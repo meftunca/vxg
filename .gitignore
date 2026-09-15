@@ -1,0 +1,13 @@
+/target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+/corpus/
+/reports/local-*
+*.vxg
+*.out
+*.spv
+__pycache__/
+
+!tests/vectors/*.vxg
+/verification/gpu-emulator*

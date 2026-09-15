@@ -1,0 +1,101 @@
+//! VXG v0.1: an experimental generic lossless block codec.
+//!
+//! ```
+//! let input = b"abcabcabcabcabcabcabcabcabcabc";
+//! let frame = vxg::compress(input, &vxg::Options::default()).unwrap();
+//! let output = vxg::decompress(&frame, &vxg::DecodeOptions::default()).unwrap();
+//! assert_eq!(output, input);
+//! ```
+//! See docs/PROOFS.md for the invariants and their exact scope. Performance is measured,
+//! not proved. The format is experimental and is not LZ4/Zstandard-compatible.
+#[cfg(kani)]
+mod proofs;
+mod error;
+mod block;
+mod frame;
+pub mod checksum;
+pub mod simd;
+pub mod gpu;
+#[cfg(feature="bench")]
+pub mod baselines;
+pub use error::{Error, Result};
+pub use frame::{Frame, BlockInfo, max_compressed_size};
+pub use block::WorkStats;
+pub use simd::Simd;
+
+#[derive(Clone, Debug)]
+pub struct Options {
+    pub block_size: usize,
+    pub threads: usize,
+    pub checksum: bool,
+    /// Minimum failed-probe step. Valid range 1..64. No change to losslessness.
+    pub acceleration: usize,
+    pub simd: Simd,
+}
+impl Default for Options {
+    fn default() -> Self { Self { block_size: 65536, threads: 1, checksum: true, acceleration: 1, simd: Simd::Auto } }
+}
+impl Options {
+    pub(crate) fn validate(&self) -> Result<()> {
+        frame::check_block_size(self.block_size)?;
+        if !(1..=256).contains(&self.threads) { return Err(Error::InvalidOption("threads must be 1..256")); }
+        if !(1..=64).contains(&self.acceleration) { return Err(Error::InvalidOption("acceleration must be 1..64")); }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug)]
+pub struct DecodeOptions { pub threads: usize, pub simd: Simd, pub max_output: usize, pub verify_checksum: bool }
+impl Default for DecodeOptions {
+    fn default() -> Self { Self { threads: 1, simd: Simd::Auto, max_output: 1<<30, verify_checksum: true } }
+}
+impl DecodeOptions {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if !(1..=256).contains(&self.threads) { return Err(Error::InvalidOption("threads must be 1..256")); }
+        Ok(())
+    }
+}
+pub fn compress(input: &[u8], options: &Options) -> Result<Vec<u8>> { Ok(compress_with_stats(input, options)?.0) }
+pub fn compress_with_stats(input: &[u8], options: &Options) -> Result<(Vec<u8>, WorkStats)> {
+    options.validate()?;
+    max_compressed_size(input.len(), options.block_size)?;
+    let engine = simd::Engine::new(options.simd)?;
+    let count = input.len().div_ceil(options.block_size);
+    let workers = options.threads.min(count.max(1));
+    let mut indexed = if workers == 1 {
+        encode_worker(input, options, engine, 0, 1)
+    } else {
+        std::thread::scope(|scope| -> Result<Vec<_>> {
+            let mut handles = Vec::new();
+            for worker in 0..workers { handles.push(scope.spawn(move || encode_worker(input, options, engine, worker, workers))); }
+            let mut result = Vec::new();
+            for handle in handles { result.extend(handle.join().map_err(|_| Error::WorkerPanic)?); }
+            Ok(result)
+        })?
+    };
+    indexed.sort_unstable_by_key(|x| x.0);
+    let mut stats = WorkStats::default();
+    let parts = indexed.into_iter().map(|(_, p, s)| { stats += s; p }).collect();
+    Ok((frame::assemble(parts, input.len(), options.block_size, options.checksum)?, stats))
+}
+fn encode_worker(input: &[u8], opt: &Options, engine: simd::Engine, worker: usize, workers: usize) -> Vec<(usize, frame::Part, WorkStats)> {
+    let mut scratch = block::Scratch::new();
+    let mut result = Vec::new();
+    for (index, chunk) in input.chunks(opt.block_size).enumerate().skip(worker).step_by(workers) {
+        let enc = block::encode(chunk, &mut scratch, engine, opt.acceleration);
+        result.push((index, frame::Part { bytes: enc.bytes, kind: enc.kind, raw_size: chunk.len(),
+            checksum: if opt.checksum { checksum::crc32c(chunk) } else { 0 } }, enc.stats));
+    }
+    result
+}
+pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
+    options.validate()?;
+    let frame = Frame::parse(src, options.max_output)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(frame.raw_size()).map_err(|_| Error::SizeOverflow)?;
+    out.resize(frame.raw_size(), 0);
+    frame.decode_into(&mut out, options)?;
+    Ok(out)
+}
+pub fn decompress_into(src: &[u8], out: &mut [u8], options: &DecodeOptions) -> Result<()> {
+    Frame::parse(src, options.max_output)?.decode_into(out, options)
+}

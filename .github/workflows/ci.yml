@@ -1,0 +1,55 @@
+name: source-validation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+      - run: cargo run --release --example roundtrip
+  model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check_model.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: model-validation
+          path: reports/*local*
+  references:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y liblz4-dev libzstd-dev
+      - run: cargo test --release --features bench
+      - run: cargo run --release --features bench --bin vxg-bench -- --size-mib 1 --samples 3 --seconds 0.01 --csv reports/ci-benchmark.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-benchmark-not-a-stable-performance-environment
+          path: reports/ci-benchmark.csv
+  metal-compile-only:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --features metal
+      # No Metal device availability/performance claim on a hosted runner.
+  vulkan-compile-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslang-tools
+      - run: cargo build --release --features vulkan
+      # Does not claim an actual GPU exists on this runner.

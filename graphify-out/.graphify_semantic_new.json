@@ -1,0 +1,26 @@
+{
+  "nodes": [],
+  "edges": [],
+  "hyperedges": [],
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "failed_chunks": 1,
+  "out_of_scope_dropped": 0,
+  "uncovered_files": [
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/.github/workflows/ci.yml",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/.github/workflows/gpu-hardware.yml",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/CHANGELOG.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/README.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/docs/BENCHMARKS.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/docs/FORMAT.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/docs/GPU.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/docs/PERFORMANCE_PLAN.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/docs/PROOFS.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/docs/REFERENCES.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/docs/SAFETY.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/docs/VALIDATION.md",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/reports/gpu-emulator-wg64.txt",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/reports/gpu-emulator.txt",
+    "/Users/mapletechnologies/Desktop/big_projects/vxg/reports/reference-c-baselines.txt"
+  ]
+}

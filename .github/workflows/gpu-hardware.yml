@@ -1,0 +1,24 @@
+name: explicit-gpu-hardware-validation
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Backend installed on your dedicated runner
+        type: choice
+        options: [metal, vulkan, cuda]
+        required: true
+permissions:
+  contents: read
+jobs:
+  hardware:
+    # Configure a trusted self-hosted runner with the matching label and SDKs.
+    # Never attach this workflow to untrusted pull requests.
+    runs-on: [self-hosted, "${{ inputs.backend }}"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/gpu_check.sh "${{ inputs.backend }}"
+      - run: cargo run --release --features "bench,${{ inputs.backend }}" --bin vxg-bench -- --gpu "${{ inputs.backend }}" --size-mib 64 --csv reports/hardware.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardware-benchmark-${{ inputs.backend }}
+          path: reports/hardware.csv

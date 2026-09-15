@@ -1,0 +1,18 @@
+{
+  "status": "PASS",
+  "scope": "Python reference model and optional shared-kernel CPU SIMT emulation ONLY",
+  "rust_compiled_or_executed": false,
+  "actual_gpu_or_shader_compiler_executed": false,
+  "unbounded_formal_proof_executed": false,
+  "counts": {
+    "crc32c_known_answer": 1,
+    "complete_control_word_bit_domain": 65536,
+    "symbolic_periodicity_and_doubling_cases": 1548,
+    "exhaustive_binary_inputs_length_0_to_10": 2047,
+    "boundary_random_periodic_roundtrips_and_work_bounds": 143,
+    "golden_valid": 6,
+    "golden_invalid": 4,
+    "rejected_truncated_golden_prefixes": 4700,
+    "cross_implementation_directions_and_golden_gpu_decode": 46
+  }
+}

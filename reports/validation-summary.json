@@ -1,0 +1,22 @@
+{
+  "shared_kernel_source_sha256": "1edec7c68780fe58544bdd39f036ff18e3e66a9cd0f3bdb657ad7313e3f5385a",
+  "shader_generator_consistency": "PASS",
+  "toml_parse": "PASS",
+  "python_ast_parse": "PASS",
+  "yaml_parse": "PASS",
+  "shell_syntax": "PASS",
+  "rust_include_bytes_paths": "PASS",
+  "documentation_links": "PASS",
+  "rust_compilation": "NOT_RUN_NO_TOOLCHAIN",
+  "rust_tests": "NOT_RUN_NO_TOOLCHAIN",
+  "rust_comparative_benchmark": "NOT_RUN_NO_TOOLCHAIN",
+  "metal_cuda_vulkan_sdk_compilation": "NOT_RUN_NO_SDK",
+  "actual_gpu_execution": "NOT_RUN_NO_DEVICE",
+  "kani_miri_cargo_fuzz": "NOT_RUN",
+  "reference_c_benchmark_rows": 50,
+  "shared_kernel_tests_wg8": "PASS: 110 exact shared-kernel encode/decode cases, WG=8",
+  "shared_kernel_tests_wg64": "PASS: 110 exact shared-kernel encode/decode cases, WG=64",
+  "model_report_wg8": "model-validation.json",
+  "model_report_wg64": "model-validation-wg64.json",
+  "note": "Manifest/source checks do not compile or execute Rust, MSL, CUDA or GLSL/SPIR-V."
+}

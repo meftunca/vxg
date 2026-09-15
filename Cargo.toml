@@ -1,0 +1,43 @@
+[package]
+name = "vxg"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Experimental bounded-work block codec with CPU SIMD and native GPU backends"
+license = "MIT"
+build = "build.rs"
+
+[features]
+default = []
+# Native SDKs are required only when the corresponding feature is selected.
+metal = []
+vulkan = []
+cuda = []
+bench = []
+
+[lib]
+name = "vxg"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vxg"
+path = "src/bin/vxg.rs"
+
+[[bin]]
+name = "vxg-bench"
+path = "src/bin/bench.rs"
+required-features = ["bench"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# Keep unwinding: malformed input and worker failures must not kill an embedding application.
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[workspace]
+exclude = ["fuzz"]

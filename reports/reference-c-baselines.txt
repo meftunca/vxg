@@ -1,0 +1,1 @@
+REFERENCE C LIBRARIES ONLY: liblz4 1.10.0, libzstd 1.5.7
