@@ -1,0 +1,13 @@
+dataset,codec,profile,operation,raw_bytes,encoded_bytes,ratio_encoded_over_raw,threads,block_size,median_ns,min_ns,max_ns,median_GBps,samples,checksums,lz4_version,zstd_version,device,allocator
+"zeros",vxg,cpu_allocating_encode,compress,8388608,7584,0.00090408,1,65536,318092.327,313899.163,320444.888,26.3716,7,off,1.10.0,1.5.7,"",system
+"zeros",vxg,cpu_preallocated_decode,decompress,8388608,7584,0.00090408,1,65536,72418.175,71999.610,76131.406,115.8357,7,off,1.10.0,1.5.7,"",system
+"period-37",vxg,cpu_allocating_encode,compress,8388608,12704,0.00151443,1,65536,328640.302,315007.862,332984.359,25.5252,7,off,1.10.0,1.5.7,"",system
+"period-37",vxg,cpu_preallocated_decode,decompress,8388608,12704,0.00151443,1,65536,167485.089,165369.078,169913.696,50.0857,7,off,1.10.0,1.5.7,"",system
+"json-records",vxg,cpu_allocating_encode,compress,8388608,1798111,0.21435153,1,65536,3307321.258,3269815.839,3391269.433,2.5364,7,off,1.10.0,1.5.7,"",system
+"json-records",vxg,cpu_preallocated_decode,decompress,8388608,1798111,0.21435153,1,65536,5306285.053,5217752.100,5354151.316,1.5809,7,off,1.10.0,1.5.7,"",system
+"random",vxg,cpu_allocating_encode,compress,8388608,8392736,1.00049210,1,65536,2499070.122,2347567.837,2554758.325,3.3567,7,off,1.10.0,1.5.7,"",system
+"random",vxg,cpu_preallocated_decode,decompress,8388608,8392736,1.00049210,1,65536,141699.540,139664.979,151839.530,59.2000,7,off,1.10.0,1.5.7,"",system
+"low-entropy-random",vxg,cpu_allocating_encode,compress,8388608,8392736,1.00049210,1,65536,2554193.750,2516211.475,2728219.595,3.2842,7,off,1.10.0,1.5.7,"",system
+"low-entropy-random",vxg,cpu_preallocated_decode,decompress,8388608,8392736,1.00049210,1,65536,138681.151,137934.712,148019.416,60.4885,7,off,1.10.0,1.5.7,"",system
+"mixed-4KiB",vxg,cpu_allocating_encode,compress,8388608,2602393,0.31022942,1,65536,2673993.421,2655133.763,2745121.622,3.1371,7,off,1.10.0,1.5.7,"",system
+"mixed-4KiB",vxg,cpu_preallocated_decode,decompress,8388608,2602393,0.31022942,1,65536,1516434.970,1508862.567,1526277.136,5.5318,7,off,1.10.0,1.5.7,"",system

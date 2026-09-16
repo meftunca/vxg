@@ -13,6 +13,15 @@ pub struct BlockInfo {
 }
 #[derive(Debug)]
 pub(crate) struct Block<'a> { pub info: BlockInfo, pub payload: &'a [u8] }
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ArenaPart {
+    pub index: usize, pub offset: usize, pub len: usize,
+    pub kind: u32, pub checksum: u32, pub raw_size: usize,
+}
+#[derive(Debug)]
+pub(crate) struct WorkerOutput {
+    pub arena: Vec<u8>, pub parts: Vec<ArenaPart>, pub stats: block::WorkStats,
+}
 #[derive(Debug)]
 pub struct Frame<'a> {
     pub(crate) blocks: Vec<Block<'a>>,
@@ -110,7 +119,7 @@ impl<'a> Frame<'a> {
             return decode_group(&self.blocks, out, engine, verify, 0);
         }
         std::thread::scope(|scope| {
-            let mut handles = Vec::new();
+            let mut handles = Vec::with_capacity(workers);
             for (group, target) in out.chunks_mut(output_stride).enumerate() {
                 let start = group*per_worker;
                 let blocks = &self.blocks[start..(start+per_worker).min(self.blocks.len())];
@@ -141,6 +150,52 @@ fn decode_group(blocks: &[Block<'_>], out: &mut [u8], engine: Engine, verify: bo
     Ok(())
 }
 pub(crate) struct Part { pub bytes: Vec<u8>, pub kind: u32, pub checksum: u32, pub raw_size: usize }
+pub(crate) fn assemble_workers(workers: Vec<WorkerOutput>, n: usize, block_size: usize, checksummed: bool) -> Result<Vec<u8>> {
+    let bound = max_compressed_size(n, block_size)?;
+    let count = workers.iter().map(|w| w.parts.len()).sum::<usize>();
+    let mut refs = Vec::with_capacity(count);
+    for (worker, output) in workers.iter().enumerate() {
+        for part in &output.parts {
+            let end = part.offset.checked_add(part.len).ok_or(Error::SizeOverflow)?;
+            if output.arena.get(part.offset..end).is_none() || part.len > part.raw_size {
+                return Err(Error::InvalidFrame("encoder arena part"));
+            }
+            refs.push((worker, *part));
+        }
+    }
+    refs.sort_unstable_by_key(|(_, part)| part.index);
+    if refs.iter().enumerate().any(|(index, (_, part))| part.index != index) {
+        return Err(Error::InvalidFrame("encoder block order"));
+    }
+    let table_end = HEADER_SIZE.checked_add(ENTRY_SIZE.checked_mul(count).ok_or(Error::SizeOverflow)?).ok_or(Error::SizeOverflow)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(bound).map_err(|_| Error::SizeOverflow)?;
+    out.extend_from_slice(MAGIC); out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&(u16::from(checksummed)).to_le_bytes());
+    out.extend_from_slice(&(n as u64).to_le_bytes());
+    out.extend_from_slice(&(block_size as u32).to_le_bytes());
+    out.extend_from_slice(&(count as u32).to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    let mut raw_offset = 0usize;
+    let mut payload_offset = table_end;
+    for (_, part) in &refs {
+        out.extend_from_slice(&(raw_offset as u64).to_le_bytes());
+        out.extend_from_slice(&(payload_offset as u64).to_le_bytes());
+        out.extend_from_slice(&(part.raw_size as u32).to_le_bytes());
+        out.extend_from_slice(&(part.len as u32).to_le_bytes());
+        out.extend_from_slice(&part.checksum.to_le_bytes());
+        out.extend_from_slice(&part.kind.to_le_bytes());
+        raw_offset = raw_offset.checked_add(part.raw_size).ok_or(Error::SizeOverflow)?;
+        payload_offset = payload_offset.checked_add(part.len).ok_or(Error::SizeOverflow)?;
+    }
+    if raw_offset != n { return Err(Error::InvalidFrame("encoder total")); }
+    for (worker, part) in refs {
+        let end = part.offset.checked_add(part.len).ok_or(Error::SizeOverflow)?;
+        out.extend_from_slice(&workers[worker].arena[part.offset..end]);
+    }
+    debug_assert!(out.len() <= bound);
+    Ok(out)
+}
 pub(crate) fn assemble(parts: Vec<Part>, n: usize, block_size: usize, checksummed: bool) -> Result<Vec<u8>> {
     let bound = max_compressed_size(n, block_size)?;
     let mut out = Vec::new();

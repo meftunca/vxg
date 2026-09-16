@@ -72,6 +72,9 @@ impl Engine {
     pub fn copy(self, dst: &mut [u8], src: &[u8]) {
         assert_eq!(dst.len(), src.len());
         let n = src.len();
+        // Tiny copies pay more for the dispatch/vector loop than they save. Keep
+        // the platform's tuned short-copy path for literals and small tails.
+        if n < 64 { dst.copy_from_slice(src); return; }
         // SAFETY: valid disjoint slices, feature-checked dispatch, exact bounds.
         unsafe {
             match self.kind {
@@ -91,10 +94,20 @@ impl Engine {
     pub fn pattern(self, dst: &mut [u8], seed: &[u8]) {
         assert!(!seed.is_empty() && seed.len() <= 64);
         if seed.len() == 1 { dst.fill(seed[0]); return; }
-        let step = (256 / seed.len()) * seed.len();
-        let mut tile = [0u8; 256];
-        for (i, x) in tile[..step].iter_mut().enumerate() { *x = seed[i % seed.len()]; }
-        for chunk in dst.chunks_mut(step) { self.copy(chunk, &tile[..chunk.len()]); }
+        const TILE_SIZE: usize = 1024;
+        let step = (TILE_SIZE / seed.len()) * seed.len();
+        let mut tile = [0u8; TILE_SIZE];
+        self.copy(&mut tile[..seed.len()], seed);
+        let mut filled = seed.len();
+        while filled < step {
+            let take = filled.min(step - filled);
+            let (prefix, suffix) = tile.split_at_mut(filled);
+            self.copy(&mut suffix[..take], &prefix[..take]);
+            filled += take;
+        }
+        // The platform copy is already vectorized and wins over repeatedly
+        // entering the hand-SIMD dispatch for these medium-sized chunks.
+        for chunk in dst.chunks_mut(step) { chunk.copy_from_slice(&tile[..chunk.len()]); }
     }
     /// LZ semantics without calling memcpy/memmove on an overlapping unproduced region.
     pub(crate) fn repeat(self, out: &mut [u8], pos: usize, len: usize, distance: usize) {
@@ -194,6 +207,17 @@ mod arm {
     #[target_feature(enable = "neon")]
     pub unsafe fn lcp_neon(a: *const u8, b: *const u8, n: usize) -> usize {
         let mut i = 0;
+        while i+32<=n {
+            let eq0 = vceqq_u8(vld1q_u8(a.add(i)), vld1q_u8(b.add(i)));
+            if vminvq_u8(eq0) != 255 {
+                for j in 0..16 { if *a.add(i+j) != *b.add(i+j) { return i+j; } }
+            }
+            let eq1 = vceqq_u8(vld1q_u8(a.add(i+16)), vld1q_u8(b.add(i+16)));
+            if vminvq_u8(eq1) != 255 {
+                for j in 0..16 { if *a.add(i+16+j) != *b.add(i+16+j) { return i+16+j; } }
+            }
+            i += 32;
+        }
         while i+16<=n {
             let eq = vceqq_u8(vld1q_u8(a.add(i)), vld1q_u8(b.add(i)));
             if vminvq_u8(eq) != 255 {

@@ -1,0 +1,7 @@
+dataset,alloc_calls,realloc_calls,dealloc_calls,alloc_bytes,dealloc_bytes,live_bytes,size_mib,threads,block_size,simd,samples,seconds
+zeros,70,5,69,4283208,86824,4196384,4,1,65536,Neon,3,0.01
+period-37,70,6,69,4285813,89429,4196384,4,1,65536,Neon,3,0.01
+json-records,70,30,69,5231259,1034875,4196384,4,1,65536,Neon,3,0.01
+random,69,5,68,8541304,4344920,4196384,4,1,65536,Neon,3,0.01
+low-entropy-random,69,5,68,8541304,4344920,4196384,4,1,65536,Neon,3,0.01
+mixed-4KiB,70,26,69,5657720,1461336,4196384,4,1,65536,Neon,3,0.01

@@ -1,0 +1,13 @@
+dataset,codec,profile,operation,raw_bytes,encoded_bytes,ratio_encoded_over_raw,threads,block_size,median_ns,min_ns,max_ns,median_GBps,samples,checksums,lz4_version,zstd_version,device,allocator
+"zeros",vxg,cpu_allocating_encode,compress,8388608,7584,0.00090408,1,65536,316000.000,314664.176,319642.038,26.5462,7,off,1.10.0,1.5.7,"",mimalloc
+"zeros",vxg,cpu_preallocated_decode,decompress,8388608,7584,0.00090408,1,65536,72336.889,71121.861,76680.779,115.9658,7,off,1.10.0,1.5.7,"",mimalloc
+"period-37",vxg,cpu_allocating_encode,compress,8388608,12704,0.00151443,1,65536,331990.619,325111.607,341182.259,25.2676,7,off,1.10.0,1.5.7,"",mimalloc
+"period-37",vxg,cpu_preallocated_decode,decompress,8388608,12704,0.00151443,1,65536,168471.870,167191.083,170790.814,49.7923,7,off,1.10.0,1.5.7,"",mimalloc
+"json-records",vxg,cpu_allocating_encode,compress,8388608,1798111,0.21435153,1,65536,3363077.767,3279457.000,3486419.552,2.4943,7,off,1.10.0,1.5.7,"",mimalloc
+"json-records",vxg,cpu_preallocated_decode,decompress,8388608,1798111,0.21435153,1,65536,5226389.600,5179937.500,5377894.737,1.6050,7,off,1.10.0,1.5.7,"",mimalloc
+"random",vxg,cpu_allocating_encode,compress,8388608,8392736,1.00049210,1,65536,1967832.529,1954605.769,1981889.706,4.2629,7,off,1.10.0,1.5.7,"",mimalloc
+"random",vxg,cpu_preallocated_decode,decompress,8388608,8392736,1.00049210,1,65536,146414.104,143189.795,149797.281,57.2937,7,off,1.10.0,1.5.7,"",mimalloc
+"low-entropy-random",vxg,cpu_allocating_encode,compress,8388608,8392736,1.00049210,1,65536,1981521.255,1959712.346,2013399.160,4.2334,7,off,1.10.0,1.5.7,"",mimalloc
+"low-entropy-random",vxg,cpu_preallocated_decode,decompress,8388608,8392736,1.00049210,1,65536,138760.981,135806.422,152215.627,60.4537,7,off,1.10.0,1.5.7,"",mimalloc
+"mixed-4KiB",vxg,cpu_allocating_encode,compress,8388608,2602393,0.31022942,1,65536,2683004.368,2667887.079,2770898.649,3.1266,7,off,1.10.0,1.5.7,"",mimalloc
+"mixed-4KiB",vxg,cpu_preallocated_decode,decompress,8388608,2602393,0.31022942,1,65536,1480992.647,1476678.912,1616702.952,5.6642,7,off,1.10.0,1.5.7,"",mimalloc

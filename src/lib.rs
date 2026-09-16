@@ -61,31 +61,35 @@ pub fn compress_with_stats(input: &[u8], options: &Options) -> Result<(Vec<u8>, 
     let engine = simd::Engine::new(options.simd)?;
     let count = input.len().div_ceil(options.block_size);
     let workers = options.threads.min(count.max(1));
-    let mut indexed = if workers == 1 {
-        encode_worker(input, options, engine, 0, 1)
+    let worker_outputs = if workers == 1 {
+        vec![encode_worker(input, options, engine, 0, 1)]
     } else {
         std::thread::scope(|scope| -> Result<Vec<_>> {
-            let mut handles = Vec::new();
+            let mut handles = Vec::with_capacity(workers);
             for worker in 0..workers { handles.push(scope.spawn(move || encode_worker(input, options, engine, worker, workers))); }
-            let mut result = Vec::new();
-            for handle in handles { result.extend(handle.join().map_err(|_| Error::WorkerPanic)?); }
+            let mut result = Vec::with_capacity(workers);
+            for handle in handles { result.push(handle.join().map_err(|_| Error::WorkerPanic)?); }
             Ok(result)
         })?
     };
-    indexed.sort_unstable_by_key(|x| x.0);
     let mut stats = WorkStats::default();
-    let parts = indexed.into_iter().map(|(_, p, s)| { stats += s; p }).collect();
-    Ok((frame::assemble(parts, input.len(), options.block_size, options.checksum)?, stats))
+    for output in &worker_outputs { stats += output.stats; }
+    Ok((frame::assemble_workers(worker_outputs, input.len(), options.block_size, options.checksum)?, stats))
 }
-fn encode_worker(input: &[u8], opt: &Options, engine: simd::Engine, worker: usize, workers: usize) -> Vec<(usize, frame::Part, WorkStats)> {
+fn encode_worker(input: &[u8], opt: &Options, engine: simd::Engine, worker: usize, workers: usize) -> frame::WorkerOutput {
     let mut scratch = block::Scratch::new();
-    let mut result = Vec::new();
+    let count = input.len().div_ceil(opt.block_size);
+    let capacity = count.saturating_sub(worker).div_ceil(workers);
+    scratch.reserve_payloads_for(opt.block_size.min(input.len()));
+    let mut parts = Vec::with_capacity(capacity);
+    let mut stats = WorkStats::default();
     for (index, chunk) in input.chunks(opt.block_size).enumerate().skip(worker).step_by(workers) {
         let enc = block::encode(chunk, &mut scratch, engine, opt.acceleration);
-        result.push((index, frame::Part { bytes: enc.bytes, kind: enc.kind, raw_size: chunk.len(),
-            checksum: if opt.checksum { checksum::crc32c(chunk) } else { 0 } }, enc.stats));
+        stats += enc.stats;
+        parts.push(frame::ArenaPart { index, offset: enc.offset, len: enc.len, kind: enc.kind,
+            raw_size: chunk.len(), checksum: if opt.checksum { checksum::crc32c(chunk) } else { 0 } });
     }
-    result
+    frame::WorkerOutput { arena: scratch.finish(), parts, stats }
 }
 pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     options.validate()?;

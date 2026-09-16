@@ -20,6 +20,11 @@ fn roundtrip_bound_and_linear_work_properties(){
             let (encoded,s)=compress_with_stats(&data,&opt).unwrap();
             assert!(encoded.len()<=max_compressed_size(data.len(),opt.block_size).unwrap());
             assert!(s.probes<=n as u64,"one probe per monotonically advanced position");
+            assert!(s.occupied_probes<=s.probes,"occupied slots are a subset of probes");
+            assert!(s.candidate_checks<=s.occupied_probes,"candidate checks require an occupied slot");
+            assert!(s.hash_collisions<=s.candidate_checks,"collisions require a candidate check");
+            assert!(s.lcp_calls<=s.probes,"each LCP belongs to an accepted candidate probe");
+            assert!(s.lcp_bytes<=n as u64,"logical LCP work stays inside the block");
             assert!(s.matched_bytes<=n as u64,"accepted match regions are disjoint");
             assert!(s.accepted_matches<=(n/8) as u64);
             assert_eq!(decompress(&encoded,&DecodeOptions::default()).unwrap(),data);
@@ -65,9 +70,12 @@ fn simd_prefix_exactness_and_unaligned_tails(){
 }
 #[test]
 fn periodic_copy_preserves_non_power_of_two_phase(){
-    let e=vxg::simd::Engine::new(Simd::Auto).unwrap();
-    for d in 1..=64{let seed:Vec<u8>=(0..d).map(|x|x as u8).collect();
-        for n in [0,1,31,63,64,65,127,256,257,1025]{let mut out=vec![0;n];e.pattern(&mut out,&seed);for i in 0..n{assert_eq!(out[i],seed[i%d]);}}
+    for simd in [Simd::Scalar,Simd::Sse2,Simd::Avx2,Simd::Avx512,Simd::Neon]{
+        if !vxg::simd::Engine::supported(simd){continue;}
+        let e=vxg::simd::Engine::new(simd).unwrap();
+        for d in 1..=64{let seed:Vec<u8>=(0..d).map(|x|x as u8).collect();
+            for n in [0,1,31,63,64,65,127,256,257,1025]{let mut out=vec![0;n];e.pattern(&mut out,&seed);for i in 0..n{assert_eq!(out[i],seed[i%d]);}}
+        }
     }
 }
 #[test]

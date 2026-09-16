@@ -1,0 +1,13 @@
+dataset,codec,profile,operation,raw_bytes,encoded_bytes,ratio_encoded_over_raw,threads,block_size,median_ns,min_ns,max_ns,median_GBps,samples,checksums,lz4_version,zstd_version,device,allocator
+"zeros",vxg,cpu_allocating_encode,compress,4194304,3808,0.00090790,1,65536,163109.756,158546.260,163319.780,25.7146,3,off,1.10.0,1.5.7,"",system
+"zeros",vxg,cpu_preallocated_decode,decompress,4194304,3808,0.00090790,1,65536,36374.698,35691.549,36419.773,115.3083,3,off,1.10.0,1.5.7,"",system
+"period-37",vxg,cpu_allocating_encode,compress,4194304,6368,0.00151825,1,65536,163610.439,163448.512,165461.083,25.6359,3,off,1.10.0,1.5.7,"",system
+"period-37",vxg,cpu_preallocated_decode,decompress,4194304,6368,0.00151825,1,65536,85571.761,83247.925,85688.393,49.0150,3,off,1.10.0,1.5.7,"",system
+"json-records",vxg,cpu_allocating_encode,compress,4194304,900298,0.21464777,1,65536,1681062.500,1668045.167,1754881.917,2.4950,3,off,1.10.0,1.5.7,"",system
+"json-records",vxg,cpu_preallocated_decode,decompress,4194304,900298,0.21464777,1,65536,2597239.500,2580984.375,2604057.250,1.6149,3,off,1.10.0,1.5.7,"",system
+"random",vxg,cpu_allocating_encode,compress,4194304,4196384,1.00049591,1,65536,988115.095,973188.476,1033554.150,4.2448,3,off,1.10.0,1.5.7,"",system
+"random",vxg,cpu_preallocated_decode,decompress,4194304,4196384,1.00049591,1,65536,72411.852,70905.477,73721.048,57.9229,3,off,1.10.0,1.5.7,"",system
+"low-entropy-random",vxg,cpu_allocating_encode,compress,4194304,4196384,1.00049591,1,65536,963037.667,959607.143,964250.000,4.3553,3,off,1.10.0,1.5.7,"",system
+"low-entropy-random",vxg,cpu_preallocated_decode,decompress,4194304,4196384,1.00049591,1,65536,70617.958,70057.112,71323.843,59.3943,3,off,1.10.0,1.5.7,"",system
+"mixed-4KiB",vxg,cpu_allocating_encode,compress,4194304,1301624,0.31033134,1,65536,1394238.867,1370536.133,1412730.533,3.0083,3,off,1.10.0,1.5.7,"",system
+"mixed-4KiB",vxg,cpu_preallocated_decode,decompress,4194304,1301624,0.31033134,1,65536,754060.185,753905.889,792724.385,5.5623,3,off,1.10.0,1.5.7,"",system

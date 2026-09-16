@@ -1,0 +1,13 @@
+dataset,codec,profile,operation,raw_bytes,encoded_bytes,ratio_encoded_over_raw,threads,block_size,median_ns,min_ns,max_ns,median_GBps,samples,checksums,lz4_version,zstd_version,device,allocator
+"zeros",vxg,cpu_allocating_encode,compress,16777216,15136,0.00090218,1,65536,741947.070,678378.675,834658.679,22.6124,7,off,1.10.0,1.5.7,"",jemalloc
+"zeros",vxg,cpu_preallocated_decode,decompress,16777216,15136,0.00090218,1,65536,164047.131,149859.207,201293.343,102.2707,7,off,1.10.0,1.5.7,"",jemalloc
+"period-37",vxg,cpu_allocating_encode,compress,16777216,25376,0.00151253,1,65536,698528.746,675588.805,712380.192,24.0179,7,off,1.10.0,1.5.7,"",jemalloc
+"period-37",vxg,cpu_preallocated_decode,decompress,16777216,25376,0.00151253,1,65536,384710.337,353784.011,526936.403,43.6100,7,off,1.10.0,1.5.7,"",jemalloc
+"json-records",vxg,cpu_allocating_encode,compress,16777216,3572973,0.21296579,1,65536,7739813.259,7439699.074,8140911.680,2.1677,7,off,1.10.0,1.5.7,"",jemalloc
+"json-records",vxg,cpu_preallocated_decode,decompress,16777216,3572973,0.21296579,1,65536,14726419.643,11948992.647,17579229.167,1.1393,7,off,1.10.0,1.5.7,"",jemalloc
+"random",vxg,cpu_allocating_encode,compress,16777216,16785440,1.00049019,1,65536,8015708.320,7286943.464,8374645.833,2.0930,7,off,1.10.0,1.5.7,"",jemalloc
+"random",vxg,cpu_preallocated_decode,decompress,16777216,16785440,1.00049019,1,65536,344339.573,301368.536,542098.011,48.7229,7,off,1.10.0,1.5.7,"",jemalloc
+"low-entropy-random",vxg,cpu_allocating_encode,compress,16777216,16785440,1.00049019,1,65536,8790760.870,8083043.269,11106677.632,1.9085,7,off,1.10.0,1.5.7,"",jemalloc
+"low-entropy-random",vxg,cpu_preallocated_decode,decompress,16777216,16785440,1.00049019,1,65536,339304.166,306471.861,494425.617,49.4459,7,off,1.10.0,1.5.7,"",jemalloc
+"mixed-4KiB",vxg,cpu_allocating_encode,compress,16777216,5200371,0.30996627,1,65536,7181273.786,7057692.517,8608996.500,2.3362,7,off,1.10.0,1.5.7,"",jemalloc
+"mixed-4KiB",vxg,cpu_preallocated_decode,decompress,16777216,5200371,0.30996627,1,65536,3479247.121,3450207.627,3924645.431,4.8221,7,off,1.10.0,1.5.7,"",jemalloc
