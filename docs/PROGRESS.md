@@ -230,3 +230,17 @@ Every implementation or measurement change is recorded here as a separate step.
 - Retained local A/B artifacts are `reports/local-raw-48-2026-09-19.csv` and
   `reports/local-raw-control-2026-09-19.csv`; `raw-fastpath-off` exists solely for benchmark
   control builds and is not a production configuration recommendation.
+
+## 2026-09-19 — Rejected two-candidate matcher experiment
+
+- A benchmark-only two-slot hash table was tested: after the latest candidate was short or a
+  collision, it compared at most one older candidate. The work bound stayed explicit at two
+  candidate checks/LCP calls per occupied probe, and default plus experimental property suites
+  passed.
+- It is not retained: at 16 MiB, one thread, 64 KiB blocks and seven 0.1 s samples, JSON ratio
+  stayed 0.213 while encode fell from 2.690 to 1.703 GB/s; mixed ratio only moved 0.310 to 0.309
+  while encode fell from 2.780 to 2.263. The second lookup raised JSON LCP calls from 591,087 to
+  941,290 without a material ratio return.
+- The experiment confirms that an unconditional older-candidate lookup is the wrong next step.
+  Matcher work should next be directed by token/match histograms or a more selective lazy policy,
+  not enabled as a default or retained as a feature.
