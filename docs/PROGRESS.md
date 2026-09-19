@@ -293,3 +293,20 @@ Every implementation or measurement change is recorded here as a separate step.
 - This confirms that JSON decode's next bottleneck is not the short-distance tile setup alone.
   Retained local artifacts are `reports/local-short-repeat-2026-09-19.csv` and
   `reports/local-short-repeat-tile-control-2026-09-19.csv`.
+
+## 2026-09-19 — Decoder parser inlining
+
+- A 25-second Xcode Time Profiler trace of the isolated JSON decoder showed `Parser::next` and
+  `block::decode` as the visible hot VXG functions; repeat/copy was not the dominant sampled
+  leaf. To make profiling reproducible, `vxg-bench` gained `--only DATASET` and `--decode-only`:
+  the latter builds and validates one VXG frame, then times only preallocated CPU decode.
+- `u32_at`, `u16_at`, and `Parser::next` are now force-inlined in production builds. The
+  benchmark-only `parser-no-inline` feature supplies a matched control build; neither feature
+  changes the wire format, encoded bytes, or public decoding semantics.
+- On the Apple M2 Max, JSON only, 16 MiB, one thread, 64 KiB blocks, nine 0.2 s samples,
+  checksums off, the inlined decoder reached 1.973 GB/s versus 1.618 GB/s for the no-inline
+  control (+21.9%). This is an ordered process pair, so repeat it in a shuffled process trial
+  before treating it as a universal percentage; it does establish parser call boundaries as a
+  material decoder cost. Local artifacts: `reports/local-parser-inline-2026-09-19.csv`,
+  `reports/local-parser-no-inline-2026-09-19.csv`, and temporary Time Profiler trace data under
+  `/private/tmp`.

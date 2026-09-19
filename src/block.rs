@@ -315,12 +315,14 @@ pub(crate) fn encode(
     }
 }
 
+#[cfg_attr(not(feature="parser-no-inline"), inline(always))]
 fn u32_at(src: &[u8], pos: &mut usize) -> Result<u32> {
     let end = pos.checked_add(4).ok_or(Error::SizeOverflow)?;
     let bytes = src.get(*pos..end).ok_or(Error::Truncated)?;
     *pos = end;
     Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
 }
+#[cfg_attr(not(feature="parser-no-inline"), inline(always))]
 fn u16_at(src: &[u8], pos: &mut usize) -> Result<u16> {
     let end = pos.checked_add(2).ok_or(Error::SizeOverflow)?;
     let bytes = src.get(*pos..end).ok_or(Error::Truncated)?;
@@ -379,6 +381,7 @@ impl<'a> Parser<'a> {
             short_distance,
         })
     }
+    #[cfg_attr(not(feature="parser-no-inline"), inline(always))]
     pub fn next(&mut self) -> Result<Option<Command>> {
         if self.remaining == 0 {
             if self.ci != self.control.len()

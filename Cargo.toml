@@ -25,6 +25,8 @@ hash13 = []
 hash15 = []
 # Benchmark-only control build for measuring the incompressible RAW filter.
 raw-fastpath-off = []
+# Benchmark-only control build for decoder parser inlining.
+parser-no-inline = []
 
 [dependencies]
 mimalloc = { version = "0.1.52", optional = true, default-features = false }
