@@ -361,3 +361,17 @@ Every implementation or measurement change is recorded here as a separate step.
   an ordered process pair. Local artifacts: `reports/local-stream-shape-2026-09-19.csv`,
   `reports/local-repeat-direct-copy-2026-09-19.csv`, and
   `reports/local-repeat-engine-copy-control-2026-09-19.csv`.
+
+## 2026-09-19 — Rejected NEON vector mismatch locator
+
+- The encoder's JSON path is LCP-heavy, so a NEON experiment replaced the scalar scan used after
+  a mismatching 16-byte compare. It compressed adjacent mismatch flags into eight pair flags and
+  used `trailing_zeros` to select the first mismatching pair, then compared at most two scalar
+  bytes. The vector loads and shuffle/unzip operations added more latency than the short scalar
+  scan avoided.
+- On Apple M2 Max with 16 MiB JSON, one thread, 64 KiB blocks, nine 0.2 s samples and Neon,
+  the vector locator encoded at 1.395 GB/s versus 1.999 GB/s for the old scalar-tail control;
+  prepared decode was 2.619 versus 2.587 GB/s, confirming that only the encoder path changed.
+  The candidate and control feature were removed. Local artifacts:
+  `reports/local-neon-lcp-mask-2026-09-19.csv` and
+  `reports/local-neon-lcp-scalar-tail-2026-09-19.csv`.
