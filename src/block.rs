@@ -523,6 +523,66 @@ impl<'a> Parser<'a> {
         self.li = new_li;
         Ok(Command { op: 7, lit, run, distance, seed: [0; 8], literal_start })
     }
+
+    /// Decode the overwhelmingly common fixed-size v2 command in place.
+    ///
+    /// This fuses parser state updates, literal copy, and match execution so
+    /// the decoder does not materialize a `Command` only to immediately
+    /// destructure it.  It deliberately handles only canonical opcode-7
+    /// tokens; extensions and every other opcode stay on `next`'s fully
+    /// generic path.  Returning `false` never consumes input.
+    #[inline(always)]
+    fn decode_short_distance_if_present(
+        &mut self,
+        out: &mut [u8],
+        engine: Engine,
+    ) -> Result<bool> {
+        if cfg!(feature = "decode-op7-direct-generic") || self.remaining == 0 {
+            return Ok(false);
+        }
+        let end = self.ci.checked_add(2).ok_or(Error::SizeOverflow)?;
+        let raw = match self.control.get(self.ci..end) {
+            Some(raw) => raw,
+            None => return Err(Error::Truncated),
+        };
+        let token = u16::from_le_bytes(raw.try_into().unwrap());
+        let op = (token & 7) as u8;
+        let lit = ((token >> 3) & 31) as usize;
+        let run = (token >> 8) as usize;
+        if !self.short_distance || op != 7 || lit == 31 || run == 255 {
+            return Ok(false);
+        }
+        self.ci = end;
+        if run < 8 {
+            return Err(Error::InvalidFrame("match below minmatch"));
+        }
+        let literal_start = self.li;
+        let new_li = self.li.checked_add(lit).ok_or(Error::SizeOverflow)?;
+        if new_li > self.literals.len() {
+            return Err(Error::Truncated);
+        }
+        let match_pos = self.pos.checked_add(lit).ok_or(Error::SizeOverflow)?;
+        let next_pos = match_pos.checked_add(run).ok_or(Error::SizeOverflow)?;
+        if next_pos > self.raw_len {
+            return Err(Error::InvalidFrame("command exceeds output"));
+        }
+        let distance = u16_at(self.attrs, &mut self.ai)? as usize;
+        if distance == 0 || distance > match_pos {
+            return Err(Error::InvalidFrame(
+                "backreference before initialized prefix",
+            ));
+        }
+        if lit != 0 {
+            out[self.pos..match_pos]
+                .copy_from_slice(&self.literals[literal_start..new_li]);
+        }
+        engine.repeat(out, match_pos, run, distance);
+        self.recent = distance;
+        self.remaining -= 1;
+        self.pos = next_pos;
+        self.li = new_li;
+        Ok(true)
+    }
 }
 pub(crate) fn validate(src: &[u8], kind: u32, raw_len: usize, short_distance: bool) -> Result<()> {
     if kind == RAW {
@@ -557,7 +617,12 @@ pub(crate) fn decode(
     }
     let mut parser = Parser::new(src, out.len(), short_distance)?;
     let mut pos = 0;
-    while let Some(c) = parser.next()? {
+    while parser.remaining != 0 {
+        if parser.decode_short_distance_if_present(out, engine)? {
+            pos = parser.pos;
+            continue;
+        }
+        let c = parser.next()?.expect("nonzero parser command count");
         if c.lit != 0 || cfg!(feature="decode-unconditional-literal-copy") {
             engine.copy(
                 &mut out[pos..pos + c.lit],
@@ -572,5 +637,8 @@ pub(crate) fn decode(
         }
         pos += c.run;
     }
+    // Retain the exact stream-consumption proof after the fused commands.
+    debug_assert_eq!(pos, parser.pos);
+    let _ = parser.next()?;
     Ok(())
 }

@@ -375,3 +375,20 @@ Every implementation or measurement change is recorded here as a separate step.
   The candidate and control feature were removed. Local artifacts:
   `reports/local-neon-lcp-mask-2026-09-19.csv` and
   `reports/local-neon-lcp-scalar-tail-2026-09-19.csv`.
+
+## 2026-09-19 — Fused opcode-7 CPU decode
+
+- JSON's fixed-size v2 opcode-7 stream is dense enough that even the dedicated parser path was
+  still materializing and immediately destructuring a `Command` for nearly every match. The CPU
+  decoder now recognizes canonical fixed-size opcode-7 tokens before generic parsing and fuses
+  bounds checks, literal copy, repeat execution, and parser-state updates in one inlined path.
+  Extended opcode-7 lengths, v1 data, and every other opcode retain the generic parser.
+- The fused path preserves the generic path's stream bounds, output bounds, literal bounds,
+  minimum-run, attribute truncation, and initialized-prefix checks. It still calls the parser's
+  exact-consumption check at block end. `decode-op7-direct-generic` is a benchmark-only control
+  that disables only the fused path.
+- On Apple M2 Max with JSON only, 16 MiB, one thread, 64 KiB blocks, Neon, nine 0.2 s samples,
+  checksums off, prepared decode measured 3.236 GB/s with the fused path versus 2.599 GB/s with
+  the generic control (+24.5%), with unchanged 0.147 ratio. Local artifacts:
+  `reports/local-op7-direct-decode-2026-09-19.csv` and
+  `reports/local-op7-direct-generic-2026-09-19.csv`.

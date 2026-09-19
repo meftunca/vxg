@@ -33,6 +33,8 @@ parser-op7-generic = []
 decode-unconditional-literal-copy = []
 # Benchmark-only control build for non-overlapping short-match copy dispatch.
 repeat-engine-copy = []
+# Benchmark-only control build for fused fixed-size v2 opcode-7 decode.
+decode-op7-direct-generic = []
 
 [dependencies]
 mimalloc = { version = "0.1.52", optional = true, default-features = false }
