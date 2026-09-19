@@ -30,6 +30,7 @@ GPU_INLINE uint in_u32(CONTEXT uint p) {
     if (s == 0u) { return lo; }
     return (lo >> s) | (INPUT[(p >> 2u)+1u] << (32u-s));
 }
+GPU_INLINE uint in_u16(CONTEXT uint p) { return in_byte(CTX p) | (in_byte(CTX p+1u) << 8u); }
 GPU_INLINE uint hash8(CONTEXT uint p) {
     uint a = in_u32(CTX p), b = in_u32(CTX p+4u);
     b = (b << 13u) | (b >> 19u);
@@ -45,6 +46,7 @@ GPU_INLINE void work_put(CONTEXT uint p, uint value) {
 GPU_INLINE void work_put32(CONTEXT uint p, uint value) {
     for (uint k=0u;k<4u;++k) { work_put(CTX p+k, value >> (8u*k)); }
 }
+GPU_INLINE void work_put16(CONTEXT uint p, uint value) { work_put(CTX p, value); work_put(CTX p+1u, value >> 8u); }
 GPU_INLINE void emit_control(CONTEXT uint base, REF_UINT(cp), uint op, uint lit, uint run) {
     uint token = op | (vx_min(lit,31u) << 3u) | (vx_min(run,255u) << 8u);
     work_put(CTX base+cp, token); work_put(CTX base+cp+1u, token >> 8u); cp += 2u;
@@ -74,14 +76,15 @@ GPU_INLINE void encode_core(CONTEXT HASH_PARAM uint tid, uint bid, uint total, u
             while (pos+run+4u<=rn && in_u32(CTX raw_base+pos+run)==in_u32(CTX raw_base+candidate+run)) { run+=4u; }
             while (pos+run<rn && in_byte(CTX raw_base+pos+run)==in_byte(CTX raw_base+candidate+run)) { ++run; }
             uint distance=pos-candidate;
-            uint op=1u;
+            uint op=distance<=65535u?7u:1u;
             if (distance==1u) { op=3u; } else if (distance==2u) { op=4u; }
             else if (distance==4u) { op=5u; } else if (distance==8u) { op=6u; }
             else if (distance==recent) { op=2u; }
             uint lit=pos-anchor;
             emit_control(CTX cb, cp, op, lit, run);
             if (op==1u) { work_put32(CTX ab+ap, distance); ap+=4u; recent=distance; }
-            else if (op>=3u) {
+            else if (op==7u) { work_put16(CTX ab+ap, distance); ap+=2u; recent=distance; }
+            else if (op>=3u && op<=6u) {
                 uint seed=in_u32(CTX raw_base+pos);
                 if (op==3u) { seed &=255u; } else if (op==4u) { seed &=65535u; }
                 work_put32(CTX ab+ap, seed); ap+=4u;
@@ -181,10 +184,11 @@ GPU_INLINE void decode_core(CONTEXT uint tid, uint bid, uint block_size) {
         uint distance=0u, seed0=0u, seed1=0u;
         if (op==1u) { distance=in_u32(CTX ai); ai+=4u; recent=distance; }
         else if (op==2u) { distance=recent; }
-        else if (op>=3u) { seed0=in_u32(CTX ai); ai+=4u; if (op==6u) { seed1=in_u32(CTX ai); ai+=4u; } }
+        else if (op==7u) { distance=in_u16(CTX ai); ai+=2u; recent=distance; }
+        else if (op>=3u && op<=6u) { seed0=in_u32(CTX ai); ai+=4u; if (op==6u) { seed1=in_u32(CTX ai); ai+=4u; } }
         segment(CTX tid, ob, pos, lit, 0u, li, 1u, 0u, 0u); pos+=lit; li+=lit;
-        if (op==1u || op==2u) { segment(CTX tid, ob, pos, run, 1u, pos-distance, distance, 0u, 0u); }
-        else if (op>=3u) { segment(CTX tid, ob, pos, run, 2u, 0u, 1u<<(op-3u), seed0, seed1); }
+        if (op==1u || op==2u || op==7u) { segment(CTX tid, ob, pos, run, 1u, pos-distance, distance, 0u, 0u); }
+        else if (op>=3u && op<=6u) { segment(CTX tid, ob, pos, run, 2u, 0u, 1u<<(op-3u), seed0, seed1); }
         pos+=run;
     }
 }

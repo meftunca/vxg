@@ -28,7 +28,7 @@ def bound(n: int, block_size: int = 4096) -> int:
 
 
 def token(op: int, lit: int, run: int) -> bytes:
-    assert 0 <= op < 7 and 0 <= lit < 2**32 and 0 <= run < 2**32
+    assert 0 <= op < 8 and 0 <= lit < 2**32 and 0 <= run < 2**32
     out = struct.pack('<H', op | (min(lit, 31) << 3) | (min(run, 255) << 8))
     if lit >= 31:
         out += struct.pack('<I', lit)
@@ -52,6 +52,8 @@ def commands_payload(commands: list[Command]) -> bytes:
         literals += c.literals
         if c.op == 1:
             attrs += struct.pack('<I', c.attribute)
+        elif c.op == 7:
+            attrs += struct.pack('<H', c.attribute)
         elif 3 <= c.op <= 6:
             period = 1 << (c.op - 3)
             seed = bytes(c.attribute)
@@ -60,7 +62,7 @@ def commands_payload(commands: list[Command]) -> bytes:
     return struct.pack('<IIII', len(commands), len(control), len(attrs), len(literals)) + control + attrs + literals
 
 
-def decode_block(payload: bytes, kind: int, n: int) -> bytes:
+def decode_block(payload: bytes, kind: int, n: int, short_distance: bool = False) -> bytes:
     if kind == 0:
         if len(payload) != n:
             raise InvalidFrame('raw length')
@@ -83,7 +85,7 @@ def decode_block(payload: bytes, kind: int, n: int) -> bytes:
         word = struct.unpack_from('<H', c, ci)[0]
         ci += 2
         op, lc, rc = word & 7, (word >> 3) & 31, word >> 8
-        if op == 7:
+        if op == 7 and not short_distance:
             raise InvalidFrame('reserved opcode')
         lit, run = lc, rc
         if lc == 31:
@@ -96,15 +98,20 @@ def decode_block(payload: bytes, kind: int, n: int) -> bytes:
                 raise InvalidFrame('noncanonical run')
         if (op == 0 and (run != 0 or lit == 0)) or (op != 0 and run == 0):
             raise InvalidFrame('progress')
-        if op in (1, 2) and run < 8:
+        if op in (1, 2, 7) and run < 8:
             raise InvalidFrame('minmatch')
         if len(output) + lit + run > n or li + lit > len(literals):
             raise InvalidFrame('output/literal overflow')
         output += literals[li:li+lit]
         li += lit
-        if op in (1, 2):
+        if op in (1, 2, 7):
             if op == 1:
                 recent, ai = take32(a, ai)
+            elif op == 7:
+                if ai + 2 > len(a):
+                    raise InvalidFrame('truncated short distance')
+                recent = struct.unpack_from('<H', a, ai)[0]
+                ai += 2
             if recent == 0 or recent > len(output):
                 raise InvalidFrame('invalid distance')
             # The mathematical recurrence. No periodic shortcut or memcpy.
@@ -125,10 +132,12 @@ def decode_block(payload: bytes, kind: int, n: int) -> bytes:
     return bytes(output)
 
 
-def frame(parts: list[tuple[bytes, int, bytes]], block_size: int = 4096, checksum: bool = False) -> bytes:
+def frame(parts: list[tuple[bytes, int, bytes]], block_size: int = 4096, checksum: bool = False, version: int = 1) -> bytes:
     """Parts are (uncompressed bytes, kind, payload). Caller controls validity."""
     n = sum(len(raw) for raw, _, _ in parts)
-    header = struct.pack('<4sHHQIIQ', b'VXG1', 1, int(checksum), n, block_size, len(parts), 0)
+    if version not in (1, 2):
+        raise ValueError('version')
+    header = struct.pack('<4sHHQIIQ', b'VXG1', version, int(checksum), n, block_size, len(parts), 0)
     directory, chunks = bytearray(), bytearray()
     ro, po = 0, 32 + 32 * len(parts)
     for raw, kind, payload in parts:
@@ -143,7 +152,7 @@ def decode(data: bytes, max_output: int = 1 << 26) -> bytes:
     if len(data) < 32:
         raise InvalidFrame('header')
     magic, version, flags, n, bs, count, reserved = struct.unpack_from('<4sHHQIIQ', data)
-    if magic != b'VXG1' or version != 1 or flags & ~1 or reserved:
+    if magic != b'VXG1' or version not in (1, 2) or flags & ~1 or reserved:
         raise InvalidFrame('header fields')
     if n > max_output or not 4096 <= bs <= 1048576 or bs % 64:
         raise InvalidFrame('limits')
@@ -156,7 +165,7 @@ def decode(data: bytes, max_output: int = 1 << 26) -> bytes:
             raise InvalidFrame('directory canonicality')
         if po + cn > len(data) or (not flags and crc):
             raise InvalidFrame('payload range/checksum flag')
-        raw = decode_block(data[po:po+cn], kind, rn)
+        raw = decode_block(data[po:po+cn], kind, rn, short_distance=version >= 2)
         if flags and crc32c(raw) != crc:
             raise InvalidFrame('checksum')
         output += raw
@@ -187,9 +196,9 @@ def encode_block(data: bytes, acceleration: int = 1) -> tuple[int, bytes, dict]:
         while pos + run < len(data) and data[pos+run] == data[candidate+run]:
             run += 1
         distance = pos - candidate
-        op = {1: 3, 2: 4, 4: 5, 8: 6}.get(distance, 2 if distance == recent else 1)
+        op = {1: 3, 2: 4, 4: 5, 8: 6}.get(distance, 2 if distance == recent else 7 if distance <= 0xffff else 1)
         attribute: int | bytes = 0
-        if op == 1:
+        if op in (1, 7):
             attribute = recent = distance
         elif 3 <= op <= 6:
             attribute = data[pos:pos+(1 << (op-3))]
@@ -212,4 +221,4 @@ def encode(data: bytes, block_size: int = 4096, checksum: bool = False, accelera
         raw = data[start:start+block_size]
         kind, payload, _ = encode_block(raw, acceleration)
         parts.append((raw, kind, payload))
-    return frame(parts, block_size, checksum)
+    return frame(parts, block_size, checksum, version=2)

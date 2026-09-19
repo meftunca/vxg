@@ -69,7 +69,7 @@ std::vector<uint8_t> encode(const std::vector<uint8_t>&input,uint bs) {
     uint n=input.size(),nb=(n+bs-1)/bs;
     auto a=packed(input); std::vector<uint> out(size_t(nb)*bs/4+4,0),work(size_t(nb)*(4*bs+256)/4+4,0),desc(size_t(nb)*4,0);
     std::barrier sync(EMU_WG); Buffers b{a,out,work,desc,sync}; launch(b,n,bs,nb,0);
-    std::vector<uint8_t> frame={'V','X','G','1',1,0,0,0};put64(frame,n);put32(frame,bs);put32(frame,nb);put64(frame,0);
+    std::vector<uint8_t> frame={'V','X','G','1',2,0,0,0};put64(frame,n);put32(frame,bs);put32(frame,nb);put64(frame,0);
     uint64_t offset=32+32ull*nb;
     for(uint i=0;i<nb;++i){put64(frame,uint64_t(i)*bs);put64(frame,offset);put32(frame,std::min(bs,n-i*bs));put32(frame,desc[4*i]);put32(frame,0);put32(frame,desc[4*i+1]);offset+=desc[4*i];}
     auto bytes=reinterpret_cast<const uint8_t*>(out.data());

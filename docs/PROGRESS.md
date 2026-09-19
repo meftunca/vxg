@@ -257,3 +257,28 @@ Every implementation or measurement change is recorded here as a separate step.
 - Mixed data's 5,200,371-byte output had 500,864 attribute bytes and 309,220 control bytes, but
   4,377,967 literal bytes. Its first ratio lever remains match selection; JSON's is command
   representation. These are distinct workload paths and must not be optimized as one benchmark.
+
+## 2026-09-19 — v2 compact short-distance command
+
+- The encoder now emits frame v2. Its new opcode 7 stores a non-special absolute match distance
+  up to 65,535 as two little-endian bytes instead of v1 opcode 1's four bytes. Existing v1 frames
+  are still parsed and decoded; opcode 7 remains invalid in v1. `Frame::version()` exposes the
+  on-wire version so embedders can observe the distinction.
+- The change follows the format end-to-end: Rust CPU encoder/decoder and validation, independent
+  Python oracle, shared shader source and regenerated Metal/CUDA/GLSL artifacts, plus the CPU
+  SIMT emulator. A property test verifies v2 emission and v1 golden-vector compatibility.
+- In the matched 16 MiB, one-thread, 64 KiB-block, seven-sample (0.1 s) CPU run, JSON fell from
+  the prior 0.213 ratio to 0.147 (2,457,877 bytes). Its attribute stream fell from 2,230,192 to
+  1,115,096 bytes: 557,548 former absolute-distance commands now use opcode 7. VXG encode was
+  2.235 GB/s and prepared decode 1.217 GB/s in this run; the ratio gain is structural, while the
+  short benchmark's throughput deltas remain provisional. LZ4-a1 was 0.150/1.176/7.285 GB/s and
+  Zstd level 3 was 0.100/1.992/4.148 GB/s (ratio/encode/decode) on the same JSON corpus.
+- Hardware validation passed again on `Apple M2 Max`: the Metal-feature Rust suite passed and
+  `gpu-check metal` passed all 81 three-way conformance cases. The shared-kernel CPU SIMT checks
+  passed at WG=8 and WG=64, and the independent model kept all 65,536 control-word cases green.
+- A 4 MiB, one-thread, three-sample Metal host-e2e run also completed. GPU JSON encoded at ratio
+  0.165 and 0.374 GB/s, then decoded at 0.636 GB/s; CPU JSON in that short run was 0.148,
+  2.499, and 1.635 GB/s. The GPU encoder's greedy matcher does not yet match CPU ratio, and
+  host transfers/framing still dominate small workloads; no GPU speedup is claimed. Local CSVs
+  are ignored artifacts: `reports/local-short-distance-2026-09-19.csv` and
+  `reports/local-short-distance-metal-2026-09-19.csv`.

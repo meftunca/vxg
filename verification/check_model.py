@@ -29,8 +29,8 @@ def golden() -> dict[str, tuple[bytes, bytes | None]]:
     recent = 0
     for c in cmds:
         out += c.literals
-        if c.op in (1, 2):
-            if c.op == 1: recent = c.attribute
+        if c.op in (1, 2, 7):
+            if c.op in (1, 7): recent = c.attribute
             for _ in range(c.run): out.append(out[-recent])
         elif c.op >= 3:
             out += (c.attribute * ((c.run+len(c.attribute)-1)//len(c.attribute)))[:c.run]
@@ -64,7 +64,7 @@ def main():
     counts = {}
     assert crc32c(b'123456789') == 0xe3069283
     counts['crc32c_known_answer'] = 1
-    # Exhaustive over every 16-bit word, including the reserved opcode.
+    # Exhaustive over every 16-bit word, including v2's compact-distance opcode.
     for word in range(65536):
         op, lc, rc = word & 7, (word >> 3) & 31, word >> 8
         assert word == op | (lc << 3) | (rc << 8)
