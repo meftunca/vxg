@@ -310,3 +310,17 @@ Every implementation or measurement change is recorded here as a separate step.
   material decoder cost. Local artifacts: `reports/local-parser-inline-2026-09-19.csv`,
   `reports/local-parser-no-inline-2026-09-19.csv`, and temporary Time Profiler trace data under
   `/private/tmp`.
+
+## 2026-09-19 — v2 opcode-7 decoder fast path
+
+- Follow-up profiling still centered on parser work. JSON's 557,548 short absolute-distance
+  commands per 16 MiB (94% of all match commands) use v2 opcode 7, so `Parser::next` now takes a
+  dedicated fixed-length opcode-7 path. It retains the generic path's literal bounds, output
+  bounds, short-attribute truncation, positive-distance, and initialized-prefix checks; v1 and
+  extended-length cases retain the generic parser.
+- The benchmark-only `parser-op7-generic` feature restores the old generic path for a direct
+  control. At 16 MiB JSON, one thread, 64 KiB blocks, nine 0.2 s samples, prepared decode was
+  2.143 GB/s with the fast path versus 1.968 GB/s with that control (+8.9%), with unchanged
+  0.147 ratio. This is an ordered process pair, not a universal claim. Artifacts:
+  `reports/local-parser-op7-fast-2026-09-19.csv` and
+  `reports/local-parser-op7-generic-2026-09-19.csv`.

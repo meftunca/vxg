@@ -403,6 +403,9 @@ impl<'a> Parser<'a> {
         }
         let lc = ((token >> 3) & 31) as usize;
         let rc = (token >> 8) as usize;
+        if self.short_distance && op == 7 && lc < 31 && rc < 255 && !cfg!(feature="parser-op7-generic") {
+            return self.next_short_distance(lc, rc).map(Some);
+        }
         let lit = if lc == 31 {
             u32_at(self.control, &mut self.ci)? as usize
         } else {
@@ -474,6 +477,27 @@ impl<'a> Parser<'a> {
             seed,
             literal_start,
         }))
+    }
+
+    /// Common v2 JSON path: a fixed-size short-distance match. This retains
+    /// every semantic/bounds check from `next` but avoids the extended-length,
+    /// seed, and multi-opcode work on the overwhelmingly frequent opcode 7.
+    #[inline(always)]
+    fn next_short_distance(&mut self, lit: usize, run: usize) -> Result<Command> {
+        if run < 8 { return Err(Error::InvalidFrame("match below minmatch")); }
+        let literal_start = self.li;
+        let new_li = self.li.checked_add(lit).ok_or(Error::SizeOverflow)?;
+        if new_li > self.literals.len() { return Err(Error::Truncated); }
+        let match_pos = self.pos.checked_add(lit).ok_or(Error::SizeOverflow)?;
+        let next_pos = match_pos.checked_add(run).ok_or(Error::SizeOverflow)?;
+        if next_pos > self.raw_len { return Err(Error::InvalidFrame("command exceeds output")); }
+        let distance = u16_at(self.attrs, &mut self.ai)? as usize;
+        if distance == 0 || distance > match_pos { return Err(Error::InvalidFrame("backreference before initialized prefix")); }
+        self.recent = distance;
+        self.remaining -= 1;
+        self.pos = next_pos;
+        self.li = new_li;
+        Ok(Command { op: 7, lit, run, distance, seed: [0; 8], literal_start })
     }
 }
 pub(crate) fn validate(src: &[u8], kind: u32, raw_len: usize, short_distance: bool) -> Result<()> {

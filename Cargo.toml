@@ -27,6 +27,8 @@ hash15 = []
 raw-fastpath-off = []
 # Benchmark-only control build for decoder parser inlining.
 parser-no-inline = []
+# Benchmark-only control build for the generic v2 short-distance parser path.
+parser-op7-generic = []
 
 [dependencies]
 mimalloc = { version = "0.1.52", optional = true, default-features = false }
