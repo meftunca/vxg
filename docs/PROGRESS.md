@@ -442,3 +442,20 @@ Every implementation or measurement change is recorded here as a separate step.
   decodes near Zstd -3/level 1, but remains about 2.8x behind LZ4 decode. This is one ordered
   process run; use it as current directional evidence rather than a universal codec ranking.
   Local artifact: `reports/local-json-after-cpu-hotpaths-2026-09-19.csv`.
+
+## 2026-09-19 — Validated-frame decode foundation
+
+- Added `Frame::into_validated() -> ValidatedFrame`. It first runs the existing complete command
+  validation and then retains the immutable frame bytes as the proof for repeated CPU decode.
+  The normal `Frame::decode_into()` path remains the safe one-shot decoder and still validates
+  commands while it executes them.
+- `ValidatedFrame::decode_into()` uses that proof for its fixed-size v2 opcode-7 path: it avoids
+  repeated stream/output/backreference checks and uses direct non-overlapping copies where the
+  validated command permits them. Extended and uncommon commands retain the checked generic
+  parser. The new API owns its validation proof, so this is not an unchecked public decode mode.
+- At 16 MiB JSON, one thread, 64 KiB blocks, Neon, nine 0.2 s samples, checksums off, the safe
+  prepared decoder measured 3.379 GB/s and the once-validated repeated decoder 3.952 GB/s
+  (+17.0%). These profiles are intentionally separate; this gain excludes the one-time validation
+  and is not compared directly to LZ4's per-call safe decode. Local artifacts:
+  `reports/local-safe-decode-v2-2026-09-19.csv` and
+  `reports/local-validated-decode-v2-2026-09-19.csv`.

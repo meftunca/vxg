@@ -44,6 +44,12 @@ pub struct Frame<'a> {
     pub(crate) checksummed: bool,
     pub(crate) version: u16,
 }
+/// A frame whose command streams have been checked once and remain immutably
+/// borrowed for repeated CPU decode. Construct it with `Frame::into_validated`.
+#[derive(Debug)]
+pub struct ValidatedFrame<'a> {
+    frame: Frame<'a>,
+}
 fn read_u32(src: &[u8], p: usize) -> Result<u32> {
     let v = src
         .get(p..p.checked_add(4).ok_or(Error::SizeOverflow)?)
@@ -197,50 +203,16 @@ impl<'a> Frame<'a> {
         }
         Ok(())
     }
+    /// Consume this frame after validating every command stream. The resulting
+    /// handle can skip repeated validation on its fixed-size CPU fast path.
+    pub fn into_validated(self) -> Result<ValidatedFrame<'a>> {
+        self.validate_commands()?;
+        Ok(ValidatedFrame { frame: self })
+    }
     /// Preallocated API: avoids zeroing/allocating an output buffer in every benchmark iteration.
     /// On error, output is unspecified/partially modified. Never use it as decoded data.
     pub fn decode_into(&self, out: &mut [u8], options: &DecodeOptions) -> Result<()> {
-        options.validate()?;
-        if self.raw_size > options.max_output {
-            return Err(Error::OutputLimit {
-                requested: self.raw_size as u64,
-                limit: options.max_output,
-            });
-        }
-        if out.len() != self.raw_size {
-            return Err(Error::OutputSize {
-                expected: self.raw_size,
-                actual: out.len(),
-            });
-        }
-        let engine = Engine::new(options.simd)?;
-        if self.blocks.is_empty() {
-            return Ok(());
-        }
-        let workers = options.threads.min(self.blocks.len());
-        let per_worker = self.blocks.len().div_ceil(workers);
-        let output_stride = per_worker
-            .checked_mul(self.block_size)
-            .ok_or(Error::SizeOverflow)?;
-        let verify = self.checksummed && options.verify_checksum;
-        if workers == 1 {
-            return decode_group(&self.blocks, out, engine, verify, 0, self.version >= 2);
-        }
-        std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(workers);
-            for (group, target) in out.chunks_mut(output_stride).enumerate() {
-                let start = group * per_worker;
-                let blocks = &self.blocks[start..(start + per_worker).min(self.blocks.len())];
-                let short_distance = self.version >= 2;
-                handles.push(scope.spawn(move || {
-                    decode_group(blocks, target, engine, verify, start, short_distance)
-                }));
-            }
-            for h in handles {
-                h.join().map_err(|_| Error::WorkerPanic)??;
-            }
-            Ok(())
-        })
+        decode_frame_into(self, out, options, false)
     }
     pub fn decode_block(&self, index: usize, options: &DecodeOptions) -> Result<Vec<u8>> {
         options.validate()?;
@@ -268,6 +240,60 @@ impl<'a> Frame<'a> {
         Ok(out)
     }
 }
+impl<'a> ValidatedFrame<'a> {
+    pub fn raw_size(&self) -> usize { self.frame.raw_size() }
+    pub fn block_count(&self) -> usize { self.frame.block_count() }
+    pub fn frame(&self) -> &Frame<'a> { &self.frame }
+    /// Preallocated decode after `into_validated`. This is safe: the handle
+    /// owns the validation proof and keeps the original byte slice borrowed.
+    pub fn decode_into(&self, out: &mut [u8], options: &DecodeOptions) -> Result<()> {
+        decode_frame_into(&self.frame, out, options, true)
+    }
+}
+fn decode_frame_into(
+    frame: &Frame<'_>,
+    out: &mut [u8],
+    options: &DecodeOptions,
+    validated: bool,
+) -> Result<()> {
+    options.validate()?;
+    if frame.raw_size > options.max_output {
+        return Err(Error::OutputLimit { requested: frame.raw_size as u64, limit: options.max_output });
+    }
+    if out.len() != frame.raw_size {
+        return Err(Error::OutputSize { expected: frame.raw_size, actual: out.len() });
+    }
+    let engine = Engine::new(options.simd)?;
+    if frame.blocks.is_empty() { return Ok(()); }
+    let workers = options.threads.min(frame.blocks.len());
+    let per_worker = frame.blocks.len().div_ceil(workers);
+    let output_stride = per_worker.checked_mul(frame.block_size).ok_or(Error::SizeOverflow)?;
+    let verify = frame.checksummed && options.verify_checksum;
+    let short_distance = frame.version >= 2;
+    if workers == 1 {
+        return if validated {
+            decode_validated_group(&frame.blocks, out, engine, verify, 0, short_distance)
+        } else {
+            decode_group(&frame.blocks, out, engine, verify, 0, short_distance)
+        };
+    }
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for (group, target) in out.chunks_mut(output_stride).enumerate() {
+            let start = group * per_worker;
+            let blocks = &frame.blocks[start..(start + per_worker).min(frame.blocks.len())];
+            handles.push(scope.spawn(move || {
+                if validated {
+                    decode_validated_group(blocks, target, engine, verify, start, short_distance)
+                } else {
+                    decode_group(blocks, target, engine, verify, start, short_distance)
+                }
+            }));
+        }
+        for h in handles { h.join().map_err(|_| Error::WorkerPanic)??; }
+        Ok(())
+    })
+}
 fn decode_group(
     blocks: &[Block<'_>],
     out: &mut [u8],
@@ -280,6 +306,25 @@ fn decode_group(
     for (i, b) in blocks.iter().enumerate() {
         let target = &mut out[offset..offset + b.info.raw_size];
         block::decode(b.payload, b.info.kind, target, engine, short_distance)?;
+        if verify && crc32c(target) != b.info.checksum {
+            return Err(Error::Checksum { block: first + i });
+        }
+        offset += b.info.raw_size;
+    }
+    Ok(())
+}
+fn decode_validated_group(
+    blocks: &[Block<'_>],
+    out: &mut [u8],
+    engine: Engine,
+    verify: bool,
+    first: usize,
+    short_distance: bool,
+) -> Result<()> {
+    let mut offset = 0;
+    for (i, b) in blocks.iter().enumerate() {
+        let target = &mut out[offset..offset + b.info.raw_size];
+        block::decode_validated(b.payload, b.info.kind, target, engine, short_distance)?;
         if verify && crc32c(target) != b.info.checksum {
             return Err(Error::Checksum { block: first + i });
         }

@@ -601,6 +601,62 @@ impl<'a> Parser<'a> {
         self.li = new_li;
         Ok(true)
     }
+
+    /// Execute a fixed-size v2 opcode-7 command after `validate` has accepted
+    /// this exact immutable payload. Returning `false` does not consume input.
+    ///
+    /// # Safety
+    /// `validate` must have completed successfully for this parser's payload
+    /// and raw length. That proof guarantees each stream access, literal range,
+    /// output range, and backreference below. The caller keeps the payload
+    /// immutably borrowed through `ValidatedFrame`.
+    #[inline(always)]
+    unsafe fn decode_short_distance_validated_if_present(
+        &mut self,
+        out: &mut [u8],
+        engine: Engine,
+    ) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        let token = u16::from_le(std::ptr::read_unaligned(
+            self.control.as_ptr().add(self.ci).cast::<u16>(),
+        ));
+        let op = (token & 7) as u8;
+        let lit = ((token >> 3) & 31) as usize;
+        let run = (token >> 8) as usize;
+        if !self.short_distance || op != 7 || lit == 31 || run == 255 {
+            return false;
+        }
+        let literal_start = self.li;
+        let match_pos = self.pos + lit;
+        let distance = u16::from_le(std::ptr::read_unaligned(
+            self.attrs.as_ptr().add(self.ai).cast::<u16>(),
+        )) as usize;
+        if lit != 0 {
+            std::ptr::copy_nonoverlapping(
+                self.literals.as_ptr().add(literal_start),
+                out.as_mut_ptr().add(self.pos),
+                lit,
+            );
+        }
+        if run <= distance {
+            std::ptr::copy_nonoverlapping(
+                out.as_ptr().add(match_pos - distance),
+                out.as_mut_ptr().add(match_pos),
+                run,
+            );
+        } else {
+            engine.repeat(out, match_pos, run, distance);
+        }
+        self.ci += 2;
+        self.ai += 2;
+        self.li += lit;
+        self.pos = match_pos + run;
+        self.recent = distance;
+        self.remaining -= 1;
+        true
+    }
 }
 pub(crate) fn validate(src: &[u8], kind: u32, raw_len: usize, short_distance: bool) -> Result<()> {
     if kind == RAW {
@@ -658,5 +714,47 @@ pub(crate) fn decode(
     // Retain the exact stream-consumption proof after the fused commands.
     debug_assert_eq!(pos, parser.pos);
     let _ = parser.next()?;
+    Ok(())
+}
+
+/// Decode a payload that has first passed `validate` without repeating
+/// per-command checks on its fixed-size v2 opcode-7 fast path.
+pub(crate) fn decode_validated(
+    src: &[u8],
+    kind: u32,
+    out: &mut [u8],
+    engine: Engine,
+    short_distance: bool,
+) -> Result<()> {
+    if kind == RAW {
+        engine.copy(out, src);
+        return Ok(());
+    }
+    let mut parser = Parser::new(src, out.len(), short_distance)?;
+    let mut pos = 0;
+    while parser.remaining != 0 {
+        // SAFETY: `ValidatedFrame` invokes this only after `validate` has
+        // proven the exact same payload and raw length. Generic commands
+        // retain the checked parser for their uncommon shapes.
+        if unsafe { parser.decode_short_distance_validated_if_present(out, engine) } {
+            pos = parser.pos;
+            continue;
+        }
+        let c = parser.next()?.expect("nonzero parser command count");
+        if c.lit != 0 {
+            engine.copy(
+                &mut out[pos..pos + c.lit],
+                &parser.literals[c.literal_start..c.literal_start + c.lit],
+            );
+        }
+        pos += c.lit;
+        match c.op {
+            1 | 2 | 7 => engine.repeat(out, pos, c.run, c.distance),
+            3..=6 => engine.pattern(&mut out[pos..pos + c.run], &c.seed[..1usize << (c.op - 3)]),
+            _ => {}
+        }
+        pos += c.run;
+    }
+    debug_assert_eq!(pos, out.len());
     Ok(())
 }

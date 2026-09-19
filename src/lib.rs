@@ -19,7 +19,7 @@ pub mod gpu;
 #[cfg(feature="bench")]
 pub mod baselines;
 pub use error::{Error, Result};
-pub use frame::{Frame, BlockInfo, max_compressed_size};
+pub use frame::{Frame, ValidatedFrame, BlockInfo, max_compressed_size};
 pub use block::WorkStats;
 pub use simd::Simd;
 
