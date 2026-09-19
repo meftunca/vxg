@@ -392,3 +392,15 @@ Every implementation or measurement change is recorded here as a separate step.
   the generic control (+24.5%), with unchanged 0.147 ratio. Local artifacts:
   `reports/local-op7-direct-decode-2026-09-19.csv` and
   `reports/local-op7-direct-generic-2026-09-19.csv`.
+
+## 2026-09-19 — Rejected scalar-prefix NEON LCP
+
+- A short-match encoder experiment checked the first 32 LCP bytes as four scalar `u64` words,
+  falling through to the 32-byte unrolled Neon loop only for longer matches. It was motivated by
+  JSON's roughly 20-byte average LCP extension, but the added scalar prefix did not beat the
+  existing vector-first path.
+- On Apple M2 Max with 16 MiB JSON, one thread, 64 KiB blocks, nine 0.2 s samples and Neon,
+  the hybrid encoded at 2.013 GB/s versus 2.070 GB/s for the vector-first control. The candidate
+  and its `neon-lcp-vector-prefix` benchmark feature were removed. Local artifacts:
+  `reports/local-neon-lcp-hybrid-2026-09-19.csv` and
+  `reports/local-neon-lcp-vector-prefix-2026-09-19.csv`.
