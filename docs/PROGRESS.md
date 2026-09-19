@@ -404,3 +404,14 @@ Every implementation or measurement change is recorded here as a separate step.
   and its `neon-lcp-vector-prefix` benchmark feature were removed. Local artifacts:
   `reports/local-neon-lcp-hybrid-2026-09-19.csv` and
   `reports/local-neon-lcp-vector-prefix-2026-09-19.csv`.
+
+## 2026-09-19 — Rejected matcher miss-branch simplification
+
+- The encoder briefly split empty hash slots from occupied slots and removed the defensive
+  `candidate >= pos` test from the latter. It retained a benchmark-only legacy branch for an
+  exact control, but this structural cleanup did not improve the measured hot path.
+- On Apple M2 Max with 16 MiB JSON, one thread, 64 KiB blocks, nine 0.2 s samples and Neon,
+  the simplified path encoded at 1.974 GB/s versus 1.996 GB/s for the legacy control. The code
+  and `matcher-legacy-miss-branch` control feature were removed. Local artifacts:
+  `reports/local-matcher-miss-fast-2026-09-19.csv` and
+  `reports/local-matcher-miss-legacy-2026-09-19.csv`.
