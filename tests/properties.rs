@@ -32,6 +32,23 @@ fn roundtrip_bound_and_linear_work_properties(){
         }}
     }
 }
+#[cfg(not(feature="raw-fastpath-off"))]
+#[test]
+fn sampled_raw_fast_path_skips_only_incompressible_work(){
+    let random=fixture(65_536,0);
+    let (frame,stats)=compress_with_stats(&random,&Options{block_size:65_536,..Options::default()}).unwrap();
+    assert_eq!(stats.raw_fast_path_blocks,1);
+    assert_eq!(stats.raw_sample_words,48);
+    assert_eq!(stats.probes,0);
+    assert!(Frame::parse(&frame,random.len()).unwrap().blocks().all(|b|b.kind==0));
+    assert_eq!(decompress(&frame,&DecodeOptions::default()).unwrap(),random);
+
+    let periodic=fixture(65_536,37);
+    let (frame,stats)=compress_with_stats(&periodic,&Options{block_size:65_536,..Options::default()}).unwrap();
+    assert_eq!(stats.raw_fast_path_blocks,0);
+    assert!(Frame::parse(&frame,periodic.len()).unwrap().blocks().all(|b|b.kind==1));
+    assert_eq!(decompress(&frame,&DecodeOptions::default()).unwrap(),periodic);
+}
 #[test]
 fn exhaustive_binary_small_inputs(){
     // This is finite-domain testing, not a proof of the unbounded whole codec.

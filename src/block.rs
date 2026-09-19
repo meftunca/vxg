@@ -16,6 +16,10 @@ pub const BLOCK_PREFIX: usize = 16;
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct WorkStats {
+    /// Blocks emitted RAW after bounded incompressibility sampling, before the
+    /// full hash matcher allocates or scans them.
+    pub raw_fast_path_blocks: u64,
+    pub raw_sample_words: u64,
     pub probes: u64,
     pub occupied_probes: u64,
     pub candidate_checks: u64,
@@ -32,6 +36,8 @@ pub struct WorkStats {
 }
 impl std::ops::AddAssign for WorkStats {
     fn add_assign(&mut self, r: Self) {
+        self.raw_fast_path_blocks += r.raw_fast_path_blocks;
+        self.raw_sample_words += r.raw_sample_words;
         self.probes += r.probes; self.occupied_probes += r.occupied_probes;
         self.candidate_checks += r.candidate_checks; self.hash_collisions += r.hash_collisions;
         self.accepted_matches += r.accepted_matches;
@@ -75,6 +81,29 @@ fn load_u64_le(data: &[u8], pos: usize) -> u64 {
 fn hash_word(x: u64) -> usize {
     (x.wrapping_mul(0x9e3779b185ebca87) >> (64-HASH_BITS)) as usize
 }
+const RAW_SAMPLE_MIN: usize = 4096;
+const RAW_SAMPLE_WORDS: usize = 48;
+const RAW_SAMPLE_SLOTS: usize = 256;
+/// A bounded, allocation-free negative filter for blocks that have no sampled
+/// repeated eight-byte word. A false negative merely uses the regular matcher;
+/// a false positive can only select the already-valid RAW representation.
+#[inline]
+fn sampled_incompressible(data: &[u8]) -> Option<usize> {
+    if cfg!(feature="raw-fastpath-off") { return None; }
+    if data.len() < RAW_SAMPLE_MIN || data.len() < 8 { return None; }
+    let mut words = [0u64; RAW_SAMPLE_SLOTS];
+    let mut occupied = [false; RAW_SAMPLE_SLOTS];
+    let last = data.len() - 8;
+    let stride = (last / (RAW_SAMPLE_WORDS - 1)).max(1);
+    for i in 0..RAW_SAMPLE_WORDS {
+        let word = load_u64_le(data, (i * stride).min(last));
+        let slot = hash_word(word) & (RAW_SAMPLE_SLOTS - 1);
+        if occupied[slot] && words[slot] == word { return None; }
+        words[slot] = word;
+        occupied[slot] = true;
+    }
+    Some(RAW_SAMPLE_WORDS)
+}
 pub(crate) fn inline_token(op: u8, lit: u8, run: u8) -> u16 {
     (op as u16) | ((lit as u16) << 3) | ((run as u16) << 8)
 }
@@ -88,6 +117,13 @@ fn control(out: &mut Vec<u8>, op: u8, lit: usize, run: usize) {
 pub(crate) fn encode(data: &[u8], scratch: &mut Scratch, engine: Engine, acceleration: usize) -> Encoded {
     let n = data.len();
     let s = scratch;
+    if let Some(samples) = sampled_incompressible(data) {
+        let mut stats = WorkStats::default();
+        stats.raw_fast_path_blocks = 1;
+        stats.raw_sample_words = samples as u64;
+        let (offset, len) = append_payload(&mut s.payloads, data);
+        return Encoded { kind: RAW, offset, len, stats };
+    }
     s.reserve_for(n);
     s.table.fill(0); s.control.clear(); s.attrs.clear(); s.literals.clear();
     let mut stats = WorkStats::default();

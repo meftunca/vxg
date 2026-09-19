@@ -210,3 +210,23 @@ Every implementation or measurement change is recorded here as a separate step.
 - The short measurement CSV is deliberately ignored as a local run artifact:
   `reports/local-metal-e2e-2026-09-19.csv`. Before making a GPU performance claim, repeat with
   shuffled multi-process trials, larger inputs, and separately reported kernel/e2e medians.
+
+## 2026-09-19 — Bounded CPU RAW fast path
+
+- Added an allocation-free, 48-word sampled negative filter for blocks of at least 4 KiB. If no
+  sampled eight-byte word repeats, VXG emits the already-valid RAW representation before it
+  clears or probes the full hash table. A sample hit falls through to the unchanged matcher;
+  the heuristic can therefore miss a fast path but never changes decode semantics or requires a
+  new frame format.
+- `WorkStats` now reports `raw_fast_path_blocks` and `raw_sample_words`; the benchmark prints
+  both. A property test proves that a 64 KiB generated incompressible block takes the RAW path
+  with zero matcher probes, while a period-37 block stays LZ and round-trips.
+- Same-machine A/B, 16 MiB, one thread, 64 KiB blocks, seven 0.1 s samples, checksum off:
+  random encode was 8.129 GB/s with the path versus 3.441 GB/s in the benchmark-only
+  `raw-fastpath-off` control (2.36x); low-entropy random was 7.967 versus 3.424 (2.33x).
+  Both remain RAW at ratio 1.000. JSON and mixed data did not take the path and retained ratios
+  0.213 and 0.310. These are one ordered process pair, so regular-data throughput remains
+  provisional until a shuffled multi-process comparison is added.
+- Retained local A/B artifacts are `reports/local-raw-48-2026-09-19.csv` and
+  `reports/local-raw-control-2026-09-19.csv`; `raw-fastpath-off` exists solely for benchmark
+  control builds and is not a production configuration recommendation.

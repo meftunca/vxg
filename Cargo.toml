@@ -23,6 +23,8 @@ jemalloc = ["dep:tikv-jemallocator"]
 # Benchmark-only hash-table capacity A/B switches. Default is HASH_BITS=14.
 hash13 = []
 hash15 = []
+# Benchmark-only control build for measuring the incompressible RAW filter.
+raw-fastpath-off = []
 
 [dependencies]
 mimalloc = { version = "0.1.52", optional = true, default-features = false }
