@@ -429,3 +429,16 @@ Every implementation or measurement change is recorded here as a separate step.
   control (+26.8%). Both produced ratio 0.147; prepared decode was statistically unchanged at
   3.206 versus 3.211 GB/s. Local artifacts: `reports/local-encode-no-stats-2026-09-19.csv` and
   `reports/local-encode-with-stats-2026-09-19.csv`.
+
+## 2026-09-19 — CPU hot-path comparison refresh
+
+- Fresh same-machine comparison after the fused opcode-7 decoder and stats-free normal encoder:
+  16 MiB JSON, one thread, 64 KiB blocks, Neon, nine 0.2 s samples, checksums off; VXG uses
+  allocating encode and prepared/preallocated decode, matching the documented harness policy.
+- VXG measured ratio 0.147, encode 2.515 GB/s, decode 3.176 GB/s. LZ4-a1 was
+  0.150/2.282/8.994 and LZ4-a4 was 0.151/2.281/9.005 (ratio/encode/decode GB/s). Zstd -3 was
+  0.100/1.922/4.062; Zstd 1 was 0.054/1.602/3.215; Zstd 3 was 0.062/1.486/2.846.
+- VXG now slightly beats both tested LZ4 configurations on this encode and ratio profile, and
+  decodes near Zstd -3/level 1, but remains about 2.8x behind LZ4 decode. This is one ordered
+  process run; use it as current directional evidence rather than a universal codec ranking.
+  Local artifact: `reports/local-json-after-cpu-hotpaths-2026-09-19.csv`.
