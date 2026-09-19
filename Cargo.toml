@@ -29,6 +29,8 @@ raw-fastpath-off = []
 parser-no-inline = []
 # Benchmark-only control build for the generic v2 short-distance parser path.
 parser-op7-generic = []
+# Benchmark-only control build for unconditional zero-length literal copies.
+decode-unconditional-literal-copy = []
 
 [dependencies]
 mimalloc = { version = "0.1.52", optional = true, default-features = false }

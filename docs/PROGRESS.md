@@ -324,3 +324,15 @@ Every implementation or measurement change is recorded here as a separate step.
   0.147 ratio. This is an ordered process pair, not a universal claim. Artifacts:
   `reports/local-parser-op7-fast-2026-09-19.csv` and
   `reports/local-parser-op7-generic-2026-09-19.csv`.
+
+## 2026-09-19 — Skip zero-length literal copies
+
+- JSON has only 147,145 literal bytes across 591,146 commands, so the decoder was frequently
+  invoking `Engine::copy` with two empty slices before every match. `block::decode` now skips
+  that no-op while retaining the same slicing and copy path for non-empty literals.
+- The benchmark-only `decode-unconditional-literal-copy` control restores the old behavior. At
+  16 MiB JSON, one thread, 64 KiB blocks, nine 0.2 s samples, prepared decode reached 2.427 GB/s
+  with the skip versus 2.093 GB/s with the control (+16.0%), with unchanged 0.147 ratio. This is
+  an ordered process pair, not a universal percentage. Local artifacts:
+  `reports/local-zero-literal-skip-2026-09-19.csv` and
+  `reports/local-zero-literal-copy-control-2026-09-19.csv`.

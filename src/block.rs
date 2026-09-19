@@ -534,10 +534,12 @@ pub(crate) fn decode(
     let mut parser = Parser::new(src, out.len(), short_distance)?;
     let mut pos = 0;
     while let Some(c) = parser.next()? {
-        engine.copy(
-            &mut out[pos..pos + c.lit],
-            &parser.literals[c.literal_start..c.literal_start + c.lit],
-        );
+        if c.lit != 0 || cfg!(feature="decode-unconditional-literal-copy") {
+            engine.copy(
+                &mut out[pos..pos + c.lit],
+                &parser.literals[c.literal_start..c.literal_start + c.lit],
+            );
+        }
         pos += c.lit;
         match c.op {
             1 | 2 | 7 => engine.repeat(out, pos, c.run, c.distance),
