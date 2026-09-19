@@ -459,3 +459,20 @@ Every implementation or measurement change is recorded here as a separate step.
   and is not compared directly to LZ4's per-call safe decode. Local artifacts:
   `reports/local-safe-decode-v2-2026-09-19.csv` and
   `reports/local-validated-decode-v2-2026-09-19.csv`.
+
+## 2026-09-19 — 4 / 95 / 15 execution plan and Terra handoff
+
+- Added `VXG_4_95_15_PLAN.md` and `TERRA_HANDOFF.md`: simultaneous >=4 GB/s allocating
+  encode, <=0.05 complete-frame ratio, and >=10 GB/s safe decode plus >=1.20x LZ4;
+  >=15 GB/s and >=1.50x LZ4 are the stretch gate. The qualification workload is a
+  frozen structured JSON/log set, not arbitrary incompressible bytes.
+- The plan starts with benchmark/validated-API audit, then exact copy and grouped
+  decoding, metadata budgets, bitsliced/int4/ternary experiments, bounded matcher
+  changes, and version/reference/backend qualification. It distinguishes safe
+  per-call command validation from prevalidated repeated decode.
+- This entry records planning only. No codec implementation, benchmark rerun, active
+  long-running goal or Terra task was started by this planning step. Historical CSVs
+  were inspected to ground the target and the ~9.19-bit-per-command metadata budget.
+- Corrections for future work: no measured v2 4–5 GB/s ceiling has been established;
+  the earlier stream-shape entry's "16–63" run range should read "8–63" according to
+  its recorded histogram. The main plan also calls out the stale v1-only format document.

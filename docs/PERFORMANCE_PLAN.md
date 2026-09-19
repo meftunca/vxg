@@ -1,5 +1,11 @@
 # Profile-driven optimization sequence
 
+The active CPU roadmap is now [VXG 4 / 95 / 15](VXG_4_95_15_PLAN.md), with
+[Terra handoff instructions](TERRA_HANDOFF.md). It defines simultaneous speed/ratio
+targets, bitsliced experiments, safety boundaries and reproducible acceptance gates.
+The notes below are historical background; consult `PROGRESS.md` before retrying
+experiments that have already been rejected.
+
 No speed target below is a measured delivery result. Keep scalar/reference semantics and
 cross-backend golden tests as gates for every change.
 
