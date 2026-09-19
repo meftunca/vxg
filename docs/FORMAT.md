@@ -1,4 +1,4 @@
-# VXG1 wire specification — version 1, experimental
+# VXG1 wire specification — versions 1 and 2, experimental
 
 All integers are little-endian. The format is byte-addressed and contains no implicit
 alignment padding. Native GPU implementations internally repack/align buffers; that is
@@ -9,7 +9,7 @@ not part of the file contract. No external dictionary, entropy state, or cross-b
 | Offset | Type | Meaning |
 |---:|---|---|
 | 0 | byte[4] | ASCII `VXG1` |
-| 4 | u16 | Version 1 |
+| 4 | u16 | Version: 1 or 2; current encoders emit 2 |
 | 6 | u16 | Flags: bit 0 = CRC32C; all other bits zero |
 | 8 | u64 | Total uncompressed byte count |
 | 16 | u32 | Block size B; 4,096..1,048,576, multiple of 64 |
@@ -59,7 +59,8 @@ Lengths are actual counts, not `length - minimum_match`. These are not varints.
 
 Each instruction first copies its literal bytes from the literal stream, then executes
 its run. Literal-only instructions have positive literal length and zero run; every other
-instruction has positive run. MATCH/REP runs are at least 8. Opcode 7 is invalid.
+instruction has positive run. MATCH/REP runs are at least 8. Opcode 7 is invalid in
+version 1 and is the short-distance MATCH form in version 2.
 
 | Opcode | Name | Attribute bytes | Run meaning |
 |---:|---|---:|---|
@@ -70,6 +71,13 @@ instruction has positive run. MATCH/REP runs are at least 8. Opcode 7 is invalid
 | 4 | PATTERN2 | 4 | First two bytes repeated; upper two bytes zero |
 | 5 | PATTERN4 | 4 | All four bytes repeated |
 | 6 | PATTERN8 | 8 | All eight bytes repeated |
+| 7 (v2) | MATCH16 | 2 | u16 backward distance; update recent distance |
+
+`MATCH16` has the same copy semantics as `MATCH`, but its distance is a little-endian
+u16 and therefore must be in `1..=65,535`. It uses exactly two attribute bytes and no
+extension. Version-2 streams may mix opcodes 1, 2 and 7; all three update or consume the
+same recent-distance state as specified above. A version-1 decoder must reject opcode 7,
+and a version-2 decoder must continue to accept every valid version-1 stream.
 
 Pattern phase starts at seed index 0 for each instruction. Run length need not be a
 multiple of seed length. Pattern instructions **do not** update recent distance.
@@ -100,5 +108,6 @@ is not permission to skip structural validation for untrusted GPU input.
 CPU and GPU encoders choose different candidates and may emit different bytes and ratios.
 Both conform to this format. CPU output is intended to be deterministic across SIMD paths
 and worker counts; GPU atomic-min anchor discovery is deterministic within its algorithm.
-The two encoders are not required to be byte-identical. Future incompatible changes require
-a new version; do not silently reinterpret version 1 opcodes.
+The two encoders are not required to be byte-identical. Version 2 is backward-compatible
+at the decoder: it adds opcode 7 only to frames explicitly marked version 2. Future
+incompatible changes require a new version; do not silently reinterpret earlier opcodes.

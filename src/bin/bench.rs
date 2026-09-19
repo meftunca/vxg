@@ -54,20 +54,20 @@ mod alloc_probe {
     pub fn snapshot()->Snapshot{Snapshot{alloc_calls:ALLOC_CALLS.load(Ordering::Relaxed),dealloc_calls:DEALLOC_CALLS.load(Ordering::Relaxed),realloc_calls:REALLOC_CALLS.load(Ordering::Relaxed),alloc_bytes:ALLOC_BYTES.load(Ordering::Relaxed),dealloc_bytes:DEALLOC_BYTES.load(Ordering::Relaxed)}}
 }
 #[derive(Clone)]
-struct Config{size:usize,seconds:f64,samples:usize,threads:usize,block_size:usize,simd:Simd,csv:String,files:Vec<String>,only:Option<String>,gpu:Option<Backend>,microbench:bool,vxg_only:bool,decode_only:bool,validated_decode:bool}
+struct Config{size:usize,seconds:f64,samples:usize,threads:usize,block_size:usize,simd:Simd,csv:String,samples_csv:Option<String>,files:Vec<String>,only:Option<String>,gpu:Option<Backend>,microbench:bool,vxg_only:bool,decode_only:bool,validated_decode:bool}
 fn next<'a>(args:&'a[String],i:&mut usize)->R<&'a str>{*i+=1;Ok(args.get(*i).ok_or("missing value")?.as_str())}
 fn main(){if let Err(e)=run(){eprintln!("benchmark failed: {e}");std::process::exit(1);}}
 fn run()->R<()>{
-    let mut c=Config{size:4<<20,seconds:0.1,samples:5,threads:1,block_size:65536,simd:Simd::Auto,csv:"reports/local-benchmark.csv".into(),files:Vec::new(),only:None,gpu:None,microbench:false,vxg_only:false,decode_only:false,validated_decode:false};
+    let mut c=Config{size:4<<20,seconds:0.1,samples:5,threads:1,block_size:65536,simd:Simd::Auto,csv:"reports/local-benchmark.csv".into(),samples_csv:None,files:Vec::new(),only:None,gpu:None,microbench:false,vxg_only:false,decode_only:false,validated_decode:false};
     let args:Vec<String>=env::args().skip(1).collect();let mut i=0;
     while i<args.len(){match args[i].as_str(){
         "--size-mib"=>c.size=next(&args,&mut i)?.parse::<usize>()?.checked_mul(1<<20).ok_or("size overflow")?,
         "--seconds"=>c.seconds=next(&args,&mut i)?.parse()?,"--samples"=>c.samples=next(&args,&mut i)?.parse()?,
         "--threads"=>c.threads=next(&args,&mut i)?.parse()?,"--block-size"=>c.block_size=next(&args,&mut i)?.parse()?,
-        "--simd"=>c.simd=next(&args,&mut i)?.parse()?,"--csv"=>c.csv=next(&args,&mut i)?.into(),
+        "--simd"=>c.simd=next(&args,&mut i)?.parse()?,"--csv"=>c.csv=next(&args,&mut i)?.into(),"--samples-csv"=>c.samples_csv=Some(next(&args,&mut i)?.into()),
         "--gpu"=>c.gpu=Some(next(&args,&mut i)?.parse()?),"--file"=>c.files.push(next(&args,&mut i)?.into()),"--only"=>c.only=Some(next(&args,&mut i)?.into()),
         "--microbench"=>c.microbench=true,"--vxg-only"=>c.vxg_only=true,"--decode-only"=>c.decode_only=true,"--validated-decode"=>c.validated_decode=true,
-        "--help"=>{println!("vxg-bench [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1] [--block-size 65536] [--simd auto] [--csv FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--decode-only] [--validated-decode]\nAll CPU codecs use independent blocks, RAW fallback and no checksum. --only selects one built-in dataset name or --file path. --decode-only skips encode rows and baseline/GPU work after creating one VXG frame. --validated-decode validates the immutable VXG command streams once before timing repeated CPU decode; it is separately profiled from safe one-shot decode. GPU rows are explicitly host-e2e, not CPU preallocated rows. --microbench measures Engine LCP/copy/pattern kernels without codec framing. --vxg-only skips baseline codecs and GPU rows.");return Ok(());}
+        "--help"=>{println!("vxg-bench [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1] [--block-size 65536] [--simd auto] [--csv FILE] [--samples-csv FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--decode-only] [--validated-decode]\nAll CPU codecs use independent blocks, RAW fallback and no checksum. --only selects one built-in dataset name or --file path. --decode-only skips encode rows and baseline/GPU work after creating one VXG frame. --validated-decode validates the immutable VXG command streams once before timing repeated CPU decode; it is separately profiled from safe one-shot decode. --samples-csv retains every timed sample (sorted by duration) with the same profile labels as --csv. GPU rows are explicitly host-e2e, not CPU preallocated rows. --microbench measures Engine LCP/copy/pattern kernels without codec framing. --vxg-only skips baseline codecs and GPU rows.");return Ok(());}
         x=>return Err(format!("unknown option {x}").into()),
     }i+=1;}
     if c.size==0||!c.seconds.is_finite()||c.seconds<=0.0||c.seconds>60.0||c.samples<3||c.samples>101{return Err("invalid size, seconds (0..60], or samples (3..101)".into());}
@@ -77,13 +77,17 @@ fn run()->R<()>{
     eprintln!("ALLOC-STATS enabled: allocation counters perturb timing; use counts only, not GB/s.");
     let (lz,zs)=baselines::versions();
     eprintln!("VXG 0.1 / liblz4 {lz} / libzstd {zs}; {} {}; SIMD={:?}; allocator={}; threads={}; block={}",env::consts::OS,env::consts::ARCH,engine.kind(),allocator_name(),c.threads,c.block_size);
-    eprintln!("CPU: allocating encode, prepared-directory/preallocated decode. Per-call contexts included. RAW fallback for ALL codecs. Checksums OFF. Warm cache. GPU: separate host-e2e profile.");
+    eprintln!("CPU profiles: cpu_allocating_encode; cpu_preallocated_decode = prepared directory + checked command decode; cpu_full_frame_preallocated_decode = parse + checked decode; cpu_prepared_validate_commands = command validation on a prepared directory; cpu_parse_validate_commands = parse + command validation; cpu_prevalidated_decode = prepared proof + repeated decode only. Per-call contexts included. RAW fallback for ALL codecs. Checksums OFF. Warm cache. GPU: separate host-e2e profile.");
     let mut datasets=if c.files.is_empty(){datasets(c.size)}else{Vec::new()};
     for path in &c.files{datasets.push((path.clone(),fs::read(path)?));}
     if let Some(only)=&c.only{datasets.retain(|(name,_)|name==only);if datasets.is_empty(){return Err(format!("unknown dataset {only}").into());}}
     if let Some(parent)=std::path::Path::new(&c.csv).parent(){if !parent.as_os_str().is_empty(){fs::create_dir_all(parent)?;}}
     let mut csv=fs::File::create(&c.csv)?;
     writeln!(csv,"dataset,codec,profile,operation,raw_bytes,encoded_bytes,ratio_encoded_over_raw,threads,block_size,median_ns,min_ns,max_ns,median_GBps,samples,checksums,lz4_version,zstd_version,device,allocator")?;
+    let mut samples_csv=match &c.samples_csv{
+        Some(path)=>{if let Some(parent)=std::path::Path::new(path).parent(){if !parent.as_os_str().is_empty(){fs::create_dir_all(parent)?;}}let mut out=fs::File::create(path)?;writeln!(out,"dataset,codec,profile,operation,sample_rank,ns_per_operation,GBps,raw_bytes,encoded_bytes,threads,block_size,allocator")?;Some(out)}
+        None=>None,
+    };
     let mut gpu=match c.gpu{Some(b)=>Some(GpuCodec::new(b)?),None=>None};
     for (name,data) in datasets{
         if data.is_empty(){eprintln!("skip empty dataset {name}");continue;}
@@ -91,7 +95,11 @@ fn run()->R<()>{
         let dec_opt=DecodeOptions{threads:c.threads,simd:c.simd,max_output:data.len(),verify_checksum:false};
         #[cfg(feature="alloc-stats")]
         alloc_probe::reset();
-        let (frame,work_stats)=compress_with_stats(&data,&enc_opt)?;
+        let (stats_frame,work_stats)=compress_with_stats(&data,&enc_opt)?;
+        // Timed encode invokes `compress`, not the diagnostic API. Establish
+        // byte-for-byte equivalence before its frame size is reported.
+        let frame=vxg::compress(&data,&enc_opt)?;
+        if frame!=stats_frame{return Err(format!("VXG compress() diverged from compress_with_stats() for {name}").into());}
         #[cfg(feature="alloc-stats")]
         { let a=alloc_probe::snapshot(); eprintln!("{name:22} alloc calls={} realloc={} dealloc={} alloc_bytes={} dealloc_bytes={} live_bytes={}",a.alloc_calls,a.realloc_calls,a.dealloc_calls,a.alloc_bytes,a.dealloc_bytes,a.alloc_bytes.saturating_sub(a.dealloc_bytes)); }
         let parsed=Frame::parse(&frame,data.len())?;
@@ -106,23 +114,33 @@ fn run()->R<()>{
             #[cfg(not(feature="encode-with-stats"))]
             let f=vxg::compress(black_box(&data),&enc_opt)?;
             black_box(f);Ok(())
-        })?;row(&mut csv,&c,&name,"vxg","cpu_allocating_encode","compress",data.len(),frame.len(),&en,&lz,&zs,"")?; }
-        let de=measure(&c,||{
-            if let Some(checked)=validated.as_ref(){checked.decode_into(black_box(&mut out),&dec_opt)?;}else{parsed.decode_into(black_box(&mut out),&dec_opt)?;}
-            black_box(&out);Ok(())
-        })?;
+        })?;row(&mut csv,&mut samples_csv,&c,&name,"vxg","cpu_allocating_encode","compress",data.len(),frame.len(),&en,&lz,&zs,"")?; }
+        let safe_de=measure(&c,||{parsed.decode_into(black_box(&mut out),&dec_opt)?;black_box(&out);Ok(())})?;
         assert_eq!(out,data,"VXG correctness after timing");
-        let decode_profile=if c.validated_decode{"cpu_prevalidated_decode"}else{"cpu_preallocated_decode"};
-        row(&mut csv,&c,&name,"vxg",decode_profile,"decompress",data.len(),frame.len(),&de,&lz,&zs,"")?;
+        row(&mut csv,&mut samples_csv,&c,&name,"vxg","cpu_preallocated_decode","decompress",data.len(),frame.len(),&safe_de,&lz,&zs,"")?;
+        let full_de=measure(&c,||{let parsed=Frame::parse(black_box(&frame),data.len())?;parsed.decode_into(black_box(&mut out),&dec_opt)?;black_box(&out);Ok(())})?;
+        assert_eq!(out,data,"VXG full-frame correctness after timing");
+        row(&mut csv,&mut samples_csv,&c,&name,"vxg","cpu_full_frame_preallocated_decode","decompress",data.len(),frame.len(),&full_de,&lz,&zs,"")?;
+        let validation=measure(&c,||{parsed.validate_commands()?;black_box(parsed.block_count());Ok(())})?;
+        row(&mut csv,&mut samples_csv,&c,&name,"vxg","cpu_prepared_validate_commands","validate_commands",data.len(),frame.len(),&validation,&lz,&zs,"")?;
+        let parse_validation=measure(&c,||{let checked=Frame::parse(black_box(&frame),data.len())?.into_validated()?;black_box(checked.block_count());Ok(())})?;
+        row(&mut csv,&mut samples_csv,&c,&name,"vxg","cpu_parse_validate_commands","parse_validate_commands",data.len(),frame.len(),&parse_validation,&lz,&zs,"")?;
+        if let Some(checked)=validated.as_ref(){
+            let prevalidated_de=measure(&c,||{checked.decode_into(black_box(&mut out),&dec_opt)?;black_box(&out);Ok(())})?;
+            assert_eq!(out,data,"VXG prevalidated correctness after timing");
+            row(&mut csv,&mut samples_csv,&c,&name,"vxg","cpu_prevalidated_decode","decompress",data.len(),frame.len(),&prevalidated_de,&lz,&zs,"")?;
+            let safe_ns=median(&safe_de);let prevalidated_ns=median(&prevalidated_de);let validation_ns=median(&validation);
+            if prevalidated_ns<safe_ns{let reuse=(validation_ns/(safe_ns-prevalidated_ns)).floor() as u64+1;eprintln!("{name:22} validated reuse break-even: k >= {reuse} (T_validate + k*T_prevalidated < k*T_safe)");}else{eprintln!("{name:22} validated reuse break-even: none; prevalidated decode is not faster than safe prepared decode");}
+        }
         if c.vxg_only||c.decode_only { csv.flush()?; continue; }
         for codec in [Codec::Lz4{acceleration:1},Codec::Lz4{acceleration:4},Codec::Zstd{level:-3},Codec::Zstd{level:1},Codec::Zstd{level:3}]{
             let compressed=Encoded::compress(&data,codec,c.block_size,c.threads)?;
             compressed.decode_into(&mut out,c.threads)?;assert_eq!(out,data,"baseline correctness before timing");
             let en=measure(&c,||{let f=Encoded::compress(black_box(&data),codec,c.block_size,c.threads)?;black_box(f);Ok(())})?;
-            row(&mut csv,&c,&name,&codec.name(),"cpu_allocating_encode","compress",data.len(),compressed.encoded_size(),&en,&lz,&zs,"")?;
+            row(&mut csv,&mut samples_csv,&c,&name,&codec.name(),"cpu_allocating_encode","compress",data.len(),compressed.encoded_size(),&en,&lz,&zs,"")?;
             let de=measure(&c,||{compressed.decode_into(black_box(&mut out),c.threads)?;black_box(&out);Ok(())})?;
             assert_eq!(out,data,"baseline correctness after timing");
-            row(&mut csv,&c,&name,&codec.name(),"cpu_preallocated_decode","decompress",data.len(),compressed.encoded_size(),&de,&lz,&zs,"")?;
+            row(&mut csv,&mut samples_csv,&c,&name,&codec.name(),"cpu_preallocated_decode","decompress",data.len(),compressed.encoded_size(),&de,&lz,&zs,"")?;
         }
         if let Some(device)=gpu.as_mut(){
             let options=GpuOptions{block_size:c.block_size,checksum:false,max_output:data.len(),..GpuOptions::default()};
@@ -131,9 +149,9 @@ fn run()->R<()>{
             assert_eq!(device.decompress(&frame,&options)?.0,data,"CPU encode / GPU decode correctness");
             let device_name=device.device_name().to_owned();
             let en=measure(&c,||{black_box(device.compress(black_box(&data),&options)?);Ok(())})?;
-            row(&mut csv,&c,&name,"vxg-gpu","gpu_host_e2e_allocating","compress",data.len(),compressed.len(),&en,&lz,&zs,&device_name)?;
+            row(&mut csv,&mut samples_csv,&c,&name,"vxg-gpu","gpu_host_e2e_allocating","compress",data.len(),compressed.len(),&en,&lz,&zs,&device_name)?;
             let de=measure(&c,||{black_box(device.decompress(black_box(&compressed),&options)?);Ok(())})?;
-            row(&mut csv,&c,&name,"vxg-gpu","gpu_host_e2e_allocating","decompress",data.len(),compressed.len(),&de,&lz,&zs,&device_name)?;
+            row(&mut csv,&mut samples_csv,&c,&name,"vxg-gpu","gpu_host_e2e_allocating","decompress",data.len(),compressed.len(),&de,&lz,&zs,&device_name)?;
             let (decoded,report)=device.decompress(&compressed,&options)?;assert_eq!(decoded,data);
             eprintln!("GPU device timestamp observation (not median, not e2e): {} kernel_ms={:?}, host_e2e_ms={:.3}",name,report.kernel_ms,report.end_to_end_ms);
         }
@@ -190,9 +208,11 @@ fn measure<F>(c:&Config,mut f:F)->R<Vec<f64>> where F:FnMut()->R<()>{
     samples.sort_by(f64::total_cmp);Ok(samples)
 }
 fn quote(s:&str)->String{format!("\"{}\"",s.replace('"',"\"\""))}
+fn median(s:&[f64])->f64{let mid=s.len()/2;if s.len()%2==0{(s[mid-1]+s[mid])*0.5}else{s[mid]}}
 #[allow(clippy::too_many_arguments)]
-fn row(out:&mut fs::File,c:&Config,name:&str,codec:&str,profile:&str,op:&str,n:usize,m:usize,s:&[f64],lz:&str,zs:&str,device:&str)->R<()>{
-    let mid=s.len()/2;let median=if s.len()%2==0{(s[mid-1]+s[mid])*0.5}else{s[mid]};let gbps=n as f64/median;
+fn row(out:&mut fs::File,samples_out:&mut Option<fs::File>,c:&Config,name:&str,codec:&str,profile:&str,op:&str,n:usize,m:usize,s:&[f64],lz:&str,zs:&str,device:&str)->R<()>{
+    let median=median(s);let gbps=n as f64/median;
+    if let Some(samples_out)=samples_out.as_mut(){for(rank,&ns)in s.iter().enumerate(){writeln!(samples_out,"{},{},{},{},{},{:.3},{:.4},{},{},{},{},{}",quote(name),codec,profile,op,rank,ns,n as f64/ns,n,m,c.threads,c.block_size,allocator_name())?;}}
     writeln!(out,"{},{},{},{},{},{},{:.8},{},{},{:.3},{:.3},{:.3},{:.4},{},off,{},{},{},{}",quote(name),codec,profile,op,n,m,m as f64/n as f64,c.threads,c.block_size,median,s[0],s[s.len()-1],gbps,s.len(),lz,zs,quote(device),allocator_name())?;
     eprintln!("{name:22} {codec:14} {op:10} ratio={:.3} {:8.3} GB/s [{profile}]",m as f64/n as f64,gbps);Ok(())
 }

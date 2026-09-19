@@ -1,0 +1,18 @@
+VXG 0.1 / liblz4 1.10.0 / libzstd 1.5.7; macos aarch64; SIMD=Neon; allocator=system; threads=1; block=65536
+CPU profiles: cpu_allocating_encode; cpu_preallocated_decode = prepared directory + checked command decode; cpu_full_frame_preallocated_decode = parse + checked decode; cpu_parse_validate_commands = parse + command validation; cpu_prevalidated_decode = prepared proof + repeated decode only. Per-call contexts included. RAW fallback for ALL codecs. Checksums OFF. Warm cache. GPU: separate host-e2e profile.
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson VXG work raw_fast=63 sample_words=3024 probes=9460670 occupied=3584951 candidate_checks=3584951 collisions=1593406 lcp_calls=1991545 lcp_bytes=41529476 matches=1991545 matched_bytes=55470908 streams=control:3987622 attrs:3897570 literals:7509188 ops=[344, 0, 42760, 0, 0, 0, 0, 1948785] op7_dist=[0, 112886, 401174, 552967, 461093, 420665] run=[162594, 1203171, 527845, 97935, 0, 0] zero_literals=1036538
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson vxg            compress   ratio=0.292    0.815 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson vxg            decompress ratio=0.292    2.502 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson vxg            decompress ratio=0.292    2.460 GB/s [cpu_full_frame_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson vxg            validate_commands ratio=0.292    9.023 GB/s [cpu_parse_validate_commands]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson lz4-c-a1       compress   ratio=0.249    1.553 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson lz4-c-a1       decompress ratio=0.249    4.829 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson lz4-c-a4       compress   ratio=0.259    1.804 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson lz4-c-a4       decompress ratio=0.259    5.360 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson zstd-c-l-3     compress   ratio=0.231    1.387 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson zstd-c-l-3     decompress ratio=0.231    2.720 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson zstd-c-l1      compress   ratio=0.129    1.094 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson zstd-c-l1      decompress ratio=0.129    2.255 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson zstd-c-l3      compress   ratio=0.134    0.866 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/event-mix-identifiers-64MiB.ndjson zstd-c-l3      decompress ratio=0.134    2.314 GB/s [cpu_preallocated_decode]
+CSV: reports/qualification/runs/P0-smoke/event-mix-identifiers-64MiB/process-01/summary.csv

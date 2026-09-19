@@ -49,7 +49,13 @@ pub struct Frame<'a> {
 #[derive(Debug)]
 pub struct ValidatedFrame<'a> {
     frame: Frame<'a>,
+    proof: ValidatedCommandStreams,
 }
+/// Private, unforgeable evidence that every command stream in the associated
+/// `Frame` passed `block::validate`. Its only constructor is
+/// `Frame::into_validated` after that validation succeeds.
+#[derive(Debug)]
+struct ValidatedCommandStreams(());
 fn read_u32(src: &[u8], p: usize) -> Result<u32> {
     let v = src
         .get(p..p.checked_add(4).ok_or(Error::SizeOverflow)?)
@@ -207,12 +213,15 @@ impl<'a> Frame<'a> {
     /// handle can skip repeated validation on its fixed-size CPU fast path.
     pub fn into_validated(self) -> Result<ValidatedFrame<'a>> {
         self.validate_commands()?;
-        Ok(ValidatedFrame { frame: self })
+        Ok(ValidatedFrame {
+            frame: self,
+            proof: ValidatedCommandStreams(()),
+        })
     }
     /// Preallocated API: avoids zeroing/allocating an output buffer in every benchmark iteration.
     /// On error, output is unspecified/partially modified. Never use it as decoded data.
     pub fn decode_into(&self, out: &mut [u8], options: &DecodeOptions) -> Result<()> {
-        decode_frame_into(self, out, options, false)
+        decode_frame_into(self, out, options, None)
     }
     pub fn decode_block(&self, index: usize, options: &DecodeOptions) -> Result<Vec<u8>> {
         options.validate()?;
@@ -245,16 +254,17 @@ impl<'a> ValidatedFrame<'a> {
     pub fn block_count(&self) -> usize { self.frame.block_count() }
     pub fn frame(&self) -> &Frame<'a> { &self.frame }
     /// Preallocated decode after `into_validated`. This is safe: the handle
-    /// owns the validation proof and keeps the original byte slice borrowed.
+    /// owns an unforgeable validation proof and keeps the original byte slice
+    /// immutably borrowed.
     pub fn decode_into(&self, out: &mut [u8], options: &DecodeOptions) -> Result<()> {
-        decode_frame_into(&self.frame, out, options, true)
+        decode_frame_into(&self.frame, out, options, Some(&self.proof))
     }
 }
 fn decode_frame_into(
     frame: &Frame<'_>,
     out: &mut [u8],
     options: &DecodeOptions,
-    validated: bool,
+    proof: Option<&ValidatedCommandStreams>,
 ) -> Result<()> {
     options.validate()?;
     if frame.raw_size > options.max_output {
@@ -271,8 +281,8 @@ fn decode_frame_into(
     let verify = frame.checksummed && options.verify_checksum;
     let short_distance = frame.version >= 2;
     if workers == 1 {
-        return if validated {
-            decode_validated_group(&frame.blocks, out, engine, verify, 0, short_distance)
+        return if let Some(proof) = proof {
+            decode_validated_group(&frame.blocks, out, engine, verify, 0, short_distance, proof)
         } else {
             decode_group(&frame.blocks, out, engine, verify, 0, short_distance)
         };
@@ -283,8 +293,8 @@ fn decode_frame_into(
             let start = group * per_worker;
             let blocks = &frame.blocks[start..(start + per_worker).min(frame.blocks.len())];
             handles.push(scope.spawn(move || {
-                if validated {
-                    decode_validated_group(blocks, target, engine, verify, start, short_distance)
+                if let Some(proof) = proof {
+                    decode_validated_group(blocks, target, engine, verify, start, short_distance, proof)
                 } else {
                     decode_group(blocks, target, engine, verify, start, short_distance)
                 }
@@ -320,11 +330,18 @@ fn decode_validated_group(
     verify: bool,
     first: usize,
     short_distance: bool,
+    _proof: &ValidatedCommandStreams,
 ) -> Result<()> {
     let mut offset = 0;
     for (i, b) in blocks.iter().enumerate() {
         let target = &mut out[offset..offset + b.info.raw_size];
-        block::decode_validated(b.payload, b.info.kind, target, engine, short_distance)?;
+        // SAFETY: `_proof` can only be constructed by `Frame::into_validated`
+        // after it validates every immutable payload in this frame. `blocks`
+        // comes directly from that same frame and `target` has the recorded
+        // raw length, so the contract of `block::decode_validated` holds.
+        unsafe {
+            block::decode_validated(b.payload, b.info.kind, target, engine, short_distance)?;
+        }
         if verify && crc32c(target) != b.info.checksum {
             return Err(Error::Checksum { block: first + i });
         }

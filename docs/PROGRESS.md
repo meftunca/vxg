@@ -3,6 +3,45 @@
 This file records implementation steps, validation gates, and benchmark evidence.
 Every implementation or measurement change is recorded here as a separate step.
 
+## 2026-09-19 — P0 qualification freeze and validated decoder boundary
+
+- Added `reports/qualification/manifest.json` and
+  `scripts/generate_qualification_corpus.py`. Q95 is now an eight-member synthetic
+  structured JSON/log set: the existing `json-records` workload and three held-out
+  families, each at 16 and 64 MiB. Exact byte counts and SHA-256 values are frozen in
+  the tracked manifest; the generated 320 MiB corpus remains ignored.
+- Added `scripts/run_qualification.sh`. It builds one benchmark binary, captures its
+  SHA-256/environment, runs each Q95 file serially, and preserves per-process summary,
+  all timed samples and console output. `reports/qualification/runs/P0-smoke-r2` proves
+  the runner end-to-end with one process and three 10 ms inner samples; the previous smoke
+  remains preserved. These are explicitly directional only, not target-qualification or
+  confidence results.
+- The benchmark now checks, outside timing, that `compress()` produces bytes identical
+  to `compress_with_stats()` before it uses the setup frame's size. It records the
+  timed API actually being measured, retains `--samples-csv`, and adds clear VXG rows
+  for safe full-frame parse+decode and parse+command-validation alongside the prepared
+  and prevalidated profiles.
+- `ValidatedFrame` now holds a private `ValidatedCommandStreams` proof constructed only
+  after successful command validation. `block::decode_validated` is `unsafe` with its
+  exact validation/immutability/output-length contract, and its caller documents how the
+  proof establishes it. Extended tests cover v1/v2, checksum failure, output bounds,
+  multi-worker decode and malformed frames; fuzzing now differentially compares safe
+  and validated decoders when a proof can be obtained.
+- Updated `docs/FORMAT.md` from the stale v1-only description: v2 emits the two-byte
+  absolute-distance opcode 7, while v1 remains readable and must reject opcode 7.
+- Validation: `cargo test --release` and `cargo test --release --features bench` passed
+  (2 golden, 16 property, one doctest each). Cargo printed an unrelated inability to
+  clean a globally cached `winapi-0.3.9` manifest; compilation and tests completed.
+  `scripts/check.sh` passed shader consistency, the same release suite and the roundtrip
+  example. `scripts/check_model.sh` passed its ASAN/UBSAN WG=8 and WG=64 CPU SIMT model
+  checks; this remains model coverage, not native GPU execution.
+- The Q95 smoke confirms the format is far from the joint target on held-out families.
+  For the reproducible 16 MiB `json-records` member it observed ratio `0.14650089`,
+  allocating encode `2.3069 GB/s`, safe prepared decode `3.2445 GB/s`, and best tested
+  LZ4 safe decode `8.9195 GB/s`. This is one very short process, so it is evidence of
+  the baseline gap—not an acceptance measurement. Detailed raw samples and every member
+  are retained under `reports/qualification/runs/P0-smoke-r2`.
+
 ## 2026-09-15 — Git baseline
 
 - Baseline commit: `b5d4395` (`chore: initialize VXG repository`)

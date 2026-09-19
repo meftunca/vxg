@@ -25,15 +25,24 @@ Their reported size adds the same `32+32*block_count` envelope for accounting. T
 close application-level coverage but **not identical memory-allocation/framing work**.
 Do not publish it as an apples-to-apples intrinsic-kernel microbenchmark.
 
-Decompression starts with prepared metadata and preallocated output for all CPU codecs.
-VXG header/directory parsing is outside the timed loop; its command parsing remains inside.
-Reference blocks already carry size/RAW metadata. Zstd decode context setup is per call,
-not hidden in a global cache. Multithreaded calls include scoped-thread creation/join;
-there is no persistent thread pool in this version.
+The primary CPU decode row is `cpu_preallocated_decode`: all codecs start with prepared
+metadata and a preallocated output buffer. VXG header/directory parsing is outside that
+timed loop; its command parsing remains inside. `cpu_full_frame_preallocated_decode` is
+an additional VXG-safe row which includes header/directory parsing before the same checked
+decode. `cpu_prepared_validate_commands` measures one-time command validation on an
+already parsed directory; `cpu_parse_validate_commands` includes both parse and validation.
+They are accounting rows, not substitutes for decode. `cpu_prevalidated_decode` exists
+only with `--validated-decode`, after a `ValidatedFrame` has obtained its immutable command
+proof outside timing; never compare that repeated-decode-only profile to LZ4's one-shot
+safe decode without reporting the one-time validation cost. Reference blocks already carry
+size/RAW metadata. Zstd decode context setup is per call, not hidden in a global cache.
+Multithreaded calls include scoped-thread creation/join; there is no persistent thread pool
+in this version.
 
 Inputs/buffers are reused (warm-cache workload). Two warmups are excluded. Each of five
 default samples runs for at least 100 ms, recording mean ns/operation within that sample;
-CSV reports the median/min/max of those samples. These are not per-request p95/p99 latencies.
+CSV reports the median/min/max of those samples. `--samples-csv FILE` retains every timed
+sample (sorted by duration) with the same profile labels. These are not per-request p95/p99 latencies.
 GB/s means decimal uncompressed bytes/second for both compression and decompression.
 Ratio means `encoded_bytes / raw_bytes`; lower is smaller. Correctness uses full byte
 comparison before timing and after decode timing, not just equal lengths/checksums.
@@ -45,7 +54,7 @@ comparison before timing and after decode timing, not just equal lengths/checksu
 # Ubuntu: sudo apt-get install liblz4-dev libzstd-dev
 cargo run --release --features bench --bin vxg-bench -- \
   --threads 1 --block-size 65536 --size-mib 16 --samples 7 --seconds 0.2 \
-  --csv reports/cpu-1-thread.csv
+  --csv reports/cpu-1-thread.csv --samples-csv reports/cpu-1-thread-samples.csv
 
 cargo run --release --features bench --bin vxg-bench -- \
   --threads 4 --size-mib 64 --csv reports/cpu-4-thread.csv
@@ -59,6 +68,25 @@ cargo run --release --features bench --bin vxg-bench -- \
 cargo run --release --features bench --bin vxg-bench -- --simd scalar --csv reports/scalar.csv
 cargo run --release --features bench --bin vxg-bench -- --simd avx512 --csv reports/avx512.csv
 ```
+
+## Frozen Q95 qualification
+
+The long-running 4 / 95 / 15 target is evaluated on a frozen, synthetic structured
+JSON/log set: existing `json-records` plus three held-out families at both 16 and 64 MiB.
+The generated corpus is ignored, but [the tracked manifest](../reports/qualification/manifest.json)
+records its workload rule, byte count and SHA-256. Regenerate and verify it with:
+
+```sh
+python3 scripts/generate_qualification_corpus.py
+python3 scripts/generate_qualification_corpus.py --verify
+scripts/run_qualification.sh reports/qualification/runs/P0-baseline
+```
+
+The runner is serial: it builds one benchmark binary, records its hash and host details,
+then preserves an aggregate CSV, all timed samples and a console log per input/process.
+It is not a claim that synthetic Q95 represents arbitrary production data. A candidate
+promotion requires paired shuffled process order, confidence intervals and every frozen
+member; the initial P0 runner records the baseline and does not discard a slow process.
 
 Built-in synthetic classes: zero runs, period-37, changing JSON records, pseudo-random,
 low-alphabet pseudo-random, and 4 KiB mixed segments. Their results are not representative

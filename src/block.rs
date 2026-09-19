@@ -719,7 +719,13 @@ pub(crate) fn decode(
 
 /// Decode a payload that has first passed `validate` without repeating
 /// per-command checks on its fixed-size v2 opcode-7 fast path.
-pub(crate) fn decode_validated(
+///
+/// # Safety
+/// The exact `src`, `kind`, output length, and `short_distance` mode must have
+/// passed `validate` successfully and the payload must remain immutable since
+/// that check. `out` must have the validated raw length. Violating this
+/// contract can make the opcode-7 path perform unchecked reads or writes.
+pub(crate) unsafe fn decode_validated(
     src: &[u8],
     kind: u32,
     out: &mut [u8],

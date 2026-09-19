@@ -1,0 +1,18 @@
+VXG 0.1 / liblz4 1.10.0 / libzstd 1.5.7; macos aarch64; SIMD=Neon; allocator=system; threads=1; block=65536
+CPU profiles: cpu_allocating_encode; cpu_preallocated_decode = prepared directory + checked command decode; cpu_full_frame_preallocated_decode = parse + checked decode; cpu_parse_validate_commands = parse + command validation; cpu_prevalidated_decode = prepared proof + repeated decode only. Per-call contexts included. RAW fallback for ALL codecs. Checksums OFF. Warm cache. GPU: separate host-e2e profile.
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson VXG work raw_fast=94 sample_words=4512 probes=9371709 occupied=3633007 candidate_checks=3633007 collisions=1529789 lcp_calls=2103218 lcp_bytes=38941144 matches=2103218 matched_bytes=53664257 streams=control:4211282 attrs:4181834 literals:7284223 ops=[343, 0, 12301, 0, 0, 0, 0, 2090917] op7_dist=[260120, 532230, 490655, 495424, 248317, 64171] run=[689325, 1189398, 126812, 37103, 60580, 0] zero_literals=1454549
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson vxg            compress   ratio=0.326    0.789 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson vxg            decompress ratio=0.326    1.844 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson vxg            decompress ratio=0.326    1.850 GB/s [cpu_full_frame_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson vxg            validate_commands ratio=0.326    8.901 GB/s [cpu_parse_validate_commands]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson lz4-c-a1       compress   ratio=0.242    1.642 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson lz4-c-a1       decompress ratio=0.242    5.498 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson lz4-c-a4       compress   ratio=0.297    1.789 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson lz4-c-a4       decompress ratio=0.297    6.348 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson zstd-c-l-3     compress   ratio=0.215    1.320 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson zstd-c-l-3     decompress ratio=0.215    2.687 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson zstd-c-l1      compress   ratio=0.129    1.077 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson zstd-c-l1      decompress ratio=0.129    2.179 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson zstd-c-l3      compress   ratio=0.132    0.873 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/bursty-variable-records-64MiB.ndjson zstd-c-l3      decompress ratio=0.132    2.122 GB/s [cpu_preallocated_decode]
+CSV: reports/qualification/runs/P0-smoke/bursty-variable-records-64MiB/process-01/summary.csv

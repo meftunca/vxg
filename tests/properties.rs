@@ -151,6 +151,105 @@ fn validated_frame_reuses_an_immutable_command_proof() {
     }
 }
 #[test]
+fn validated_frame_boundary_covers_versions_limits_checksums_and_workers() {
+    // The legacy vector exercises literal tails, overlap, recent-distance
+    // transitions and extended command shapes. It must be eligible for the
+    // validated path even though opcode 7 did not exist in v1.
+    let v1 = include_bytes!("vectors/all-ops.vxg");
+    let v1_expected = include_bytes!("vectors/all-ops.raw");
+    let validated_v1 = Frame::parse(v1, v1_expected.len())
+        .unwrap()
+        .into_validated()
+        .unwrap();
+    let mut v1_out = vec![0; v1_expected.len()];
+    validated_v1
+        .decode_into(&mut v1_out, &DecodeOptions::default())
+        .unwrap();
+    assert_eq!(v1_out, v1_expected);
+
+    // A v2 frame with several independent blocks takes the same unforgeable
+    // proof through the scoped multi-worker route.
+    let data = fixture(16_589, 37);
+    let encoded = compress(
+        &data,
+        &Options {
+            block_size: 4096,
+            checksum: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let validated = Frame::parse(&encoded, data.len())
+        .unwrap()
+        .into_validated()
+        .unwrap();
+    let mut out = vec![0; data.len()];
+    validated
+        .decode_into(
+            &mut out,
+            &DecodeOptions {
+                threads: 2,
+                ..DecodeOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(out, data);
+    let short_len = out.len() - 1;
+    assert!(matches!(
+        validated.decode_into(&mut out[..short_len], &DecodeOptions::default()),
+        Err(vxg::Error::OutputSize { .. })
+    ));
+    assert!(matches!(
+        validated.decode_into(
+            &mut out,
+            &DecodeOptions {
+                max_output: data.len() - 1,
+                ..DecodeOptions::default()
+            }
+        ),
+        Err(vxg::Error::OutputLimit { .. })
+    ));
+
+    // A checksum is deliberately outside command validation, so it still has
+    // to execute on the validated fast path.
+    let mut bad_checksum = encoded;
+    bad_checksum[32 + 24] ^= 1;
+    let bad_validated = Frame::parse(&bad_checksum, data.len())
+        .unwrap()
+        .into_validated()
+        .unwrap();
+    assert!(matches!(
+        bad_validated.decode_into(&mut out, &DecodeOptions::default()),
+        Err(vxg::Error::Checksum { .. })
+    ));
+
+    // Re-labelling a v2 opcode-7 stream as v1 must fail before it can obtain
+    // a proof for unchecked opcode-7 loads.
+    let mut mislabeled_v1 = compress(
+        &fixture(65_536, 37),
+        &Options {
+            block_size: 65_536,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    mislabeled_v1[4] = 1;
+    assert!(Frame::parse(&mislabeled_v1, 65_536)
+        .unwrap()
+        .into_validated()
+        .is_err());
+    for malformed in [
+        include_bytes!("vectors/invalid-distance-zero.vxg").as_slice(),
+        include_bytes!("vectors/invalid-distance-before-prefix.vxg").as_slice(),
+        include_bytes!("vectors/invalid-output-overrun.vxg").as_slice(),
+        include_bytes!("vectors/invalid-command-count.vxg").as_slice(),
+    ] {
+        if let Ok(frame) = Frame::parse(malformed, 1 << 20) {
+            assert!(frame.into_validated().is_err());
+        }
+    }
+}
+#[test]
 fn v2_short_distance_reduces_attributes_and_v1_vectors_remain_readable() {
     let data = fixture(65_536, 37);
     let (encoded, stats) = compress_with_stats(

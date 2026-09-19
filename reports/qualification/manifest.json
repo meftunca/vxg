@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "generator_revision": "q95-json-r1",
+  "target_scope": "Synthetic structured JSON/log Q95; not a claim about arbitrary production data.",
+  "policy": "Every member remains in qualification. Exact byte identity is verified by SHA-256 before a run.",
+  "members": [
+    {
+      "id": "json-records-16mib",
+      "path": "corpus/qualification/json-records-16MiB.ndjson",
+      "bytes": 16777216,
+      "sha256": "d8ae24dc2d3804697efcb5ce275a21d33eeb4bf83da73e7f55c0b53f454d4316",
+      "family": "json-records",
+      "split": "baseline",
+      "seed": null,
+      "description": "existing built-in json-records reproduced as a frozen file"
+    },
+    {
+      "id": "field-order-optional-escaping-16mib",
+      "path": "corpus/qualification/field-order-optional-escaping-16MiB.ndjson",
+      "bytes": 16777216,
+      "sha256": "a35ec18b88d6e94e9cd6426ea96211f8cfc9483a8c7786c82ad0fb06c472000f",
+      "family": "field-order-optional-escaping",
+      "split": "held-out",
+      "seed": "0x8d124a77319b05e1",
+      "description": "changed field order, optional fields, and escaped JSON strings"
+    },
+    {
+      "id": "event-mix-identifiers-16mib",
+      "path": "corpus/qualification/event-mix-identifiers-16MiB.ndjson",
+      "bytes": 16777216,
+      "sha256": "69835e6c1503cebf2a7e0b84ba1391eb61f23501d0b9ecb97bed500a1ea8ca3c",
+      "family": "event-mix-identifiers",
+      "split": "held-out",
+      "seed": "0xc5016b2d784e1193",
+      "description": "mixed event templates, request identifiers, and regional distributions"
+    },
+    {
+      "id": "bursty-variable-records-16mib",
+      "path": "corpus/qualification/bursty-variable-records-16MiB.ndjson",
+      "bytes": 16777216,
+      "sha256": "054a842cbcc599c06ca99c38ebd21e4de15dc0d29d5453753754cd6d63ee3eda",
+      "family": "bursty-variable-records",
+      "split": "held-out",
+      "seed": "0x17e390ac620d4f8b",
+      "description": "bursts and variable record/message lengths"
+    },
+    {
+      "id": "json-records-64mib",
+      "path": "corpus/qualification/json-records-64MiB.ndjson",
+      "bytes": 67108864,
+      "sha256": "8463b79c9e14947e998cfb8ba6252235d4435e5dbe5d13d348a4bc1452dd09cf",
+      "family": "json-records",
+      "split": "baseline",
+      "seed": null,
+      "description": "existing built-in json-records reproduced as a frozen file"
+    },
+    {
+      "id": "field-order-optional-escaping-64mib",
+      "path": "corpus/qualification/field-order-optional-escaping-64MiB.ndjson",
+      "bytes": 67108864,
+      "sha256": "4f6ce3d90614407e53c65552f7ea4c080905429aeaedf6130cd2c73657caf0fa",
+      "family": "field-order-optional-escaping",
+      "split": "held-out",
+      "seed": "0x8d124a77319b05e1",
+      "description": "changed field order, optional fields, and escaped JSON strings"
+    },
+    {
+      "id": "event-mix-identifiers-64mib",
+      "path": "corpus/qualification/event-mix-identifiers-64MiB.ndjson",
+      "bytes": 67108864,
+      "sha256": "d7ec192b1970a55965e7bfc7e9654fe730906ad5bc6f4897ce1276b64f6918da",
+      "family": "event-mix-identifiers",
+      "split": "held-out",
+      "seed": "0xc5016b2d784e1193",
+      "description": "mixed event templates, request identifiers, and regional distributions"
+    },
+    {
+      "id": "bursty-variable-records-64mib",
+      "path": "corpus/qualification/bursty-variable-records-64MiB.ndjson",
+      "bytes": 67108864,
+      "sha256": "fc703102838b125f5b7617141be8535150bdf577380b72ba5c9e18ac0ef34615",
+      "family": "bursty-variable-records",
+      "split": "held-out",
+      "seed": "0x17e390ac620d4f8b",
+      "description": "bursts and variable record/message lengths"
+    }
+  ]
+}

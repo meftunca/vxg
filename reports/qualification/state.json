@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "active_package": "P0",
+  "experiment_id": "P0-baseline-freeze",
+  "hypothesis": "A frozen corpus, explicit validation boundary, exact timed-API check and separately labelled profiles make later speed/ratio experiments falsifiable.",
+  "baseline_revision": "52ed95e",
+  "candidate_hash": "4da77283f17d037f7f93272eb9f6dd406ef59a52a06ede224b7ea4831a41d7a7",
+  "candidate_binary": "/Users/mapletechnologies/.cargo/target/release/vxg-bench",
+  "corpus_manifest": "reports/qualification/manifest.json",
+  "commands": [
+    "cargo test --release",
+    "cargo test --release --features bench",
+    "TRIALS=1 SAMPLES_PER_PROCESS=3 SECONDS_PER_SAMPLE=0.01 scripts/run_qualification.sh reports/qualification/runs/P0-smoke-r2"
+  ],
+  "correctness_status": {
+    "release_tests": "passed: 2 golden + 16 property + 1 doctest",
+    "bench_feature_tests": "passed: 2 golden + 16 property + 1 doctest",
+    "full_cpu_shader_gate": "passed: scripts/check.sh (shader consistency, release tests, roundtrip example)",
+    "independent_model_gate": "passed: scripts/check_model.sh with ASAN/UBSAN emulator WG=8 and WG=64; this is not actual GPU execution",
+    "timed_encode_equivalence": "vxg-bench checks compress() byte-for-byte against compress_with_stats() before reporting setup-frame size",
+    "validated_boundary": "decode_validated is unsafe; its sole caller is gated by ValidatedCommandStreams constructed only after Frame::into_validated validation"
+  },
+  "metrics_by_profile": {
+    "smoke_artifact": "reports/qualification/runs/P0-smoke-r2",
+    "scope": "One process per Q95 member, three 10 ms inner samples. This validates the runner and records direction only; it is not an acceptance run or confidence estimate.",
+    "json_records_16mib": {
+      "ratio": 0.14650089,
+      "allocating_encode_GBps": 2.5253,
+      "safe_prepared_decode_GBps": 3.2321,
+      "safe_full_frame_decode_GBps": 3.3105,
+      "prepared_validate_GBps": 8.2522,
+      "parse_validate_GBps": 8.2471,
+      "best_lz4_safe_decode_GBps": 8.9195
+    }
+  },
+  "decision": "P0 instrumentation and safety boundary are in place. The current format fails the 0.05/4/10 target on the smoke corpus; do not infer a qualification result from this one short process per member.",
+  "next_step": "Run the retained multi-process P0 baseline, then use the profile data to select at most two P1 decode/encode execution experiments before P2 metadata analysis.",
+  "unrun_checks": [
+    "7-process paired confidence baseline at 0.2 s samples for every Q95 member",
+    "actual Metal validation after CPU P0 changes",
+    "Miri/sanitizer fuzzing of the new unsafe validated decode boundary",
+    "P1 profiling/disassembly and P2 command-stream metadata analyzer"
+  ]
+}
