@@ -54,19 +54,24 @@ impl DecodeOptions {
         Ok(())
     }
 }
-pub fn compress(input: &[u8], options: &Options) -> Result<Vec<u8>> { Ok(compress_with_stats(input, options)?.0) }
+pub fn compress(input: &[u8], options: &Options) -> Result<Vec<u8>> {
+    Ok(compress_inner::<false>(input, options)?.0)
+}
 pub fn compress_with_stats(input: &[u8], options: &Options) -> Result<(Vec<u8>, WorkStats)> {
+    compress_inner::<true>(input, options)
+}
+fn compress_inner<const STATS: bool>(input: &[u8], options: &Options) -> Result<(Vec<u8>, WorkStats)> {
     options.validate()?;
     max_compressed_size(input.len(), options.block_size)?;
     let engine = simd::Engine::new(options.simd)?;
     let count = input.len().div_ceil(options.block_size);
     let workers = options.threads.min(count.max(1));
     let worker_outputs = if workers == 1 {
-        vec![encode_worker(input, options, engine, 0, 1)]
+        vec![encode_worker::<STATS>(input, options, engine, 0, 1)]
     } else {
         std::thread::scope(|scope| -> Result<Vec<_>> {
             let mut handles = Vec::with_capacity(workers);
-            for worker in 0..workers { handles.push(scope.spawn(move || encode_worker(input, options, engine, worker, workers))); }
+            for worker in 0..workers { handles.push(scope.spawn(move || encode_worker::<STATS>(input, options, engine, worker, workers))); }
             let mut result = Vec::with_capacity(workers);
             for handle in handles { result.push(handle.join().map_err(|_| Error::WorkerPanic)?); }
             Ok(result)
@@ -76,7 +81,7 @@ pub fn compress_with_stats(input: &[u8], options: &Options) -> Result<(Vec<u8>, 
     for output in &worker_outputs { stats += output.stats; }
     Ok((frame::assemble_workers(worker_outputs, input.len(), options.block_size, options.checksum)?, stats))
 }
-fn encode_worker(input: &[u8], opt: &Options, engine: simd::Engine, worker: usize, workers: usize) -> frame::WorkerOutput {
+fn encode_worker<const STATS: bool>(input: &[u8], opt: &Options, engine: simd::Engine, worker: usize, workers: usize) -> frame::WorkerOutput {
     let mut scratch = block::Scratch::new();
     let count = input.len().div_ceil(opt.block_size);
     let capacity = count.saturating_sub(worker).div_ceil(workers);
@@ -84,8 +89,8 @@ fn encode_worker(input: &[u8], opt: &Options, engine: simd::Engine, worker: usiz
     let mut parts = Vec::with_capacity(capacity);
     let mut stats = WorkStats::default();
     for (index, chunk) in input.chunks(opt.block_size).enumerate().skip(worker).step_by(workers) {
-        let enc = block::encode(chunk, &mut scratch, engine, opt.acceleration);
-        stats += enc.stats;
+        let enc = block::encode::<STATS>(chunk, &mut scratch, engine, opt.acceleration);
+        if STATS { stats += enc.stats; }
         parts.push(frame::ArenaPart { index, offset: enc.offset, len: enc.len, kind: enc.kind,
             raw_size: chunk.len(), checksum: if opt.checksum { checksum::crc32c(chunk) } else { 0 } });
     }

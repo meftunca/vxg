@@ -178,13 +178,15 @@ fn control(out: &mut Vec<u8>, op: u8, lit: usize, run: usize) {
         out.extend_from_slice(&(run as u32).to_le_bytes());
     }
 }
-fn finish_stats(stats: &mut WorkStats, count: usize, scratch: &Scratch) {
-    stats.commands = count as u64;
-    stats.literal_bytes = scratch.literals.len() as u64;
-    stats.control_bytes = scratch.control.len() as u64;
-    stats.attribute_bytes = scratch.attrs.len() as u64;
+fn finish_stats<const STATS: bool>(stats: &mut WorkStats, count: usize, scratch: &Scratch) {
+    if STATS {
+        stats.commands = count as u64;
+        stats.literal_bytes = scratch.literals.len() as u64;
+        stats.control_bytes = scratch.control.len() as u64;
+        stats.attribute_bytes = scratch.attrs.len() as u64;
+    }
 }
-pub(crate) fn encode(
+pub(crate) fn encode<const STATS: bool>(
     data: &[u8],
     scratch: &mut Scratch,
     engine: Engine,
@@ -194,8 +196,10 @@ pub(crate) fn encode(
     let s = scratch;
     if let Some(samples) = sampled_incompressible(data) {
         let mut stats = WorkStats::default();
-        stats.raw_fast_path_blocks = 1;
-        stats.raw_sample_words = samples as u64;
+        if STATS {
+            stats.raw_fast_path_blocks = 1;
+            stats.raw_sample_words = samples as u64;
+        }
         let (offset, len) = append_payload(&mut s.payloads, data);
         return Encoded {
             kind: RAW,
@@ -220,9 +224,11 @@ pub(crate) fn encode(
         let h = hash_word(word);
         let old = s.table[h];
         s.table[h] = (pos + 1) as u32;
-        stats.probes += 1;
-        if old != 0 {
-            stats.occupied_probes += 1;
+        if STATS {
+            stats.probes += 1;
+            if old != 0 {
+                stats.occupied_probes += 1;
+            }
         }
         let candidate = old.wrapping_sub(1) as usize;
         if old == 0 || candidate >= pos {
@@ -231,9 +237,13 @@ pub(crate) fn encode(
             pos = pos.saturating_add(step);
             continue;
         }
-        stats.candidate_checks += 1;
+        if STATS {
+            stats.candidate_checks += 1;
+        }
         if load_u64_le(data, candidate) != word {
-            stats.hash_collisions += 1;
+            if STATS {
+                stats.hash_collisions += 1;
+            }
             misses = misses.saturating_add(1);
             let step = acceleration.saturating_add(misses >> 6).min(64);
             pos = pos.saturating_add(step);
@@ -243,8 +253,10 @@ pub(crate) fn encode(
         let right = &data[candidate + 8..];
         let common = engine.lcp(left, right);
         let compared = common.saturating_add(1).min(left.len().min(right.len()));
-        stats.lcp_calls += 1;
-        stats.lcp_bytes += compared as u64;
+        if STATS {
+            stats.lcp_calls += 1;
+            stats.lcp_bytes += compared as u64;
+        }
         let run = 8 + common;
         let distance = pos - candidate;
         let lit = pos - anchor;
@@ -258,15 +270,17 @@ pub(crate) fn encode(
             _ => 1,
         };
         control(&mut s.control, op, lit, run);
-        stats.op_counts[op as usize] += 1;
-        #[cfg(feature = "bench")]
-        {
-            if lit == 0 { stats.zero_literal_commands += 1; }
-            let run_bucket = match run { 0..=15 => 0, 16..=31 => 1, 32..=63 => 2, 64..=127 => 3, 128..=255 => 4, _ => 5 };
-            stats.match_run_buckets[run_bucket] += 1;
-            if op == 7 {
-                let distance_bucket = match distance { 0..=64 => 0, 65..=256 => 1, 257..=1024 => 2, 1025..=4096 => 3, 4097..=16384 => 4, _ => 5 };
-                stats.op7_distance_buckets[distance_bucket] += 1;
+        if STATS {
+            stats.op_counts[op as usize] += 1;
+            #[cfg(feature = "bench")]
+            {
+                if lit == 0 { stats.zero_literal_commands += 1; }
+                let run_bucket = match run { 0..=15 => 0, 16..=31 => 1, 32..=63 => 2, 64..=127 => 3, 128..=255 => 4, _ => 5 };
+                stats.match_run_buckets[run_bucket] += 1;
+                if op == 7 {
+                    let distance_bucket = match distance { 0..=64 => 0, 65..=256 => 1, 257..=1024 => 2, 1025..=4096 => 3, 4097..=16384 => 4, _ => 5 };
+                    stats.op7_distance_buckets[distance_bucket] += 1;
+                }
             }
         }
         match op {
@@ -288,15 +302,17 @@ pub(crate) fn encode(
             _ => {}
         }
         s.literals.extend_from_slice(&data[anchor..pos]);
-        stats.accepted_matches += 1;
-        stats.matched_bytes += run as u64;
+        if STATS {
+            stats.accepted_matches += 1;
+            stats.matched_bytes += run as u64;
+        }
         count += 1;
         pos += run;
         anchor = pos;
         misses = 0;
         // Once committed bytes reach n, no later instruction can make this block smaller.
         if BLOCK_PREFIX + s.control.len() + s.attrs.len() + s.literals.len() >= n {
-            finish_stats(&mut stats, count, s);
+            finish_stats::<STATS>(&mut stats, count, s);
             let (offset, len) = append_payload(&mut s.payloads, data);
             return Encoded {
                 kind: RAW,
@@ -308,11 +324,13 @@ pub(crate) fn encode(
     }
     if anchor < n {
         control(&mut s.control, 0, n - anchor, 0);
-        stats.op_counts[0] += 1;
+        if STATS {
+            stats.op_counts[0] += 1;
+        }
         s.literals.extend_from_slice(&data[anchor..]);
         count += 1;
     }
-    finish_stats(&mut stats, count, s);
+    finish_stats::<STATS>(&mut stats, count, s);
     let size = BLOCK_PREFIX + s.control.len() + s.attrs.len() + s.literals.len();
     if size >= n {
         let (offset, len) = append_payload(&mut s.payloads, data);

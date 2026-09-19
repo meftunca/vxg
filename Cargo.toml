@@ -35,6 +35,8 @@ decode-unconditional-literal-copy = []
 repeat-engine-copy = []
 # Benchmark-only control build for fused fixed-size v2 opcode-7 decode.
 decode-op7-direct-generic = []
+# Benchmark-only control build that collects `WorkStats` during timed encode.
+encode-with-stats = []
 
 [dependencies]
 mimalloc = { version = "0.1.52", optional = true, default-features = false }

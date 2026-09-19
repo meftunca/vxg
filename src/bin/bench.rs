@@ -97,7 +97,13 @@ fn run()->R<()>{
         let parsed=Frame::parse(&frame,data.len())?;let mut out=vec![0u8;data.len()];
         eprintln!("{name:22} VXG work raw_fast={} sample_words={} probes={} occupied={} candidate_checks={} collisions={} lcp_calls={} lcp_bytes={} matches={} matched_bytes={} streams=control:{} attrs:{} literals:{} ops={:?} op7_dist={:?} run={:?} zero_literals={}",work_stats.raw_fast_path_blocks,work_stats.raw_sample_words,work_stats.probes,work_stats.occupied_probes,work_stats.candidate_checks,work_stats.hash_collisions,work_stats.lcp_calls,work_stats.lcp_bytes,work_stats.accepted_matches,work_stats.matched_bytes,work_stats.control_bytes,work_stats.attribute_bytes,work_stats.literal_bytes,work_stats.op_counts,work_stats.op7_distance_buckets,work_stats.match_run_buckets,work_stats.zero_literal_commands);
         parsed.decode_into(&mut out,&dec_opt)?;assert_eq!(out,data,"VXG correctness before timing");
-        if !c.decode_only { let en=measure(&c,||{let f=vxg::compress(black_box(&data),&enc_opt)?;black_box(f);Ok(())})?;row(&mut csv,&c,&name,"vxg","cpu_allocating_encode","compress",data.len(),frame.len(),&en,&lz,&zs,"")?; }
+        if !c.decode_only { let en=measure(&c,||{
+            #[cfg(feature="encode-with-stats")]
+            let f=vxg::compress_with_stats(black_box(&data),&enc_opt)?;
+            #[cfg(not(feature="encode-with-stats"))]
+            let f=vxg::compress(black_box(&data),&enc_opt)?;
+            black_box(f);Ok(())
+        })?;row(&mut csv,&c,&name,"vxg","cpu_allocating_encode","compress",data.len(),frame.len(),&en,&lz,&zs,"")?; }
         let de=measure(&c,||{parsed.decode_into(black_box(&mut out),&dec_opt)?;black_box(&out);Ok(())})?;
         assert_eq!(out,data,"VXG correctness after timing");
         row(&mut csv,&c,&name,"vxg","cpu_preallocated_decode","decompress",data.len(),frame.len(),&de,&lz,&zs,"")?;

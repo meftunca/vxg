@@ -415,3 +415,17 @@ Every implementation or measurement change is recorded here as a separate step.
   and `matcher-legacy-miss-branch` control feature were removed. Local artifacts:
   `reports/local-matcher-miss-fast-2026-09-19.csv` and
   `reports/local-matcher-miss-legacy-2026-09-19.csv`.
+
+## 2026-09-19 — Stats-free normal CPU encode
+
+- `compress()` previously delegated to `compress_with_stats()`, so its hot matcher updated
+  `WorkStats` counters even when the caller discarded them. Encoding and worker dispatch are now
+  const-generic over stats collection: the regular `compress()` instantiation elides those
+  increments at compile time, while `compress_with_stats()` retains identical telemetry and the
+  benchmark's setup frame still reports it.
+- `encode-with-stats` makes the benchmark time the old telemetry-collecting API as a control.
+  On Apple M2 Max with JSON only, 16 MiB, one thread, 64 KiB blocks, Neon, nine 0.2 s samples,
+  checksums off, normal allocating encode measured 2.519 GB/s versus 1.986 GB/s with the stats
+  control (+26.8%). Both produced ratio 0.147; prepared decode was statistically unchanged at
+  3.206 versus 3.211 GB/s. Local artifacts: `reports/local-encode-no-stats-2026-09-19.csv` and
+  `reports/local-encode-with-stats-2026-09-19.csv`.
