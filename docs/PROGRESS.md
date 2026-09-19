@@ -282,3 +282,14 @@ Every implementation or measurement change is recorded here as a separate step.
   host transfers/framing still dominate small workloads; no GPU speedup is claimed. Local CSVs
   are ignored artifacts: `reports/local-short-distance-2026-09-19.csv` and
   `reports/local-short-distance-metal-2026-09-19.csv`.
+
+## 2026-09-19 — Rejected short-repeat tile threshold
+
+- JSON has short average matches, so a decoder experiment bypassed the 1 KiB short-distance
+  pattern tile for runs below 256 bytes. An initial cross-process observation looked faster, but
+  a matched benchmark-only control build disproved it: at 16 MiB, one thread, 64 KiB blocks,
+  seven 0.1 s samples, JSON prepared decode was 1.612 GB/s with the threshold and 1.613 GB/s
+  with the original always-tiled path. The optimization and its control feature were removed.
+- This confirms that JSON decode's next bottleneck is not the short-distance tile setup alone.
+  Retained local artifacts are `reports/local-short-repeat-2026-09-19.csv` and
+  `reports/local-short-repeat-tile-control-2026-09-19.csv`.
