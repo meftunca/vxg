@@ -336,3 +336,12 @@ Every implementation or measurement change is recorded here as a separate step.
   an ordered process pair, not a universal percentage. Local artifacts:
   `reports/local-zero-literal-skip-2026-09-19.csv` and
   `reports/local-zero-literal-copy-control-2026-09-19.csv`.
+
+## 2026-09-19 — Rejected opcode-7 dispatch reorder
+
+- A decoder experiment split opcode 7 ahead of the existing `1|2|7` match branch. In the matched
+  16 MiB JSON setup (one thread, 64 KiB blocks, nine 0.2 s samples), the special branch measured
+  2.325 GB/s versus 2.377 GB/s for the generic control. The difference is not a win and is inside
+  the process-level noise band, so the branch and its benchmark feature were removed.
+- Retained local artifacts are `reports/local-op7-dispatch-2026-09-19.csv` and
+  `reports/local-generic-match-dispatch-2026-09-19.csv`.
