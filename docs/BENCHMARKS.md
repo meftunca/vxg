@@ -88,6 +88,20 @@ It is not a claim that synthetic Q95 represents arbitrary production data. A can
 promotion requires paired shuffled process order, confidence intervals and every frozen
 member; the initial P0 runner records the baseline and does not discard a slow process.
 
+Before changing the wire format, inspect the actual emitted commands—not only encoder
+counters—with the offline analyzer. It compresses once with the stated options, parses the
+resulting frame, and writes no timed benchmark rows:
+
+```sh
+cargo run --release --features bench --bin vxg-analyze -- \
+  --input corpus/qualification/json-records-16MiB.ndjson \
+  --output reports/qualification/experiments/P2-command-analysis/json-records-16MiB.json
+```
+
+The report includes exact command histograms, grouped residual widths, cache-hit models and
+dependency counts. Its cache model is diagnostic: it does not establish a compressed format
+until an exact pack/unpack prototype includes selectors, bases, exceptions and padding.
+
 Built-in synthetic classes: zero runs, period-37, changing JSON records, pseudo-random,
 low-alphabet pseudo-random, and 4 KiB mixed segments. Their results are not representative
 of every corpus. Supply existing compressed/media/encrypted files to test RAW decisions.

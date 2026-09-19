@@ -42,6 +42,28 @@ Every implementation or measurement change is recorded here as a separate step.
   the baseline gap—not an acceptance measurement. Detailed raw samples and every member
   are retained under `reports/qualification/runs/P0-smoke-r2`.
 
+## 2026-09-19 — P1 direct safe-copy result and P2 command metadata analyzer
+
+- P1 tested whether checked v2 opcode-7 commands could bypass `Engine::repeat` and invoke a
+  direct non-overlapping copy after the safe parser had proved `run <= distance`. The control
+  restored the prior engine route. Both builds passed the release suite, but the two ordered
+  runs disagreed (candidate/control `2.816/2.477 GB/s`, then reverse-order
+  `2.122/2.222 GB/s` safe prepared decode). The candidate was removed: this is not enough
+  evidence to retain a new unsafe-looking branch, and the prevalidated profile varied with it.
+  Local artifacts: `reports/local-p1-safe-op7-*-2026-09-19.csv`.
+- Added bench-only `vxg::analysis` and `vxg-analyze`. It re-parses an existing encoded trace
+  outside timing and records exact literal/run and joint opcode/literal/run histograms,
+  8-command residual-width histograms, distance delta/XOR models, specified 2/4/8-entry
+  MRU cache hits, non-overlap rate, within-group dependencies, and exact command totals.
+  It neither changes compression decisions nor runs inside the timed codec.
+- Retained reports for all frozen Q95 members live in
+  `reports/qualification/experiments/P2-command-analysis`. On 16 MiB `json-records`, there
+  are 591,146 commands (591,087 matches), 147,145 literal bytes and 16,630,071 matched bytes;
+  every match is non-overlapping, only 5,182 references land within its 8-command group, and
+  the specified 8-entry distance cache hits 335,204 matches. Those figures motivate compact
+  grouped metadata, but a bitslice/transpose alone cannot reduce bytes; P3 must compare exact
+  packed scalar roundtrips before any wire-format claim.
+
 ## 2026-09-15 — Git baseline
 
 - Baseline commit: `b5d4395` (`chore: initialize VXG repository`)
