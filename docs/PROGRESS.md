@@ -191,3 +191,22 @@ Every implementation or measurement change is recorded here as a separate step.
   is one process run per variant on a variable macOS host, the default 14-bit table remains the
   production choice; the retained CSVs are `reports/hash13-table-t1-2026-09-15.csv`,
   `reports/hash14-table-t1-2026-09-15.csv`, and `reports/hash15-table-t1-2026-09-15.csv`.
+
+## 2026-09-19 — First actual Metal device result
+
+- An unsandboxed Metal run discovered `Apple M2 Max` and passed all 81 three-way CPU/GPU
+  conformance cases. The normal sandbox still returns `no Metal device`; this is an execution
+  environment restriction, not a hardware or VXG pipeline-discovery failure.
+- First hardware e2e sample used 4 MiB inputs, one CPU thread, 64 KiB blocks, three 0.05 s
+  samples, checksums off, and the default 16 MiB GPU batch. The GPU encoder was lossless but
+  slower than the CPU encoder on every supplied dataset: zeros 0.909 GB/s, period-37 0.715,
+  JSON 0.336, random 0.113, low-entropy random 0.112, and mixed 0.122. These are host-e2e
+  allocating numbers, not kernel-only numbers.
+- GPU decode was materially faster than GPU encode (zeros 7.016 GB/s; random 4.426; low-entropy
+  random 4.488) but remained below the prepared CPU decode path. Device timestamp observations
+  show the distinction: random's GPU kernel was about 0.148 ms while a one-call host e2e sample
+  was 1.455 ms. Buffer upload/readback, framing, command submission, and synchronous wait are
+  therefore the first optimization target, ahead of claiming a kernel-speed result.
+- The short measurement CSV is deliberately ignored as a local run artifact:
+  `reports/local-metal-e2e-2026-09-19.csv`. Before making a GPU performance claim, repeat with
+  shuffled multi-process trials, larger inputs, and separately reported kernel/e2e medians.
