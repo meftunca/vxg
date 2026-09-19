@@ -345,3 +345,19 @@ Every implementation or measurement change is recorded here as a separate step.
   the process-level noise band, so the branch and its benchmark feature were removed.
 - Retained local artifacts are `reports/local-op7-dispatch-2026-09-19.csv` and
   `reports/local-generic-match-dispatch-2026-09-19.csv`.
+
+## 2026-09-19 — Stream-shape telemetry and direct non-overlap repeat
+
+- Benchmark-only stream telemetry now reports opcode-7 distance and match-run buckets plus the
+  number of zero-literal commands; these fields and increments are absent from normal library
+  builds. At 16 MiB JSON, 480,120 of 591,146 commands had no literals. Opcode-7 distances were
+  almost entirely above 256 bytes, while all match runs were 16–63 bytes. The decoder therefore
+  usually has a non-overlapping, short one-copy match rather than a doubling/overlap case.
+- `Engine::repeat` now recognizes `len <= distance` and directly uses the platform copy after
+  proving the source and destination non-overlap from that condition. The old generic
+  Engine-copy path remains available as the benchmark-only `repeat-engine-copy` control.
+- In the matched 16 MiB JSON decode setup (one thread, 64 KiB blocks, nine 0.2 s samples), the
+  direct path measured 2.579 GB/s versus 2.485 GB/s (+3.8%) with unchanged 0.147 ratio. This is
+  an ordered process pair. Local artifacts: `reports/local-stream-shape-2026-09-19.csv`,
+  `reports/local-repeat-direct-copy-2026-09-19.csv`, and
+  `reports/local-repeat-engine-copy-control-2026-09-19.csv`.

@@ -32,6 +32,14 @@ pub struct WorkStats {
     pub attribute_bytes: u64,
     /// Canonical command counts for opcodes 0 through 7.
     pub op_counts: [u64; 8],
+    /// Benchmark-only shape telemetry. These fields and their increments are
+    /// absent from normal library builds.
+    #[cfg(feature = "bench")]
+    pub op7_distance_buckets: [u64; 6],
+    #[cfg(feature = "bench")]
+    pub match_run_buckets: [u64; 6],
+    #[cfg(feature = "bench")]
+    pub zero_literal_commands: u64,
     /// Number of logical bytes inspected by the LCP matcher (including a
     /// terminating mismatch byte when one exists). This is a work counter,
     /// not a hardware instruction count.
@@ -54,6 +62,12 @@ impl std::ops::AddAssign for WorkStats {
         self.attribute_bytes += r.attribute_bytes;
         for (left, right) in self.op_counts.iter_mut().zip(r.op_counts) {
             *left += right;
+        }
+        #[cfg(feature = "bench")]
+        {
+            for (left, right) in self.op7_distance_buckets.iter_mut().zip(r.op7_distance_buckets) { *left += right; }
+            for (left, right) in self.match_run_buckets.iter_mut().zip(r.match_run_buckets) { *left += right; }
+            self.zero_literal_commands += r.zero_literal_commands;
         }
         self.lcp_calls += r.lcp_calls;
         self.lcp_bytes += r.lcp_bytes;
@@ -245,6 +259,16 @@ pub(crate) fn encode(
         };
         control(&mut s.control, op, lit, run);
         stats.op_counts[op as usize] += 1;
+        #[cfg(feature = "bench")]
+        {
+            if lit == 0 { stats.zero_literal_commands += 1; }
+            let run_bucket = match run { 0..=15 => 0, 16..=31 => 1, 32..=63 => 2, 64..=127 => 3, 128..=255 => 4, _ => 5 };
+            stats.match_run_buckets[run_bucket] += 1;
+            if op == 7 {
+                let distance_bucket = match distance { 0..=64 => 0, 65..=256 => 1, 257..=1024 => 2, 1025..=4096 => 3, 4097..=16384 => 4, _ => 5 };
+                stats.op7_distance_buckets[distance_bucket] += 1;
+            }
+        }
         match op {
             1 => {
                 s.attrs.extend_from_slice(&(distance as u32).to_le_bytes());

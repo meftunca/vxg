@@ -112,6 +112,15 @@ impl Engine {
     /// LZ semantics without calling memcpy/memmove on an overlapping unproduced region.
     pub(crate) fn repeat(self, out: &mut [u8], pos: usize, len: usize, distance: usize) {
         debug_assert!(distance > 0 && distance <= pos && len <= out.len() - pos);
+        // JSON-style matches are commonly short and farther back than their
+        // run. They are non-overlapping, so avoid the general doubling setup
+        // and SIMD-dispatch branch; the platform copy is already optimal for
+        // these sub-64-byte regions.
+        if len <= distance && !cfg!(feature="repeat-engine-copy") {
+            let (prefix, suffix) = out.split_at_mut(pos);
+            suffix[..len].copy_from_slice(&prefix[pos-distance..pos-distance+len]);
+            return;
+        }
         if distance <= 64 {
             let mut seed = [0u8; 64];
             seed[..distance].copy_from_slice(&out[pos-distance..pos]);

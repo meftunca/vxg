@@ -31,6 +31,8 @@ parser-no-inline = []
 parser-op7-generic = []
 # Benchmark-only control build for unconditional zero-length literal copies.
 decode-unconditional-literal-copy = []
+# Benchmark-only control build for non-overlapping short-match copy dispatch.
+repeat-engine-copy = []
 
 [dependencies]
 mimalloc = { version = "0.1.52", optional = true, default-features = false }
