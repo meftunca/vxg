@@ -28,6 +28,10 @@ pub struct WorkStats {
     pub matched_bytes: u64,
     pub commands: u64,
     pub literal_bytes: u64,
+    pub control_bytes: u64,
+    pub attribute_bytes: u64,
+    /// Canonical command counts for opcodes 0 through 6.
+    pub op_counts: [u64;7],
     /// Number of logical bytes inspected by the LCP matcher (including a
     /// terminating mismatch byte when one exists). This is a work counter,
     /// not a hardware instruction count.
@@ -43,6 +47,8 @@ impl std::ops::AddAssign for WorkStats {
         self.accepted_matches += r.accepted_matches;
         self.matched_bytes += r.matched_bytes; self.commands += r.commands;
         self.literal_bytes += r.literal_bytes;
+        self.control_bytes += r.control_bytes; self.attribute_bytes += r.attribute_bytes;
+        for (left,right) in self.op_counts.iter_mut().zip(r.op_counts) { *left += right; }
         self.lcp_calls += r.lcp_calls; self.lcp_bytes += r.lcp_bytes;
     }
 }
@@ -114,6 +120,12 @@ fn control(out: &mut Vec<u8>, op: u8, lit: usize, run: usize) {
     if lit >= 31 { out.extend_from_slice(&(lit as u32).to_le_bytes()); }
     if run >= 255 { out.extend_from_slice(&(run as u32).to_le_bytes()); }
 }
+fn finish_stats(stats: &mut WorkStats, count: usize, scratch: &Scratch) {
+    stats.commands = count as u64;
+    stats.literal_bytes = scratch.literals.len() as u64;
+    stats.control_bytes = scratch.control.len() as u64;
+    stats.attribute_bytes = scratch.attrs.len() as u64;
+}
 pub(crate) fn encode(data: &[u8], scratch: &mut Scratch, engine: Engine, acceleration: usize) -> Encoded {
     let n = data.len();
     let s = scratch;
@@ -166,6 +178,7 @@ pub(crate) fn encode(data: &[u8], scratch: &mut Scratch, engine: Engine, acceler
         let op = match distance { 1 => 3, 2 => 4, 4 => 5, 8 => 6,
             d if d == recent => 2, _ => 1 };
         control(&mut s.control, op, lit, run);
+        stats.op_counts[op as usize] += 1;
         match op {
             1 => { s.attrs.extend_from_slice(&(distance as u32).to_le_bytes()); recent = distance; }
             3..=6 => {
@@ -181,13 +194,17 @@ pub(crate) fn encode(data: &[u8], scratch: &mut Scratch, engine: Engine, acceler
         pos += run; anchor = pos; misses = 0;
         // Once committed bytes reach n, no later instruction can make this block smaller.
         if BLOCK_PREFIX + s.control.len() + s.attrs.len() + s.literals.len() >= n {
-            stats.commands = count as u64; stats.literal_bytes = s.literals.len() as u64;
+            finish_stats(&mut stats, count, s);
             let (offset, len) = append_payload(&mut s.payloads, data);
             return Encoded { kind: RAW, offset, len, stats };
         }
     }
-    if anchor < n { control(&mut s.control, 0, n-anchor, 0); s.literals.extend_from_slice(&data[anchor..]); count += 1; }
-    stats.commands = count as u64; stats.literal_bytes = s.literals.len() as u64;
+    if anchor < n {
+        control(&mut s.control, 0, n-anchor, 0);
+        stats.op_counts[0] += 1;
+        s.literals.extend_from_slice(&data[anchor..]); count += 1;
+    }
+    finish_stats(&mut stats, count, s);
     let size = BLOCK_PREFIX + s.control.len() + s.attrs.len() + s.literals.len();
     if size >= n {
         let (offset, len) = append_payload(&mut s.payloads, data);

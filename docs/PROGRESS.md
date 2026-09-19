@@ -244,3 +244,16 @@ Every implementation or measurement change is recorded here as a separate step.
 - The experiment confirms that an unconditional older-candidate lookup is the wrong next step.
   Matcher work should next be directed by token/match histograms or a more selective lazy policy,
   not enabled as a default or retained as a feature.
+
+## 2026-09-19 — Token-stream telemetry identifies the ratio bottleneck
+
+- `WorkStats` now records canonical opcode counts plus control and attribute stream bytes; the
+  benchmark reports them with matcher work. The counters do not alter encoding decisions.
+- At 16 MiB / 64 KiB blocks, JSON encoded to 3,572,973 bytes (ratio 0.213): 1,183,316 bytes were
+  control tokens, 2,230,192 were attributes, and only 147,145 were literals. Of 591,087 match
+  commands, 557,548 used a four-byte absolute distance (`op=1`) and only 33,539 reused the prior
+  distance (`op=2`). The next ratio experiment should therefore target bounded block-local
+  distance representation, not more expensive candidate search.
+- Mixed data's 5,200,371-byte output had 500,864 attribute bytes and 309,220 control bytes, but
+  4,377,967 literal bytes. Its first ratio lever remains match selection; JSON's is command
+  representation. These are distinct workload paths and must not be optimized as one benchmark.

@@ -27,6 +27,7 @@ fn roundtrip_bound_and_linear_work_properties(){
             assert!(s.lcp_bytes<=n as u64,"logical LCP work stays inside the block");
             assert!(s.matched_bytes<=n as u64,"accepted match regions are disjoint");
             assert!(s.accepted_matches<=(n/8) as u64);
+            assert_eq!(s.op_counts.iter().sum::<u64>(),s.commands,"each command has one opcode");
             assert_eq!(decompress(&encoded,&DecodeOptions::default()).unwrap(),data);
             Frame::parse(&encoded,n).unwrap().validate_commands().unwrap();
         }}
