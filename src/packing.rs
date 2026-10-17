@@ -2975,6 +2975,7 @@ mod tests {
             &crate::Options {
                 block_size: 4096,
                 checksum: false,
+                legacy_v2: true,
                 ..crate::Options::default()
             },
         )

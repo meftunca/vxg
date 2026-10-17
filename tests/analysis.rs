@@ -25,6 +25,7 @@ fn command_analysis_matches_encoder_trace_totals() {
     let options = Options {
         block_size: 4096,
         checksum: false,
+        legacy_v2: true,
         ..Options::default()
     };
     let (encoded, stats) = compress_with_stats(&data, &options).unwrap();

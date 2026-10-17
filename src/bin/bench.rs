@@ -131,6 +131,8 @@ struct Config {
     simd: Simd,
     csv: String,
     samples_csv: Option<String>,
+    markdown: Option<String>,
+    suite: String,
     files: Vec<String>,
     only: Option<String>,
     gpu: Option<Backend>,
@@ -140,9 +142,36 @@ struct Config {
     validated_decode: bool,
     legacy_v2: bool,
 }
+#[derive(Default, Clone)]
+struct DatasetSummary {
+    name: String,
+    raw_bytes: usize,
+    vxg_ratio: f64,
+    vxg_enc: f64,
+    vxg_dec: f64,
+    lz4_ratio: f64,
+    lz4_enc: f64,
+    lz4_dec: f64,
+    zstd1_ratio: f64,
+    zstd1_enc: f64,
+    zstd1_dec: f64,
+    zstd3_ratio: f64,
+    zstd3_enc: f64,
+    zstd3_dec: f64,
+}
 fn next<'a>(args: &'a [String], i: &mut usize) -> R<&'a str> {
     *i += 1;
     Ok(args.get(*i).ok_or("missing value")?.as_str())
+}
+fn parse_threads(s: &str) -> R<usize> {
+    if s.eq_ignore_ascii_case("auto") || s == "0" {
+        Ok(std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(1)
+            .clamp(1, 256))
+    } else {
+        Ok(s.parse()?)
+    }
 }
 fn main() {
     if let Err(e) = run() {
@@ -160,6 +189,8 @@ fn run() -> R<()> {
         simd: Simd::Auto,
         csv: "reports/local-benchmark.csv".into(),
         samples_csv: None,
+        markdown: None,
+        suite: "default".into(),
         files: Vec::new(),
         only: None,
         gpu: None,
@@ -181,11 +212,13 @@ fn run() -> R<()> {
             }
             "--seconds" => c.seconds = next(&args, &mut i)?.parse()?,
             "--samples" => c.samples = next(&args, &mut i)?.parse()?,
-            "--threads" => c.threads = next(&args, &mut i)?.parse()?,
+            "--threads" => c.threads = parse_threads(next(&args, &mut i)?)?,
             "--block-size" => c.block_size = next(&args, &mut i)?.parse()?,
             "--simd" => c.simd = next(&args, &mut i)?.parse()?,
             "--csv" => c.csv = next(&args, &mut i)?.into(),
             "--samples-csv" => c.samples_csv = Some(next(&args, &mut i)?.into()),
+            "--markdown" => c.markdown = Some(next(&args, &mut i)?.into()),
+            "--suite" => c.suite = next(&args, &mut i)?.into(),
             "--gpu" => c.gpu = Some(next(&args, &mut i)?.parse()?),
             "--file" => c.files.push(next(&args, &mut i)?.into()),
             "--only" => c.only = Some(next(&args, &mut i)?.into()),
@@ -193,10 +226,10 @@ fn run() -> R<()> {
             "--vxg-only" => c.vxg_only = true,
             "--decode-only" => c.decode_only = true,
             "--validated-decode" => c.validated_decode = true,
-            "--v3" => {} // unified pipeline is the default; kept for script compatibility
+            "--v3" | "--v4" => {} // unified pipeline is the default; kept for script compatibility
             "--legacy" => c.legacy_v2 = true,
             "--help" => {
-                println!("vxg-bench [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1] [--block-size 65536] [--simd auto] [--csv FILE] [--samples-csv FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--decode-only] [--validated-decode] [--legacy]\nAll CPU codecs use independent blocks, RAW fallback and no checksum. --only selects one built-in dataset name or --file path. --decode-only skips encode rows and baseline/GPU work after creating one VXG frame. --validated-decode validates the immutable VXG command streams once before timing repeated CPU decode; it is separately profiled from safe one-shot decode and is unavailable for v3 structured-column frames. --legacy emits LZ-only v2 frames instead of the default unified adaptive v4 pipeline. --samples-csv retains every timed sample (sorted by duration) with the same profile labels as --csv. GPU rows are explicitly host-e2e, not CPU preallocated rows. --microbench measures Engine LCP/copy/pattern kernels without codec framing. --vxg-only skips baseline codecs and GPU rows.");
+                println!("vxg-bench [--suite default|v4|all] [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1|auto] [--block-size 65536] [--simd auto] [--csv FILE] [--samples-csv FILE] [--markdown FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--decode-only] [--validated-decode] [--legacy]\nAll CPU codecs use independent blocks, RAW fallback and no checksum. --suite v4 runs the 10-dataset multi-format v4 suite (CSV, TSV, Logfmt, 4x NDJSON, Source/Docs, 32-bpp BMP, 24-bpp BMP). --markdown writes a GitHub Markdown comparison table. --only selects one built-in dataset name or --file path. --decode-only skips encode rows and baseline/GPU work after creating one VXG frame. --validated-decode validates the immutable VXG command streams once before timing repeated CPU decode; it is separately profiled from safe one-shot decode and is unavailable for v3 structured-column frames. --legacy emits LZ-only v2 frames instead of the default unified adaptive v4 pipeline. --samples-csv retains every timed sample (sorted by duration) with the same profile labels as --csv. GPU rows are explicitly host-e2e, not CPU preallocated rows. --microbench measures Engine LCP/copy/pattern kernels without codec framing. --vxg-only skips baseline codecs and GPU rows.");
                 return Ok(());
             }
             x => return Err(format!("unknown option {x}").into()),
@@ -221,10 +254,19 @@ fn run() -> R<()> {
         "ALLOC-STATS enabled: allocation counters perturb timing; use counts only, not GB/s."
     );
     let (lz, zs) = baselines::versions();
-    eprintln!("VXG 0.1 / liblz4 {lz} / libzstd {zs}; {} {}; SIMD={:?}; allocator={}; threads={}; block={}",env::consts::OS,env::consts::ARCH,engine.kind(),allocator_name(),c.threads,c.block_size);
+    eprintln!("VXG {} / liblz4 {lz} / libzstd {zs}; {} {}; SIMD={:?}; allocator={}; threads={}; block={}",env!("CARGO_PKG_VERSION"),env::consts::OS,env::consts::ARCH,engine.kind(),allocator_name(),c.threads,c.block_size);
     eprintln!("CPU profiles: cpu_allocating_encode; cpu_preallocated_decode = prepared directory + checked command decode; cpu_full_frame_preallocated_decode = parse + checked decode; cpu_prepared_validate_commands = command validation on a prepared directory; cpu_parse_validate_commands = parse + command validation; cpu_prevalidated_decode = prepared proof + repeated decode only. Per-call contexts included. RAW fallback for ALL codecs. Checksums OFF. Warm cache. GPU: separate host-e2e profile.");
     let mut datasets = if c.files.is_empty() {
-        datasets(c.size)
+        match c.suite.as_str() {
+            "default" => datasets(c.size),
+            "v4" => datasets_v4(c.size),
+            "all" => {
+                let mut v = datasets_v4(c.size);
+                v.extend(datasets(c.size));
+                v
+            }
+            other => return Err(format!("unknown --suite {other} (expected default, v4, or all)").into()),
+        }
     } else {
         Vec::new()
     };
@@ -261,6 +303,7 @@ fn run() -> R<()> {
         Some(b) => Some(GpuCodec::new(b)?),
         None => None,
     };
+    let mut summaries: Vec<DatasetSummary> = Vec::new();
     for (name, data) in datasets {
         if data.is_empty() {
             eprintln!("skip empty dataset {name}");
@@ -314,6 +357,16 @@ fn run() -> R<()> {
             parsed.decode_into(&mut out, &dec_opt)?;
         }
         assert_eq!(out, data, "VXG correctness before timing");
+        let mut ds_summary = DatasetSummary {
+            name: std::path::Path::new(&name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&name)
+                .to_owned(),
+            raw_bytes: data.len(),
+            vxg_ratio: frame.len() as f64 / data.len() as f64,
+            ..DatasetSummary::default()
+        };
         if !c.decode_only {
             let en = measure(&c, || {
                 #[cfg(feature = "encode-with-stats")]
@@ -323,6 +376,7 @@ fn run() -> R<()> {
                 black_box(f);
                 Ok(())
             })?;
+            ds_summary.vxg_enc = data.len() as f64 / median(&en);
             row(
                 &mut csv,
                 &mut samples_csv,
@@ -345,6 +399,7 @@ fn run() -> R<()> {
             Ok(())
         })?;
         assert_eq!(out, data, "VXG correctness after timing");
+        ds_summary.vxg_dec = data.len() as f64 / median(&safe_de);
         row(
             &mut csv,
             &mut samples_csv,
@@ -465,6 +520,7 @@ fn run() -> R<()> {
             }
         }
         if c.vxg_only || c.decode_only {
+            summaries.push(ds_summary);
             csv.flush()?;
             continue;
         }
@@ -519,7 +575,29 @@ fn run() -> R<()> {
                 &zs,
                 "",
             )?;
+            let ratio = compressed.encoded_size() as f64 / data.len() as f64;
+            let enc_gbps = data.len() as f64 / median(&en);
+            let dec_gbps = data.len() as f64 / median(&de);
+            match codec {
+                Codec::Lz4 { acceleration: 1 } => {
+                    ds_summary.lz4_ratio = ratio;
+                    ds_summary.lz4_enc = enc_gbps;
+                    ds_summary.lz4_dec = dec_gbps;
+                }
+                Codec::Zstd { level: 1 } => {
+                    ds_summary.zstd1_ratio = ratio;
+                    ds_summary.zstd1_enc = enc_gbps;
+                    ds_summary.zstd1_dec = dec_gbps;
+                }
+                Codec::Zstd { level: 3 } => {
+                    ds_summary.zstd3_ratio = ratio;
+                    ds_summary.zstd3_enc = enc_gbps;
+                    ds_summary.zstd3_dec = dec_gbps;
+                }
+                _ => {}
+            }
         }
+        summaries.push(ds_summary);
         if let Some(device) = gpu.as_mut() {
             let options = GpuOptions {
                 block_size: c.block_size,
@@ -584,6 +662,10 @@ fn run() -> R<()> {
         csv.flush()?;
     }
     eprintln!("CSV: {}", c.csv);
+    if let Some(md_path) = &c.markdown {
+        write_markdown_report(md_path, &c, engine.kind(), &lz, &zs, &summaries)?;
+        eprintln!("Markdown: {md_path}");
+    }
     Ok(())
 }
 fn run_microbench(c: &Config, engine: vxg::simd::Engine) -> R<()> {
@@ -819,5 +901,369 @@ fn datasets(n: usize) -> Vec<(String, Vec<u8>)> {
         ("random".into(), random),
         ("low-entropy-random".into(), low),
         ("mixed-4KiB".into(), mixed),
+    ]
+}
+
+fn write_markdown_report(
+    path: &str,
+    c: &Config,
+    simd: Simd,
+    lz: &str,
+    zs: &str,
+    summaries: &[DatasetSummary],
+) -> R<()> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let mut f = fs::File::create(path)?;
+    writeln!(
+        f,
+        "## VXG v4 Benchmark Summary (`{}` / `{}`, SIMD=`{:?}`, threads=`{}`, block=`{}`)",
+        env::consts::OS,
+        env::consts::ARCH,
+        simd,
+        c.threads,
+        c.block_size
+    )?;
+    writeln!(
+        f,
+        "\nBaselines: `liblz4 {lz}` (`lz4-c-a1`), `libzstd {zs}` (`zstd-c-l1`, `zstd-c-l3`). All codecs run on independent `{}`-byte blocks with RAW fallback and checksums OFF.\n",
+        c.block_size
+    )?;
+    writeln!(
+        f,
+        "| Dataset | Size | VXG v4 Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG v4 Encode | LZ4 Encode | Zstd-1 Encode | VXG v4 Decode | LZ4 Decode | Zstd-1 Decode |"
+    )?;
+    writeln!(
+        f,
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+    )?;
+    for s in summaries {
+        let size_str = if s.raw_bytes >= (1 << 20) && s.raw_bytes % (1 << 20) == 0 {
+            format!("{} MiB", s.raw_bytes >> 20)
+        } else {
+            format!("{:.1} MB", s.raw_bytes as f64 / 1e6)
+        };
+        writeln!(
+            f,
+            "| **`{}`** | {} | **{:.4}** | {:.4} | {:.4} | **{:.3} GB/s** | {:.3} GB/s | {:.3} GB/s | **{:.3} GB/s** | {:.3} GB/s | {:.3} GB/s |",
+            s.name,
+            size_str,
+            s.vxg_ratio,
+            s.lz4_ratio,
+            s.zstd1_ratio,
+            s.vxg_enc,
+            s.lz4_enc,
+            s.zstd1_enc,
+            s.vxg_dec,
+            s.lz4_dec,
+            s.zstd1_dec
+        )?;
+    }
+    f.flush()?;
+    Ok(())
+}
+
+fn xorshift64(mut state: u64) -> u64 {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    state
+}
+
+fn fill_repeated(chunk: &[u8], n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        let take = (n - out.len()).min(chunk.len());
+        out.extend_from_slice(&chunk[..take]);
+    }
+    out
+}
+
+fn datasets_v4(n: usize) -> Vec<(String, Vec<u8>)> {
+    // 1. telemetry.csv
+    let mut csv_chunk = Vec::new();
+    for row in 0..4096u32 {
+        let epoch = row / 128;
+        let prefix = 0x3B7F_2C4Du32.wrapping_add(epoch.wrapping_mul(0x2545_F491));
+        let line = format!(
+            "\"2026-01-{:02}T{:02}:{:02}:00Z\",{row},\"session.open\",\"eu-central-1\",\"r-{prefix:08x}{:08x}\",\"worker-{}\"\n",
+            (row % 28) + 1,
+            (row / 60) % 24,
+            row % 60,
+            row % 128,
+            row % 16
+        );
+        csv_chunk.extend_from_slice(line.as_bytes());
+    }
+    let csv_data = fill_repeated(&csv_chunk, n);
+
+    // 2. events.tsv
+    let mut tsv_chunk = Vec::new();
+    for row in 0..4096u32 {
+        let line = format!(
+            "{row}\t{}\t\"queue depth exceeded; retry scheduled; {}\"\t\"worker-{}\"\t\"ok\"\n",
+            100_000 + row * 5,
+            row % 128,
+            row % 8
+        );
+        tsv_chunk.extend_from_slice(line.as_bytes());
+    }
+    let tsv_data = fill_repeated(&tsv_chunk, n);
+
+    // 3. app-logs.logfmt
+    let mut logfmt_chunk = Vec::new();
+    for row in 0..4096u32 {
+        let epoch = row / 128;
+        let prefix = 0x3B7F_2C4Du32.wrapping_add(epoch.wrapping_mul(0x2545_F491));
+        let line = format!(
+            "ts=\"2026-01-{:02}T{:02}:{:02}:00Z\" level=info seq={row} req_id=\"r-{prefix:08x}{:08x}\" region=\"eu-1\" worker=\"worker-{}\"\n",
+            (row % 28) + 1,
+            (row / 60) % 24,
+            row % 60,
+            row % 128,
+            row % 12
+        );
+        logfmt_chunk.extend_from_slice(line.as_bytes());
+    }
+    let logfmt_data = fill_repeated(&logfmt_chunk, n);
+
+    // 4. json-records.ndjson
+    let mut json_rec = Vec::with_capacity(n);
+    let mut idx = 0u64;
+    while json_rec.len() < n {
+        let s = format!(
+            "{{\"tenant\":{},\"event\":\"checklist.completed\",\"item\":{idx},\"ok\":true,\"actor\":\"user-{}\"}}\n",
+            idx % 31,
+            idx % 103
+        );
+        let b = s.as_bytes();
+        let take = (n - json_rec.len()).min(b.len());
+        json_rec.extend_from_slice(&b[..take]);
+        idx += 1;
+    }
+
+    // 5. field-order-optional-escaping.ndjson
+    let mut field_order = Vec::with_capacity(n);
+    let seed_fo = 0x8D12_4A77_319B_05E1u64;
+    idx = 0;
+    while field_order.len() < n {
+        let state = xorshift64(seed_fo ^ idx);
+        let tenant = state % 97;
+        let actor = (state >> 9) % 1009;
+        let escaped = if idx % 5 == 0 {
+            "tab\\tquote\\\"slash\\\\line\\n"
+        } else {
+            "plain"
+        };
+        let optional = if idx % 3 != 0 {
+            format!(",\"retry\":{},\"note\":\"{escaped}\"", (state >> 17) % 4)
+        } else {
+            String::new()
+        };
+        let rec = if idx & 1 != 0 {
+            format!("{{\"actor\":\"user-{actor}\",\"tenant\":{tenant}{optional},\"event\":\"task.update\",\"id\":{idx}}}\n")
+        } else {
+            format!("{{\"event\":\"task.update\",\"id\":{idx},\"tenant\":{tenant}{optional},\"actor\":\"user-{actor}\"}}\n")
+        };
+        let b = rec.as_bytes();
+        let take = (n - field_order.len()).min(b.len());
+        field_order.extend_from_slice(&b[..take]);
+        idx += 1;
+    }
+
+    // 6. event-mix-identifiers.ndjson
+    let mut event_mix = Vec::with_capacity(n);
+    let seed_em = 0x3B7F_2C4D_9A18_56E7u64;
+    let events = ["session.open", "session.close", "build.finished", "alert.raised"];
+    let regions = ["eu-1", "us-2", "ap-1"];
+    idx = 0;
+    while event_mix.len() < n {
+        let state = xorshift64(seed_em ^ idx.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let event = events[(state & 3) as usize];
+        let region = regions[((state >> 3) % 3) as usize];
+        let status = if state & 0x40 != 0 { "ok" } else { "warning" };
+        let epoch = idx / 128;
+        let prefix = (xorshift64(seed_em ^ epoch.wrapping_mul(0x2545_F491_4F6C_DD1D)) & 0xFFFF_FFFF) as u32;
+        let sequence = if state % 32 == 0 {
+            ((state >> 16) & 0xFFFF_FFFF) as u32
+        } else {
+            (idx % 128) as u32
+        };
+        let rec = format!(
+            "{{\"ts\":\"2026-01-{:02}T{:02}:00:00Z\",\"event\":\"{event}\",\"region\":\"{region}\",\"request_id\":\"r-{prefix:08x}{sequence:08x}\",\"status\":\"{status}\",\"sequence\":{idx}}}\n",
+            (idx % 28) + 1,
+            idx % 24
+        );
+        let b = rec.as_bytes();
+        let take = (n - event_mix.len()).min(b.len());
+        event_mix.extend_from_slice(&b[..take]);
+        idx += 1;
+    }
+
+    // 7. bursty-variable-records.ndjson
+    let mut bursty = Vec::with_capacity(n);
+    let seed_br = 0x6D29_E4B8_1F73_A350u64;
+    const PHRASES: [&str; 12] = [
+        "queue depth exceeded",
+        "retry scheduled",
+        "batch committed",
+        "cache flush complete",
+        "worker heartbeat ok",
+        "shard rebalanced",
+        "index merge done",
+        "page evicted",
+        "commit retried",
+        "drop detected",
+        "sync paused",
+        "threshold crossed",
+    ];
+    const VOCAB: [&str; 16] = [
+        "flush", "queue", "retry", "timeout", "worker", "ack", "batch", "sync", "drop", "merge",
+        "cache", "page", "index", "shard", "commit", "warn",
+    ];
+    idx = 0;
+    while bursty.len() < n {
+        let state = xorshift64(seed_br ^ idx.wrapping_mul(0xD134_2543_DE82_EF95));
+        let burst = (idx / 19) % 7;
+        let msg_len = (8 + (state % if burst < 5 { 24 } else { 240 })) as usize;
+        let tags = if burst <= 1 { "[\"hot\",\"retry\"]" } else { "[]" };
+        let mut msg = String::with_capacity(msg_len);
+        let mut pos = 0usize;
+        loop {
+            let phrase = PHRASES[((state >> ((pos * 7) % 57)) as usize) % PHRASES.len()];
+            let extra = phrase.len() + if msg.is_empty() { 0 } else { 2 };
+            if msg.len() + extra > msg_len {
+                break;
+            }
+            if !msg.is_empty() {
+                msg.push_str("; ");
+            }
+            msg.push_str(phrase);
+            pos += 1;
+        }
+        pos = 0;
+        loop {
+            let tok_buf;
+            let token: &str = if ((state >> (13 + (pos % 5))) & 3) == 0 {
+                tok_buf = format!("{}", state % 4096);
+                &tok_buf
+            } else {
+                VOCAB[((state >> ((pos * 5) % 59)) & 15) as usize]
+            };
+            let extra = token.len() + if msg.is_empty() { 0 } else { 2 };
+            if msg.len() + extra > msg_len {
+                break;
+            }
+            if !msg.is_empty() {
+                msg.push_str("; ");
+            }
+            msg.push_str(token);
+            pos += 1;
+        }
+        while msg.len() < msg_len {
+            msg.push(' ');
+        }
+        let rec = format!(
+            "{{\"burst\":{burst},\"record\":{idx},\"tags\":{tags},\"message\":\"{msg}\",\"source\":\"worker-{}\"}}\n",
+            state % 23
+        );
+        let b = rec.as_bytes();
+        let take = (n - bursty.len()).min(b.len());
+        bursty.extend_from_slice(&b[..take]);
+        idx += 1;
+    }
+
+    // 8. source-and-docs.txt
+    let mut src_seed = Vec::new();
+    for slice in [
+        include_bytes!("../analysis.rs") as &[u8],
+        include_bytes!("../block.rs"),
+        include_bytes!("../frame.rs"),
+        include_bytes!("../lib.rs"),
+        include_bytes!("../simd.rs"),
+        include_bytes!("../../docs/FORMAT.md"),
+        include_bytes!("../../docs/BENCHMARKS.md"),
+    ] {
+        src_seed.extend_from_slice(slice);
+        src_seed.push(b'\n');
+    }
+    let src_docs = fill_repeated(&src_seed, n);
+
+    // 9. ui-render-32bpp.bmp
+    let mut bmp32 = vec![0u8; n.max(65536)];
+    bmp32[0..2].copy_from_slice(b"BM");
+    let bmp_len = n as u32;
+    bmp32[2..6].copy_from_slice(&bmp_len.to_le_bytes());
+    bmp32[10..14].copy_from_slice(&54u32.to_le_bytes());
+    bmp32[14..18].copy_from_slice(&40u32.to_le_bytes());
+    bmp32[18..22].copy_from_slice(&2048i32.to_le_bytes());
+    bmp32[22..26].copy_from_slice(&2048i32.to_le_bytes());
+    bmp32[26..28].copy_from_slice(&1u16.to_le_bytes());
+    bmp32[28..30].copy_from_slice(&32u16.to_le_bytes());
+    let mut tile32 = [0u8; 65536];
+    for px in 0..16384usize {
+        let band = ((px / 256) & 0xFF) as u8;
+        let edge = if px % 256 == 0 {
+            ((px / 17) & 0xFF) as u8
+        } else {
+            0
+        };
+        let base = px * 4;
+        tile32[base] = band.wrapping_mul(13).wrapping_add(edge);
+        tile32[base + 1] = band.wrapping_mul(29);
+        tile32[base + 2] = band.wrapping_mul(47).wrapping_sub(edge);
+        tile32[base + 3] = 255;
+    }
+    bmp32[54..65536].copy_from_slice(&tile32[54..65536]);
+    let mut off = 65536;
+    while off < bmp32.len() {
+        let end = (off + 65536).min(bmp32.len());
+        bmp32[off..end].copy_from_slice(&tile32[..end - off]);
+        off += 65536;
+    }
+    bmp32.truncate(n);
+
+    // 10. rgb-frame-24bpp.bmp
+    let mut bmp24 = vec![0u8; n.max(65536)];
+    bmp24[0..2].copy_from_slice(b"BM");
+    bmp24[2..6].copy_from_slice(&bmp_len.to_le_bytes());
+    bmp24[10..14].copy_from_slice(&54u32.to_le_bytes());
+    bmp24[14..18].copy_from_slice(&40u32.to_le_bytes());
+    bmp24[18..22].copy_from_slice(&2360i32.to_le_bytes());
+    bmp24[22..26].copy_from_slice(&2360i32.to_le_bytes());
+    bmp24[26..28].copy_from_slice(&1u16.to_le_bytes());
+    bmp24[28..30].copy_from_slice(&24u16.to_le_bytes());
+    let mut tile24 = [0u8; 65536];
+    for px in 0..21845usize {
+        let run = ((px / 256) & 0xFF) as u8;
+        let edge = u8::from(px % 256 == 127);
+        let base = px * 3;
+        tile24[base] = run.wrapping_mul(7);
+        tile24[base + 1] = run.wrapping_mul(19).wrapping_add(edge);
+        tile24[base + 2] = run.wrapping_mul(37);
+    }
+    bmp24[54..65536].copy_from_slice(&tile24[54..65536]);
+    off = 65536;
+    while off < bmp24.len() {
+        let end = (off + 65536).min(bmp24.len());
+        bmp24[off..end].copy_from_slice(&tile24[..end - off]);
+        off += 65536;
+    }
+    bmp24.truncate(n);
+
+    vec![
+        ("telemetry.csv".into(), csv_data),
+        ("events.tsv".into(), tsv_data),
+        ("app-logs.logfmt".into(), logfmt_data),
+        ("json-records.ndjson".into(), json_rec),
+        ("field-order-optional-escaping.ndjson".into(), field_order),
+        ("event-mix-identifiers.ndjson".into(), event_mix),
+        ("bursty-variable-records.ndjson".into(), bursty),
+        ("source-and-docs.txt".into(), src_docs),
+        ("ui-render-32bpp.bmp".into(), bmp32),
+        ("rgb-frame-24bpp.bmp".into(), bmp24),
     ]
 }

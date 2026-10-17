@@ -53,21 +53,33 @@ fn main() {
             "c++".into()
         }
     });
+    let mut search_dirs = Vec::new();
     if let Some(paths) = env::var_os("VXG_LIBRARY_PATH") {
         for p in env::split_paths(&paths) {
             println!("cargo:rustc-link-search=native={}", p.display());
+            search_dirs.push(p);
         }
     }
     if os == "macos" {
         for p in ["/opt/homebrew/lib", "/usr/local/lib"] {
             if Path::new(p).exists() {
                 println!("cargo:rustc-link-search=native={p}");
+                search_dirs.push(PathBuf::from(p));
             }
         }
     }
     if env::var_os("CARGO_FEATURE_BENCH").is_some() {
         println!("cargo:rustc-link-lib=lz4");
-        println!("cargo:rustc-link-lib=zstd");
+        let zstd_lib = if os == "windows"
+            && search_dirs
+                .iter()
+                .any(|d| d.join("zstd_static.lib").exists() && !d.join("zstd.lib").exists())
+        {
+            "zstd_static"
+        } else {
+            "zstd"
+        };
+        println!("cargo:rustc-link-lib={zstd_lib}");
     }
     if env::var_os("CARGO_FEATURE_METAL").is_some() {
         assert_eq!(

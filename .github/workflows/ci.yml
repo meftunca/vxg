@@ -33,11 +33,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y liblz4-dev libzstd-dev
       - run: cargo test --release --features bench
-      - run: cargo run --release --features bench --bin vxg-bench -- --size-mib 1 --samples 3 --seconds 0.01 --csv reports/ci-benchmark.csv
+      - run: cargo run --release --features bench --bin vxg-bench -- --suite v4 --size-mib 4 --samples 3 --seconds 0.02 --csv reports/ci-benchmark.csv --markdown reports/ci-benchmark.md
+      - run: cat reports/ci-benchmark.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: ci-benchmark-not-a-stable-performance-environment
-          path: reports/ci-benchmark.csv
+          path: |
+            reports/ci-benchmark.csv
+            reports/ci-benchmark.md
   metal-compile-only:
     runs-on: macos-14
     steps:
