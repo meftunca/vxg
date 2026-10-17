@@ -1012,6 +1012,75 @@ fn scan_string(data: &[u8], mut pos: usize) -> Option<usize> {
             pos += 16;
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let v_quote = _mm_set1_epi8(b'"' as i8);
+        let v_slash = _mm_set1_epi8(b'\\' as i8);
+        let v_ctrl_max = _mm_set1_epi8(0x1f);
+        while pos + 32 <= len {
+            let c0 = _mm_loadu_si128(ptr.add(pos).cast::<__m128i>());
+            let c1 = _mm_loadu_si128(ptr.add(pos + 16).cast::<__m128i>());
+            let s0 = _mm_or_si128(
+                _mm_cmpeq_epi8(c0, v_quote),
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(c0, v_slash),
+                    _mm_cmpeq_epi8(_mm_max_epu8(c0, v_ctrl_max), v_ctrl_max),
+                ),
+            );
+            let s1 = _mm_or_si128(
+                _mm_cmpeq_epi8(c1, v_quote),
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(c1, v_slash),
+                    _mm_cmpeq_epi8(_mm_max_epu8(c1, v_ctrl_max), v_ctrl_max),
+                ),
+            );
+            let m = (_mm_movemask_epi8(s0) as u32) | ((_mm_movemask_epi8(s1) as u32) << 16);
+            if m != 0 {
+                let idx = m.trailing_zeros() as usize;
+                let hit = *ptr.add(pos + idx);
+                if hit == b'"' {
+                    return Some(pos + idx + 1);
+                }
+                if hit < 0x20 {
+                    return None;
+                }
+                if pos + idx + 1 >= len || *ptr.add(pos + idx + 1) < 0x20 {
+                    return None;
+                }
+                pos += idx + 2;
+                continue;
+            }
+            pos += 32;
+        }
+        while pos + 16 <= len {
+            let c0 = _mm_loadu_si128(ptr.add(pos).cast::<__m128i>());
+            let s0 = _mm_or_si128(
+                _mm_cmpeq_epi8(c0, v_quote),
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(c0, v_slash),
+                    _mm_cmpeq_epi8(_mm_max_epu8(c0, v_ctrl_max), v_ctrl_max),
+                ),
+            );
+            let m = _mm_movemask_epi8(s0) as u32;
+            if m != 0 {
+                let idx = m.trailing_zeros() as usize;
+                let hit = *ptr.add(pos + idx);
+                if hit == b'"' {
+                    return Some(pos + idx + 1);
+                }
+                if hit < 0x20 {
+                    return None;
+                }
+                if pos + idx + 1 >= len || *ptr.add(pos + idx + 1) < 0x20 {
+                    return None;
+                }
+                pos += idx + 2;
+                continue;
+            }
+            pos += 16;
+        }
+    }
     while pos < len {
         match data[pos] {
             b'"' => return Some(pos + 1),
@@ -11590,6 +11659,147 @@ fn prefix_interleave_planes(
             acc[1] = vgetq_lane_u8::<0>(a1);
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        macro_rules! scan {
+            ($v:expr, $a:ident) => {{
+                let mut s = $v;
+                s = _mm_add_epi8(s, _mm_slli_si128::<1>(s));
+                s = _mm_add_epi8(s, _mm_slli_si128::<2>(s));
+                s = _mm_add_epi8(s, _mm_slli_si128::<4>(s));
+                s = _mm_add_epi8(s, _mm_slli_si128::<8>(s));
+                s = _mm_add_epi8(s, $a);
+                let hi8 = _mm_unpackhi_epi8(s, s);
+                let hi16 = _mm_unpackhi_epi16(hi8, hi8);
+                $a = _mm_shuffle_epi32::<0xff>(hi16);
+                s
+            }};
+        }
+        macro_rules! store_interleave4 {
+            ($dst:expr, $r0:expr, $r1:expr, $r2:expr, $r3:expr) => {{
+                let t0 = _mm_unpacklo_epi8($r0, $r1);
+                let t1 = _mm_unpackhi_epi8($r0, $r1);
+                let t2 = _mm_unpacklo_epi8($r2, $r3);
+                let t3 = _mm_unpackhi_epi8($r2, $r3);
+                let d = $dst;
+                _mm_storeu_si128(d.cast::<__m128i>(), _mm_unpacklo_epi16(t0, t2));
+                _mm_storeu_si128(d.add(16).cast::<__m128i>(), _mm_unpackhi_epi16(t0, t2));
+                _mm_storeu_si128(d.add(32).cast::<__m128i>(), _mm_unpacklo_epi16(t1, t3));
+                _mm_storeu_si128(d.add(48).cast::<__m128i>(), _mm_unpackhi_epi16(t1, t3));
+            }};
+        }
+        let dst_ptr = dst.as_mut_ptr();
+        let mut a0 = _mm_set1_epi8(acc[0] as i8);
+        let mut a1 = _mm_set1_epi8(acc[1] as i8);
+        if stride == 4 {
+            let mut a2 = _mm_set1_epi8(acc[2] as i8);
+            let mut a3 = _mm_set1_epi8(acc[3] as i8);
+            let (p0, p1, p2, p3) = (p_ptrs[0], p_ptrs[1], p_ptrs[2], p_ptrs[3]);
+            let (c0, c1, c2, c3) = (const_plane[0], const_plane[1], const_plane[2], const_plane[3]);
+            while idx + 16 <= count {
+                let s0 = if c0 {
+                    a0
+                } else {
+                    scan!(_mm_loadu_si128(p0.add(idx).cast::<__m128i>()), a0)
+                };
+                let s1 = if c1 {
+                    a1
+                } else {
+                    scan!(_mm_loadu_si128(p1.add(idx).cast::<__m128i>()), a1)
+                };
+                let s2 = if c2 {
+                    a2
+                } else {
+                    scan!(_mm_loadu_si128(p2.add(idx).cast::<__m128i>()), a2)
+                };
+                let s3 = if c3 {
+                    a3
+                } else {
+                    scan!(_mm_loadu_si128(p3.add(idx).cast::<__m128i>()), a3)
+                };
+                if sub_green {
+                    store_interleave4!(
+                        dst_ptr.add(idx * 4),
+                        _mm_add_epi8(s0, s1),
+                        s1,
+                        _mm_add_epi8(s2, s1),
+                        s3
+                    );
+                } else {
+                    store_interleave4!(dst_ptr.add(idx * 4), s0, s1, s2, s3);
+                }
+                idx += 16;
+            }
+            acc[0] = _mm_cvtsi128_si32(a0) as u8;
+            acc[1] = _mm_cvtsi128_si32(a1) as u8;
+            acc[2] = _mm_cvtsi128_si32(a2) as u8;
+            acc[3] = _mm_cvtsi128_si32(a3) as u8;
+        } else if stride == 3 {
+            let mut a2 = _mm_set1_epi8(acc[2] as i8);
+            let (p0, p1, p2) = (p_ptrs[0], p_ptrs[1], p_ptrs[2]);
+            let (c0, c1, c2) = (const_plane[0], const_plane[1], const_plane[2]);
+            let mut b0 = [0u8; 16];
+            let mut b1 = [0u8; 16];
+            let mut b2 = [0u8; 16];
+            while idx + 16 <= count {
+                let s0 = if c0 {
+                    a0
+                } else {
+                    scan!(_mm_loadu_si128(p0.add(idx).cast::<__m128i>()), a0)
+                };
+                let s1 = if c1 {
+                    a1
+                } else {
+                    scan!(_mm_loadu_si128(p1.add(idx).cast::<__m128i>()), a1)
+                };
+                let s2 = if c2 {
+                    a2
+                } else {
+                    scan!(_mm_loadu_si128(p2.add(idx).cast::<__m128i>()), a2)
+                };
+                let (r0, r2) = if sub_green {
+                    (_mm_add_epi8(s0, s1), _mm_add_epi8(s2, s1))
+                } else {
+                    (s0, s2)
+                };
+                _mm_storeu_si128(b0.as_mut_ptr().cast::<__m128i>(), r0);
+                _mm_storeu_si128(b1.as_mut_ptr().cast::<__m128i>(), s1);
+                _mm_storeu_si128(b2.as_mut_ptr().cast::<__m128i>(), r2);
+                let out_p = dst_ptr.add(idx * 3);
+                for k in 0..16 {
+                    *out_p.add(k * 3) = b0[k];
+                    *out_p.add(k * 3 + 1) = b1[k];
+                    *out_p.add(k * 3 + 2) = b2[k];
+                }
+                idx += 16;
+            }
+            acc[0] = _mm_cvtsi128_si32(a0) as u8;
+            acc[1] = _mm_cvtsi128_si32(a1) as u8;
+            acc[2] = _mm_cvtsi128_si32(a2) as u8;
+        } else if stride == 2 {
+            let (p0, p1) = (p_ptrs[0], p_ptrs[1]);
+            let (c0, c1) = (const_plane[0], const_plane[1]);
+            while idx + 16 <= count {
+                let s0 = if c0 {
+                    a0
+                } else {
+                    scan!(_mm_loadu_si128(p0.add(idx).cast::<__m128i>()), a0)
+                };
+                let s1 = if c1 {
+                    a1
+                } else {
+                    scan!(_mm_loadu_si128(p1.add(idx).cast::<__m128i>()), a1)
+                };
+                let d = dst_ptr.add(idx * 2);
+                _mm_storeu_si128(d.cast::<__m128i>(), _mm_unpacklo_epi8(s0, s1));
+                _mm_storeu_si128(d.add(16).cast::<__m128i>(), _mm_unpackhi_epi8(s0, s1));
+                idx += 16;
+            }
+            acc[0] = _mm_cvtsi128_si32(a0) as u8;
+            acc[1] = _mm_cvtsi128_si32(a1) as u8;
+        }
+    }
     while idx < count {
         for p in 0..stride {
             if !const_plane[p] {
@@ -12030,7 +12240,274 @@ fn pack_stride_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
                 }
             }
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use core::arch::x86_64::*;
+            let zero = _mm_setzero_si128();
+            if stride == 4 && count >= 16 {
+                let p0 = comb_ptr;
+                let p1 = comb_ptr.add(count);
+                let p2 = comb_ptr.add(2 * count);
+                let p3 = comb_ptr.add(3 * count);
+                let f0 = *body_ptr;
+                let f1 = *body_ptr.add(1);
+                let f2 = *body_ptr.add(2);
+                let f3 = *body_ptr.add(3);
+                first_bytes = if use_sub_green {
+                    [f0.wrapping_sub(f1), f1, f2.wrapping_sub(f1), f3, 0, 0, 0, 0]
+                } else {
+                    [f0, f1, f2, f3, 0, 0, 0, 0]
+                };
+                let mut prev0 = _mm_set1_epi8(first_bytes[0] as i8);
+                let mut prev1 = _mm_set1_epi8(first_bytes[1] as i8);
+                let mut prev2 = _mm_set1_epi8(first_bytes[2] as i8);
+                let mut prev3 = _mm_set1_epi8(first_bytes[3] as i8);
+                let mut or0 = zero;
+                let mut or1 = zero;
+                let mut or2 = zero;
+                let mut or3 = zero;
+                let mut idx = 0usize;
+                while idx + 16 <= count {
+                    let src = body_ptr.add(idx * 4);
+                    let v0 = _mm_loadu_si128(src.cast::<__m128i>());
+                    let v1 = _mm_loadu_si128(src.add(16).cast::<__m128i>());
+                    let v2 = _mm_loadu_si128(src.add(32).cast::<__m128i>());
+                    let v3 = _mm_loadu_si128(src.add(48).cast::<__m128i>());
+                    let a0 = _mm_unpacklo_epi8(v0, v2);
+                    let a1 = _mm_unpackhi_epi8(v0, v2);
+                    let a2 = _mm_unpacklo_epi8(v1, v3);
+                    let a3 = _mm_unpackhi_epi8(v1, v3);
+                    let b0 = _mm_unpacklo_epi8(a0, a1);
+                    let b1 = _mm_unpackhi_epi8(a0, a1);
+                    let b2 = _mm_unpacklo_epi8(a2, a3);
+                    let b3 = _mm_unpackhi_epi8(a2, a3);
+                    let m0 = _mm_unpacklo_epi8(b0, b1);
+                    let m1 = _mm_unpackhi_epi8(b0, b1);
+                    let m2 = _mm_unpacklo_epi8(b2, b3);
+                    let m3 = _mm_unpackhi_epi8(b2, b3);
+                    let raw0 = _mm_unpacklo_epi32(m0, m2);
+                    let c1 = _mm_unpackhi_epi32(m0, m2);
+                    let raw2 = _mm_unpacklo_epi32(m1, m3);
+                    let c3 = _mm_unpackhi_epi32(m1, m3);
+                    let (c0, c2) = if use_sub_green {
+                        (_mm_sub_epi8(raw0, c1), _mm_sub_epi8(raw2, c1))
+                    } else {
+                        (raw0, raw2)
+                    };
+                    let lag0 = _mm_or_si128(_mm_slli_si128::<1>(c0), _mm_srli_si128::<15>(prev0));
+                    let lag1 = _mm_or_si128(_mm_slli_si128::<1>(c1), _mm_srli_si128::<15>(prev1));
+                    let lag2 = _mm_or_si128(_mm_slli_si128::<1>(c2), _mm_srli_si128::<15>(prev2));
+                    let lag3 = _mm_or_si128(_mm_slli_si128::<1>(c3), _mm_srli_si128::<15>(prev3));
+                    prev0 = c0;
+                    prev1 = c1;
+                    prev2 = c2;
+                    prev3 = c3;
+                    let d0 = _mm_sub_epi8(c0, lag0);
+                    let d1 = _mm_sub_epi8(c1, lag1);
+                    let d2 = _mm_sub_epi8(c2, lag2);
+                    let d3 = _mm_sub_epi8(c3, lag3);
+                    or0 = _mm_or_si128(or0, d0);
+                    or1 = _mm_or_si128(or1, d1);
+                    or2 = _mm_or_si128(or2, d2);
+                    or3 = _mm_or_si128(or3, d3);
+                    _mm_storeu_si128(p0.add(idx).cast::<__m128i>(), d0);
+                    _mm_storeu_si128(p1.add(idx).cast::<__m128i>(), d1);
+                    _mm_storeu_si128(p2.add(idx).cast::<__m128i>(), d2);
+                    _mm_storeu_si128(p3.add(idx).cast::<__m128i>(), d3);
+                    idx += 16;
+                }
+                let mut s_or = [
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or0, zero)) != 0xffff) as u8,
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or1, zero)) != 0xffff) as u8,
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or2, zero)) != 0xffff) as u8,
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or3, zero)) != 0xffff) as u8,
+                ];
+                let ptrs = [p0, p1, p2, p3];
+                while idx < count {
+                    let g = *body_ptr.add(idx * 4 + 1);
+                    let pg = *body_ptr.add((idx - 1) * 4 + 1);
+                    let dg = g.wrapping_sub(pg);
+                    for p in 0..4 {
+                        let cur = *body_ptr.add(idx * 4 + p);
+                        let prev = *body_ptr.add((idx - 1) * 4 + p);
+                        let d = cur.wrapping_sub(prev);
+                        let v = if use_sub_green && (p == 0 || p == 2) {
+                            d.wrapping_sub(dg)
+                        } else {
+                            d
+                        };
+                        *ptrs[p].add(idx) = v;
+                        s_or[p] |= v;
+                    }
+                    idx += 1;
+                }
+                all_zero = [
+                    s_or[0] == 0,
+                    s_or[1] == 0,
+                    s_or[2] == 0,
+                    s_or[3] == 0,
+                    false,
+                    false,
+                    false,
+                    false,
+                ];
+            } else if stride == 3 && count >= 16 {
+                let p0 = comb_ptr;
+                let p1 = comb_ptr.add(count);
+                let p2 = comb_ptr.add(2 * count);
+                let f0 = *body_ptr;
+                let f1 = *body_ptr.add(1);
+                let f2 = *body_ptr.add(2);
+                first_bytes = if use_sub_green {
+                    [f0.wrapping_sub(f1), f1, f2.wrapping_sub(f1), 0, 0, 0, 0, 0]
+                } else {
+                    [f0, f1, f2, 0, 0, 0, 0, 0]
+                };
+                let mut prev0 = _mm_set1_epi8(first_bytes[0] as i8);
+                let mut prev1 = _mm_set1_epi8(first_bytes[1] as i8);
+                let mut prev2 = _mm_set1_epi8(first_bytes[2] as i8);
+                let mut or0 = zero;
+                let mut or1 = zero;
+                let mut or2 = zero;
+                let mut idx = 0usize;
+                let mut t0 = [0u8; 16];
+                let mut t1 = [0u8; 16];
+                let mut t2 = [0u8; 16];
+                while idx + 16 <= count {
+                    let src = body_ptr.add(idx * 3);
+                    for k in 0..16 {
+                        t0[k] = *src.add(k * 3);
+                        t1[k] = *src.add(k * 3 + 1);
+                        t2[k] = *src.add(k * 3 + 2);
+                    }
+                    let raw0 = _mm_loadu_si128(t0.as_ptr().cast::<__m128i>());
+                    let c1 = _mm_loadu_si128(t1.as_ptr().cast::<__m128i>());
+                    let raw2 = _mm_loadu_si128(t2.as_ptr().cast::<__m128i>());
+                    let (c0, c2) = if use_sub_green {
+                        (_mm_sub_epi8(raw0, c1), _mm_sub_epi8(raw2, c1))
+                    } else {
+                        (raw0, raw2)
+                    };
+                    let lag0 = _mm_or_si128(_mm_slli_si128::<1>(c0), _mm_srli_si128::<15>(prev0));
+                    let lag1 = _mm_or_si128(_mm_slli_si128::<1>(c1), _mm_srli_si128::<15>(prev1));
+                    let lag2 = _mm_or_si128(_mm_slli_si128::<1>(c2), _mm_srli_si128::<15>(prev2));
+                    prev0 = c0;
+                    prev1 = c1;
+                    prev2 = c2;
+                    let d0 = _mm_sub_epi8(c0, lag0);
+                    let d1 = _mm_sub_epi8(c1, lag1);
+                    let d2 = _mm_sub_epi8(c2, lag2);
+                    or0 = _mm_or_si128(or0, d0);
+                    or1 = _mm_or_si128(or1, d1);
+                    or2 = _mm_or_si128(or2, d2);
+                    _mm_storeu_si128(p0.add(idx).cast::<__m128i>(), d0);
+                    _mm_storeu_si128(p1.add(idx).cast::<__m128i>(), d1);
+                    _mm_storeu_si128(p2.add(idx).cast::<__m128i>(), d2);
+                    idx += 16;
+                }
+                let mut s_or = [
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or0, zero)) != 0xffff) as u8,
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or1, zero)) != 0xffff) as u8,
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or2, zero)) != 0xffff) as u8,
+                ];
+                let ptrs = [p0, p1, p2];
+                while idx < count {
+                    let g = *body_ptr.add(idx * 3 + 1);
+                    let pg = *body_ptr.add((idx - 1) * 3 + 1);
+                    let dg = g.wrapping_sub(pg);
+                    for p in 0..3 {
+                        let cur = *body_ptr.add(idx * 3 + p);
+                        let prev = *body_ptr.add((idx - 1) * 3 + p);
+                        let d = cur.wrapping_sub(prev);
+                        let v = if use_sub_green && (p == 0 || p == 2) {
+                            d.wrapping_sub(dg)
+                        } else {
+                            d
+                        };
+                        *ptrs[p].add(idx) = v;
+                        s_or[p] |= v;
+                    }
+                    idx += 1;
+                }
+                all_zero = [
+                    s_or[0] == 0,
+                    s_or[1] == 0,
+                    s_or[2] == 0,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                ];
+            } else if stride == 2 && count >= 16 {
+                let p0 = comb_ptr;
+                let p1 = comb_ptr.add(count);
+                first_bytes[0] = *body_ptr;
+                first_bytes[1] = *body_ptr.add(1);
+                let mut prev0 = _mm_set1_epi8(first_bytes[0] as i8);
+                let mut prev1 = _mm_set1_epi8(first_bytes[1] as i8);
+                let mut or0 = zero;
+                let mut or1 = zero;
+                let mut idx = 0usize;
+                while idx + 16 <= count {
+                    let src = body_ptr.add(idx * 2);
+                    let v0 = _mm_loadu_si128(src.cast::<__m128i>());
+                    let v1 = _mm_loadu_si128(src.add(16).cast::<__m128i>());
+                    let a0 = _mm_unpacklo_epi8(v0, v1);
+                    let a1 = _mm_unpackhi_epi8(v0, v1);
+                    let b0 = _mm_unpacklo_epi8(a0, a1);
+                    let b1 = _mm_unpackhi_epi8(a0, a1);
+                    let m0 = _mm_unpacklo_epi8(b0, b1);
+                    let m1 = _mm_unpackhi_epi8(b0, b1);
+                    let c0 = _mm_unpacklo_epi8(m0, m1);
+                    let c1 = _mm_unpackhi_epi8(m0, m1);
+                    let lag0 = _mm_or_si128(_mm_slli_si128::<1>(c0), _mm_srli_si128::<15>(prev0));
+                    let lag1 = _mm_or_si128(_mm_slli_si128::<1>(c1), _mm_srli_si128::<15>(prev1));
+                    prev0 = c0;
+                    prev1 = c1;
+                    let d0 = _mm_sub_epi8(c0, lag0);
+                    let d1 = _mm_sub_epi8(c1, lag1);
+                    or0 = _mm_or_si128(or0, d0);
+                    or1 = _mm_or_si128(or1, d1);
+                    _mm_storeu_si128(p0.add(idx).cast::<__m128i>(), d0);
+                    _mm_storeu_si128(p1.add(idx).cast::<__m128i>(), d1);
+                    idx += 16;
+                }
+                let mut s_or = [
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or0, zero)) != 0xffff) as u8,
+                    (_mm_movemask_epi8(_mm_cmpeq_epi8(or1, zero)) != 0xffff) as u8,
+                ];
+                let ptrs = [p0, p1];
+                while idx < count {
+                    for p in 0..2 {
+                        let d = (*body_ptr.add(idx * 2 + p))
+                            .wrapping_sub(*body_ptr.add((idx - 1) * 2 + p));
+                        *ptrs[p].add(idx) = d;
+                        s_or[p] |= d;
+                    }
+                    idx += 1;
+                }
+                all_zero[0] = s_or[0] == 0;
+                all_zero[1] = s_or[1] == 0;
+            } else {
+                for p in 0..stride {
+                    first_bytes[p] = body[p];
+                    let mut prev = first_bytes[p];
+                    let mut s_or = 0u8;
+                    let p_slice = &mut comb[p * count..(p + 1) * count];
+                    p_slice[0] = 0;
+                    for idx in 1..count {
+                        let cur = body[idx * stride + p];
+                        let d = cur.wrapping_sub(prev);
+                        p_slice[idx] = d;
+                        s_or |= d;
+                        prev = cur;
+                    }
+                    all_zero[p] = s_or == 0;
+                }
+            }
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             for p in 0..stride {
                 let f = body[p];
@@ -14870,7 +15347,7 @@ mod tests {
                     index % 28 + 1,
                     index % 24,
                     if index & 1 == 0 { "open" } else { "close" },
-                    index as u64 * 0x9e3779b97f4a7c15,
+                    (index as u64).wrapping_mul(0x9e3779b97f4a7c15),
                 )
             }
             .into_bytes())
@@ -15312,7 +15789,7 @@ mod tests {
                 user_id.push(c);
             }
             let ip = format!("172.69.{}.{}", 10 + (row / 8) % 12, 100 + (row % 23));
-            let trace = format!("{:032x}", (row as u128 + 1) * 0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c834u128);
+            let trace = format!("{:032x}", (row as u128 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c834u128));
             mixed.extend_from_slice(
                 format!(
                     "{{\"time\":\"2026-03-19T13:55:{:02}.{:06}Z\",\"level\":\"INFO\",\"user\":\"{user_id}\",\"ip\":\"{ip}\",\"trace\":\"{trace}\"}}\n",
