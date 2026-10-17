@@ -51,6 +51,7 @@ tikv-jemallocator = { version = "0.7.0", optional = true, default-features = fal
 [lib]
 name = "vxg"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [[bin]]
 name = "vxg"

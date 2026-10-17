@@ -18,6 +18,7 @@ pub mod groups;
 mod block;
 pub mod checksum;
 mod error;
+pub mod ffi;
 mod frame;
 pub mod gpu;
 #[cfg(feature = "bench")]

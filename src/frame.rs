@@ -294,6 +294,21 @@ impl<'a> Frame<'a> {
         decode_frame_into(self, out, options, None)
     }
     pub fn decode_block(&self, index: usize, options: &DecodeOptions) -> Result<Vec<u8>> {
+        let b = self
+            .blocks
+            .get(index)
+            .ok_or(Error::InvalidOption("block index"))?;
+        let mut out = vec![0; b.info.raw_size];
+        self.decode_block_into(index, &mut out, options)?;
+        Ok(out)
+    }
+    /// Preallocated single-block random-access decode into `out[..block_raw_size]`.
+    pub fn decode_block_into(
+        &self,
+        index: usize,
+        out: &mut [u8],
+        options: &DecodeOptions,
+    ) -> Result<usize> {
         options.validate()?;
         let b = self
             .blocks
@@ -305,18 +320,24 @@ impl<'a> Frame<'a> {
                 limit: options.max_output,
             });
         }
-        let mut out = vec![0; b.info.raw_size];
+        if out.len() < b.info.raw_size {
+            return Err(Error::OutputSize {
+                expected: b.info.raw_size,
+                actual: out.len(),
+            });
+        }
+        let dst = &mut out[..b.info.raw_size];
         block::decode(
             b.payload,
             b.info.kind,
-            &mut out,
+            dst,
             Engine::new(options.simd)?,
             self.version >= 2,
         )?;
-        if self.checksummed && options.verify_checksum && crc32c(&out) != b.info.checksum {
+        if self.checksummed && options.verify_checksum && crc32c(dst) != b.info.checksum {
             return Err(Error::Checksum { block: index });
         }
-        Ok(out)
+        Ok(b.info.raw_size)
     }
 }
 impl<'a> ValidatedFrame<'a> {

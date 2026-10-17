@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release
+      - run: cargo build --release --lib
+      - run: python3 examples/ffi/python_example.py
       - run: cargo run --release --example roundtrip
   model:
     runs-on: ubuntu-latest
