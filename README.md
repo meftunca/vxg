@@ -166,6 +166,14 @@ bun run examples/ffi/node_bun_example.mjs
 ### C# / .NET 8+ Zero-Copy `Span<byte>` P/Invoke ([`examples/ffi/csharp_example.cs`](examples/ffi/csharp_example.cs))
 Uses `[LibraryImport("vxg")]` and `fixed (byte* ...)` over `ReadOnlySpan<byte>` / `Span<byte>` for zero managed heap copies.
 
+### WebAssembly (`wasm32-unknown-unknown` — Browser, Node.js, Bun, Cloudflare Workers) ([`examples/ffi/wasm_example.mjs`](examples/ffi/wasm_example.mjs))
+Compiles to a standalone `vxg.wasm` module with **zero WASI imports** (`WebAssembly.instantiate(bytes, {})`) and zero `wasm-bindgen` dependencies:
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build --release --lib --target wasm32-unknown-unknown
+node examples/ffi/wasm_example.mjs
+```
+
 ---
 
 ## Mathematical & Verification Scope

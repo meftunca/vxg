@@ -79,6 +79,7 @@ impl Engine {
         let n = a.len().min(b.len());
         // SAFETY: constructors checked CPU support; functions only load full vectors
         // while offset + vector_width <= n. The scalar tail also stays inside n.
+        #[allow(unused_unsafe)]
         unsafe {
             match self.kind {
                 #[cfg(target_arch = "x86_64")]
@@ -104,6 +105,7 @@ impl Engine {
             return;
         }
         // SAFETY: valid disjoint slices, feature-checked dispatch, exact bounds.
+        #[allow(unused_unsafe)]
         unsafe {
             match self.kind {
                 #[cfg(target_arch = "x86_64")]

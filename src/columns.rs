@@ -936,6 +936,7 @@ fn scan_string(data: &[u8], mut pos: usize) -> Option<usize> {
     }
     pos += 1;
     let len = data.len();
+    #[allow(unused_variables)]
     let ptr = data.as_ptr();
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -4812,6 +4813,7 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
                 | ((ts.second as u64) << 32)
         };
         let mut prev_w0 = unsafe { v0.as_ptr().cast::<u64>().read_unaligned() };
+        #[allow(unused_variables)]
         let first_w0_low48 = prev_w0 & 0x0000_ffff_ffff_ffff;
         let mut prev_w6 = unsafe { v0.as_ptr().add(6).cast::<u64>().read_unaligned() };
         let mut prev_w14 = unsafe { v0.as_ptr().add(14).cast::<u64>().read_unaligned() };
@@ -11974,7 +11976,9 @@ fn pack_stride_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
 
         let mut first_bytes = [0u8; 8];
         let mut all_zero = [false; 8];
+        #[allow(unused_variables)]
         let body_ptr = body.as_ptr();
+        #[allow(unused_variables)]
         let comb_ptr = comb.as_mut_ptr();
 
         #[cfg(target_arch = "aarch64")]
@@ -13191,6 +13195,7 @@ fn unpack_stride_into(cursor: &mut Cursor<'_>, out: &mut [u8]) -> Result<()> {
         }
 
         let dst_body = &mut out[prefix_len..prefix_len + count * stride];
+        #[allow(unused_variables)]
         let dst_ptr = dst_body.as_mut_ptr();
         #[cfg(target_arch = "aarch64")]
         unsafe {

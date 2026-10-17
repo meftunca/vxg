@@ -141,7 +141,13 @@ uint8_t *vxg_decompress_alloc(
 );
 
 /**
- * Frees a buffer allocated by `vxg_compress_alloc` or `vxg_decompress_alloc`.
+ * Allocates a zero-initialized buffer of `len` bytes owned by VXG (ideal for WebAssembly
+ * hosts operating on `WebAssembly.Memory`). Free with `vxg_free(ptr, len)`.
+ */
+uint8_t *vxg_alloc(size_t len);
+
+/**
+ * Frees a buffer allocated by `vxg_alloc`, `vxg_compress_alloc`, or `vxg_decompress_alloc`.
  */
 void vxg_free(uint8_t *ptr, size_t len);
 

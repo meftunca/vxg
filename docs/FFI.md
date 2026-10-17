@@ -93,3 +93,12 @@ bun run examples/ffi/node_bun_example.mjs
 
 ### C# / .NET 8+ ([`examples/ffi/csharp_example.cs`](../examples/ffi/csharp_example.cs))
 Pins `ReadOnlySpan<byte>` and `Span<byte>` in place via source-generated `[LibraryImport("vxg")]` P/Invoke with zero managed heap copies.
+
+### WebAssembly (`wasm32-unknown-unknown` — Browser / Edge / Node.js / Bun) ([`examples/ffi/wasm_example.mjs`](../examples/ffi/wasm_example.mjs))
+Builds a self-contained `vxg.wasm` binary requiring **zero WASI or host imports** (`WebAssembly.instantiate(wasmBytes, {})`). Uses `vxg_alloc` and `vxg_free` to slice directly into `exports.memory`:
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build --release --lib --target wasm32-unknown-unknown
+node examples/ffi/wasm_example.mjs
+```
+

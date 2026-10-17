@@ -19,6 +19,15 @@ jobs:
       - run: cargo build --release --lib
       - run: python3 examples/ffi/python_example.py
       - run: cargo run --release --example roundtrip
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo build --release --lib --target wasm32-unknown-unknown
+      - run: node examples/ffi/wasm_example.mjs
   model:
     runs-on: ubuntu-latest
     steps:

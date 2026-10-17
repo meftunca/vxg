@@ -385,10 +385,32 @@ pub unsafe extern "C" fn vxg_decompress_alloc(
     res.unwrap_or(std::ptr::null_mut())
 }
 
-/// Frees a buffer previously returned by `vxg_compress_alloc` or `vxg_decompress_alloc`.
+/// Allocates a zero-initialized byte buffer of `len` bytes inside VXG's linear memory
+/// (particularly useful for WebAssembly hosts passing buffers across `WebAssembly.Memory`).
+/// Must be freed with `vxg_free(ptr, len)`.
+#[no_mangle]
+pub extern "C" fn vxg_alloc(len: usize) -> *mut u8 {
+    if len == 0 {
+        return std::ptr::null_mut();
+    }
+    let res = catch_unwind(|| -> *mut u8 {
+        let mut buf = Vec::<u8>::new();
+        if buf.try_reserve_exact(len).is_err() {
+            return std::ptr::null_mut();
+        }
+        buf.resize(len, 0);
+        let mut boxed = buf.into_boxed_slice();
+        let ptr = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
+        ptr
+    });
+    res.unwrap_or(std::ptr::null_mut())
+}
+
+/// Frees a buffer previously returned by `vxg_alloc`, `vxg_compress_alloc`, or `vxg_decompress_alloc`.
 #[no_mangle]
 pub unsafe extern "C" fn vxg_free(ptr: *mut u8, len: usize) {
-    if !ptr.is_null() {
+    if !ptr.is_null() && len > 0 {
         let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
             let slice = std::slice::from_raw_parts_mut(ptr, len);
             drop(Box::from_raw(slice as *mut [u8]));
