@@ -5,7 +5,60 @@ pub const ENTRY_SIZE: usize = 32;
 pub const MAGIC: &[u8; 4] = b"VXG1";
 /// v2 adds opcode 7: a two-byte absolute match distance. v1 frames remain readable.
 pub const VERSION: u16 = 2;
+/// v3 additionally allows structured-column block payloads. Opt-in on encode;
+/// v1 and v2 frames remain readable.
+#[allow(dead_code)]
+pub const VERSION_V3: u16 = 3;
+/// v4 (release) is the unified adaptive pipeline with a compact 8-byte block
+/// directory: `u32 (payload_size | kind << 30)` + `u32 checksum`. Raw and
+/// payload offsets are implied by the canonical block order, so random access
+/// stays O(1) after one prefix-sum pass in `Frame::parse`.
+pub const VERSION_V4: u16 = 4;
+/// Version emitted by default.
+pub const VERSION_RELEASE: u16 = VERSION_V4;
+pub const ENTRY_SIZE_V4: usize = 8;
 const MIN_VERSION: u16 = 1;
+const MAX_VERSION: u16 = VERSION_V4;
+const V4_SIZE_MASK: u32 = 0x3fff_ffff;
+
+/// Directory entry size for a given frame version.
+#[inline]
+pub const fn entry_size(version: u16) -> usize {
+    if version >= VERSION_V4 {
+        ENTRY_SIZE_V4
+    } else {
+        ENTRY_SIZE
+    }
+}
+
+/// Write one directory entry at `out[p..p + entry_size(version)]`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_entry(
+    out: &mut [u8],
+    p: usize,
+    version: u16,
+    raw_offset: usize,
+    payload_offset: usize,
+    raw_size: usize,
+    payload_size: usize,
+    checksum: u32,
+    kind: u32,
+) {
+    if version >= VERSION_V4 {
+        debug_assert!(payload_size as u64 <= V4_SIZE_MASK as u64 && kind < 4);
+        let word = (payload_size as u32 & V4_SIZE_MASK) | (kind << 30);
+        out[p..p + 4].copy_from_slice(&word.to_le_bytes());
+        out[p + 4..p + 8].copy_from_slice(&checksum.to_le_bytes());
+    } else {
+        out[p..p + 8].copy_from_slice(&(raw_offset as u64).to_le_bytes());
+        out[p + 8..p + 16].copy_from_slice(&(payload_offset as u64).to_le_bytes());
+        out[p + 16..p + 20].copy_from_slice(&(raw_size as u32).to_le_bytes());
+        out[p + 20..p + 24].copy_from_slice(&(payload_size as u32).to_le_bytes());
+        out[p + 24..p + 28].copy_from_slice(&checksum.to_le_bytes());
+        out[p + 28..p + 32].copy_from_slice(&kind.to_le_bytes());
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct BlockInfo {
@@ -98,7 +151,7 @@ impl<'a> Frame<'a> {
             return Err(Error::Truncated);
         }
         let version = u16::from_le_bytes(src[4..6].try_into().unwrap());
-        if &src[..4] != MAGIC || !(MIN_VERSION..=VERSION).contains(&version) {
+        if &src[..4] != MAGIC || !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(Error::InvalidFrame("magic/version"));
         }
         let flags = u16::from_le_bytes(src[6..8].try_into().unwrap());
@@ -120,8 +173,9 @@ impl<'a> Frame<'a> {
         if count != expected_count {
             return Err(Error::InvalidFrame("block count"));
         }
+        let esize = entry_size(version);
         let dir_end = count
-            .checked_mul(ENTRY_SIZE)
+            .checked_mul(esize)
             .and_then(|v| v.checked_add(HEADER_SIZE))
             .ok_or(Error::SizeOverflow)?;
         if dir_end > src.len() {
@@ -134,24 +188,40 @@ impl<'a> Frame<'a> {
         let mut next_payload = dir_end;
         let mut next_raw = 0;
         for i in 0..count {
-            let p = HEADER_SIZE + i * ENTRY_SIZE;
-            let raw_offset = usize::try_from(read_u64(src, p)?).map_err(|_| Error::SizeOverflow)?;
-            let payload_offset =
-                usize::try_from(read_u64(src, p + 8)?).map_err(|_| Error::SizeOverflow)?;
-            let rn = read_u32(src, p + 16)? as usize;
-            let cn = read_u32(src, p + 20)? as usize;
-            let checksum = read_u32(src, p + 24)?;
-            let kind = read_u32(src, p + 28)?;
+            let p = HEADER_SIZE + i * esize;
+            let (raw_offset, payload_offset, rn, cn, checksum, kind) = if version >= VERSION_V4 {
+                let word = read_u32(src, p)?;
+                (
+                    next_raw,
+                    next_payload,
+                    block_size.min(raw_size - next_raw),
+                    (word & V4_SIZE_MASK) as usize,
+                    read_u32(src, p + 4)?,
+                    word >> 30,
+                )
+            } else {
+                (
+                    usize::try_from(read_u64(src, p)?).map_err(|_| Error::SizeOverflow)?,
+                    usize::try_from(read_u64(src, p + 8)?).map_err(|_| Error::SizeOverflow)?,
+                    read_u32(src, p + 16)? as usize,
+                    read_u32(src, p + 20)? as usize,
+                    read_u32(src, p + 24)?,
+                    read_u32(src, p + 28)?,
+                )
+            };
             if raw_offset != next_raw
                 || payload_offset != next_payload
                 || rn != block_size.min(raw_size - next_raw)
             {
                 return Err(Error::InvalidFrame("non-canonical directory"));
             }
-            if (kind == block::RAW && cn != rn)
-                || (kind == block::LZ && (cn >= rn || cn < block::BLOCK_PREFIX))
-                || kind > block::LZ
-            {
+            let kind_size_ok = match kind {
+                block::RAW => cn == rn,
+                block::LZ => cn < rn && cn >= block::BLOCK_PREFIX,
+                block::COLUMN => version >= 3 && cn >= 2 && cn < rn,
+                _ => false,
+            };
+            if !kind_size_ok {
                 return Err(Error::InvalidFrame("block kind/size"));
             }
             if flags == 0 && checksum != 0 {
@@ -250,9 +320,15 @@ impl<'a> Frame<'a> {
     }
 }
 impl<'a> ValidatedFrame<'a> {
-    pub fn raw_size(&self) -> usize { self.frame.raw_size() }
-    pub fn block_count(&self) -> usize { self.frame.block_count() }
-    pub fn frame(&self) -> &Frame<'a> { &self.frame }
+    pub fn raw_size(&self) -> usize {
+        self.frame.raw_size()
+    }
+    pub fn block_count(&self) -> usize {
+        self.frame.block_count()
+    }
+    pub fn frame(&self) -> &Frame<'a> {
+        &self.frame
+    }
     /// Preallocated decode after `into_validated`. This is safe: the handle
     /// owns an unforgeable validation proof and keeps the original byte slice
     /// immutably borrowed.
@@ -268,16 +344,26 @@ fn decode_frame_into(
 ) -> Result<()> {
     options.validate()?;
     if frame.raw_size > options.max_output {
-        return Err(Error::OutputLimit { requested: frame.raw_size as u64, limit: options.max_output });
+        return Err(Error::OutputLimit {
+            requested: frame.raw_size as u64,
+            limit: options.max_output,
+        });
     }
     if out.len() != frame.raw_size {
-        return Err(Error::OutputSize { expected: frame.raw_size, actual: out.len() });
+        return Err(Error::OutputSize {
+            expected: frame.raw_size,
+            actual: out.len(),
+        });
     }
     let engine = Engine::new(options.simd)?;
-    if frame.blocks.is_empty() { return Ok(()); }
+    if frame.blocks.is_empty() {
+        return Ok(());
+    }
     let workers = options.threads.min(frame.blocks.len());
     let per_worker = frame.blocks.len().div_ceil(workers);
-    let output_stride = per_worker.checked_mul(frame.block_size).ok_or(Error::SizeOverflow)?;
+    let output_stride = per_worker
+        .checked_mul(frame.block_size)
+        .ok_or(Error::SizeOverflow)?;
     let verify = frame.checksummed && options.verify_checksum;
     let short_distance = frame.version >= 2;
     if workers == 1 {
@@ -294,13 +380,23 @@ fn decode_frame_into(
             let blocks = &frame.blocks[start..(start + per_worker).min(frame.blocks.len())];
             handles.push(scope.spawn(move || {
                 if let Some(proof) = proof {
-                    decode_validated_group(blocks, target, engine, verify, start, short_distance, proof)
+                    decode_validated_group(
+                        blocks,
+                        target,
+                        engine,
+                        verify,
+                        start,
+                        short_distance,
+                        proof,
+                    )
                 } else {
                     decode_group(blocks, target, engine, verify, start, short_distance)
                 }
             }));
         }
-        for h in handles { h.join().map_err(|_| Error::WorkerPanic)??; }
+        for h in handles {
+            h.join().map_err(|_| Error::WorkerPanic)??;
+        }
         Ok(())
     })
 }
@@ -360,10 +456,12 @@ pub(crate) fn assemble_workers(
     n: usize,
     block_size: usize,
     checksummed: bool,
+    version: u16,
 ) -> Result<Vec<u8>> {
     let bound = max_compressed_size(n, block_size)?;
     let count = workers.iter().map(|w| w.parts.len()).sum::<usize>();
     let mut refs = Vec::with_capacity(count);
+    let mut total_payload_len = 0usize;
     for (worker, output) in workers.iter().enumerate() {
         for part in &output.parts {
             let end = part
@@ -373,10 +471,15 @@ pub(crate) fn assemble_workers(
             if output.arena.get(part.offset..end).is_none() || part.len > part.raw_size {
                 return Err(Error::InvalidFrame("encoder arena part"));
             }
+            total_payload_len = total_payload_len
+                .checked_add(part.len)
+                .ok_or(Error::SizeOverflow)?;
             refs.push((worker, *part));
         }
     }
-    refs.sort_unstable_by_key(|(_, part)| part.index);
+    if workers.len() > 1 {
+        refs.sort_unstable_by_key(|(_, part)| part.index);
+    }
     if refs
         .iter()
         .enumerate()
@@ -384,28 +487,38 @@ pub(crate) fn assemble_workers(
     {
         return Err(Error::InvalidFrame("encoder block order"));
     }
+    let esize = entry_size(version);
     let table_end = HEADER_SIZE
-        .checked_add(ENTRY_SIZE.checked_mul(count).ok_or(Error::SizeOverflow)?)
+        .checked_add(esize.checked_mul(count).ok_or(Error::SizeOverflow)?)
+        .ok_or(Error::SizeOverflow)?;
+    let exact_len = table_end
+        .checked_add(total_payload_len)
         .ok_or(Error::SizeOverflow)?;
     let mut out = Vec::new();
-    out.try_reserve_exact(bound)
+    out.try_reserve_exact(exact_len)
         .map_err(|_| Error::SizeOverflow)?;
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&(u16::from(checksummed)).to_le_bytes());
     out.extend_from_slice(&(n as u64).to_le_bytes());
     out.extend_from_slice(&(block_size as u32).to_le_bytes());
     out.extend_from_slice(&(count as u32).to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes());
+    out.resize(table_end, 0);
     let mut raw_offset = 0usize;
     let mut payload_offset = table_end;
-    for (_, part) in &refs {
-        out.extend_from_slice(&(raw_offset as u64).to_le_bytes());
-        out.extend_from_slice(&(payload_offset as u64).to_le_bytes());
-        out.extend_from_slice(&(part.raw_size as u32).to_le_bytes());
-        out.extend_from_slice(&(part.len as u32).to_le_bytes());
-        out.extend_from_slice(&part.checksum.to_le_bytes());
-        out.extend_from_slice(&part.kind.to_le_bytes());
+    for (i, (_, part)) in refs.iter().enumerate() {
+        write_entry(
+            &mut out,
+            HEADER_SIZE + i * esize,
+            version,
+            raw_offset,
+            payload_offset,
+            part.raw_size,
+            part.len,
+            part.checksum,
+            part.kind,
+        );
         raw_offset = raw_offset
             .checked_add(part.raw_size)
             .ok_or(Error::SizeOverflow)?;

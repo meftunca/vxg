@@ -1,0 +1,21 @@
+{
+  "schema": "vxg-record-template-eval-r3",
+  "scope": "bench-only independent block-local record skeleton and variable-slot grammar; rates are oracle construction/reconstruction, not VXG codec GB/s",
+  "timing_iterations": 1,
+  "input_bytes": 67108864,
+  "blocks": 1024,
+  "grammar_blocks": 1024,
+  "raw_blocks": 0,
+  "dictionary_entries": 1024,
+  "template_records": 485202,
+  "raw_records": 2037,
+  "payload_bytes": 17826851,
+  "frame_directory_bytes": 32800,
+  "prototype_total_frame_bytes": 17859651,
+  "prototype_total_ratio": 0.266129538,
+  "max_candidate_payload_bytes": 47689,
+  "pack_elapsed_ns": 2128950541,
+  "unpack_elapsed_ns": 176821916,
+  "pack_input_bytes_per_second": 31522039.948,
+  "unpack_input_bytes_per_second": 379527976.611
+}

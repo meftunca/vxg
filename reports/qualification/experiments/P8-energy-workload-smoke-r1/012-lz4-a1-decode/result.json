@@ -1,0 +1,21 @@
+{
+  "codec": "lz4-a1",
+  "operation": "decode",
+  "profile": "cpu_preallocated_decode",
+  "raw_bytes": 16777216,
+  "encoded_bytes": 2511283,
+  "ratio": 0.1496841311454773,
+  "threads": 1,
+  "block_size": 65536,
+  "checksums": false,
+  "allocator": "system",
+  "simd": "Neon",
+  "lz4_version": "1.10.0",
+  "zstd_version": "1.5.7",
+  "elapsed_seconds": 0.201679084,
+  "GBps": 8.984269920623003,
+  "energy_status": "unavailable_no_power_mode",
+  "cpu_rail_J_per_GB": null,
+  "cpu_rail_average_W": null,
+  "incremental_cpu_J_per_GB": null
+}

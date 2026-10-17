@@ -1,0 +1,36 @@
+{
+  "schema": "vxg-p6p-bounded-op7-copy-r1",
+  "scope": "Profile-led v2 execution experiment. The emitted frame, ratio, parser validation rules, independent blocks and public safe decode API are unchanged. This is directional/smoke evidence, not all-Q95 target qualification.",
+  "profile_trigger": {
+    "tool": "/usr/bin/sample",
+    "input": "json-records-16MiB",
+    "profile": "cpu_preallocated_decode",
+    "samples": 3351,
+    "platform_memmove_samples": 1972,
+    "interpretation": "The original variable-size non-overlap branch spent about 58.85% of sampled stacks in platform_memmove, motivating only the proven-disjoint 8..=63-byte replacement."
+  },
+  "json_16mib_reversed_order": {
+    "configuration": "one worker, 64 KiB blocks, Neon, checksums off, nine 0.2-second samples",
+    "candidate_forward_safe_GBps": 7.5410,
+    "generic_control_forward_safe_GBps": 3.7413,
+    "generic_control_reverse_safe_GBps": 3.7465,
+    "candidate_reverse_safe_GBps": 7.5404,
+    "candidate_over_control_percent": 101.4,
+    "artifact_ratio": 0.14650089
+  },
+  "validated_replay_follow_up": {
+    "generic_variable_copy_GBps": 4.0114,
+    "bounded_short_copy_GBps": 7.4960,
+    "safe_prepared_GBps": 7.5367,
+    "prepared_validation_GBps": 8.3042,
+    "note": "Validated replay remains a separate diagnostic and is not substituted for safe decode."
+  },
+  "q95_smoke": {
+    "run": "reports/qualification/runs/P6P-bounded-op7-copy-smoke-r1",
+    "policy": "Manifest-verified eight-member serial one-process smoke; each frame roundtrips through the safe public decode path.",
+    "safe_decode_GBps_range": [2.6369, 7.5963],
+    "lz4_a1_safe_decode_GBps_range": [4.7671, 9.3386],
+    "ratio_range": [0.14650089, 0.32611792]
+  },
+  "decision": "Retain the bounded helper: it is byte-exact, bounded to a profile-dominant, already-proven non-overlap range, and wins in both execution orders. Do not claim the 4/95/15 target: JSON remains below 10 GB/s and 1.20x LZ4, held-out Q95 members remain much slower, and the unchanged artifact ratios still fail the hard gate."
+}

@@ -1,0 +1,5 @@
+dataset,codec,profile,operation,raw_bytes,encoded_bytes,ratio_encoded_over_raw,threads,block_size,median_ns,min_ns,max_ns,median_GBps,samples,checksums,lz4_version,zstd_version,device,allocator
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_preallocated_decode,decompress,16777216,2457877,0.14650089,1,65536,2224793.522,2214167.121,2309174.816,7.5410,9,off,1.10.0,1.5.7,"",system
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_full_frame_preallocated_decode,decompress,16777216,2457877,0.14650089,1,65536,2212133.692,2162194.452,2223549.078,7.5842,9,off,1.10.0,1.5.7,"",system
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_prepared_validate_commands,validate_commands,16777216,2457877,0.14650089,1,65536,2025625.414,2005290.000,2080412.804,8.2825,9,off,1.10.0,1.5.7,"",system
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_parse_validate_commands,parse_validate_commands,16777216,2457877,0.14650089,1,65536,2020953.707,1961768.794,2052164.959,8.3016,9,off,1.10.0,1.5.7,"",system

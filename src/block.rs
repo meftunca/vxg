@@ -3,6 +3,8 @@ use crate::{simd::Engine, Error, Result};
 
 pub const RAW: u32 = 0;
 pub const LZ: u32 = 1;
+/// Structured-column payload built by the block-local packet encoder.
+pub const COLUMN: u32 = 2;
 #[cfg(all(feature = "hash13", feature = "hash15"))]
 compile_error!("hash13 and hash15 benchmark features are mutually exclusive");
 #[cfg(feature = "hash13")]
@@ -65,8 +67,16 @@ impl std::ops::AddAssign for WorkStats {
         }
         #[cfg(feature = "bench")]
         {
-            for (left, right) in self.op7_distance_buckets.iter_mut().zip(r.op7_distance_buckets) { *left += right; }
-            for (left, right) in self.match_run_buckets.iter_mut().zip(r.match_run_buckets) { *left += right; }
+            for (left, right) in self
+                .op7_distance_buckets
+                .iter_mut()
+                .zip(r.op7_distance_buckets)
+            {
+                *left += right;
+            }
+            for (left, right) in self.match_run_buckets.iter_mut().zip(r.match_run_buckets) {
+                *left += right;
+            }
             self.zero_literal_commands += r.zero_literal_commands;
         }
         self.lcp_calls += r.lcp_calls;
@@ -83,7 +93,7 @@ pub(crate) struct Scratch {
 impl Scratch {
     pub fn new() -> Self {
         Self {
-            table: vec![0; HASH_SIZE],
+            table: Vec::new(),
             control: Vec::new(),
             attrs: Vec::new(),
             literals: Vec::new(),
@@ -91,6 +101,9 @@ impl Scratch {
         }
     }
     pub fn reserve_for(&mut self, n: usize) {
+        if self.table.len() < HASH_SIZE {
+            self.table.resize(HASH_SIZE, 0);
+        }
         // These bounded hints cover the common command/literal mix without
         // eagerly reserving the full block for every temporary stream.
         let control = n / 8;
@@ -110,6 +123,9 @@ impl Scratch {
         if self.payloads.capacity() < n {
             self.payloads.reserve(n - self.payloads.capacity());
         }
+    }
+    pub fn payloads_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.payloads
     }
     pub fn finish(self) -> Vec<u8> {
         self.payloads
@@ -274,11 +290,27 @@ pub(crate) fn encode<const STATS: bool>(
             stats.op_counts[op as usize] += 1;
             #[cfg(feature = "bench")]
             {
-                if lit == 0 { stats.zero_literal_commands += 1; }
-                let run_bucket = match run { 0..=15 => 0, 16..=31 => 1, 32..=63 => 2, 64..=127 => 3, 128..=255 => 4, _ => 5 };
+                if lit == 0 {
+                    stats.zero_literal_commands += 1;
+                }
+                let run_bucket = match run {
+                    0..=15 => 0,
+                    16..=31 => 1,
+                    32..=63 => 2,
+                    64..=127 => 3,
+                    128..=255 => 4,
+                    _ => 5,
+                };
                 stats.match_run_buckets[run_bucket] += 1;
                 if op == 7 {
-                    let distance_bucket = match distance { 0..=64 => 0, 65..=256 => 1, 257..=1024 => 2, 1025..=4096 => 3, 4097..=16384 => 4, _ => 5 };
+                    let distance_bucket = match distance {
+                        0..=64 => 0,
+                        65..=256 => 1,
+                        257..=1024 => 2,
+                        1025..=4096 => 3,
+                        4097..=16384 => 4,
+                        _ => 5,
+                    };
                     stats.op7_distance_buckets[distance_bucket] += 1;
                 }
             }
@@ -357,19 +389,70 @@ pub(crate) fn encode<const STATS: bool>(
     }
 }
 
-#[cfg_attr(not(feature="parser-no-inline"), inline(always))]
+#[cfg_attr(not(feature = "parser-no-inline"), inline(always))]
 fn u32_at(src: &[u8], pos: &mut usize) -> Result<u32> {
     let end = pos.checked_add(4).ok_or(Error::SizeOverflow)?;
     let bytes = src.get(*pos..end).ok_or(Error::Truncated)?;
     *pos = end;
     Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
 }
-#[cfg_attr(not(feature="parser-no-inline"), inline(always))]
+#[cfg_attr(not(feature = "parser-no-inline"), inline(always))]
 fn u16_at(src: &[u8], pos: &mut usize) -> Result<u16> {
     let end = pos.checked_add(2).ok_or(Error::SizeOverflow)?;
     let bytes = src.get(*pos..end).ok_or(Error::Truncated)?;
     *pos = end;
     Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+/// Copy a proven-disjoint hot opcode-7 match without routing the overwhelmingly
+/// 8..=63-byte JSON run buckets through a variable-size libc call. The caller
+/// establishes the range, initialized-prefix, and non-overlap proof before
+/// entering this function; this helper never services an overlapping LZ copy.
+///
+/// Each load is unaligned but in-range. Source and destination are disjoint, so
+/// the small number of overlapping *destination* stores in the tail case repeat
+/// the same source bytes and preserve the exact requested range.
+#[inline(always)]
+unsafe fn copy_nonoverlapping_short(src: *const u8, dst: *mut u8, len: usize) {
+    debug_assert!((8..=63).contains(&len));
+    #[inline(always)]
+    unsafe fn copy_word(src: *const u8, dst: *mut u8, offset: usize) {
+        // SAFETY: the enclosing caller proves [offset, offset + 8) lies in
+        // both disjoint requested ranges. Unaligned accesses are intentional.
+        let word = unsafe { std::ptr::read_unaligned(src.add(offset).cast::<u64>()) };
+        unsafe { std::ptr::write_unaligned(dst.add(offset).cast::<u64>(), word) };
+    }
+
+    // SAFETY: `len >= 8`, so the first word is fully in range.
+    unsafe { copy_word(src, dst, 0) };
+    if len >= 16 {
+        // SAFETY: this branch proves the second word is fully in range.
+        unsafe { copy_word(src, dst, 8) };
+    }
+    if len >= 24 {
+        // SAFETY: this branch proves the word is fully in range.
+        unsafe { copy_word(src, dst, 16) };
+    }
+    if len >= 32 {
+        // SAFETY: this branch proves the word is fully in range.
+        unsafe { copy_word(src, dst, 24) };
+    }
+    if len >= 40 {
+        // SAFETY: this branch proves the word is fully in range.
+        unsafe { copy_word(src, dst, 32) };
+    }
+    if len >= 48 {
+        // SAFETY: this branch proves the word is fully in range.
+        unsafe { copy_word(src, dst, 40) };
+    }
+    if len >= 56 {
+        // SAFETY: this branch proves the word is fully in range.
+        unsafe { copy_word(src, dst, 48) };
+    }
+    // SAFETY: `len >= 8`, so the exact tail word is fully in range. It may
+    // overlap a previous destination store, but both stores contain the same
+    // source bytes at their corresponding offsets.
+    unsafe { copy_word(src, dst, len - 8) };
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Command {
@@ -423,7 +506,7 @@ impl<'a> Parser<'a> {
             short_distance,
         })
     }
-    #[cfg_attr(not(feature="parser-no-inline"), inline(always))]
+    #[cfg_attr(not(feature = "parser-no-inline"), inline(always))]
     pub fn next(&mut self) -> Result<Option<Command>> {
         if self.remaining == 0 {
             if self.ci != self.control.len()
@@ -445,7 +528,12 @@ impl<'a> Parser<'a> {
         }
         let lc = ((token >> 3) & 31) as usize;
         let rc = (token >> 8) as usize;
-        if self.short_distance && op == 7 && lc < 31 && rc < 255 && !cfg!(feature="parser-op7-generic") {
+        if self.short_distance
+            && op == 7
+            && lc < 31
+            && rc < 255
+            && !cfg!(feature = "parser-op7-generic")
+        {
             return self.next_short_distance(lc, rc).map(Some);
         }
         let lit = if lc == 31 {
@@ -526,20 +614,37 @@ impl<'a> Parser<'a> {
     /// seed, and multi-opcode work on the overwhelmingly frequent opcode 7.
     #[inline(always)]
     fn next_short_distance(&mut self, lit: usize, run: usize) -> Result<Command> {
-        if run < 8 { return Err(Error::InvalidFrame("match below minmatch")); }
+        if run < 8 {
+            return Err(Error::InvalidFrame("match below minmatch"));
+        }
         let literal_start = self.li;
         let new_li = self.li.checked_add(lit).ok_or(Error::SizeOverflow)?;
-        if new_li > self.literals.len() { return Err(Error::Truncated); }
+        if new_li > self.literals.len() {
+            return Err(Error::Truncated);
+        }
         let match_pos = self.pos.checked_add(lit).ok_or(Error::SizeOverflow)?;
         let next_pos = match_pos.checked_add(run).ok_or(Error::SizeOverflow)?;
-        if next_pos > self.raw_len { return Err(Error::InvalidFrame("command exceeds output")); }
+        if next_pos > self.raw_len {
+            return Err(Error::InvalidFrame("command exceeds output"));
+        }
         let distance = u16_at(self.attrs, &mut self.ai)? as usize;
-        if distance == 0 || distance > match_pos { return Err(Error::InvalidFrame("backreference before initialized prefix")); }
+        if distance == 0 || distance > match_pos {
+            return Err(Error::InvalidFrame(
+                "backreference before initialized prefix",
+            ));
+        }
         self.recent = distance;
         self.remaining -= 1;
         self.pos = next_pos;
         self.li = new_li;
-        Ok(Command { op: 7, lit, run, distance, seed: [0; 8], literal_start })
+        Ok(Command {
+            op: 7,
+            lit,
+            run,
+            distance,
+            seed: [0; 8],
+            literal_start,
+        })
     }
 
     /// Decode the overwhelmingly common fixed-size v2 command in place.
@@ -550,11 +655,7 @@ impl<'a> Parser<'a> {
     /// tokens; extensions and every other opcode stay on `next`'s fully
     /// generic path.  Returning `false` never consumes input.
     #[inline(always)]
-    fn decode_short_distance_if_present(
-        &mut self,
-        out: &mut [u8],
-        engine: Engine,
-    ) -> Result<bool> {
+    fn decode_short_distance_if_present(&mut self, out: &mut [u8], engine: Engine) -> Result<bool> {
         if cfg!(feature = "decode-op7-direct-generic") || self.remaining == 0 {
             return Ok(false);
         }
@@ -591,10 +692,27 @@ impl<'a> Parser<'a> {
             ));
         }
         if lit != 0 {
-            out[self.pos..match_pos]
-                .copy_from_slice(&self.literals[literal_start..new_li]);
+            out[self.pos..match_pos].copy_from_slice(&self.literals[literal_start..new_li]);
         }
-        engine.repeat(out, match_pos, run, distance);
+        // The checked arithmetic above proves `match_pos + run <= out.len()`;
+        // the positive-distance check proves the source starts in the initialized
+        // prefix.  When the run is no longer than the distance, source and
+        // destination are disjoint. Keep overlap cases on the periodic engine.
+        if run <= distance && !cfg!(feature = "decode-op7-inline-copy-generic") {
+            // SAFETY: the validated range checks above keep both ranges inside
+            // `out`, and `run <= distance` makes them non-overlapping.
+            unsafe {
+                let src = out.as_ptr().add(match_pos - distance);
+                let dst = out.as_mut_ptr().add(match_pos);
+                if run <= 63 && !cfg!(feature = "decode-op7-inline-short-copy-generic") {
+                    copy_nonoverlapping_short(src, dst, run);
+                } else {
+                    std::ptr::copy_nonoverlapping(src, dst, run);
+                }
+            }
+        } else {
+            engine.repeat(out, match_pos, run, distance);
+        }
         self.recent = distance;
         self.remaining -= 1;
         self.pos = next_pos;
@@ -641,11 +759,16 @@ impl<'a> Parser<'a> {
             );
         }
         if run <= distance {
-            std::ptr::copy_nonoverlapping(
-                out.as_ptr().add(match_pos - distance),
-                out.as_mut_ptr().add(match_pos),
-                run,
-            );
+            let src = out.as_ptr().add(match_pos - distance);
+            let dst = out.as_mut_ptr().add(match_pos);
+            if run <= 63 && !cfg!(feature = "decode-op7-inline-short-copy-generic") {
+                // SAFETY: the immutable validation proof establishes the same
+                // initialized, bounded, non-overlapping ranges as the checked
+                // path above; this is only its bounded code-generation variant.
+                copy_nonoverlapping_short(src, dst, run);
+            } else {
+                std::ptr::copy_nonoverlapping(src, dst, run);
+            }
         } else {
             engine.repeat(out, match_pos, run, distance);
         }
@@ -664,6 +787,12 @@ pub(crate) fn validate(src: &[u8], kind: u32, raw_len: usize, short_distance: bo
             return Err(Error::InvalidFrame("RAW size"));
         }
         return Ok(());
+    }
+    if kind == COLUMN {
+        // The structured decoder checks every bound, count and ordering rule,
+        // so a trial decode into a scratch buffer is an exact validation.
+        let mut tmp = vec![0u8; raw_len];
+        return crate::columns::decode_block_into(src, &mut tmp);
     }
     if kind != LZ {
         return Err(Error::InvalidFrame("block kind"));
@@ -686,6 +815,10 @@ pub(crate) fn decode(
         engine.copy(out, src);
         return Ok(());
     }
+    if kind == COLUMN {
+        crate::columns::decode_block_into(src, out)?;
+        return Ok(());
+    }
     if kind != LZ {
         return Err(Error::InvalidFrame("block kind"));
     }
@@ -697,7 +830,7 @@ pub(crate) fn decode(
             continue;
         }
         let c = parser.next()?.expect("nonzero parser command count");
-        if c.lit != 0 || cfg!(feature="decode-unconditional-literal-copy") {
+        if c.lit != 0 || cfg!(feature = "decode-unconditional-literal-copy") {
             engine.copy(
                 &mut out[pos..pos + c.lit],
                 &parser.literals[c.literal_start..c.literal_start + c.lit],
@@ -732,6 +865,10 @@ pub(crate) unsafe fn decode_validated(
     engine: Engine,
     short_distance: bool,
 ) -> Result<()> {
+    if kind == COLUMN {
+        // The column decoder is always fully checked; no unchecked fast path.
+        return crate::columns::decode_block_into(src, out);
+    }
     if kind == RAW {
         engine.copy(out, src);
         return Ok(());
@@ -763,4 +900,32 @@ pub(crate) unsafe fn decode_validated(
     }
     debug_assert_eq!(pos, out.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_nonoverlapping_short;
+
+    #[test]
+    fn bounded_nonoverlap_copy_preserves_every_length_and_alignment() {
+        for len in 8..=63 {
+            for source_alignment in 0..8 {
+                for destination_alignment in 0..8 {
+                    let source = 16 + source_alignment;
+                    let destination = 128 + destination_alignment;
+                    let mut bytes = (0..256).map(|index| index as u8 ^ 0xa5).collect::<Vec<_>>();
+                    let expected = bytes[source..source + len].to_vec();
+                    // SAFETY: the test ranges are fully in `bytes` and disjoint.
+                    unsafe {
+                        copy_nonoverlapping_short(
+                            bytes.as_ptr().add(source),
+                            bytes.as_mut_ptr().add(destination),
+                            len,
+                        );
+                    }
+                    assert_eq!(&bytes[destination..destination + len], &expected);
+                }
+            }
+        }
+    }
 }

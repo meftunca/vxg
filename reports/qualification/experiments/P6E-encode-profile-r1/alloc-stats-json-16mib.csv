@@ -1,0 +1,6 @@
+dataset,codec,profile,operation,raw_bytes,encoded_bytes,ratio_encoded_over_raw,threads,block_size,median_ns,min_ns,max_ns,median_GBps,samples,checksums,lz4_version,zstd_version,device,allocator
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_allocating_encode,compress,16777216,2457877,0.14650089,1,65536,6462127.625,6422687.500,6568354.188,2.5962,3,off,1.10.0,1.5.7,"",system+alloc-stats
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_preallocated_decode,decompress,16777216,2457877,0.14650089,1,65536,2226979.622,2223136.111,2233028.689,7.5336,3,off,1.10.0,1.5.7,"",system+alloc-stats
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_full_frame_preallocated_decode,decompress,16777216,2457877,0.14650089,1,65536,2216088.783,2213018.130,2236519.444,7.5706,3,off,1.10.0,1.5.7,"",system+alloc-stats
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_prepared_validate_commands,validate_commands,16777216,2457877,0.14650089,1,65536,1976234.471,1958568.096,1989679.745,8.4895,3,off,1.10.0,1.5.7,"",system+alloc-stats
+"corpus/qualification/json-records-16MiB.ndjson",vxg,cpu_parse_validate_commands,parse_validate_commands,16777216,2457877,0.14650089,1,65536,1990968.137,1987705.882,1995987.745,8.4267,3,off,1.10.0,1.5.7,"",system+alloc-stats

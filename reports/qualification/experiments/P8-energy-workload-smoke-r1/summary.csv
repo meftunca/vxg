@@ -1,0 +1,13 @@
+codec,operation,profile,trials,ratio,GBps,cpu_rail_average_W,cpu_rail_J_per_GB,incremental_cpu_J_per_GB,energy_vs_lz4_a1
+lz4-a1,decode,cpu_preallocated_decode,1,0.1496841311454773,8.984269920623003,,,,
+lz4-a1,encode,cpu_allocating_encode,1,0.1496841311454773,2.2887598531873365,,,,
+lz4-a4,decode,cpu_preallocated_decode,1,0.15083718299865723,9.158421945810911,,,,
+lz4-a4,encode,cpu_allocating_encode,1,0.15083718299865723,2.2875431658307246,,,,
+vxg,decode,cpu_full_frame_preallocated_decode,1,0.14650088548660278,7.095747206577952,,,,
+vxg,encode,cpu_allocating_encode,1,0.14650088548660278,2.474166927515678,,,,
+zstd-1,decode,cpu_preallocated_decode,1,0.05424308776855469,3.226351228811556,,,,
+zstd-1,encode,cpu_allocating_encode,1,0.05424308776855469,1.65495221304395,,,,
+zstd-3,decode,cpu_preallocated_decode,1,0.06240344047546387,2.826016671548727,,,,
+zstd-3,encode,cpu_allocating_encode,1,0.06240344047546387,1.4852810823068578,,,,
+zstd-m3,decode,cpu_preallocated_decode,1,0.09964674711227417,4.123092178365055,,,,
+zstd-m3,encode,cpu_allocating_encode,1,0.09964674711227417,1.8870947640740117,,,,

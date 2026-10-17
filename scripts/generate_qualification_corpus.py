@@ -17,8 +17,11 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CORPUS = ROOT / "corpus" / "qualification"
+DEFAULT_CORPUS_R2 = DEFAULT_CORPUS / "r2"
 DEFAULT_MANIFEST = ROOT / "reports" / "qualification" / "manifest.json"
+DEFAULT_MANIFEST_R2 = ROOT / "reports" / "qualification" / "manifest-r2.json"
 REVISION = "q95-json-r1"
+REVISION_R2 = "q95-json-r2"
 MIB = 1 << 20
 
 
@@ -78,6 +81,121 @@ def bursty_records(index: int, seed: int) -> bytes:
     ).encode()
 
 
+def event_mix_r2(index: int, seed: int) -> bytes:
+    """r2 identifier source: UUIDv7-like epoch prefix plus per-epoch sequence.
+
+    The record skeleton, templates, timestamp law and categorical distributions
+    are unchanged from ``event_mix``; only the identifier value source changes.
+    Runs of 128 records share a pseudo-random 32-bit epoch prefix and carry a
+    small ascending 32-bit suffix; about 3% of records use a random suffix as a
+    bounded exception. No per-record full-width pseudo-random identifier or
+    generator relation remains to hide behind.
+    """
+    state = xorshift64(seed ^ (index * 0x9E3779B97F4A7C15))
+    event = ("session.open", "session.close", "build.finished", "alert.raised")[state & 3]
+    region = ("eu-1", "us-2", "ap-1")[((state >> 3) % 3)]
+    status = "ok" if state & 0x40 else "warning"
+    epoch = index // 128
+    prefix = xorshift64(seed ^ (epoch * 0x2545F4914F6CDD1D)) & 0xFFFFFFFF
+    sequence = ((state >> 16) & 0xFFFFFFFF) if state % 32 == 0 else index % 128
+    return (
+        f'{{"ts":"2026-01-{(index % 28) + 1:02d}T{index % 24:02d}:00:00Z",'
+        f'"event":"{event}","region":"{region}","request_id":"r-{prefix:08x}{sequence:08x}",'
+        f'"status":"{status}","sequence":{index}}}\n'
+    ).encode()
+
+
+def bursty_records_r2(index: int, seed: int) -> bytes:
+    """r2 message source: repeated bounded phrases instead of a 60-bit pattern.
+
+    The record skeleton, burst schedule, tags, source field and the existing
+    message length law are unchanged from ``bursty_records``; only the message
+    content source changes. Messages fill their fixed length with repeated
+    phrases from a 12-phrase vocabulary, bounded tail words and occasional
+    decimal parameters; the byte length and padding law are preserved.
+    """
+    state = xorshift64(seed ^ (index * 0xD1342543DE82EF95))
+    burst = (index // 19) % 7
+    message_len = 8 + (state % (24 if burst < 5 else 240))
+    tags = "[\"hot\",\"retry\"]" if burst in (0, 1) else "[]"
+    message = _phrase_message(state, message_len)
+    return (
+        f'{{"burst":{burst},"record":{index},"tags":{tags},"message":"{message}",'
+        f'"source":"worker-{state % 23}"}}\n'
+    ).encode()
+
+
+R2_PHRASES = (
+    "queue depth exceeded",
+    "retry scheduled",
+    "batch committed",
+    "cache flush complete",
+    "worker heartbeat ok",
+    "shard rebalanced",
+    "index merge done",
+    "page evicted",
+    "commit retried",
+    "drop detected",
+    "sync paused",
+    "threshold crossed",
+)
+
+R2_VOCABULARY = (
+    "flush",
+    "queue",
+    "retry",
+    "timeout",
+    "worker",
+    "ack",
+    "batch",
+    "sync",
+    "drop",
+    "merge",
+    "cache",
+    "page",
+    "index",
+    "shard",
+    "commit",
+    "warn",
+)
+
+
+def _phrase_message(state: int, message_len: int) -> str:
+    """Fill exactly ``message_len`` bytes with repeated phrases and tail words.
+
+    The phrase stream bounds every record's message entropy to a small number
+    of dictionary choices plus at most a few tail words or decimal parameters;
+    the existing length law still decides the byte length and padding.
+    """
+    tokens: list[str] = []
+    total = 0
+    position = 0
+    while True:
+        phrase = R2_PHRASES[(state >> ((position * 7) % 57)) % len(R2_PHRASES)]
+        extra = len(phrase) + (2 if tokens else 0)
+        if total + extra > message_len:
+            break
+        tokens.append(phrase)
+        total += extra
+        position += 1
+    position = 0
+    while True:
+        if ((state >> (13 + (position % 5))) & 3) == 0:
+            token = f"{state % 4096}"
+        else:
+            token = R2_VOCABULARY[(state >> ((position * 5) % 59)) & 15]
+        extra = len(token) + (2 if tokens else 0)
+        if total + extra > message_len:
+            break
+        tokens.append(token)
+        total += extra
+        position += 1
+    if not tokens:
+        return " " * message_len
+    message = "; ".join(tokens)
+    return message + " " * (message_len - len(message))
+
+
 FAMILIES: tuple[tuple[str, str, str, int, Callable[[int, int], bytes]], ...] = (
     (
         "json-records",
@@ -109,6 +227,37 @@ FAMILIES: tuple[tuple[str, str, str, int, Callable[[int, int], bytes]], ...] = (
     ),
 )
 
+FAMILIES_R2: tuple[tuple[str, str, str, int, Callable[[int, int], bytes]], ...] = (
+    (
+        "json-records",
+        "existing built-in json-records reproduced as a frozen file",
+        "baseline",
+        0,
+        json_records,
+    ),
+    (
+        "field-order-optional-escaping",
+        "changed field order, optional fields, and escaped JSON strings",
+        "held-out",
+        0x8D12_4A77_319B_05E1,
+        field_order_and_escapes,
+    ),
+    (
+        "event-mix-identifiers",
+        "mixed event templates, epoch+counter request identifiers, and regional distributions",
+        "held-out",
+        0x3B7F_2C4D_9A18_56E7,
+        event_mix_r2,
+    ),
+    (
+        "bursty-variable-records",
+        "bursts and variable record/message lengths; bounded token-vocabulary messages",
+        "held-out",
+        0x6D29_E4B8_1F73_A350,
+        bursty_records_r2,
+    ),
+)
+
 
 def write_exact(path: Path, size: int, seed: int, make_record: Callable[[int, int], bytes]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,10 +279,15 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def generate(corpus: Path, manifest_path: Path) -> dict[str, object]:
+def generate(
+    corpus: Path,
+    manifest_path: Path,
+    families: tuple[tuple[str, str, str, int, Callable[[int, int], bytes]], ...] = FAMILIES,
+    revision: str = REVISION,
+) -> dict[str, object]:
     members: list[dict[str, object]] = []
     for mib in (16, 64):
-        for family, description, split, seed, make_record in FAMILIES:
+        for family, description, split, seed, make_record in families:
             filename = f"{family}-{mib}MiB.ndjson"
             path = corpus / filename
             write_exact(path, mib * MIB, seed, make_record)
@@ -151,7 +305,7 @@ def generate(corpus: Path, manifest_path: Path) -> dict[str, object]:
             )
     manifest = {
         "schema": 1,
-        "generator_revision": REVISION,
+        "generator_revision": revision,
         "target_scope": "Synthetic structured JSON/log Q95; not a claim about arbitrary production data.",
         "policy": "Every member remains in qualification. Exact byte identity is verified by SHA-256 before a run.",
         "members": members,
@@ -163,7 +317,7 @@ def generate(corpus: Path, manifest_path: Path) -> dict[str, object]:
 
 def verify(manifest_path: Path) -> list[str]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("generator_revision") != REVISION:
+    if manifest.get("generator_revision") not in (REVISION, REVISION_R2):
         raise SystemExit("manifest generator revision differs from this generator")
     paths: list[str] = []
     for member in manifest["members"]:
@@ -180,16 +334,25 @@ def verify(manifest_path: Path) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--corpus", type=Path, default=None)
+    parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument(
+        "--r2",
+        action="store_true",
+        help="use the r2 revision families (corpus/qualification/r2, manifest-r2.json)",
+    )
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
+    families = FAMILIES_R2 if args.r2 else FAMILIES
+    revision = REVISION_R2 if args.r2 else REVISION
+    corpus = args.corpus or (DEFAULT_CORPUS_R2 if args.r2 else DEFAULT_CORPUS)
+    manifest_path = args.manifest or (DEFAULT_MANIFEST_R2 if args.r2 else DEFAULT_MANIFEST)
     if args.verify or args.list:
-        paths = verify(args.manifest)
+        paths = verify(manifest_path)
     else:
-        generate(args.corpus, args.manifest)
-        paths = verify(args.manifest)
+        generate(corpus, manifest_path, families, revision)
+        paths = verify(manifest_path)
     if args.list:
         print("\n".join(paths))
 

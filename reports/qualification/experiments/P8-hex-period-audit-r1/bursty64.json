@@ -1,0 +1,23 @@
+{
+  "input": "corpus/qualification/bursty-variable-records-64MiB.ndjson",
+  "sha256": "fc703102838b125f5b7617141be8535150bdf577380b72ba5c9e18ac0ef34615",
+  "blocks": 1024,
+  "eligible_values": 534801,
+  "period_histogram": {
+    "5": 3,
+    "6": 70,
+    "7": 1178,
+    "8": 16719,
+    "9": 16305,
+    "10": 16578,
+    "11": 16504,
+    "12": 16642,
+    "13": 16659,
+    "14": 16725,
+    "15": 417418
+  },
+  "raw_nibble_values_bytes": 14182457,
+  "per_value_period_bytes": 5153926,
+  "optimistic_value_savings_bytes": 9028531,
+  "scope": "lexical opportunity audit; no complete frame ratio or codec-speed claim"
+}

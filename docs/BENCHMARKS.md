@@ -1,5 +1,9 @@
 # Benchmark protocol
 
+For the current numerical target, see [TARGET_4_006_12_15.md](TARGET_4_006_12_15.md).
+The fourth axis, CPU energy per GB, has its own [energy protocol](ENERGY_BENCHMARKS.md)
+with sustained workloads, idle observations and explicit measurement boundaries.
+
 ## Do not interpret supplied reference numbers as VXG performance
 
 `reports/reference-c-baselines.csv` was actually generated in the preparation environment
@@ -82,6 +86,18 @@ python3 scripts/generate_qualification_corpus.py --verify
 scripts/run_qualification.sh reports/qualification/runs/P0-baseline
 ```
 
+A second frozen revision, Q95-r2, applies the 2026-09-26 scope revision
+([E_B_FRONTIER_REVIEW.md](E_B_FRONTIER_REVIEW.md), [TARGET_4_006_12_15.md](TARGET_4_006_12_15.md)):
+only the `event-mix-identifiers` and `bursty-variable-records` value sources change
+(epoch+counter identifiers; bounded phrase-vocabulary messages). The other two families
+regenerate byte-identical to r1, which remains as an adversarial control set.
+
+```sh
+python3 scripts/generate_qualification_corpus.py --r2
+python3 scripts/generate_qualification_corpus.py --r2 --verify
+MANIFEST=reports/qualification/manifest-r2.json scripts/run_qualification.sh OUTPUT_DIRECTORY
+```
+
 The runner is serial: it builds one benchmark binary, records its hash and host details,
 then preserves an aggregate CSV, all timed samples and a console log per input/process.
 It is not a claim that synthetic Q95 represents arbitrary production data. A candidate
@@ -101,6 +117,46 @@ cargo run --release --features bench --bin vxg-analyze -- \
 The report includes exact command histograms, grouped residual widths, cache-hit models and
 dependency counts. Its cache model is diagnostic: it does not establish a compressed format
 until an exact pack/unpack prototype includes selectors, bases, exceptions and padding.
+
+P3 provides those lossless scalar prototypes without changing the encoder or public frame
+format. It captures every logical command field, including pattern seeds, and requires a
+pack/unpack roundtrip before writing a report. The resulting rates are metadata-only
+commands/s and metadata-bytes/s—not complete-codec GB/s—and its prototype totals are labelled
+as a model rather than a VXG v3 bitstream:
+
+```sh
+cargo run --release --features bench --bin vxg-pack-eval -- \
+  --input corpus/qualification/json-records-16MiB.ndjson \
+  --output reports/qualification/experiments/P3-packing-r2/json-records-16MiB.json \
+  --iterations 1 --threads 1 --block-size 65536
+```
+
+It evaluates fixed-width with exceptions, exact bitsliced transpose, lossless int4 escapes,
+2-bit/base-3 ternary selectors, and standalone exact distance alternatives. The distance rows
+are a substream experiment only; their size cannot be substituted for a full-frame ratio.
+
+P5's bounded entropy experiment is also an offline oracle. It writes canonical per-LZ-block
+Huffman tables and an MRU-8 distance tag stream, then proves an exact unpack before reporting
+its bytes. The adaptive form builds both entropy and fixed-128 streams, charges both builders,
+and adds a one-byte selector per LZ block; it is not a `compress` format or a codec GB/s claim:
+
+```sh
+cargo run --release --features bench --bin vxg-pack-eval -- \
+  --input corpus/qualification/json-records-16MiB.ndjson \
+  --output reports/qualification/experiments/P5-adaptive-entropy-r1/json-records-16MiB.json \
+  --iterations 3 --threads 1 --block-size 65536
+```
+
+The full Q95 reports show an adaptive JSON-only improvement (0.113659 on JSON-16) but no
+held-out ratio improvement beyond fixed-128's selector-byte cost. It is retained as a costed
+negative result; `docs/TARGET_4_95_15_PLAN.md` defines the next literal and matcher gates.
+
+The same evaluator also contains the P5 literal oracle. It extracts validated v2 literal streams,
+builds raw and canonical byte-Huffman payloads for every LZ block and charges a selector, tables,
+bit lengths and padding. Its total retains existing v2 command/prefix bytes and replaces only
+the literal payload. All-Q95 evidence in `P5-literal-entropy-r1` rejects it as a wire candidate:
+the compressed bursty/event literal payloads alone remain above the 5% artifact cap. Its scalar
+literal bytes/s rate is not a VXG encode/decode GB/s result.
 
 Built-in synthetic classes: zero runs, period-37, changing JSON records, pseudo-random,
 low-alphabet pseudo-random, and 4 KiB mixed segments. Their results are not representative

@@ -1,0 +1,6 @@
+{"event":"ready","codec":"lz4-a4","operation":"decode","profile":"cpu_preallocated_decode","raw_bytes":16777216,"encoded_bytes":2530628,"ratio":0.15083718299865723,"threads":1,"block_size":65536,"checksums":false,"allocator":"system","simd":"Neon","lz4_version":"1.10.0","zstd_version":"1.5.7"}
+{"event":"start","unix_ns":1789977102488169000,"elapsed_ns":167,"iterations":0,"raw_bytes_processed":0}
+{"event":"progress","unix_ns":1789977102588299000,"elapsed_ns":100129500,"iterations":54,"raw_bytes_processed":905969664}
+{"event":"progress","unix_ns":1789977102689663000,"elapsed_ns":201492917,"iterations":110,"raw_bytes_processed":1845493760}
+{"event":"end","unix_ns":1789977102689678000,"elapsed_ns":201508000,"iterations":110,"raw_bytes_processed":1845493760}
+{"event":"verified","roundtrip":true}

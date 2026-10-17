@@ -36,6 +36,11 @@ fn command_analysis_matches_encoder_trace_totals() {
     assert_eq!(analysis.matched_bytes, stats.matched_bytes);
     assert_eq!(analysis.op_counts, stats.op_counts);
     assert_eq!(analysis.commands, analysis.op_counts.iter().sum());
+    let literals = analysis::literal_blocks(&frame).unwrap();
+    assert_eq!(
+        literals.iter().map(Vec::len).sum::<usize>(),
+        stats.literal_bytes as usize
+    );
     assert!(analysis.to_json().contains("\"opcode_literal_run\""));
 }
 
@@ -64,4 +69,5 @@ fn command_analysis_keeps_raw_blocks_out_of_metadata() {
     assert_eq!(analysis.raw_blocks, 1);
     assert_eq!(analysis.commands, 0);
     assert_eq!(analysis.match_commands, 0);
+    assert_eq!(analysis::literal_blocks(&frame).unwrap(), [Vec::<u8>::new()]);
 }

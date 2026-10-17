@@ -1,5 +1,10 @@
 # Terra handoff — VXG 4 / 95 / 15
 
+> Current target (2026-09-21): [TARGET_4_006_12_15.md](TARGET_4_006_12_15.md).
+> The user revised ratio to <=0.06 and safe decode to >=12 GB/s (15 GB/s stretch);
+> allocating encode remains >=4 GB/s. Continue from current PROGRESS/state evidence.
+> The original kickoff and P0 instructions below are historical, not a restart.
+
 Planning prepared 2026-09-19; execution has not started under this plan.
 Workspace: `/Users/mapletechnologies/Desktop/big_projects/vxg`.
 Inspected implementation baseline: `0a2b4ed`. Do not reset to it; preserve newer work.

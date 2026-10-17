@@ -7,11 +7,26 @@ use std::{collections::BTreeMap, fmt::Write};
 
 use crate::{
     block::{self, Command, Parser},
-    Frame, Result,
+    Error, Frame, Result,
 };
 
 const GROUP: usize = 8;
 const WIDTHS: usize = 65;
+
+/// One lossless logical command, detached from the v1/v2 byte representation.
+/// Command blocks preserve independent-block reset points for packing experiments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetadataCommand {
+    pub op: u8,
+    pub lit: u32,
+    pub run: u32,
+    pub distance: u32,
+    /// Pattern opcodes carry up to eight seed bytes. Keeping the value split
+    /// avoids a lossy "match-only" research trace and makes every prototype
+    /// roundtrip every existing v2 opcode.
+    pub seed_lo: u32,
+    pub seed_hi: u32,
+}
 
 #[derive(Debug)]
 pub struct CommandAnalysis {
@@ -268,6 +283,72 @@ impl CommandAnalysis {
 
 fn next_command(parser: &mut Parser<'_>) -> Result<Option<Command>> {
     parser.next()
+}
+
+/// Return every non-RAW command stream as exact logical commands. The command
+/// parser validates each source stream and block-local state before returning.
+/// This is an offline bench-only API; production encoding and decoding do not
+/// allocate this representation.
+pub fn command_blocks(frame: &Frame<'_>) -> Result<Vec<Vec<MetadataCommand>>> {
+    let mut blocks = Vec::with_capacity(frame.blocks.len());
+    for block in &frame.blocks {
+        if block.info.kind == block::RAW {
+            blocks.push(Vec::new());
+            continue;
+        }
+        let mut parser = Parser::new(block.payload, block.info.raw_size, frame.version >= 2)?;
+        let mut commands = Vec::new();
+        while let Some(command) = next_command(&mut parser)? {
+            commands.push(MetadataCommand {
+                op: command.op,
+                lit: u32::try_from(command.lit).map_err(|_| crate::Error::SizeOverflow)?,
+                run: u32::try_from(command.run).map_err(|_| crate::Error::SizeOverflow)?,
+                distance: u32::try_from(command.distance)
+                    .map_err(|_| crate::Error::SizeOverflow)?,
+                seed_lo: u32::from_le_bytes(command.seed[..4].try_into().unwrap()),
+                seed_hi: u32::from_le_bytes(command.seed[4..].try_into().unwrap()),
+            });
+        }
+        blocks.push(commands);
+    }
+    Ok(blocks)
+}
+
+/// Return the exact literal byte stream for every non-RAW v2 block. The
+/// command parser verifies each literal boundary and complete stream
+/// consumption before the detached copy is returned. RAW blocks contribute an
+/// empty entry because their bytes remain a separately accounted passthrough
+/// payload in packing experiments.
+///
+/// This is a bench-only extraction helper. It does not alter public framing,
+/// matcher decisions or timed decode behavior.
+pub fn literal_blocks(frame: &Frame<'_>) -> Result<Vec<Vec<u8>>> {
+    let mut blocks = Vec::with_capacity(frame.blocks.len());
+    for block in &frame.blocks {
+        if block.info.kind == block::RAW {
+            blocks.push(Vec::new());
+            continue;
+        }
+        let mut parser = Parser::new(block.payload, block.info.raw_size, frame.version >= 2)?;
+        let mut literals = Vec::with_capacity(parser.literals.len());
+        while let Some(command) = next_command(&mut parser)? {
+            let end = command
+                .literal_start
+                .checked_add(command.lit)
+                .ok_or(Error::SizeOverflow)?;
+            literals.extend_from_slice(
+                parser
+                    .literals
+                    .get(command.literal_start..end)
+                    .ok_or(Error::Truncated)?,
+            );
+        }
+        if literals.len() != parser.literals.len() {
+            return Err(Error::InvalidFrame("literal stream accounting"));
+        }
+        blocks.push(literals);
+    }
+    Ok(blocks)
 }
 
 /// Analyze a parsed frame. The parser still validates complete stream consumption.

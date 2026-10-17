@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "experiment_id": "P6E-encode-profile-r1",
+  "status": "rejected_no_retained_source_change",
+  "scope": "Directional local CPU evidence only; not an all-Q95 qualification run.",
+  "configuration": {
+    "input": "corpus/qualification/json-records-16MiB.ndjson",
+    "raw_bytes": 16777216,
+    "threads": 1,
+    "block_size": 65536,
+    "simd": "Neon",
+    "checksum": false,
+    "allocator": "system",
+    "profile": "cpu_allocating_encode",
+    "artifact_ratio": 0.14650089
+  },
+  "allocation_counters": {
+    "alloc_calls": 18,
+    "realloc_calls": 12,
+    "dealloc_calls": 16,
+    "allocated_bytes": 50434768,
+    "deallocated_bytes": 16863888,
+    "live_bytes": 33570880,
+    "interpretation": "This is too few allocator entries to justify adding mimalloc/jemalloc before a profile attributes material wall time to allocation."
+  },
+  "sample_profile": {
+    "samples": 3356,
+    "compress_samples": 3313,
+    "encode_worker_samples": 1324,
+    "engine_lcp_samples": 1261,
+    "block_control_samples": 418,
+    "bzero_samples": 166,
+    "platform_memmove_samples": 163,
+    "rawvec_reserve_or_realloc_samples": 21,
+    "interpretation": "LCP and command construction dominate; direct allocation/reallocation is not the primary local encode cost. Counts overlap by stack frame and are not additive percentages."
+  },
+  "paired_experiments": [
+    {
+      "candidate": "Two u64 suffix probes before the NEON vector loop; exact trailing-zero byte locator.",
+      "control": "Original NEON vector-first LCP with scalar 16-byte mismatch scan.",
+      "samples": 11,
+      "seconds_per_sample": 0.5,
+      "candidate_GBps": 2.0119,
+      "control_GBps": 2.5708,
+      "candidate_over_control_percent": 78.26,
+      "decision": "reject"
+    },
+    {
+      "candidate": "NEON equality-mask inversion and lane trailing-zero mismatch locator.",
+      "control": "Original scalar mismatch locator.",
+      "samples": 9,
+      "seconds_per_sample": 0.35,
+      "candidate_GBps": 1.6965,
+      "control_GBps": 2.5965,
+      "candidate_over_control_percent": 65.34,
+      "decision": "reject"
+    },
+    {
+      "candidate": "Reserve each worker payload arena to all assigned raw bytes before encoding.",
+      "control": "Existing one-block initial arena reserve with ordinary Vec growth.",
+      "samples": 9,
+      "seconds_per_sample": 0.35,
+      "candidate_GBps": 2.5449,
+      "control_GBps": 2.5796,
+      "candidate_over_control_percent": 98.65,
+      "decision": "reject"
+    },
+    {
+      "candidate": "Clear only hash-table slots recorded as dirty in the preceding block.",
+      "control": "Existing full hash-table fill(0) per block.",
+      "samples": 9,
+      "seconds_per_sample": 0.35,
+      "candidate_GBps": 2.4977,
+      "control_GBps": 2.5723,
+      "candidate_over_control_percent": 97.10,
+      "decision": "reject"
+    }
+  ],
+  "correctness": {
+    "default_bench_release_suite": "passed",
+    "each_temporary_candidate_and_control_suite": "passed before its benchmark",
+    "artifact": "All paired rows retained the same 0.14650089 encoded/raw ratio."
+  },
+  "conclusion": "Do not add a general allocator, arena/slab framework, alternate NEON LCP locator, or dirty hash reset to v2. The existing worker-local payload arena is already the right ownership boundary. Further encode work requires a match-selection or format/model hypothesis that can pay back the measured LCP/command cost; no candidate here advances the locked joint 4/95/15 target."
+}

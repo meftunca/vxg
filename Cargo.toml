@@ -35,6 +35,12 @@ decode-unconditional-literal-copy = []
 repeat-engine-copy = []
 # Benchmark-only control build for fused fixed-size v2 opcode-7 decode.
 decode-op7-direct-generic = []
+# Benchmark-only control build for checked opcode-7's proven non-overlap copy.
+decode-op7-inline-copy-generic = []
+# Benchmark-only control build for the bounded unrolled 8..=63-byte opcode-7
+# copy. It keeps the same validated non-overlap branch but calls the generic
+# pointer copy so the P6 profile can isolate code generation, not semantics.
+decode-op7-inline-short-copy-generic = []
 # Benchmark-only control build that collects `WorkStats` during timed encode.
 encode-with-stats = []
 
@@ -56,8 +62,28 @@ path = "src/bin/bench.rs"
 required-features = ["bench"]
 
 [[bin]]
+name = "vxg-energy-workload"
+path = "src/bin/energy_workload.rs"
+required-features = ["bench"]
+
+[[bin]]
 name = "vxg-analyze"
 path = "src/bin/analyze.rs"
+required-features = ["bench"]
+
+[[bin]]
+name = "vxg-pack-eval"
+path = "src/bin/pack_eval.rs"
+required-features = ["bench"]
+
+[[bin]]
+name = "vxg-column-eval"
+path = "src/bin/column_eval.rs"
+required-features = ["bench"]
+
+[[bin]]
+name = "vxg-group-eval"
+path = "src/bin/group_eval.rs"
 required-features = ["bench"]
 
 [profile.release]

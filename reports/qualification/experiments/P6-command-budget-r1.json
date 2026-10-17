@@ -1,0 +1,48 @@
+{
+  "schema": "vxg-p6-command-budget-r1",
+  "scope": "Direction-only command-execution feasibility audit for the existing v2 JSON-16 trace. This is not a shuffled qualification result and does not make a safe-decode claim from validated replay.",
+  "sources": {
+    "trace": "reports/qualification/experiments/P2-command-analysis/json-records-16MiB.json",
+    "timing": "reports/local-p6-json-full-vs-baselines-2026-09-19.csv",
+    "corpus_manifest": "reports/qualification/manifest.json"
+  },
+  "workload": {
+    "dataset": "corpus/qualification/json-records-16MiB.ndjson",
+    "raw_bytes": 16777216,
+    "threads": 1,
+    "block_size": 65536,
+    "checksums": false,
+    "simd": "Neon",
+    "allocator": "system"
+  },
+  "trace_observations": {
+    "commands": 591146,
+    "match_commands": 591087,
+    "opcode_7_commands": 557548,
+    "matched_bytes": 16630071,
+    "literal_bytes": 147145,
+    "average_output_bytes_per_command": 28.380833,
+    "references_within_8_command_group": 5182
+  },
+  "local_timing_observations_gbps": {
+    "safe_prepared_decode": 3.7643,
+    "safe_full_frame_decode": 3.8771,
+    "prepared_command_validation": 8.6031,
+    "validated_replay_decode": 3.9696,
+    "lz4_acceleration_1_decode": 9.158
+  },
+  "derived_same_trace_budget": {
+    "safe_prepared_commands_per_second": 132635000,
+    "validated_replay_commands_per_second": 139869000,
+    "safe_prepared_ns_per_command": 7.539,
+    "validated_replay_ns_per_command": 7.15,
+    "minimum_10_gbps_commands_per_second": 352350000,
+    "minimum_10_gbps_ns_per_command": 2.838,
+    "minimum_1_20x_lz4_commands_per_second": 387205000,
+    "minimum_1_20x_lz4_ns_per_command": 2.583,
+    "minimum_15_gbps_commands_per_second": 528526000,
+    "minimum_15_gbps_ns_per_command": 1.892
+  },
+  "calculation": "command_rate = output_GBps * 1_000_000_000 / average_output_bytes_per_command; ns_per_command = average_output_bytes_per_command / output_GBps. Rounded input GB/s values bound the precision of every derived number.",
+  "decision": "Do not run another same-trace v2 copy-loop micro-optimization without a profiler finding or a grouped command-format prototype. A prevalidated grouped executor must exceed 352.350 M commands/s before it can be considered a necessary (not sufficient) route to a 10 GB/s safe decoder. Validation remains inside every public safe-decode measurement."
+}

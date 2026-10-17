@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "active_package": "P2",
-  "experiment_id": "P2-command-analysis-r1",
-  "hypothesis": "The existing command trace must fit the 0.05 byte budget on paper before a SIMD packing layout is promoted.",
+  "active_package": "P8: energy comparison infrastructure and event/bursty byte-budget audit; CPU target remains 4 GB/s / ratio 0.06 / safe decode 12–15 GB/s",
+  "experiment_id": "P6P-bounded-op7-copy-r1",
+  "hypothesis": "Re-evaluate complete event/bursty model payloads against the user-authorized 6% ceiling before selecting a bounded generic representation. JSON and field-order P5D R9 packets now pass ratio only; all production speed gates remain open. Retain P6P and avoid repeating P6E variants without new evidence.",
   "baseline_revision": "e249158",
   "candidate_hash": null,
   "candidate_binary": null,
@@ -10,16 +10,51 @@
   "commands": [
     "cargo test --release",
     "cargo test --release --features bench",
+    "cargo run --release --features bench --bin vxg-pack-eval -- --input corpus/qualification/INPUT.ndjson --output reports/qualification/experiments/P3-packing-r2/INPUT.json --iterations 1 --threads 1 --block-size 65536",
+    "cargo run --release --features bench --bin vxg-pack-eval -- --input corpus/qualification/INPUT.ndjson --output reports/qualification/experiments/P5-adaptive-entropy-r1/INPUT.json --iterations 3 --threads 1 --block-size 65536",
+    "cargo run --release --features bench --bin vxg-pack-eval -- --input corpus/qualification/INPUT.ndjson --output reports/qualification/experiments/P5-literal-entropy-r1/INPUT.json --iterations 3 --threads 1 --block-size 65536",
+    "cargo run --release --features matcher-hash2-gated --bin vxg-pack-eval -- --input corpus/qualification/INPUT.ndjson --output reports/qualification/experiments/P5-hash2-gated-r1/INPUT.json --iterations 3 --threads 1 --block-size 65536",
+    "cargo run --release --features bench --bin vxg-pack-eval -- --input corpus/qualification/INPUT.ndjson --output reports/qualification/experiments/P5-nested-literal-vxg-r1/INPUT.json --iterations 1 --threads 1 --block-size 65536",
+    "cargo run --release --features bench --bin vxg-structure-eval -- --input corpus/qualification/INPUT.ndjson --output reports/qualification/experiments/P5-structural-grammar-r1/INPUT.json --iterations 1 --block-size 65536",
+    "cargo run --release --features bench --bin vxg-record-eval -- --input corpus/qualification/INPUT.ndjson --output reports/qualification/experiments/P5-record-template-r4/INPUT.json --iterations 1 --block-size 65536",
+    "cargo test --release --features bench columns",
+    "cargo run --release --features bench --bin vxg-column-eval -- --input corpus/qualification/INPUT.ndjson --output reports/qualification/experiments/P5D-structured-columns-r9/INPUT.json --iterations 1 --block-size 65536",
+    "cargo test --release --features bench groups",
+    "cargo run --release --features bench --bin vxg-group-eval -- --input corpus/qualification/json-records-16MiB.ndjson --output reports/qualification/experiments/P6B-grouped-command-r1/json-records-16MiB.json --iterations 5 --block-size 65536 --threads 1 --simd neon",
+    "cargo test --release --features bench,decode-op7-inline-short-copy-generic",
+    "cargo run --release --features bench --bin vxg-bench -- --file corpus/qualification/json-records-16MiB.ndjson --threads 1 --block-size 65536 --simd neon --decode-only --vxg-only --samples 9 --seconds 0.2 --csv reports/qualification/experiments/P6P-bounded-op7-copy-r1/candidate-forward.csv",
+    "TRIALS=1 SAMPLES_PER_PROCESS=3 SECONDS_PER_SAMPLE=0.05 scripts/run_qualification.sh reports/qualification/runs/P6P-bounded-op7-copy-smoke-r1",
+    "cargo test --release --features bench,decode-op7-inline-copy-generic",
+    "cargo run --release --features bench --bin vxg-bench -- --file corpus/qualification/json-records-16MiB.ndjson --threads 1 --block-size 65536 --simd neon --validated-decode --samples 9 --seconds 0.2 --csv reports/local-p6-json-full-vs-baselines-2026-09-19.csv --samples-csv reports/local-p6-json-full-vs-baselines-samples-2026-09-19.csv",
+    "TRIALS=1 SAMPLES_PER_PROCESS=3 SECONDS_PER_SAMPLE=0.05 scripts/run_qualification.sh reports/qualification/runs/P6-op7-inline-copy-smoke-r1",
+    "P5 temporary candidate control commands and local CSV names are recorded in docs/PROGRESS.md; their feature flags were removed after the experiment",
     "TRIALS=1 SAMPLES_PER_PROCESS=3 SECONDS_PER_SAMPLE=0.01 scripts/run_qualification.sh reports/qualification/runs/P0-smoke-r2"
   ],
   "correctness_status": {
-    "release_tests": "passed: 2 golden + 16 property + 1 doctest",
-    "bench_feature_tests": "passed: 2 golden + 16 property + 1 doctest",
+    "release_tests": "passed after P3: 2 golden + 16 property + 1 doctest",
+    "bench_feature_tests": "passed after P3: 6 packing + 2 analysis + 2 golden + 16 property + 1 doctest",
     "full_cpu_shader_gate": "passed: scripts/check.sh (shader consistency, release tests, roundtrip example)",
     "independent_model_gate": "passed: scripts/check_model.sh with ASAN/UBSAN emulator WG=8 and WG=64; this is not actual GPU execution",
     "timed_encode_equivalence": "vxg-bench checks compress() byte-for-byte against compress_with_stats() before reporting setup-frame size",
     "validated_boundary": "decode_validated is unsafe; its sole caller is gated by ValidatedCommandStreams constructed only after Frame::into_validated validation",
-    "p1_direct_copy_control": "both candidate/control release suites passed; conflicting ordered measurements caused the candidate to be removed"
+    "p1_direct_copy_control": "both candidate/control release suites passed; conflicting ordered measurements caused the candidate to be removed",
+    "p3_packing": "passed: 6 scalar packing boundary/roundtrip tests plus 2 command-analysis regressions; all 8 r2 reports parse as JSON and contain 15 full-metadata layouts plus 9 exact distance models",
+    "p5_recent_distance": "both temporary candidate builds passed the full bench release suite; experimental code/features were removed after their packed-size evidence, and the restored default/bench release suites passed",
+    "p5_bounded_entropy": "passed: canonical Huffman/bits/padding boundary tests, adaptive fixed-or-entropy selection tests, actual encoder trace roundtrip and the full default + bench release suites; all 8 bounded and adaptive reports parse as JSON",
+    "p5_literal_entropy": "passed: parser-backed literal extraction, raw-or-entropy exact literal roundtrip and malformed selector rejection, actual encoder trace evaluation and the bench packing suite; all 8 literal reports parse as JSON",
+    "p5_token_dictionary": "passed: RAW/Huffman/token literal roundtrips, canonical token-table rejection, actual encoder trace evaluation and all 8 P5-token-dictionary-r1 JSON reports; candidate was rejected after its Q95 result",
+    "p5_hash2_gated": "temporary candidate passed default and matcher-feature release suites, timed-API frame equivalence in vxg-bench and all 8 P5-hash2-gated-r1 JSON reports; feature is removed after evidence because it loses joint compact/speed criteria",
+    "p5_nested_literal_vxg": "passed: independent nested literal subframe exact/truncation tests, actual encoder trace evaluation and all 8 P5-nested-literal-vxg-r1 JSON reports; control is removed after evidence because held-out blocks never select it",
+    "p5_structural_grammar": "passed: lexer/escape lossless roundtrip plus malformed dictionary rejection tests and all 8 P5-structural-grammar-r1 JSON reports; control is removed because direct raw-domain grammar selection is rare and its complete ratios are not viable",
+    "p5_record_template": "passed: exact skeleton/slot roundtrip, raw tail, malformed table, bit-sliced delta padding, hex and periodic-hex tests plus all 8 P5-record-template-r4 JSON reports; control is removed because its generic all-Q95 ratio and oracle rate are not viable",
+    "p6_op7_inline_copy": "passed: default and generic-control 30-test release suites plus manifest-verified eight-member smoke; all frames roundtrip through the same safe decoder and the candidate retains overlap on Engine::repeat",
+    "p5_identifier_delta": "passed: exact text-to-u64 extraction and 16/64 MiB count cross-checks in retained reports; this is an analytical gate only, not a codec or decoder path",
+    "p6_command_budget": "passed: retained P2 trace and P6 local CSV inputs are copied as rounded values into P6-command-budget-r1.json; the JSON report parses and is an analytical/handoff gate only, not a codec or decoder path",
+    "p5d_structured_columns": "passed prototype correctness only: six bench-only model/packet tests passed; all eight R9 reports parse and each complete packet roundtrips exactly. R2 is retained but invalid after a report-serialization defect and is not evidence. P5D is not a v3 path or a performance qualification.",
+    "p6b_grouped_commands": "passed prototype correctness only: exact mixed-command roundtrip plus truncated/noncanonical packet rejection tests passed; R1 performs a complete safe reconstruction before serializing its report, and the retained JSON parses. It is a synthetic research packet, not a VXG v3 or public decode qualification.",
+    "p6p_bounded_op7_copy": "passed: exhaustive 8..=63 length/alignment direct-copy test, normal + generic-control bench suites, byte-identical JSON candidate/control runs and a manifest-verified eight-member safe-decode smoke. The helper only executes after the existing checked/proof-backed non-overlap invariant; overlap and longer runs retain their former paths.",
+    "p6e_encode_profile_controls": "passed temporary candidate/control release suites before each paired local benchmark; every candidate retained the same JSON-16 artifact ratio and was removed after losing its control. P6E evidence is profiling and directional speed evidence only, not a qualification run.",
+    "p6m_metal_device": "passed: actual Apple M2 Max Metal gpu-check reports 81 three-way CPU/GPU conformance cases. The five-sample host-e2e benchmark is directional performance evidence only."
   },
   "metrics_by_profile": {
     "smoke_artifact": "reports/qualification/runs/P0-smoke-r2",
@@ -33,14 +68,83 @@
       "parse_validate_GBps": 8.2471,
       "best_lz4_safe_decode_GBps": 8.9195
     },
-    "p2_command_analysis": "reports/qualification/experiments/P2-command-analysis; all eight Q95 members analyzed outside timed paths"
+    "p2_command_analysis": "reports/qualification/experiments/P2-command-analysis; all eight Q95 members analyzed outside timed paths",
+    "p3_packing": "reports/qualification/experiments/P3-packing-r2; all values are one-iteration scalar prototype evidence, not codec GB/s. Best complete unchanged-trace fixed/bitslice ratio: JSON 0.119791 (16 MiB)/0.120802 (64 MiB); bursty 0.313019/0.319255; event 0.270220/0.294602; field-order 0.199435/0.201342. Bitslice byte count equals its fixed counterpart under the same plan.",
+    "p5_recent_distance": "P5-recent-distance-r1 contains all 8 Q95 candidate reports. It saves v2 bytes on every member but worsens fixed-128 complete prototype bytes on 7/8. P5-recent-miss-r2 JSON-16 saves 327 v2 bytes and 244 fixed-128 prototype bytes after 123,607 checks / 175 hits; neither experiment approaches the locked target.",
+    "p5_bounded_entropy": "P5-bounded-entropy-r1 and P5-adaptive-entropy-r1 contain all 8 reports. Pure entropy improves only JSON (0.113657/0.113993) and loses all six held-out members. The adaptive selector chooses entropy in 252/256 JSON-16 and 1011/1023 JSON-64 LZ blocks, but fixed in every held-out block; selector-inclusive ratios are 0.113659/0.114000 on JSON and fixed ratio plus one byte/LZ block elsewhere. It is a ratio-only scalar oracle, not a v3 or GB/s result.",
+    "p5_literal_entropy": "P5-literal-entropy-r1 contains all 8 reports. Every LZ block selects byte entropy, lowering bursty literals by 858,032/3,377,995 B and event literals by 886,957/3,406,366 B at 16/64 MiB, but their encoded literal payloads alone remain 5.9%/5.8% bursty and 6.4%/6.1% event before command/header bytes. Literal-only total ratios remain 0.269001/0.275782 bursty, 0.214096/0.240877 event, 0.196827/0.199034 field and 0.144882/0.145019 JSON.",
+    "p5_token_dictionary": "P5-token-dictionary-r1 contains all 8 reports. Fixed eight-byte tokens select only on JSON (137/256 and 527/1023 LZ blocks) for 2,658/9,102 B beyond Huffman; all held-out blocks select Huffman and gain no byte. It is not a viable cross-Q95 literal representation.",
+    "p5_hash2_gated": "P5-hash2-gated-r1 contains all 8 reports. It improves held-out fixed-128 metadata by 13,612..557,438 B while JSON worsens by 783/3,366 B; JSON frame only saves 475/1,757 B. Directional encode is 2.081 vs 2.591 GB/s JSON-16 and 0.836 vs 1.096 GB/s field-16, with 186,090/402,845 extra LCPs for 161/46,327 selections. The bounded hash-2 candidate is rejected and removed.",
+    "p5_nested_literal_vxg": "P5-nested-literal-vxg-r1 contains all 8 reports. Nested VXG literal frames win 249/256 JSON-16 and 1005/1023 JSON-64 blocks, saving 12,345/49,481 B beyond fixed tokens for 0.143988/0.144146 total literal models. They win zero bursty/event/field blocks; those models remain 0.269001/0.275782, 0.214096/0.240877 and 0.196827/0.199034. The control is rejected and removed.",
+    "p5_structural_grammar": "P5-structural-grammar-r1 contains all 8 reports. Complete raw-domain grammar ratios are bursty 0.982668/0.978032, event 0.967214/0.958055, field-order 0.927871/0.927176 and JSON 0.922730/0.905680 at 16/64 MiB. It selects grammar on only 14/71, 16/82, 35/142 and 31/152 blocks respectively; RAW dominates. Direct syntax tagging with generic spans is rejected and removed.",
+    "p5_record_template": "P5-record-template-r4 contains all 8 reports. Exact skeleton + column ratios are bursty 0.237793/0.236834, event 0.267403/0.266130, field-order 0.074979/0.074780 and JSON 0.041067/0.040884 at 16/64 MiB. It charges real bit-sliced delta, bounded dictionary, delta-RLE, hex and periodic-hex forms; every block selects grammar, but the scalar oracle reaches only 0.018..0.033 GB/s construction and 0.260..0.391 GB/s reconstruction. It is rejected and removed.",
+    "p6_op7_inline_copy": "P6-op7-inline-copy-r1 retains one default/control JSON-16 pair: checked prepared decode 3.681 versus 3.371 GB/s (+9.2% directional). P6-op7-inline-copy-smoke-r1 is a manifest-verified eight-member, one-process/three-0.05-second-sample record: safe VXG decode spans 1.745..3.884 GB/s versus LZ4-a1 4.740..9.449 GB/s, and v2 ratios remain 0.146..0.326. It is a smoke record, not qualification.",
+    "p5_identifier_delta": "P5-identifier-delta-analysis-r1 retains both event sizes. Raw exact eight-byte IDs alone are 0.058249/0.057962 of input. XOR and wrapping-subtract delta planes have near-half one density and transition density (XOR: 3,975,556/7,818,048 one bits and 3,956,926 transitions at 16 MiB; 15,823,726/31,118,016 and 15,748,901 at 64 MiB). Generic bitplane/RLE delta coding is rejected before v3 integration.",
+    "p6_command_budget": "P6-command-budget-r1 derives a necessary same-trace execution budget from P2 JSON-16 and the longer local P6 CSV: 591,146 commands, 28.380833 output bytes/command, 132.635 M safe and 139.869 M replay commands/s. The 10 GB/s/1.20x-LZ4/15 GB/s thresholds require 352.350/387.205/528.526 M commands/s respectively. Rounded local inputs make this direction-only analytical evidence, not a qualification row.",
+    "p5d_structured_columns": "P5D-structured-columns-r9 is a complete scalar independent-block model packet, not a codec wire format or speed result. Fully charged 16/64 MiB ratios are bursty 0.084347367/0.083904117, event 0.078921139/0.078591824, field-order 0.050787866/0.050617427 and JSON 0.023171782/0.023074254. Pack/unpack is 0.034..0.072/0.050..0.084 GB/s. The generic prefix-trained 65-bit GF(2) affine recurrence selected zero Q95 columns.",
+    "p6b_grouped_commands": "P6B-grouped-command-r1 is a complete scalar 64-command bit-plane packet from the JSON-16 v2 trace, with full literals/RAW passthrough and a 32-byte header plus 32-byte block directories charged. It reports 0.112360299 synthetic ratio, 44.825M validation, 37.971M validated replay and 20.446M safe commands/s (1.078/0.580 GB/s input rate) at five Neon iterations. The replay result is only 10.8% of P6A's 352.350M necessary command-rate threshold, so no Neon transpose is authorized.",
+    "p6p_bounded_op7_copy": "P6P-bounded-op7-copy-r1 preserves the byte-identical v2 artifact and restricts unaligned word copies to existing proven-disjoint 8..=63-byte opcode-7 runs. JSON-16 reversed-order safe prepared pairs are candidate 7.5410/7.5404 versus generic control 3.7413/3.7465 GB/s (ratio 0.14650089). Bounded proof-backed replay is 7.4960 GB/s, safe 7.5367 and validation 8.3042. Eight-member smoke VXG safe range is 2.6369..7.5963 GB/s vs LZ4-a1 4.7671..9.3386; ratios remain 0.14650089..0.32611792.",
+    "p6e_encode_profile_controls": "P6E-encode-profile-r1 retains a directional JSON-16 allocating-encode allocation/profile decision: 18 alloc and 12 realloc calls, but only 21/3356 stack samples in RawVec reserve/reallocation versus 1261 in Engine::lcp. Word-prefix and mask-based NEON LCP probes, full worker-arena pre-reservation, and dirty-slot hash reset all lost their same-artifact controls (2.0119/2.5708, 1.6965/2.5965, 2.5449/2.5796 and 2.4977/2.5723 GB/s respectively) and were removed.",
+    "p6m_metal_device": "P6M-metal-device-r1 records an actual M2 Max 81-case CPU/GPU conformance pass. Its directional JSON-16 host-e2e Metal rows are 0.736 GB/s encode, 1.255 GB/s decode and 0.164 ratio; CPU VXG is 2.487/7.280 at 0.147, and LZ4-a1 is 2.271/8.812 at 0.150. Metal is functionally valid but not a performance qualification."
   },
-  "decision": "P0 instrumentation and safety boundary are in place. P1 direct safe-copy did not survive reversed-order measurement. P2 now supplies frozen command traces; the current format still fails the 0.05/4/10 target on the smoke corpus.",
-  "next_step": "P3: implement exact scalar fixed-width, bitsliced, int4 and ternary command-metadata pack/unpack prototypes against the frozen trace, then compare their complete metadata sizes.",
+  "decision": "P0 instrumentation and safety boundary are in place. P1 direct safe-copy did not survive reversed-order measurement. P2 supplies frozen command traces. P3 completed exact fixed/bitsliced/int4/ternary and distance scalar oracles; no unchanged-trace candidate approaches the 0.05 artifact budget. P5 recent-distance and hash-miss-only probes were removed. P5 bounded metadata entropy, byte literal entropy, fixed 8-byte tokens, nested literal VXG, direct structural-byte grammar, exact record-template grammar, generic XOR/subtract identifier delta analysis and P5D structured-column modeling are costed evidence. P5D R9 reconstructs every byte but reaches only 0.083904 bursty, 0.078592 event and 0.050617 field-order at 64 MiB; its generic GF(2) predictor selected zero columns. It fails the ratio gate and is not a v3 route. P6B's exact bit-sliced group packet reaches only 37.971M replay commands/s versus the necessary 352.350M, so its scalar stop gate fails and a Neon transpose is rejected. P6P retains the only successful new v2 execution improvement: a profile-justified bounded non-overlap copy more than doubles JSON safe prepared decode in reversed order, but all Q95 speed and all current ratios remain below the joint gates. P6E shows allocator/arena and NEON LCP micro-controls lose their byte-identical local controls, so none is retained. No currently authorized generic candidate has a route to the joint target. On 2026-09-21 the user revised the target to ratio <=0.06 and safe decode >=12 GB/s (15 stretch), retaining 4 GB/s encode. The previous 5% stop decisions are historical; current_target and docs/TARGET_4_006_12_15.md govern further work. Existing P5D packets pass ratio alone on JSON/field-order, but event/bursty and production speeds still fail.",
+  "next_step": "Retry the corrected energy runner in the user's authenticated terminal into P8-energy-r2; no codec energy measurements completed in R1. Keep heavy work separate from sensor runs. For ratio, the per-value hex-period model is rejected (529,045 extra bytes versus the common-period reference); next test a bounded generic conditional model across serialized values/lengths with prefix training, held-out predictions and full descriptor/escape costs. The required event/bursty savings remain 1,247,677/1,604,179 bytes at 64 MiB. Keep frozen corpus and same-artifact tests; do not combine scalar oracle ratio with v2 speed.",
   "unrun_checks": [
     "7-process paired confidence baseline at 0.2 s samples for every Q95 member",
     "actual Metal validation after CPU P0 changes",
     "Miri/sanitizer fuzzing of the new unsafe validated decode boundary",
-    "P1 profiling/disassembly and P2 command-stream metadata analyzer"
-  ]
+    "P1 profiling/disassembly"
+  ],
+  "current_target": {
+    "revision": "2026-09-21-user-006",
+    "document": "docs/TARGET_4_006_12_15.md",
+    "encode_GBps_min": 4,
+    "encoded_over_raw_max": 0.06,
+    "safe_full_frame_decode_GBps_min": 12,
+    "safe_full_frame_decode_GBps_stretch": 15,
+    "lz4_decode_speedup_min": 1.2,
+    "lz4_decode_speedup_stretch": 1.5,
+    "threads": 1,
+    "block_size": 65536,
+    "corpus_manifest": "reports/qualification/manifest.json",
+    "primary_decode_profile": "cpu_full_frame_preallocated_decode",
+    "same_artifact_configuration_required": true,
+    "previous_thresholds": "Historical: ratio <=0.05; safe decode >=10 GB/s plus relative LZ4 gates.",
+    "goal_tool_status": "usageLimited at inspection; target revision is recorded in project documents only."
+  },
+  "p8_energy": {
+    "document": "docs/ENERGY_BENCHMARKS.md",
+    "metric": "encode/decode estimated system CPU-rail J per decimal GB of raw input",
+    "scope": "same host; includes background CPU activity; not per-process or whole-system energy",
+    "workload_smoke": "12 codec/operation paths passed pre/post byte checks; no-power energy values remain null",
+    "parser_tests": "6 passed under default, UTC and America/Los_Angeles TZ",
+    "real_capture_regression": "P8-energy-r1/preflight-power.txt now parses its +0300 offset correctly; the failed R1 run is preserved",
+    "status": "awaiting user-terminal retry into P8-energy-r2; separate agent sudo session still requires a password",
+    "codec_energy_comparison_available": false
+  },
+  "p8_ratio_audit": {
+    "report": "reports/qualification/experiments/P8-hex-period-audit-r2/decision.json",
+    "per_value_period_bytes": 5154950,
+    "common_period_reference_bytes": 4625905,
+    "extra_bytes": 529045,
+    "decision": "reject before implementation; no core codec change"
+  },
+  "target_revision_assessment": {
+    "latest_directional_csv": "reports/local-metal-json16-r1.csv",
+    "json16": {
+      "allocating_encode_GBps": 2.4865,
+      "safe_full_frame_decode_GBps": 7.3703,
+      "encoded_over_raw": 0.14650089
+    },
+    "p5d_r9_ratio_only": {
+      "json_pass": true,
+      "field_order_pass": true,
+      "event_pass": false,
+      "bursty_pass": false,
+      "event_64mib_bytes_over_006": 1247677,
+      "bursty_64mib_bytes_over_006": 1604179
+    },
+    "production_joint_target_passed": false,
+    "new_benchmark_run": false
+  }
 }

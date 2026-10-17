@@ -1,0 +1,19 @@
+VXG 0.1 / liblz4 1.10.0 / libzstd 1.5.7; macos aarch64; SIMD=Neon; allocator=system; threads=1; block=65536
+CPU profiles: cpu_allocating_encode; cpu_preallocated_decode = prepared directory + checked command decode; cpu_full_frame_preallocated_decode = parse + checked decode; cpu_prepared_validate_commands = command validation on a prepared directory; cpu_parse_validate_commands = parse + command validation; cpu_prevalidated_decode = prepared proof + repeated decode only. Per-call contexts included. RAW fallback for ALL codecs. Checksums OFF. Warm cache. GPU: separate host-e2e profile.
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson VXG work raw_fast=1 sample_words=48 probes=2924093 occupied=2354563 candidate_checks=2354563 collisions=4189 lcp_calls=2350374 lcp_bytes=50002635 matches=2350374 matched_bytes=66456029 streams=control:4705334 attrs:4432856 literals:587299 ops=[247, 0, 133946, 0, 0, 0, 0, 2216428] op7_dist=[0, 8250, 550345, 766426, 888224, 3183] run=[758537, 808664, 783173, 0, 0, 0] zero_literals=1908141
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson vxg            compress   ratio=0.147    2.565 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson vxg            decompress ratio=0.147    7.493 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson vxg            decompress ratio=0.147    7.460 GB/s [cpu_full_frame_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson vxg            validate_commands ratio=0.147    8.467 GB/s [cpu_prepared_validate_commands]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson vxg            parse_validate_commands ratio=0.147    8.523 GB/s [cpu_parse_validate_commands]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson lz4-c-a1       compress   ratio=0.149    2.350 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson lz4-c-a1       decompress ratio=0.149    9.132 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson lz4-c-a4       compress   ratio=0.150    2.429 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson lz4-c-a4       decompress ratio=0.150    9.128 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson zstd-c-l-3     compress   ratio=0.099    1.972 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson zstd-c-l-3     decompress ratio=0.099    4.188 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson zstd-c-l1      compress   ratio=0.054    1.657 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson zstd-c-l1      decompress ratio=0.054    3.305 GB/s [cpu_preallocated_decode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson zstd-c-l3      compress   ratio=0.062    1.533 GB/s [cpu_allocating_encode]
+/Users/mapletechnologies/Desktop/big_projects/vxg/corpus/qualification/json-records-64MiB.ndjson zstd-c-l3      decompress ratio=0.062    2.906 GB/s [cpu_preallocated_decode]
+CSV: reports/qualification/runs/P6P-bounded-op7-copy-smoke-r1/json-records-64MiB/process-01/summary.csv

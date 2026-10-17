@@ -1,5 +1,9 @@
 # VXG 4 / 95 / 15 — CPU implementation and acceptance plan
 
+> Target revision (2026-09-21): use [TARGET_4_006_12_15.md](TARGET_4_006_12_15.md)
+> for the current 4 GB/s encode / ratio <=0.06 / 12–15 GB/s safe decode contract.
+> The thresholds below are historical; completed phases must not be restarted.
+
 Status: implementation plan, not a performance claim. Prepared 2026-09-19.
 Executor: Terra. Start from the current checkout; the inspected code baseline is
 `0a2b4ed` (validated-frame decode). Read `TERRA_HANDOFF.md` before executing.

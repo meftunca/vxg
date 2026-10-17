@@ -1,0 +1,5 @@
+{"event":"ready","codec":"zstd-m3","operation":"encode","profile":"cpu_allocating_encode","raw_bytes":16777216,"encoded_bytes":1671795,"ratio":0.09964674711227417,"threads":1,"block_size":65536,"checksums":false,"allocator":"system","simd":"Neon","lz4_version":"1.10.0","zstd_version":"1.5.7"}
+{"event":"start","unix_ns":1789977102730806000,"elapsed_ns":166,"iterations":0,"raw_bytes_processed":0}
+{"event":"progress","unix_ns":1789977102836512000,"elapsed_ns":105705875,"iterations":12,"raw_bytes_processed":201326592}
+{"event":"end","unix_ns":1789977102935289000,"elapsed_ns":204481666,"iterations":23,"raw_bytes_processed":385875968}
+{"event":"verified","roundtrip":true}

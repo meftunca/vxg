@@ -1,0 +1,21 @@
+{
+  "codec": "vxg",
+  "operation": "encode",
+  "profile": "cpu_allocating_encode",
+  "raw_bytes": 16777216,
+  "encoded_bytes": 2457877,
+  "ratio": 0.14650088548660278,
+  "threads": 1,
+  "block_size": 65536,
+  "checksums": false,
+  "allocator": "system",
+  "simd": "Neon",
+  "lz4_version": "1.10.0",
+  "zstd_version": "1.5.7",
+  "elapsed_seconds": 0.203428667,
+  "GBps": 2.474166927515678,
+  "energy_status": "unavailable_no_power_mode",
+  "cpu_rail_J_per_GB": null,
+  "cpu_rail_average_W": null,
+  "incremental_cpu_J_per_GB": null
+}

@@ -100,6 +100,7 @@ fn sampled_raw_fast_path_skips_only_incompressible_work() {
         &random,
         &Options {
             block_size: 65_536,
+            legacy_v2: true,
             ..Options::default()
         },
     )
@@ -121,6 +122,7 @@ fn sampled_raw_fast_path_skips_only_incompressible_work() {
         &periodic,
         &Options {
             block_size: 65_536,
+            legacy_v2: true,
             ..Options::default()
         },
     )
@@ -139,13 +141,25 @@ fn sampled_raw_fast_path_skips_only_incompressible_work() {
 fn validated_frame_reuses_an_immutable_command_proof() {
     for period in [0, 1, 2, 7, 37, 65] {
         let data = fixture(65_536, period);
-        let encoded = compress(&data, &Options { block_size: 65_536, ..Options::default() }).unwrap();
-        let validated = Frame::parse(&encoded, data.len()).unwrap().into_validated().unwrap();
+        let encoded = compress(
+            &data,
+            &Options {
+                block_size: 65_536,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let validated = Frame::parse(&encoded, data.len())
+            .unwrap()
+            .into_validated()
+            .unwrap();
         assert_eq!(validated.raw_size(), data.len());
         assert_eq!(validated.block_count(), 1);
         let mut out = vec![0; data.len()];
         for _ in 0..3 {
-            validated.decode_into(&mut out, &DecodeOptions::default()).unwrap();
+            validated
+                .decode_into(&mut out, &DecodeOptions::default())
+                .unwrap();
             assert_eq!(out, data);
         }
     }
@@ -175,6 +189,7 @@ fn validated_frame_boundary_covers_versions_limits_checksums_and_workers() {
         &Options {
             block_size: 4096,
             checksum: true,
+            legacy_v2: true,
             ..Options::default()
         },
     )
@@ -229,6 +244,7 @@ fn validated_frame_boundary_covers_versions_limits_checksums_and_workers() {
         &fixture(65_536, 37),
         &Options {
             block_size: 65_536,
+            legacy_v2: true,
             ..Options::default()
         },
     )
@@ -256,6 +272,7 @@ fn v2_short_distance_reduces_attributes_and_v1_vectors_remain_readable() {
         &data,
         &Options {
             block_size: 65_536,
+            legacy_v2: true,
             ..Options::default()
         },
     )

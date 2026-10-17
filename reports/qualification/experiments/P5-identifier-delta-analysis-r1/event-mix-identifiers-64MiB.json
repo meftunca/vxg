@@ -1,0 +1,22 @@
+{
+  "schema": "vxg-identifier-delta-analysis-r1",
+  "scope": "offline generic identifier-column feasibility analysis; no generator parameters, predictor, codec frame, or throughput claim",
+  "input": "corpus/qualification/event-mix-identifiers-64MiB.ndjson",
+  "input_bytes": 67108864,
+  "identifier_pattern": "\\\"request_id\\\":\\\"r-[0-9a-f]{16}\\\"",
+  "identifier_rows": 486220,
+  "raw_binary_identifier_bytes": 3889760,
+  "raw_binary_identifier_ratio": 0.057961941,
+  "deltas": 486219,
+  "xor_delta": {
+    "bitplane_bits": 31118016,
+    "one_bits": 15823726,
+    "bit_transitions": 15748901
+  },
+  "wrapping_sub_delta": {
+    "bitplane_bits": 31118016,
+    "one_bits": 15884832,
+    "bit_transitions": 15122342
+  },
+  "decision": "Both generic delta forms are near half-density and half-transition bit planes. A bounded bitplane/RLE representation has no low-entropy route below raw eight-byte identifiers, before required record metadata."
+}

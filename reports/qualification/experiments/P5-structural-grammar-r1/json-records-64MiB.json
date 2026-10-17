@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "scope": "Bench-only direct structural-byte grammar oracle. Block kind is charged by the normal frame directory; grammar tables, tags and raw runs are exact. It preserves every byte and is not a VXG v3 format or codec GB/s claim.",
+  "input_bytes": 67108864,
+  "blocks": 1024,
+  "grammar_blocks": 152,
+  "raw_blocks": 872,
+  "dictionary_entries": 19456,
+  "payload_bytes": 60746356,
+  "frame_directory_bytes": 32800,
+  "prototype_total_frame_bytes": 60779156,
+  "prototype_total_ratio": 0.905680001,
+  "max_selection_payload_bytes": 174964,
+  "timing_iterations": 1,
+  "pack_elapsed_ns": 480151167,
+  "unpack_elapsed_ns": 13071917,
+  "pack_input_bytes_per_second": 139766116.616,
+  "unpack_input_bytes_per_second": 5133819622.631
+}

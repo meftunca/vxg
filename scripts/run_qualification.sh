@@ -7,7 +7,7 @@ out_dir="${1:?usage: scripts/run_qualification.sh OUTPUT_DIRECTORY}"
 trials="${TRIALS:-7}"
 seconds="${SECONDS_PER_SAMPLE:-0.2}"
 samples="${SAMPLES_PER_PROCESS:-7}"
-manifest="$root/reports/qualification/manifest.json"
+manifest="${MANIFEST:-$root/reports/qualification/manifest.json}"
 
 cd "$root"
 python3 scripts/generate_qualification_corpus.py --verify --manifest "$manifest"

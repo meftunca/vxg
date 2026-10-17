@@ -1,0 +1,8 @@
+binary=/Users/mapletechnologies/.cargo/target/release/vxg-bench
+b678f9cbb27e94f515dbc80c4ecce4a93fd8e5fe830f75447bc3983e6c66bc8a  /Users/mapletechnologies/.cargo/target/release/vxg-bench
+trials=1
+samples_per_process=3
+seconds_per_sample=0.05
+threads=1
+block_size=65536
+Darwin Mac.home 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:18:48 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_T6020 arm64

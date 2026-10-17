@@ -20,8 +20,12 @@ impl fmt::Display for Error {
             Self::InvalidFrame(s) => write!(f, "invalid VXG frame: {s}"),
             Self::Truncated => f.write_str("truncated VXG frame"),
             Self::SizeOverflow => f.write_str("integer or allocation-size overflow"),
-            Self::OutputLimit { requested, limit } => write!(f, "output {requested} exceeds limit {limit}"),
-            Self::OutputSize { expected, actual } => write!(f, "output length {actual}, expected {expected}"),
+            Self::OutputLimit { requested, limit } => {
+                write!(f, "output {requested} exceeds limit {limit}")
+            }
+            Self::OutputSize { expected, actual } => {
+                write!(f, "output length {actual}, expected {expected}")
+            }
             Self::Checksum { block } => write!(f, "CRC32C mismatch in block {block}"),
             Self::Unsupported(s) => write!(f, "unsupported: {s}"),
             Self::Backend(s) => write!(f, "GPU backend: {s}"),

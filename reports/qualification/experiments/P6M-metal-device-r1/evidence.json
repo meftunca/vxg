@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "experiment_id": "P6M-metal-device-r1",
+  "status": "actual_device_conformance_passed_directional_performance_only",
+  "device": "Apple M2 Max",
+  "conformance": {
+    "command": "cargo run --release --features metal --bin vxg -- gpu-check metal",
+    "result": "PASS: 81 three-way CPU/GPU conformance cases"
+  },
+  "benchmark": {
+    "command": "cargo run --release --features bench,metal --bin vxg-bench -- --file corpus/qualification/json-records-16MiB.ndjson --threads 1 --block-size 65536 --simd neon --gpu metal --samples 5 --seconds 0.2 --csv reports/local-metal-json16-r1.csv --samples-csv reports/local-metal-json16-r1-samples.csv",
+    "input": "corpus/qualification/json-records-16MiB.ndjson",
+    "raw_bytes": 16777216,
+    "threads": 1,
+    "block_size": 65536,
+    "checksum": false,
+    "samples": 5,
+    "seconds_per_sample": 0.2,
+    "profiles": {
+      "vxg_cpu_allocating_encode_GBps": 2.487,
+      "vxg_cpu_preallocated_decode_GBps": 7.280,
+      "lz4_a1_allocating_encode_GBps": 2.271,
+      "lz4_a1_preallocated_decode_GBps": 8.812,
+      "zstd_l1_allocating_encode_GBps": 1.597,
+      "zstd_l1_preallocated_decode_GBps": 3.290,
+      "vxg_gpu_host_e2e_allocating_encode_GBps": 0.736,
+      "vxg_gpu_host_e2e_allocating_decode_GBps": 1.255
+    },
+    "ratios": {
+      "vxg_cpu": 0.147,
+      "lz4_a1": 0.150,
+      "zstd_l1": 0.054,
+      "vxg_gpu": 0.164
+    },
+    "timestamp_observation": {
+      "gpu_kernel_ms": 9.224250010447577,
+      "host_e2e_ms": 12.817,
+      "scope": "One observation only; not a median and not interchangeable with host end-to-end throughput."
+    }
+  },
+  "conclusion": "Metal is actually executing and conformant on this M2 Max. Its current host-to-end compressor/decompressor is nevertheless slower than the corresponding CPU rows and emits a less compact result on this input. This does not qualify a GPU performance target and cannot substitute for the CPU 4/95/15 acceptance gates."
+}

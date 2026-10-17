@@ -1,0 +1,22 @@
+{
+  "schema": "vxg-p6b-grouped-command-r1",
+  "scope": "Bench-only synthetic grouped-command packet. It is not a VXG v3 wire format or a public safe-decode qualification. Validation, replay and safe rows are separate.",
+  "group_size": 64,
+  "simd": "Neon",
+  "timing_iterations": 5,
+  "input_bytes": 16777216,
+  "source_frame_bytes": 2457877,
+  "synthetic_frame_bytes": 1885093,
+  "synthetic_ratio": 0.112360299,
+  "blocks": 256,
+  "lz_blocks": 256,
+  "commands": 591146,
+  "groups": 9346,
+  "literal_bytes": 147145,
+  "max_group_bytes": 6929,
+  "validation_commands_per_second": 44824962.323,
+  "replay_commands_per_second": 37970564.883,
+  "safe_commands_per_second": 20446453.822,
+  "replay_input_bytes_per_second": 1077636266.980,
+  "safe_input_bytes_per_second": 580287394.657
+}

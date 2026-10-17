@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "decision": "reject_per_value_period_variant_before_codec_implementation",
+  "source": "bursty64.json",
+  "input_sha256": "fc703102838b125f5b7617141be8535150bdf577380b72ba5c9e18ac0ef34615",
+  "scope": "generic lexical analytical audit, not a new encoded artifact or speed result",
+  "facts": {
+    "p5d_r9_complete_frame_bytes": 5630710,
+    "p5d_r9_periodic_hex_payload_bytes": 4622844,
+    "target_006_max_frame_bytes": 4026531,
+    "complete_frame_bytes_to_remove": 1604179,
+    "audited_eligible_hex_strings": 534801,
+    "audited_common_period_bytes": 4625905,
+    "audited_per_value_period_bytes": 5154950,
+    "added_bytes": 529045,
+    "audited_seed_bytes_only": 4008130
+  },
+  "interpretation": "All 1024 audited blocks already admit a shared period of 15. Shorter minimal periods occur mostly in strings shorter than that shared period, whose existing model already truncates the stored seed to the actual string length. Storing a period for every value adds metadata without material seed savings. The approximately 4.008 MB of seed bytes alone nearly occupies the entire 4.027 MB target, before lengths, other values and framing. This is a limitation of this seed representation, not an information-theoretic impossibility proof.",
+  "prior_report": "R1 compares against raw nibble storage only and is retained as an opportunity report. Its 9 MB raw-relative saving was already largely captured by the existing common-period model; it must never be claimed as an additional VXG saving.",
+  "next_hypothesis": "Audit bounded, source-independent conditional dependencies between serialized column values/lengths before adding another packing layout. Charge any predictor, residuals and block-local descriptors; require held-out prediction evidence and complete exact reconstruction."
+}
