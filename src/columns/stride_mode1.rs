@@ -155,7 +155,22 @@ fn unpack_stride_mode1_into(
                             vst1q_u8(vp, s);
                         }
                     }
-                    #[cfg(not(target_arch = "aarch64"))]
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        use core::arch::x86_64::*;
+                        for v_idx in 0..4 {
+                            let vp = plane_ptr.add(base + v_idx * 16);
+                            let mut s = _mm_loadu_si128(vp.cast::<__m128i>());
+                            s = _mm_add_epi8(s, _mm_slli_si128(s, 1));
+                            s = _mm_add_epi8(s, _mm_slli_si128(s, 2));
+                            s = _mm_add_epi8(s, _mm_slli_si128(s, 4));
+                            s = _mm_add_epi8(s, _mm_slli_si128(s, 8));
+                            s = _mm_add_epi8(s, _mm_set1_epi8(acc as i8));
+                            acc = (_mm_extract_epi16(s, 7) >> 8) as u8;
+                            _mm_storeu_si128(vp.cast::<__m128i>(), s);
+                        }
+                    }
+                    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
                     unsafe {
                         for b in 0..64 {
                             let bp = plane_ptr.add(base + b);
@@ -247,7 +262,64 @@ fn unpack_stride_mode1_into(
                 }
             }
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use core::arch::x86_64::*;
+            if stride == 4 {
+                let p0 = scratch.planes[0].as_ptr();
+                let p1 = scratch.planes[1].as_ptr();
+                let p2 = scratch.planes[2].as_ptr();
+                let p3 = scratch.planes[3].as_ptr();
+                let mut idx = 0usize;
+                while idx + 16 <= count {
+                    let s0 = _mm_loadu_si128(p0.add(idx).cast::<__m128i>());
+                    let s1 = _mm_loadu_si128(p1.add(idx).cast::<__m128i>());
+                    let s2 = _mm_loadu_si128(p2.add(idx).cast::<__m128i>());
+                    let s3 = _mm_loadu_si128(p3.add(idx).cast::<__m128i>());
+                    let t01_lo = _mm_unpacklo_epi8(s0, s1);
+                    let t01_hi = _mm_unpackhi_epi8(s0, s1);
+                    let t23_lo = _mm_unpacklo_epi8(s2, s3);
+                    let t23_hi = _mm_unpackhi_epi8(s2, s3);
+                    let d = dst_ptr.add(idx * 4);
+                    _mm_storeu_si128(d.cast::<__m128i>(), _mm_unpacklo_epi16(t01_lo, t23_lo));
+                    _mm_storeu_si128(d.add(16).cast::<__m128i>(), _mm_unpackhi_epi16(t01_lo, t23_lo));
+                    _mm_storeu_si128(d.add(32).cast::<__m128i>(), _mm_unpacklo_epi16(t01_hi, t23_hi));
+                    _mm_storeu_si128(d.add(48).cast::<__m128i>(), _mm_unpackhi_epi16(t01_hi, t23_hi));
+                    idx += 16;
+                }
+                while idx < count {
+                    *dst_ptr.add(idx * 4) = *p0.add(idx);
+                    *dst_ptr.add(idx * 4 + 1) = *p1.add(idx);
+                    *dst_ptr.add(idx * 4 + 2) = *p2.add(idx);
+                    *dst_ptr.add(idx * 4 + 3) = *p3.add(idx);
+                    idx += 1;
+                }
+            } else if stride == 2 {
+                let p0 = scratch.planes[0].as_ptr();
+                let p1 = scratch.planes[1].as_ptr();
+                let mut idx = 0usize;
+                while idx + 16 <= count {
+                    let s0 = _mm_loadu_si128(p0.add(idx).cast::<__m128i>());
+                    let s1 = _mm_loadu_si128(p1.add(idx).cast::<__m128i>());
+                    let d = dst_ptr.add(idx * 2);
+                    _mm_storeu_si128(d.cast::<__m128i>(), _mm_unpacklo_epi8(s0, s1));
+                    _mm_storeu_si128(d.add(16).cast::<__m128i>(), _mm_unpackhi_epi8(s0, s1));
+                    idx += 16;
+                }
+                while idx < count {
+                    *dst_ptr.add(idx * 2) = *p0.add(idx);
+                    *dst_ptr.add(idx * 2 + 1) = *p1.add(idx);
+                    idx += 1;
+                }
+            } else {
+                for idx in 0..count {
+                    for p in 0..stride {
+                        *dst_ptr.add(idx * stride + p) = *scratch.planes[p].as_ptr().add(idx);
+                    }
+                }
+            }
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             for idx in 0..count {
                 for p in 0..stride {

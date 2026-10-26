@@ -26,7 +26,28 @@ fn parse_hex_u32_le(digits: &[u8]) -> Option<u32> {
         let wide = vcombine_u16(paired, paired);
         return Some(vget_lane_u32(vreinterpret_u32_u8(vmovn_u16(wide)), 0));
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let raw = digits.as_ptr().cast::<u64>().read_unaligned();
+        let v = _mm_cvtsi64_si128(raw as i64);
+        let d_dec = _mm_sub_epi8(v, _mm_set1_epi8(b'0' as i8));
+        let is_dec = _mm_cmpeq_epi8(_mm_min_epu8(d_dec, _mm_set1_epi8(9)), d_dec);
+        let d_hex = _mm_sub_epi8(v, _mm_set1_epi8(b'a' as i8));
+        let is_hex = _mm_cmpeq_epi8(_mm_min_epu8(d_hex, _mm_set1_epi8(5)), d_hex);
+        let valid = _mm_or_si128(is_dec, is_hex);
+        if (_mm_movemask_epi8(valid) & 0xff) != 0xff {
+            return None;
+        }
+        let nib = _mm_sub_epi8(d_dec, _mm_and_si128(is_hex, _mm_set1_epi8(39)));
+        let paired = _mm_and_si128(
+            _mm_or_si128(_mm_slli_epi16(nib, 4), _mm_srli_epi16(nib, 8)),
+            _mm_set1_epi16(0x00ff),
+        );
+        let packed = _mm_packus_epi16(paired, paired);
+        return Some(_mm_cvtsi128_si32(packed) as u32);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let mut raw = [0u8; 4];
         let mut acc_err = 0u8;
@@ -68,7 +89,27 @@ fn parse_hex_u64_le(digits: &[u8]) -> Option<u64> {
         let paired = vorrq_u16(vshlq_n_u16(nib16, 4), vshrq_n_u16(nib16, 8));
         return Some(vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(paired)), 0));
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let v = _mm_loadu_si128(digits.as_ptr().cast::<__m128i>());
+        let d_dec = _mm_sub_epi8(v, _mm_set1_epi8(b'0' as i8));
+        let is_dec = _mm_cmpeq_epi8(_mm_min_epu8(d_dec, _mm_set1_epi8(9)), d_dec);
+        let d_hex = _mm_sub_epi8(v, _mm_set1_epi8(b'a' as i8));
+        let is_hex = _mm_cmpeq_epi8(_mm_min_epu8(d_hex, _mm_set1_epi8(5)), d_hex);
+        let valid = _mm_or_si128(is_dec, is_hex);
+        if _mm_movemask_epi8(valid) != 0xffff {
+            return None;
+        }
+        let nib = _mm_sub_epi8(d_dec, _mm_and_si128(is_hex, _mm_set1_epi8(39)));
+        let paired = _mm_and_si128(
+            _mm_or_si128(_mm_slli_epi16(nib, 4), _mm_srli_epi16(nib, 8)),
+            _mm_set1_epi16(0x00ff),
+        );
+        let packed = _mm_packus_epi16(paired, paired);
+        return Some(_mm_cvtsi128_si64(packed) as u64);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let mut raw = [0u8; 8];
         let mut acc_err = 0u8;

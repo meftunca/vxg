@@ -343,22 +343,41 @@ unsafe fn fill_px4_run(dst_u32: *mut u32, start: usize, end: usize, px32: u32) {
         }
         return;
     }
-    let px128 = (px32 as u128) * 0x00000001_00000001_00000001_00000001u128;
     let mut i = 0usize;
-    while i + 16 <= len {
-        unsafe {
-            p.add(i).cast::<u128>().write_unaligned(px128);
-            p.add(i + 4).cast::<u128>().write_unaligned(px128);
-            p.add(i + 8).cast::<u128>().write_unaligned(px128);
-            p.add(i + 12).cast::<u128>().write_unaligned(px128);
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let v = _mm_set1_epi32(px32 as i32);
+        while i + 16 <= len {
+            _mm_storeu_si128(p.add(i).cast::<__m128i>(), v);
+            _mm_storeu_si128(p.add(i + 4).cast::<__m128i>(), v);
+            _mm_storeu_si128(p.add(i + 8).cast::<__m128i>(), v);
+            _mm_storeu_si128(p.add(i + 12).cast::<__m128i>(), v);
+            i += 16;
         }
-        i += 16;
+        while i + 4 <= len {
+            _mm_storeu_si128(p.add(i).cast::<__m128i>(), v);
+            i += 4;
+        }
     }
-    while i + 4 <= len {
-        unsafe {
-            p.add(i).cast::<u128>().write_unaligned(px128);
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let px128 = (px32 as u128) * 0x00000001_00000001_00000001_00000001u128;
+        while i + 16 <= len {
+            unsafe {
+                p.add(i).cast::<u128>().write_unaligned(px128);
+                p.add(i + 4).cast::<u128>().write_unaligned(px128);
+                p.add(i + 8).cast::<u128>().write_unaligned(px128);
+                p.add(i + 12).cast::<u128>().write_unaligned(px128);
+            }
+            i += 16;
         }
-        i += 4;
+        while i + 4 <= len {
+            unsafe {
+                p.add(i).cast::<u128>().write_unaligned(px128);
+            }
+            i += 4;
+        }
     }
     while i < len {
         unsafe {
@@ -390,24 +409,56 @@ unsafe fn fill_px3_run(dst_ptr: *mut u8, start: usize, end: usize, c0: u8, c1: u
         return;
     }
     let mut i = 0usize;
-    if len >= 16 {
-        let w0 = u128::from_le_bytes([
-            c0, c1, c2, c0, c1, c2, c0, c1, c2, c0, c1, c2, c0, c1, c2, c0,
-        ]);
-        let w1 = u128::from_le_bytes([
-            c1, c2, c0, c1, c2, c0, c1, c2, c0, c1, c2, c0, c1, c2, c0, c1,
-        ]);
-        let w2 = u128::from_le_bytes([
-            c2, c0, c1, c2, c0, c1, c2, c0, c1, c2, c0, c1, c2, c0, c1, c2,
-        ]);
-        while i + 16 <= len {
+    if len >= 8 {
+        const REP24: u64 = 0x0001_0000_0100_0001;
+        let q0 = (((c0 as u64) | ((c1 as u64) << 8) | ((c2 as u64) << 16))
+            .wrapping_mul(REP24))
+            .to_le();
+        let q1 = (((c2 as u64) | ((c0 as u64) << 8) | ((c1 as u64) << 16))
+            .wrapping_mul(REP24))
+            .to_le();
+        let q2 = (((c1 as u64) | ((c2 as u64) << 8) | ((c0 as u64) << 16))
+            .wrapping_mul(REP24))
+            .to_le();
+        #[cfg(target_arch = "x86_64")]
+        if len >= 16 {
+            unsafe {
+                use core::arch::x86_64::*;
+                let v0 = _mm_set_epi64x(q1 as i64, q0 as i64);
+                let v1 = _mm_set_epi64x(q0 as i64, q2 as i64);
+                let v2 = _mm_set_epi64x(q2 as i64, q1 as i64);
+                while i + 16 <= len {
+                    let d = p.add(i * 3);
+                    _mm_storeu_si128(d.cast::<__m128i>(), v0);
+                    _mm_storeu_si128(d.add(16).cast::<__m128i>(), v1);
+                    _mm_storeu_si128(d.add(32).cast::<__m128i>(), v2);
+                    i += 16;
+                }
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        if len >= 16 {
+            let w0 = (u64::from_le(q0) as u128) | ((u64::from_le(q1) as u128) << 64);
+            let w1 = (u64::from_le(q2) as u128) | ((u64::from_le(q0) as u128) << 64);
+            let w2 = (u64::from_le(q1) as u128) | ((u64::from_le(q2) as u128) << 64);
+            while i + 16 <= len {
+                unsafe {
+                    let d = p.add(i * 3);
+                    d.cast::<u128>().write_unaligned(w0.to_le());
+                    d.add(16).cast::<u128>().write_unaligned(w1.to_le());
+                    d.add(32).cast::<u128>().write_unaligned(w2.to_le());
+                }
+                i += 16;
+            }
+        }
+        while i + 8 <= len {
             unsafe {
                 let d = p.add(i * 3);
-                d.cast::<u128>().write_unaligned(w0);
-                d.add(16).cast::<u128>().write_unaligned(w1);
-                d.add(32).cast::<u128>().write_unaligned(w2);
+                d.cast::<u64>().write_unaligned(q0);
+                d.add(8).cast::<u64>().write_unaligned(q1);
+                d.add(16).cast::<u64>().write_unaligned(q2);
             }
-            i += 16;
+            i += 8;
         }
     }
     while i < len {

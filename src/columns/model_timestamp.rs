@@ -168,7 +168,88 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
                 [max_b[0], max_b[1], max_b[2], max_b[3], max_b[4]],
             )
         };
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        let (mins, maxs) = unsafe {
+            use core::arch::x86_64::*;
+            let mut min_v = _mm_cvtsi64_si128(prev_packed as i64);
+            let mut max_v = min_v;
+            for (idx, &val) in values.iter().enumerate().skip(1) {
+                if val.len() != 22 {
+                    return None;
+                }
+                let ptr = val.as_ptr();
+                let w0 = ptr.cast::<u64>().read_unaligned();
+                let w6 = ptr.add(6).cast::<u64>().read_unaligned();
+                let w14 = ptr.add(14).cast::<u64>().read_unaligned();
+                if w6 == prev_w6 && w0 == prev_w0 {
+                    if w14 == prev_w14 {
+                        *parsed_ptr.add(idx) = prev_packed;
+                        continue;
+                    }
+                    let d14 = w14 ^ 0x225a_3030_3a30_303a;
+                    if ((d14.wrapping_add(0x0000_0606_0006_0600)) | d14) & 0xffff_f0f0_fff0_f0ff
+                        != 0
+                    {
+                        return None;
+                    }
+                    let p14 = d14.wrapping_mul(10).wrapping_add(d14 >> 8);
+                    let minute = (p14 >> 8) & 0xff;
+                    let second = (p14 >> 32) & 0xff;
+                    if minute >= 60 || second >= 60 {
+                        return None;
+                    }
+                    prev_w14 = w14;
+                    prev_packed = (prev_packed & 0x00ff_ffff) | (minute << 24) | (second << 32);
+                    let pv = _mm_cvtsi64_si128(prev_packed as i64);
+                    min_v = _mm_min_epu8(min_v, pv);
+                    max_v = _mm_max_epu8(max_v, pv);
+                    *parsed_ptr.add(idx) = prev_packed;
+                    continue;
+                }
+                if (w0 & 0x0000_ffff_ffff_ffff) != first_w0_low48 {
+                    return None;
+                }
+                let d6 = w6 ^ 0x3030_5430_302d_3030;
+                let d14 = w14 ^ 0x225a_3030_3a30_303a;
+                if (((d6.wrapping_add(0x0606_0006_0600_0606)) | d6) & 0xf0f0_fff0_f0ff_f0f0)
+                    | (((d14.wrapping_add(0x0000_0606_0006_0600)) | d14) & 0xffff_f0f0_fff0_f0ff)
+                    != 0
+                {
+                    return None;
+                }
+                let p6 = d6.wrapping_mul(10).wrapping_add(d6 >> 8);
+                let p14 = d14.wrapping_mul(10).wrapping_add(d14 >> 8);
+                let month = p6 & 0xff;
+                let day = (p6 >> 24) & 0xff;
+                let hour = (p6 >> 48) & 0xff;
+                let minute = (p14 >> 8) & 0xff;
+                let second = (p14 >> 32) & 0xff;
+                if month.wrapping_sub(1) >= 12
+                    || day.wrapping_sub(1) >= 31
+                    || hour >= 24
+                    || minute >= 60
+                    || second >= 60
+                {
+                    return None;
+                }
+                prev_w0 = w0;
+                prev_w6 = w6;
+                prev_w14 = w14;
+                prev_packed =
+                    month | (day << 8) | (hour << 16) | (minute << 24) | (second << 32);
+                let pv = _mm_cvtsi64_si128(prev_packed as i64);
+                min_v = _mm_min_epu8(min_v, pv);
+                max_v = _mm_max_epu8(max_v, pv);
+                *parsed_ptr.add(idx) = prev_packed;
+            }
+            let min_b = (_mm_cvtsi128_si64(min_v) as u64).to_le_bytes();
+            let max_b = (_mm_cvtsi128_si64(max_v) as u64).to_le_bytes();
+            (
+                [min_b[0], min_b[1], min_b[2], min_b[3], min_b[4]],
+                [max_b[0], max_b[1], max_b[2], max_b[3], max_b[4]],
+            )
+        };
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         let (mins, maxs) = {
             let mut mins = [first.month, first.day, first.hour, first.minute, first.second];
             let mut maxs = mins;

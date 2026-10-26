@@ -39,36 +39,26 @@ fn unpack_fast_lz_core(
                 let match_len = ml_code + 4;
                 if offset >= 16 {
                     unsafe {
-                        let lsrc = lit_ptr.add(lit_pos);
-                        let ldst = out_ptr.add(dst_pos);
-                        ldst.cast::<u128>()
-                            .write_unaligned(lsrc.cast::<u128>().read_unaligned());
+                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
                         lit_pos += lit_len;
                         dst_pos += lit_len;
 
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
-                        mdst.cast::<u128>()
-                            .write_unaligned(msrc.cast::<u128>().read_unaligned());
-                        mdst.add(16)
-                            .cast::<u128>()
-                            .write_unaligned(msrc.add(16).cast::<u128>().read_unaligned());
+                        copy16_unaligned(msrc, mdst);
+                        copy16_unaligned(msrc.add(16), mdst.add(16));
                         dst_pos += match_len;
                     }
                     continue;
                 } else if offset >= match_len {
                     unsafe {
-                        let lsrc = lit_ptr.add(lit_pos);
-                        let ldst = out_ptr.add(dst_pos);
-                        ldst.cast::<u128>()
-                            .write_unaligned(lsrc.cast::<u128>().read_unaligned());
+                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
                         lit_pos += lit_len;
                         dst_pos += lit_len;
 
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
-                        mdst.cast::<u128>()
-                            .write_unaligned(msrc.cast::<u128>().read_unaligned());
+                        copy16_unaligned(msrc, mdst);
                         dst_pos += match_len;
                     }
                     continue;
@@ -79,20 +69,14 @@ fn unpack_fast_lz_core(
                     ext_pos += 1;
                     let match_len = 19 + e;
                     unsafe {
-                        let lsrc = lit_ptr.add(lit_pos);
-                        let ldst = out_ptr.add(dst_pos);
-                        ldst.cast::<u128>()
-                            .write_unaligned(lsrc.cast::<u128>().read_unaligned());
+                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
                         lit_pos += lit_len;
                         dst_pos += lit_len;
 
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
-                        mdst.cast::<u128>()
-                            .write_unaligned(msrc.cast::<u128>().read_unaligned());
-                        mdst.add(16)
-                            .cast::<u128>()
-                            .write_unaligned(msrc.add(16).cast::<u128>().read_unaligned());
+                        copy16_unaligned(msrc, mdst);
+                        copy16_unaligned(msrc.add(16), mdst.add(16));
                         dst_pos += match_len;
                     }
                     continue;
@@ -144,15 +128,12 @@ fn unpack_fast_lz_core(
             unsafe {
                 let lsrc = lit_ptr.add(lit_pos);
                 let ldst = out_ptr.add(dst_pos);
-                ldst.cast::<u128>()
-                    .write_unaligned(lsrc.cast::<u128>().read_unaligned());
+                copy16_unaligned(lsrc, ldst);
                 if lit_len > 16 {
                     // Slack verified above: dst has >= 32 spare bytes, lits >= 16.
                     let mut i = 16usize;
                     while i < lit_len {
-                        ldst.add(i)
-                            .cast::<u128>()
-                            .write_unaligned(lsrc.add(i).cast::<u128>().read_unaligned());
+                        copy16_unaligned(lsrc.add(i), ldst.add(i));
                         i += 16;
                     }
                 }
@@ -162,18 +143,13 @@ fn unpack_fast_lz_core(
                 let msrc = out_ptr.add(dst_pos - offset);
                 let mdst = out_ptr.add(dst_pos);
                 if offset >= 16 || match_len <= offset {
-                    mdst.cast::<u128>()
-                        .write_unaligned(msrc.cast::<u128>().read_unaligned());
+                    copy16_unaligned(msrc, mdst);
                     if match_len > 16 {
-                        mdst.add(16)
-                            .cast::<u128>()
-                            .write_unaligned(msrc.add(16).cast::<u128>().read_unaligned());
+                        copy16_unaligned(msrc.add(16), mdst.add(16));
                         if match_len > 32 {
                             let mut i = 32usize;
                             while i < match_len {
-                                mdst.add(i)
-                                    .cast::<u128>()
-                                    .write_unaligned(msrc.add(i).cast::<u128>().read_unaligned());
+                                copy16_unaligned(msrc.add(i), mdst.add(i));
                                 i += 16;
                             }
                         }
@@ -182,52 +158,51 @@ fn unpack_fast_lz_core(
                     continue;
                 } else if offset == 1 {
                     let b = *msrc;
-                    let v = u128::from_le_bytes([b; 16]);
-                    mdst.cast::<u128>().write_unaligned(v);
+                    let v = [b; 16];
+                    copy16_unaligned(v.as_ptr(), mdst);
                     if match_len > 16 {
                         let mut i = 16usize;
                         while i < match_len {
-                            mdst.add(i).cast::<u128>().write_unaligned(v);
+                            copy16_unaligned(v.as_ptr(), mdst.add(i));
                             i += 16;
                         }
                     }
                     dst_pos += match_len;
                     continue;
                 } else if offset == 4 {
-                    let p = msrc.cast::<u32>().read_unaligned() as u128;
-                    let v = p | (p << 32) | (p << 64) | (p << 96);
-                    mdst.cast::<u128>().write_unaligned(v);
+                    let p = msrc.cast::<u32>().read_unaligned();
+                    let v = [p; 4];
+                    copy16_unaligned(v.as_ptr().cast::<u8>(), mdst);
                     if match_len > 16 {
                         let mut i = 16usize;
                         while i < match_len {
-                            mdst.add(i).cast::<u128>().write_unaligned(v);
+                            copy16_unaligned(v.as_ptr().cast::<u8>(), mdst.add(i));
                             i += 16;
                         }
                     }
                     dst_pos += match_len;
                     continue;
                 } else if offset == 8 {
-                    let p = msrc.cast::<u64>().read_unaligned() as u128;
-                    let v = p | (p << 64);
-                    mdst.cast::<u128>().write_unaligned(v);
+                    let p = msrc.cast::<u64>().read_unaligned();
+                    let v = [p; 2];
+                    copy16_unaligned(v.as_ptr().cast::<u8>(), mdst);
                     if match_len > 16 {
                         let mut i = 16usize;
                         while i < match_len {
-                            mdst.add(i).cast::<u128>().write_unaligned(v);
+                            copy16_unaligned(v.as_ptr().cast::<u8>(), mdst.add(i));
                             i += 16;
                         }
                     }
                     dst_pos += match_len;
                     continue;
                 } else if offset == 2 {
-                    let p = msrc.cast::<u16>().read_unaligned() as u128;
-                    let p32 = p | (p << 16);
-                    let v = p32 | (p32 << 32) | (p32 << 64) | (p32 << 96);
-                    mdst.cast::<u128>().write_unaligned(v);
+                    let p = msrc.cast::<u16>().read_unaligned();
+                    let v = [p; 8];
+                    copy16_unaligned(v.as_ptr().cast::<u8>(), mdst);
                     if match_len > 16 {
                         let mut i = 16usize;
                         while i < match_len {
-                            mdst.add(i).cast::<u128>().write_unaligned(v);
+                            copy16_unaligned(v.as_ptr().cast::<u8>(), mdst.add(i));
                             i += 16;
                         }
                     }
@@ -244,8 +219,7 @@ fn unpack_fast_lz_core(
                 let mut c = 0usize;
                 while c < match_len {
                     let s = if c + offset >= step { step } else { offset };
-                    let v = mdst.add(c).sub(s).cast::<u128>().read_unaligned();
-                    mdst.add(c).cast::<u128>().write_unaligned(v);
+                    copy16_unaligned(mdst.add(c).sub(s), mdst.add(c));
                     c += s;
                 }
             }

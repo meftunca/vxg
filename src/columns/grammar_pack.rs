@@ -400,6 +400,20 @@ unsafe fn read_u128_partial(ptr: *const u8, len: usize) -> u128 {
     }
 }
 
+#[inline(always)]
+unsafe fn copy16_unaligned(src: *const u8, dst: *mut u8) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        _mm_storeu_si128(dst.cast::<__m128i>(), _mm_loadu_si128(src.cast::<__m128i>()));
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    unsafe {
+        dst.cast::<u128>()
+            .write_unaligned(src.cast::<u128>().read_unaligned());
+    }
+}
+
 impl FastPiece {
     #[inline(always)]
     const fn empty() -> Self {
@@ -441,7 +455,7 @@ impl FastPiece {
     #[inline(always)]
     unsafe fn emit_16(&self, dst: *mut u8) -> *mut u8 {
         unsafe {
-            dst.cast::<u128>().write_unaligned(self.v0);
+            copy16_unaligned((&raw const self.v0).cast::<u8>(), dst);
             dst.add(self.len)
         }
     }
@@ -449,8 +463,9 @@ impl FastPiece {
     #[inline(always)]
     unsafe fn emit_32(&self, dst: *mut u8) -> *mut u8 {
         unsafe {
-            dst.cast::<u128>().write_unaligned(self.v0);
-            dst.add(16).cast::<u128>().write_unaligned(self.v1);
+            let p = (&raw const self.v0).cast::<u8>();
+            copy16_unaligned(p, dst);
+            copy16_unaligned(p.add(16), dst.add(16));
             dst.add(self.len)
         }
     }
@@ -458,9 +473,10 @@ impl FastPiece {
     #[inline(always)]
     unsafe fn emit_48_exact(&self, dst: *mut u8) -> *mut u8 {
         unsafe {
-            dst.cast::<u128>().write_unaligned(self.v0);
-            dst.add(16).cast::<u128>().write_unaligned(self.v1);
-            dst.add(32).cast::<u128>().write_unaligned(self.v2);
+            let p = (&raw const self.v0).cast::<u8>();
+            copy16_unaligned(p, dst);
+            copy16_unaligned(p.add(16), dst.add(16));
+            copy16_unaligned(p.add(32), dst.add(32));
             dst.add(self.len)
         }
     }
@@ -468,9 +484,10 @@ impl FastPiece {
     #[inline(always)]
     unsafe fn emit_48(&self, dst: *mut u8) -> *mut u8 {
         unsafe {
-            dst.cast::<u128>().write_unaligned(self.v0);
-            dst.add(16).cast::<u128>().write_unaligned(self.v1);
-            dst.add(32).cast::<u128>().write_unaligned(self.v2);
+            let p = (&raw const self.v0).cast::<u8>();
+            copy16_unaligned(p, dst);
+            copy16_unaligned(p.add(16), dst.add(16));
+            copy16_unaligned(p.add(32), dst.add(32));
             if self.len > 48 {
                 Self::emit_tail_cold(self.ptr, dst, self.len);
             }
@@ -484,14 +501,10 @@ impl FastPiece {
             if len <= 160 {
                 let mut off = 48usize;
                 while off + 16 < len {
-                    dst.add(off)
-                        .cast::<u128>()
-                        .write_unaligned(src.add(off).cast::<u128>().read_unaligned());
+                    copy16_unaligned(src.add(off), dst.add(off));
                     off += 16;
                 }
-                dst.add(len - 16)
-                    .cast::<u128>()
-                    .write_unaligned(src.add(len - 16).cast::<u128>().read_unaligned());
+                copy16_unaligned(src.add(len - 16), dst.add(len - 16));
             } else {
                 std::ptr::copy_nonoverlapping(src.add(48), dst.add(48), len - 48);
             }

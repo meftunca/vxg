@@ -280,6 +280,55 @@ fn unpack_palette_stream(src: &[u8], out: &mut [u8]) -> Result<()> {
         let v3 = vld1q_u8(pal.as_ptr().add(48));
         (v0, uint8x16x2_t(v0, v1), uint8x16x4_t(v0, v1, v2, v3))
     };
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::*;
+    #[cfg(target_arch = "x86_64")]
+    let (x86_v0, x86_v1, x86_v2, x86_v3, has_sse41) = unsafe {
+        (
+            _mm_loadu_si128(pal.as_ptr().cast::<__m128i>()),
+            _mm_loadu_si128(pal.as_ptr().add(16).cast::<__m128i>()),
+            _mm_loadu_si128(pal.as_ptr().add(32).cast::<__m128i>()),
+            _mm_loadu_si128(pal.as_ptr().add(48).cast::<__m128i>()),
+            std::arch::is_x86_feature_detected!("sse4.1"),
+        )
+    };
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "ssse3,sse4.1")]
+    unsafe fn lut16_sse41(
+        dst: *mut u8,
+        bits: u8,
+        idx_lo: u64,
+        idx_hi: u64,
+        v0: __m128i,
+        v1: __m128i,
+        v2: __m128i,
+        v3: __m128i,
+    ) {
+        let idx_v = _mm_set_epi64x(idx_hi as i64, idx_lo as i64);
+        let syms_v = if bits == 4 {
+            _mm_shuffle_epi8(v0, idx_v)
+        } else if bits == 5 {
+            let s0 = _mm_shuffle_epi8(v0, idx_v);
+            let s1 = _mm_shuffle_epi8(v1, idx_v);
+            let m1 = _mm_slli_epi16(idx_v, 3);
+            _mm_blendv_epi8(s0, s1, m1)
+        } else {
+            let m_lo = _mm_slli_epi16(idx_v, 3);
+            let m_hi = _mm_slli_epi16(idx_v, 2);
+            let s01 = _mm_blendv_epi8(
+                _mm_shuffle_epi8(v0, idx_v),
+                _mm_shuffle_epi8(v1, idx_v),
+                m_lo,
+            );
+            let s23 = _mm_blendv_epi8(
+                _mm_shuffle_epi8(v2, idx_v),
+                _mm_shuffle_epi8(v3, idx_v),
+                m_lo,
+            );
+            _mm_blendv_epi8(s01, s23, m_hi)
+        };
+        _mm_storeu_si128(dst.cast::<__m128i>(), syms_v);
+    }
 
     for blk in 0..chunks16 {
         let p4 = u64::from_le(unsafe { p_src.cast::<u64>().read_unaligned() });
@@ -316,42 +365,35 @@ fn unpack_palette_stream(src: &[u8], out: &mut [u8]) -> Result<()> {
             };
             vst1q_u8(dst, syms_v);
         }
-        #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+        #[cfg(target_arch = "x86_64")]
         unsafe {
-            use core::arch::x86_64::*;
-            let v0 = _mm_loadu_si128(pal.as_ptr().cast::<__m128i>());
-            let v1 = _mm_loadu_si128(pal.as_ptr().add(16).cast::<__m128i>());
-            let v2 = _mm_loadu_si128(pal.as_ptr().add(32).cast::<__m128i>());
-            let v3 = _mm_loadu_si128(pal.as_ptr().add(48).cast::<__m128i>());
-            let idx_v = _mm_set_epi64x(idx_hi as i64, idx_lo as i64);
-            let syms_v = if bits == 4 {
-                _mm_shuffle_epi8(v0, idx_v)
-            } else if bits == 5 {
-                let s0 = _mm_shuffle_epi8(v0, idx_v);
-                let s1 = _mm_shuffle_epi8(v1, idx_v);
-                let m1 = _mm_slli_epi16(idx_v, 3);
-                _mm_blendv_epi8(s0, s1, m1)
+            if has_sse41 {
+                lut16_sse41(dst, bits, idx_lo, idx_hi, x86_v0, x86_v1, x86_v2, x86_v3);
             } else {
-                let m_lo = _mm_slli_epi16(idx_v, 3);
-                let m_hi = _mm_slli_epi16(idx_v, 2);
-                let s01 = _mm_blendv_epi8(
-                    _mm_shuffle_epi8(v0, idx_v),
-                    _mm_shuffle_epi8(v1, idx_v),
-                    m_lo,
-                );
-                let s23 = _mm_blendv_epi8(
-                    _mm_shuffle_epi8(v2, idx_v),
-                    _mm_shuffle_epi8(v3, idx_v),
-                    m_lo,
-                );
-                _mm_blendv_epi8(s01, s23, m_hi)
-            };
-            _mm_storeu_si128(dst.cast::<__m128i>(), syms_v);
+                let lo_b = idx_lo.to_le_bytes();
+                let hi_b = idx_hi.to_le_bytes();
+                let pal_p = pal.as_ptr();
+                let w_lo = (*pal_p.add((lo_b[0] as usize) & 63) as u64)
+                    | ((*pal_p.add((lo_b[1] as usize) & 63) as u64) << 8)
+                    | ((*pal_p.add((lo_b[2] as usize) & 63) as u64) << 16)
+                    | ((*pal_p.add((lo_b[3] as usize) & 63) as u64) << 24)
+                    | ((*pal_p.add((lo_b[4] as usize) & 63) as u64) << 32)
+                    | ((*pal_p.add((lo_b[5] as usize) & 63) as u64) << 40)
+                    | ((*pal_p.add((lo_b[6] as usize) & 63) as u64) << 48)
+                    | ((*pal_p.add((lo_b[7] as usize) & 63) as u64) << 56);
+                let w_hi = (*pal_p.add((hi_b[0] as usize) & 63) as u64)
+                    | ((*pal_p.add((hi_b[1] as usize) & 63) as u64) << 8)
+                    | ((*pal_p.add((hi_b[2] as usize) & 63) as u64) << 16)
+                    | ((*pal_p.add((hi_b[3] as usize) & 63) as u64) << 24)
+                    | ((*pal_p.add((hi_b[4] as usize) & 63) as u64) << 32)
+                    | ((*pal_p.add((hi_b[5] as usize) & 63) as u64) << 40)
+                    | ((*pal_p.add((hi_b[6] as usize) & 63) as u64) << 48)
+                    | ((*pal_p.add((hi_b[7] as usize) & 63) as u64) << 56);
+                dst.cast::<u64>().write_unaligned(w_lo.to_le());
+                dst.add(8).cast::<u64>().write_unaligned(w_hi.to_le());
+            }
         }
-        #[cfg(not(any(
-            target_arch = "aarch64",
-            all(target_arch = "x86_64", target_feature = "ssse3")
-        )))]
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         unsafe {
             let lo_b = idx_lo.to_le_bytes();
             let hi_b = idx_hi.to_le_bytes();

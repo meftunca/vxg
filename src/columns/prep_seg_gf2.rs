@@ -193,9 +193,9 @@ impl<'a> PreparedColumn<'a> {
                         sep_offset = MAX_SEGMENT_DICT;
                         unsafe {
                             let l = *dict_len_ptr.add(idx) as usize;
-                            let [v0, v1] = *dict_v_ptr.add(idx);
-                            dst_ptr.cast::<u128>().write_unaligned(v0);
-                            dst_ptr.add(16).cast::<u128>().write_unaligned(v1);
+                            let entry_ptr = dict_v_ptr.add(idx).cast::<u8>();
+                            copy16_unaligned(entry_ptr, dst_ptr);
+                            copy16_unaligned(entry_ptr.add(16), dst_ptr.add(16));
                             dst_ptr = dst_ptr.add(l);
                         }
                     } else if code == end_code {
@@ -210,9 +210,17 @@ impl<'a> PreparedColumn<'a> {
                         or_pad |= p;
                         let pad = p as usize;
                         unsafe {
-                            dst_ptr
-                                .cast::<u128>()
-                                .write_unaligned(0x2020_2020_2020_2020_2020_2020_2020_2020);
+                            #[cfg(target_arch = "x86_64")]
+                            {
+                                use core::arch::x86_64::*;
+                                _mm_storeu_si128(dst_ptr.cast::<__m128i>(), _mm_set1_epi8(0x20));
+                            }
+                            #[cfg(not(target_arch = "x86_64"))]
+                            {
+                                dst_ptr
+                                    .cast::<u128>()
+                                    .write_unaligned(0x2020_2020_2020_2020_2020_2020_2020_2020);
+                            }
                             dst_ptr = dst_ptr.add(pad);
                         }
                         let row_len = unsafe { dst_ptr.offset_from(row_start_ptr) as usize };
@@ -267,9 +275,9 @@ impl<'a> PreparedColumn<'a> {
                     sep_offset = MAX_SEGMENT_DICT;
                     unsafe {
                         let l = *dict_len_ptr.add(idx) as usize;
-                        let [v0, v1] = *dict_v_ptr.add(idx);
-                        dst_ptr.cast::<u128>().write_unaligned(v0);
-                        dst_ptr.add(16).cast::<u128>().write_unaligned(v1);
+                        let entry_ptr = dict_v_ptr.add(idx).cast::<u8>();
+                        copy16_unaligned(entry_ptr, dst_ptr);
+                        copy16_unaligned(entry_ptr.add(16), dst_ptr.add(16));
                         dst_ptr = dst_ptr.add(l);
                     }
                 } else if code == end_code {

@@ -103,6 +103,15 @@ impl<'a> PreparedColumn<'a> {
                         let mut prev_entry: &'a [u8] = first_entry;
                         #[cfg(target_arch = "aarch64")]
                         let v_pal = unsafe { core::arch::aarch64::vld1q_u8(pal.as_ptr()) };
+                        #[cfg(target_arch = "x86_64")]
+                        let (x86_v_pal, has_ssse3) = unsafe {
+                            (
+                                core::arch::x86_64::_mm_loadu_si128(
+                                    pal.as_ptr().cast::<core::arch::x86_64::__m128i>(),
+                                ),
+                                std::arch::is_x86_feature_detected!("ssse3"),
+                            )
+                        };
                         for _ in 1..entries_len {
                             let (lcp, lcs, raw_hdr) = if cursor.pos + 3 <= cursor.bytes.len() {
                                 let p = unsafe { cursor.bytes.as_ptr().add(cursor.pos) };
@@ -213,7 +222,45 @@ impl<'a> PreparedColumn<'a> {
                             } else {
                                 false
                             };
-                            #[cfg(not(target_arch = "aarch64"))]
+                            #[cfg(target_arch = "x86_64")]
+                            let handled_fast = if has_ssse3
+                                && !is_raw
+                                && pal_len <= 16
+                                && lcp <= 32
+                                && mid_len <= 32
+                                && lcs <= 16
+                            {
+                                unsafe {
+                                    if mid_len > 0
+                                        && (mid_len & 1) != 0
+                                        && (*packed_mid.get_unchecked(packed_mid.len() - 1) & 0x0f)
+                                            != 0
+                                    {
+                                        return Err(invalid("column front dict nibble padding"));
+                                    }
+                                    let dst = scratch.raw_arena.as_mut_ptr().add(arena_start);
+                                    if !unpack_front_dict_fast_ssse3(
+                                        dst,
+                                        prev_entry.as_ptr(),
+                                        prev_entry.len(),
+                                        lcp,
+                                        mid_len,
+                                        lcs,
+                                        packed_mid,
+                                        x86_v_pal,
+                                        pal_len,
+                                    ) {
+                                        return Err(invalid(
+                                            "column front dict nibble out of bounds",
+                                        ));
+                                    }
+                                    scratch.raw_arena.set_len(arena_start + total_len);
+                                }
+                                true
+                            } else {
+                                false
+                            };
+                            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
                             let handled_fast = false;
                             if !handled_fast {
                                 unsafe {

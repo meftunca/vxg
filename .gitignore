@@ -13,3 +13,7 @@ __pycache__/
 /verification/gpu-emulator*
 graphify-out/
 .DS_Store
+node_modules/
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

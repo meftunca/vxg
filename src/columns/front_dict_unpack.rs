@@ -153,6 +153,75 @@ fn unpack_nibble_bytes_into(
             b_idx += 4;
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        #[target_feature(enable = "ssse3")]
+        unsafe fn unpack_nibble16_ssse3(
+            src_ptr: *const u8,
+            char_len: usize,
+            pal_ptr: *const u8,
+            pal_len: u8,
+            dst: *mut u8,
+            j: &mut usize,
+            b_idx: &mut usize,
+        ) -> bool {
+            let v_pal = _mm_loadu_si128(pal_ptr.cast::<__m128i>());
+            let m_0f = _mm_set1_epi8(0x0f);
+            let v_lim = _mm_set1_epi8(pal_len.wrapping_sub(1) as i8);
+            while *j + 16 <= char_len {
+                let raw64 = src_ptr.add(*b_idx).cast::<u64>().read_unaligned();
+                let v8 = _mm_cvtsi64_si128(raw64 as i64);
+                let hi = _mm_and_si128(_mm_srli_epi16(v8, 4), m_0f);
+                let lo = _mm_and_si128(v8, m_0f);
+                let zipped = _mm_unpacklo_epi8(hi, lo);
+                if pal_len < 16
+                    && _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(zipped, v_lim), v_lim))
+                        != 0xffff
+                {
+                    return false;
+                }
+                let ascii = _mm_shuffle_epi8(v_pal, zipped);
+                _mm_storeu_si128(dst.add(*j).cast::<__m128i>(), ascii);
+                *j += 16;
+                *b_idx += 8;
+            }
+            if *j + 8 <= char_len {
+                let raw32 = src_ptr.add(*b_idx).cast::<u32>().read_unaligned();
+                let v8 = _mm_cvtsi32_si128(raw32 as i32);
+                let hi = _mm_and_si128(_mm_srli_epi16(v8, 4), m_0f);
+                let lo = _mm_and_si128(v8, m_0f);
+                let zipped = _mm_unpacklo_epi8(hi, lo);
+                if pal_len < 16
+                    && (_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(zipped, v_lim), v_lim))
+                        & 0xff)
+                        != 0xff
+                {
+                    return false;
+                }
+                let ascii = _mm_shuffle_epi8(v_pal, zipped);
+                dst.add(*j)
+                    .cast::<u64>()
+                    .write_unaligned(_mm_cvtsi128_si64(ascii) as u64);
+                *j += 8;
+                *b_idx += 4;
+            }
+            true
+        }
+        if std::arch::is_x86_feature_detected!("ssse3") {
+            if !unpack_nibble16_ssse3(
+                src.as_ptr(),
+                char_len,
+                pal.as_ptr(),
+                pal_len,
+                dst,
+                &mut j,
+                &mut b_idx,
+            ) {
+                return Err(invalid("column front dict nibble out of bounds"));
+            }
+        }
+    }
     #[cfg(not(target_arch = "aarch64"))]
     unsafe {
         let pal_p = pal.as_ptr();
@@ -216,6 +285,72 @@ fn unpack_nibble_bytes_into(
     Ok(())
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn unpack_front_dict_fast_ssse3(
+    dst: *mut u8,
+    p_ptr: *const u8,
+    prev_len: usize,
+    lcp: usize,
+    mid_len: usize,
+    lcs: usize,
+    packed_mid: &[u8],
+    v_pal: core::arch::x86_64::__m128i,
+    pal_len: u8,
+) -> bool {
+    use core::arch::x86_64::*;
+    let lcs_v0 = _mm_loadu_si128(p_ptr.add(prev_len - lcs).cast::<__m128i>());
+    _mm_storeu_si128(
+        dst.cast::<__m128i>(),
+        _mm_loadu_si128(p_ptr.cast::<__m128i>()),
+    );
+    if lcp > 16 {
+        _mm_storeu_si128(
+            dst.add(16).cast::<__m128i>(),
+            _mm_loadu_si128(p_ptr.add(16).cast::<__m128i>()),
+        );
+    }
+    if mid_len > 0 {
+        let packed_len = packed_mid.len();
+        let raw128 = read_u128_partial(packed_mid.as_ptr(), packed_len);
+        let raw64 = raw128 as u64;
+        let m_0f = _mm_set1_epi8(0x0f);
+        let v_lim = _mm_set1_epi8(pal_len.wrapping_sub(1) as i8);
+        let v8 = _mm_cvtsi64_si128(raw64.to_le() as i64);
+        let hi = _mm_and_si128(_mm_srli_epi16(v8, 4), m_0f);
+        let lo = _mm_and_si128(v8, m_0f);
+        let zipped = _mm_unpacklo_epi8(hi, lo);
+        if pal_len < 16
+            && _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(zipped, v_lim), v_lim)) != 0xffff
+        {
+            return false;
+        }
+        _mm_storeu_si128(
+            dst.add(lcp).cast::<__m128i>(),
+            _mm_shuffle_epi8(v_pal, zipped),
+        );
+        if mid_len > 16 {
+            let raw64_hi = (raw128 >> 64) as u64;
+            let v8_hi = _mm_cvtsi64_si128(raw64_hi.to_le() as i64);
+            let hi2 = _mm_and_si128(_mm_srli_epi16(v8_hi, 4), m_0f);
+            let lo2 = _mm_and_si128(v8_hi, m_0f);
+            let zipped2 = _mm_unpacklo_epi8(hi2, lo2);
+            if pal_len < 16
+                && _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(zipped2, v_lim), v_lim))
+                    != 0xffff
+            {
+                return false;
+            }
+            _mm_storeu_si128(
+                dst.add(lcp + 16).cast::<__m128i>(),
+                _mm_shuffle_epi8(v_pal, zipped2),
+            );
+        }
+    }
+    _mm_storeu_si128(dst.add(lcp + mid_len).cast::<__m128i>(), lcs_v0);
+    true
+}
+
 /// Unpack `count` `width`-bit integers (`width in 0..=7`) into `out`, adding `base`
 /// to each value, and simultaneously verify that every raw value is `< bound`
 /// (`1 <= bound <= 128`) and tail padding bits are zero.
@@ -261,6 +396,18 @@ fn unpack_and_validate_u8(
                 while i + 16 <= count {
                     let v = vld1q_u8(bytes.as_ptr().add(i));
                     if vmaxvq_u8(v) >= b_max {
+                        return Err(invalid("column bit index out of bounds"));
+                    }
+                    i += 16;
+                }
+            }
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                use core::arch::x86_64::*;
+                let v_lim = _mm_set1_epi8(b_max.wrapping_sub(1) as i8);
+                while i + 16 <= count {
+                    let v = _mm_loadu_si128(bytes.as_ptr().add(i).cast::<__m128i>());
+                    if _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_max_epu8(v, v_lim), v_lim)) != 0xffff {
                         return Err(invalid("column bit index out of bounds"));
                     }
                     i += 16;

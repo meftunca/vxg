@@ -92,6 +92,21 @@ fn find_byte(needle: u8, data: &[u8]) -> Option<usize> {
 }
 
 #[inline(always)]
+unsafe fn eq16_unaligned(a: *const u8, b: *const u8) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let va = _mm_loadu_si128(a.cast::<__m128i>());
+        let vb = _mm_loadu_si128(b.cast::<__m128i>());
+        _mm_movemask_epi8(_mm_cmpeq_epi8(va, vb)) == 0xffff
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    unsafe {
+        a.cast::<u128>().read_unaligned() == b.cast::<u128>().read_unaligned()
+    }
+}
+
+#[inline(always)]
 fn slice_eq_fast(a: &[u8], b: &[u8]) -> bool {
     let len = a.len();
     if len != b.len() {
@@ -118,21 +133,17 @@ fn slice_eq_fast(a: &[u8], b: &[u8]) -> bool {
                     return false;
                 }
                 let tail = len - 16;
-                return pa.add(tail).cast::<u128>().read_unaligned()
-                    == pb.add(tail).cast::<u128>().read_unaligned();
+                return eq16_unaligned(pa.add(tail), pb.add(tail));
             }
             let mut off = 8usize;
             while off + 16 < len {
-                if pa.add(off).cast::<u128>().read_unaligned()
-                    != pb.add(off).cast::<u128>().read_unaligned()
-                {
+                if !eq16_unaligned(pa.add(off), pb.add(off)) {
                     return false;
                 }
                 off += 16;
             }
             let tail = len - 16;
-            return pa.add(tail).cast::<u128>().read_unaligned()
-                == pb.add(tail).cast::<u128>().read_unaligned();
+            return eq16_unaligned(pa.add(tail), pb.add(tail));
         }
         if len >= 4 {
             let tail = len - 4;

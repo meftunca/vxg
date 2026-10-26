@@ -250,6 +250,34 @@ fn prefix_interleave_planes(
             acc[2] = _mm_cvtsi128_si32(a2) as u8;
             acc[3] = _mm_cvtsi128_si32(a3) as u8;
         } else if stride == 3 {
+            #[target_feature(enable = "ssse3")]
+            unsafe fn store_rgb16_ssse3(out_p: *mut u8, r0: __m128i, r1: __m128i, r2: __m128i) {
+                let m0_0 = _mm_setr_epi8(0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1, 5);
+                let m0_1 = _mm_setr_epi8(-1, 0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1);
+                let m0_2 = _mm_setr_epi8(-1, -1, 0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1);
+                let m1_0 = _mm_setr_epi8(-1, -1, 6, -1, -1, 7, -1, -1, 8, -1, -1, 9, -1, -1, 10, -1);
+                let m1_1 = _mm_setr_epi8(5, -1, -1, 6, -1, -1, 7, -1, -1, 8, -1, -1, 9, -1, -1, 10);
+                let m1_2 = _mm_setr_epi8(-1, 5, -1, -1, 6, -1, -1, 7, -1, -1, 8, -1, -1, 9, -1, -1);
+                let m2_0 = _mm_setr_epi8(-1, 11, -1, -1, 12, -1, -1, 13, -1, -1, 14, -1, -1, 15, -1, -1);
+                let m2_1 = _mm_setr_epi8(-1, -1, 11, -1, -1, 12, -1, -1, 13, -1, -1, 14, -1, -1, 15, -1);
+                let m2_2 = _mm_setr_epi8(10, -1, -1, 11, -1, -1, 12, -1, -1, 13, -1, -1, 14, -1, -1, 15);
+                let o0 = _mm_or_si128(
+                    _mm_or_si128(_mm_shuffle_epi8(r0, m0_0), _mm_shuffle_epi8(r1, m0_1)),
+                    _mm_shuffle_epi8(r2, m0_2),
+                );
+                let o1 = _mm_or_si128(
+                    _mm_or_si128(_mm_shuffle_epi8(r0, m1_0), _mm_shuffle_epi8(r1, m1_1)),
+                    _mm_shuffle_epi8(r2, m1_2),
+                );
+                let o2 = _mm_or_si128(
+                    _mm_or_si128(_mm_shuffle_epi8(r0, m2_0), _mm_shuffle_epi8(r1, m2_1)),
+                    _mm_shuffle_epi8(r2, m2_2),
+                );
+                _mm_storeu_si128(out_p.cast::<__m128i>(), o0);
+                _mm_storeu_si128(out_p.add(16).cast::<__m128i>(), o1);
+                _mm_storeu_si128(out_p.add(32).cast::<__m128i>(), o2);
+            }
+            let has_ssse3 = std::arch::is_x86_feature_detected!("ssse3");
             let mut a2 = _mm_set1_epi8(acc[2] as i8);
             let (p0, p1, p2) = (p_ptrs[0], p_ptrs[1], p_ptrs[2]);
             let (c0, c1, c2) = (const_plane[0], const_plane[1], const_plane[2]);
@@ -277,14 +305,18 @@ fn prefix_interleave_planes(
                 } else {
                     (s0, s2)
                 };
-                _mm_storeu_si128(b0.as_mut_ptr().cast::<__m128i>(), r0);
-                _mm_storeu_si128(b1.as_mut_ptr().cast::<__m128i>(), s1);
-                _mm_storeu_si128(b2.as_mut_ptr().cast::<__m128i>(), r2);
                 let out_p = dst_ptr.add(idx * 3);
-                for k in 0..16 {
-                    *out_p.add(k * 3) = b0[k];
-                    *out_p.add(k * 3 + 1) = b1[k];
-                    *out_p.add(k * 3 + 2) = b2[k];
+                if has_ssse3 {
+                    store_rgb16_ssse3(out_p, r0, s1, r2);
+                } else {
+                    _mm_storeu_si128(b0.as_mut_ptr().cast::<__m128i>(), r0);
+                    _mm_storeu_si128(b1.as_mut_ptr().cast::<__m128i>(), s1);
+                    _mm_storeu_si128(b2.as_mut_ptr().cast::<__m128i>(), r2);
+                    for k in 0..16 {
+                        *out_p.add(k * 3) = b0[k];
+                        *out_p.add(k * 3 + 1) = b1[k];
+                        *out_p.add(k * 3 + 2) = b2[k];
+                    }
                 }
                 idx += 16;
             }

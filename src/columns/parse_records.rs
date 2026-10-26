@@ -330,6 +330,34 @@ unsafe fn delimited_masks64(p: *const u8, delim: u8) -> (u64, u64) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         use core::arch::x86_64::*;
+        #[target_feature(enable = "avx2")]
+        unsafe fn delimited_masks64_avx2(p: *const u8, delim: u8) -> (u64, u64) {
+            let v_quote = _mm256_set1_epi8(b'"' as i8);
+            let v_slash = _mm256_set1_epi8(b'\\' as i8);
+            let v_1f = _mm256_set1_epi8(0x1f);
+            let v_delim = _mm256_set1_epi8(delim as i8);
+            let v_21 = _mm256_set1_epi8(0x21);
+            let v_5d = _mm256_set1_epi8(0x5d);
+            let mut qm = 0u64;
+            let mut um = 0u64;
+            for k in 0..2 {
+                let c = _mm256_loadu_si256(p.add(k * 32).cast::<__m256i>());
+                let is_q = _mm256_cmpeq_epi8(c, v_quote);
+                let ctrl = _mm256_cmpeq_epi8(_mm256_max_epu8(c, v_1f), v_1f);
+                let q = _mm256_or_si256(is_q, _mm256_or_si256(_mm256_cmpeq_epi8(c, v_slash), ctrl));
+                let x = _mm256_sub_epi8(c, v_21);
+                let in_range = _mm256_cmpeq_epi8(_mm256_min_epu8(x, v_5d), x);
+                let stop = _mm256_or_si256(is_q, _mm256_cmpeq_epi8(c, v_delim));
+                let u_bits = (_mm256_movemask_epi8(stop) as u32)
+                    | !(_mm256_movemask_epi8(in_range) as u32);
+                qm |= (_mm256_movemask_epi8(q) as u32 as u64) << (k * 32);
+                um |= (u_bits as u64) << (k * 32);
+            }
+            (qm, um)
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return delimited_masks64_avx2(p, delim);
+        }
         let v_quote = _mm_set1_epi8(b'"' as i8);
         let v_slash = _mm_set1_epi8(b'\\' as i8);
         let v_1f = _mm_set1_epi8(0x1f);
@@ -475,6 +503,26 @@ unsafe fn json_quote_mask64(p: *const u8) -> u64 {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         use core::arch::x86_64::*;
+        #[target_feature(enable = "avx2")]
+        unsafe fn json_quote_mask64_avx2(p: *const u8) -> u64 {
+            let v_quote = _mm256_set1_epi8(b'"' as i8);
+            let v_slash = _mm256_set1_epi8(b'\\' as i8);
+            let v_1f = _mm256_set1_epi8(0x1f);
+            let mut qm = 0u64;
+            for k in 0..2 {
+                let c = _mm256_loadu_si256(p.add(k * 32).cast::<__m256i>());
+                let ctrl = _mm256_cmpeq_epi8(_mm256_max_epu8(c, v_1f), v_1f);
+                let q = _mm256_or_si256(
+                    _mm256_cmpeq_epi8(c, v_quote),
+                    _mm256_or_si256(_mm256_cmpeq_epi8(c, v_slash), ctrl),
+                );
+                qm |= (_mm256_movemask_epi8(q) as u32 as u64) << (k * 32);
+            }
+            qm
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return json_quote_mask64_avx2(p);
+        }
         let v_quote = _mm_set1_epi8(b'"' as i8);
         let v_slash = _mm_set1_epi8(b'\\' as i8);
         let v_1f = _mm_set1_epi8(0x1f);

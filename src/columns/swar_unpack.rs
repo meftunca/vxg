@@ -297,7 +297,9 @@ fn unpack_u16_swar(
         let mut byte_pos = 0usize;
         #[cfg(target_arch = "aarch64")]
         let v_min = unsafe { core::arch::aarch64::vdupq_n_u16(min) };
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        let v_min = unsafe { core::arch::x86_64::_mm_set1_epi16(min as i16) };
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         let min_splat = (min as u64).wrapping_mul(0x0001_0001_0001_0001);
 
         while row < count {
@@ -323,7 +325,14 @@ fn unpack_u16_swar(
                 let v16 = vaddq_u16(vmovl_u8(v8), v_min);
                 vst1q_u16(dst_ptr.add(row), v16);
             }
-            #[cfg(not(target_arch = "aarch64"))]
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                use core::arch::x86_64::*;
+                let v8 = _mm_cvtsi64_si128(u8x8 as i64);
+                let v16 = _mm_add_epi16(_mm_unpacklo_epi8(v8, _mm_setzero_si128()), v_min);
+                _mm_storeu_si128(dst_ptr.add(row).cast::<__m128i>(), v16);
+            }
+            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
             unsafe {
                 let lo = (u8x8 & 0xff)
                     | (((u8x8 >> 8) & 0xff) << 16)

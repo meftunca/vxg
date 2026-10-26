@@ -392,24 +392,21 @@ impl<'a> ExecColumn<'a> {
                 BoundStream::Copy16After16 { ptr } => {
                     let p = *ptr;
                     *ptr = p.add(16);
-                    dst.cast::<u128>()
-                        .write_unaligned(p.cast::<u128>().read_unaligned());
+                    copy16_unaligned(p, dst);
                     dst = dst.add(16);
                     return self.after.emit_16(dst);
                 }
                 BoundStream::Copy16After32 { ptr } => {
                     let p = *ptr;
                     *ptr = p.add(16);
-                    dst.cast::<u128>()
-                        .write_unaligned(p.cast::<u128>().read_unaligned());
+                    copy16_unaligned(p, dst);
                     dst = dst.add(16);
                     return self.after.emit_32(dst);
                 }
                 BoundStream::Copy16 { ptr } => {
                     let p = *ptr;
                     *ptr = p.add(16);
-                    dst.cast::<u128>()
-                        .write_unaligned(p.cast::<u128>().read_unaligned());
+                    copy16_unaligned(p, dst);
                     dst = dst.add(16);
                 }
                 BoundStream::HexSuffix4 { ptr } => {
@@ -437,20 +434,11 @@ impl<'a> ExecColumn<'a> {
                     *len_ptr = len_ptr.add(1);
                     let p = *str_ptr;
                     *str_ptr = p.add(len);
-                    dst.cast::<u128>()
-                        .write_unaligned(p.cast::<u128>().read_unaligned());
-                    dst.add(16)
-                        .cast::<u128>()
-                        .write_unaligned(p.add(16).cast::<u128>().read_unaligned());
-                    dst.add(32)
-                        .cast::<u128>()
-                        .write_unaligned(p.add(32).cast::<u128>().read_unaligned());
-                    dst.add(48)
-                        .cast::<u128>()
-                        .write_unaligned(p.add(48).cast::<u128>().read_unaligned());
-                    dst.add(64)
-                        .cast::<u128>()
-                        .write_unaligned(p.add(64).cast::<u128>().read_unaligned());
+                    copy16_unaligned(p, dst);
+                    copy16_unaligned(p.add(16), dst.add(16));
+                    copy16_unaligned(p.add(32), dst.add(32));
+                    copy16_unaligned(p.add(48), dst.add(48));
+                    copy16_unaligned(p.add(64), dst.add(64));
                     if len > 80 {
                         FastPiece::emit_tail_cold(p, dst, len);
                     }

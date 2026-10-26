@@ -211,7 +211,21 @@ fn extract_stride_planes_neon(
                 let mut idx = 0usize;
                 if use_sub_green {
                     while idx + 16 <= count {
-                        let cur3 = vld3q_u8(body_ptr.add(idx * 3));
+                        let src = body_ptr.add(idx * 3);
+                        if idx > 0 {
+                            let prev_src = src.sub(3);
+                            let e0 = vceqq_u8(vld1q_u8(src), vld1q_u8(prev_src));
+                            let e1 = vceqq_u8(vld1q_u8(src.add(16)), vld1q_u8(prev_src.add(16)));
+                            let e2 = vceqq_u8(vld1q_u8(src.add(32)), vld1q_u8(prev_src.add(32)));
+                            if vminvq_u8(vandq_u8(vandq_u8(e0, e1), e2)) == 0xff {
+                                vst1q_u8(p0.add(idx), zero);
+                                vst1q_u8(p1.add(idx), zero);
+                                vst1q_u8(p2.add(idx), zero);
+                                idx += 16;
+                                continue;
+                            }
+                        }
+                        let cur3 = vld3q_u8(src);
                         let c0 = vsubq_u8(cur3.0, cur3.1);
                         let c1 = cur3.1;
                         let c2 = vsubq_u8(cur3.2, cur3.1);
@@ -238,7 +252,21 @@ fn extract_stride_planes_neon(
                     }
                 } else {
                     while idx + 16 <= count {
-                        let cur3 = vld3q_u8(body_ptr.add(idx * 3));
+                        let src = body_ptr.add(idx * 3);
+                        if idx > 0 {
+                            let prev_src = src.sub(3);
+                            let e0 = vceqq_u8(vld1q_u8(src), vld1q_u8(prev_src));
+                            let e1 = vceqq_u8(vld1q_u8(src.add(16)), vld1q_u8(prev_src.add(16)));
+                            let e2 = vceqq_u8(vld1q_u8(src.add(32)), vld1q_u8(prev_src.add(32)));
+                            if vminvq_u8(vandq_u8(vandq_u8(e0, e1), e2)) == 0xff {
+                                vst1q_u8(p0.add(idx), zero);
+                                vst1q_u8(p1.add(idx), zero);
+                                vst1q_u8(p2.add(idx), zero);
+                                idx += 16;
+                                continue;
+                            }
+                        }
+                        let cur3 = vld3q_u8(src);
                         let lag0 = vextq_u8::<15>(prev0, cur3.0);
                         let lag1 = vextq_u8::<15>(prev1, cur3.1);
                         let lag2 = vextq_u8::<15>(prev2, cur3.2);

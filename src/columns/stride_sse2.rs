@@ -172,19 +172,81 @@ fn extract_stride_planes_sse2(
                 let mut or1 = zero;
                 let mut or2 = zero;
                 let mut idx = 0usize;
+                let has_ssse3 = std::arch::is_x86_feature_detected!("ssse3");
+                #[target_feature(enable = "ssse3")]
+                #[inline]
+                unsafe fn deinterleave_rgb16_ssse3(
+                    v0: core::arch::x86_64::__m128i,
+                    v1: core::arch::x86_64::__m128i,
+                    v2: core::arch::x86_64::__m128i,
+                ) -> (
+                    core::arch::x86_64::__m128i,
+                    core::arch::x86_64::__m128i,
+                    core::arch::x86_64::__m128i,
+                ) {
+                    use core::arch::x86_64::*;
+                    let sr0 = _mm_setr_epi8(0, 3, 6, 9, 12, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+                    let sr1 = _mm_setr_epi8(-1, -1, -1, -1, -1, -1, 2, 5, 8, 11, 14, -1, -1, -1, -1, -1);
+                    let sr2 = _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1, 4, 7, 10, 13);
+                    let sg0 = _mm_setr_epi8(1, 4, 7, 10, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+                    let sg1 = _mm_setr_epi8(-1, -1, -1, -1, -1, 0, 3, 6, 9, 12, 15, -1, -1, -1, -1, -1);
+                    let sg2 = _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 5, 8, 11, 14);
+                    let sb0 = _mm_setr_epi8(2, 5, 8, 11, 14, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+                    let sb1 = _mm_setr_epi8(-1, -1, -1, -1, -1, 1, 4, 7, 10, 13, -1, -1, -1, -1, -1, -1);
+                    let sb2 = _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 3, 6, 9, 12, 15);
+                    let r = _mm_or_si128(
+                        _mm_or_si128(_mm_shuffle_epi8(v0, sr0), _mm_shuffle_epi8(v1, sr1)),
+                        _mm_shuffle_epi8(v2, sr2),
+                    );
+                    let g = _mm_or_si128(
+                        _mm_or_si128(_mm_shuffle_epi8(v0, sg0), _mm_shuffle_epi8(v1, sg1)),
+                        _mm_shuffle_epi8(v2, sg2),
+                    );
+                    let b = _mm_or_si128(
+                        _mm_or_si128(_mm_shuffle_epi8(v0, sb0), _mm_shuffle_epi8(v1, sb1)),
+                        _mm_shuffle_epi8(v2, sb2),
+                    );
+                    (r, g, b)
+                }
                 let mut t0 = [0u8; 16];
                 let mut t1 = [0u8; 16];
                 let mut t2 = [0u8; 16];
                 while idx + 16 <= count {
                     let src = body_ptr.add(idx * 3);
-                    for k in 0..16 {
-                        t0[k] = *src.add(k * 3);
-                        t1[k] = *src.add(k * 3 + 1);
-                        t2[k] = *src.add(k * 3 + 2);
+                    let v0 = _mm_loadu_si128(src.cast::<__m128i>());
+                    let v1 = _mm_loadu_si128(src.add(16).cast::<__m128i>());
+                    let v2 = _mm_loadu_si128(src.add(32).cast::<__m128i>());
+                    if idx > 0 {
+                        let psrc = src.sub(3);
+                        let pv0 = _mm_loadu_si128(psrc.cast::<__m128i>());
+                        let pv1 = _mm_loadu_si128(psrc.add(16).cast::<__m128i>());
+                        let pv2 = _mm_loadu_si128(psrc.add(32).cast::<__m128i>());
+                        let diff = _mm_or_si128(
+                            _mm_or_si128(_mm_xor_si128(v0, pv0), _mm_xor_si128(v1, pv1)),
+                            _mm_xor_si128(v2, pv2),
+                        );
+                        if _mm_movemask_epi8(_mm_cmpeq_epi8(diff, zero)) == 0xffff {
+                            _mm_storeu_si128(p0.add(idx).cast::<__m128i>(), zero);
+                            _mm_storeu_si128(p1.add(idx).cast::<__m128i>(), zero);
+                            _mm_storeu_si128(p2.add(idx).cast::<__m128i>(), zero);
+                            idx += 16;
+                            continue;
+                        }
                     }
-                    let raw0 = _mm_loadu_si128(t0.as_ptr().cast::<__m128i>());
-                    let c1 = _mm_loadu_si128(t1.as_ptr().cast::<__m128i>());
-                    let raw2 = _mm_loadu_si128(t2.as_ptr().cast::<__m128i>());
+                    let (raw0, c1, raw2) = if has_ssse3 {
+                        deinterleave_rgb16_ssse3(v0, v1, v2)
+                    } else {
+                        for k in 0..16 {
+                            t0[k] = *src.add(k * 3);
+                            t1[k] = *src.add(k * 3 + 1);
+                            t2[k] = *src.add(k * 3 + 2);
+                        }
+                        (
+                            _mm_loadu_si128(t0.as_ptr().cast::<__m128i>()),
+                            _mm_loadu_si128(t1.as_ptr().cast::<__m128i>()),
+                            _mm_loadu_si128(t2.as_ptr().cast::<__m128i>()),
+                        )
+                    };
                     let (c0, c2) = if use_sub_green {
                         (_mm_sub_epi8(raw0, c1), _mm_sub_epi8(raw2, c1))
                     } else {

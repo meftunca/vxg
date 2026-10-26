@@ -1,0 +1,15 @@
+{
+  "name": "vxg-docs",
+  "version": "0.4.2",
+  "private": true,
+  "type": "module",
+  "description": "VXG — Vectorized Execution Grammar Codec Documentation",
+  "scripts": {
+    "docs:dev": "vitepress dev .",
+    "docs:build": "vitepress build .",
+    "docs:preview": "vitepress preview ."
+  },
+  "devDependencies": {
+    "vitepress": "^1.5.0"
+  }
+}
