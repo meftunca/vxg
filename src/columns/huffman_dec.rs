@@ -124,11 +124,8 @@ fn huf_decode_impl(blob: &[u8], dst: &mut [u8]) -> Result<()> {
         return Err(invalid("huffman stream sizes"));
     }
     let size = 1usize << max_len;
-    thread_local! {
-        static HUF_DEC_TABLE: std::cell::UnsafeCell<[u16; 1 << HUF_BITS]> =
-            const { std::cell::UnsafeCell::new([0u16; 1 << HUF_BITS]) };
-    }
-    let tbl_ptr = HUF_DEC_TABLE.with(|cell| cell.get().cast::<u16>());
+    let mut table_uninit = [std::mem::MaybeUninit::<u16>::uninit(); 1 << HUF_BITS];
+    let tbl_ptr = table_uninit.as_mut_ptr().cast::<u16>();
     // Doubling build: at level `l` the table (size 2^l) is its lower half copied
     // once (contiguous memcpy), then every code of length `l` writes its single
     // bit-reversed slot. Low byte holds symbol (`e as u8`), high byte holds code length (`e >> 8`).

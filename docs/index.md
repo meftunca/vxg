@@ -42,6 +42,14 @@ Traditional byte-stream LZ compressors (`LZ4`, `Zstd`) scan inputs sequentially 
 | **Decode Energy (`J/GB`, 1T)** *(lower is better)* | **`0.665 J/GB`** | `0.619 J/GB` | `1.641 J/GB` | **`2.47x` less decode energy than Zstd-1** |
 | **Green Codec Index (`GCI`, 1T / 8T)** | **`133.2 / 728.7`** | `34.0 / 184.1` | `15.5 / 94.6` | **`3.92x` greener than LZ4, `8.59x` greener than Zstd-1** |
 
+### Cross-Platform GitHub Actions CI Summary (`1T`, `16 MiB` Geomean)
+
+| CI Runner (`OS / Arch / SIMD`) | **VXG v4 Ratio** | **VXG v4 Encode / Decode** | **LZ4 Encode / Decode** | **Zstd-1 Encode / Decode** | **VXG `VPI` (`vs LZ4` / `Zstd-1`)** | **VXG `BCI` (`vs LZ4` / `Zstd-1`)** |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **macOS (`macos-14` / `aarch64` NEON)** | **`0.0249`** | **`1.554 / 5.896 GB/s`** | `1.307 / 5.205 GB/s` | `0.920 / 1.990 GB/s` | **`121.4` (`5.91x` / `5.45x`)** | **`7.17` (`3.76` / `3.11`)** |
+| **Linux (`ubuntu-latest` / `x86_64` AVX2)** | **`0.0249`** | **`1.984 / 6.822 GB/s`** | `2.038 / 5.994 GB/s` | `1.308 / 2.699 GB/s` | **`147.5` (`5.36x` / `4.76x`)** | **`8.16` (`4.58` / `3.88`)** |
+| **Windows (`windows-latest` / `x86_64` AVX2)** | **`0.0249`** | **`2.295 / 8.362 GB/s`** | `1.520 / 7.519 GB/s` | `1.110 / 3.080 GB/s` | **`175.9` (`6.60x` / `5.76x`)** | **`9.17` (`4.48` / `3.84`)** |
+
 ---
 
 ## Quick Start in 30 Seconds
