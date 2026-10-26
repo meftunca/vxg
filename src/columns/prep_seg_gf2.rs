@@ -1,6 +1,35 @@
 impl<'a> PreparedColumn<'a> {
     #[inline(never)]
     fn parse_segment_dict(
+        cursor: Cursor<'a>,
+        count: usize,
+        scratch: &mut DecodeScratch,
+    ) -> Result<Self> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+            unsafe fn parse_segment_dict_x86_v3<'a>(
+                cursor: Cursor<'a>,
+                count: usize,
+                scratch: &mut DecodeScratch,
+            ) -> Result<PreparedColumn<'a>> {
+                PreparedColumn::parse_segment_dict_impl(cursor, count, scratch)
+            }
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("ssse3")
+                && std::arch::is_x86_feature_detected!("sse4.1")
+                && std::arch::is_x86_feature_detected!("popcnt")
+                && std::arch::is_x86_feature_detected!("bmi1")
+                && std::arch::is_x86_feature_detected!("bmi2")
+            {
+                return unsafe { parse_segment_dict_x86_v3(cursor, count, scratch) };
+            }
+        }
+        Self::parse_segment_dict_impl(cursor, count, scratch)
+    }
+
+    #[inline(always)]
+    fn parse_segment_dict_impl(
         mut cursor: Cursor<'a>,
         count: usize,
         scratch: &mut DecodeScratch,

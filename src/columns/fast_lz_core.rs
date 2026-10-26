@@ -166,6 +166,37 @@ fn pack_fast_lz_core_impl<const HASH_LEN: u32, const USE_DICT7: bool>(
             return 8 + (diff1.trailing_zeros() >> 3) as usize;
         }
         let mut ml = 16usize;
+        #[cfg(target_arch = "x86_64")]
+        {
+            #[target_feature(enable = "avx2")]
+            #[inline]
+            unsafe fn match_len_avx2(
+                ptr: *const u8,
+                ip: usize,
+                cand: usize,
+                n: usize,
+                ml: &mut usize,
+            ) -> Option<usize> {
+                use core::arch::x86_64::*;
+                while ip + *ml + 32 <= n {
+                    let eq = _mm256_cmpeq_epi8(
+                        _mm256_loadu_si256(ptr.add(ip + *ml).cast()),
+                        _mm256_loadu_si256(ptr.add(cand + *ml).cast()),
+                    );
+                    let mask = _mm256_movemask_epi8(eq) as u32;
+                    if mask != u32::MAX {
+                        return Some(*ml + (!mask).trailing_zeros() as usize);
+                    }
+                    *ml += 32;
+                }
+                None
+            }
+            if std::arch::is_x86_feature_detected!("avx2") {
+                if let Some(exact) = unsafe { match_len_avx2(ptr, ip, cand, n, &mut ml) } {
+                    return exact;
+                }
+            }
+        }
         while ip + ml + 8 <= n {
             let a = unsafe { ptr.add(ip + ml).cast::<u64>().read_unaligned().to_le() };
             let b = unsafe { ptr.add(cand + ml).cast::<u64>().read_unaligned().to_le() };

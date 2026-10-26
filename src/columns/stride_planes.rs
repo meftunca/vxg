@@ -84,32 +84,6 @@ fn encode_stride_planes_impl(
                     sparse_cand[p] = true;
                 }
             }
-        } else {
-            for p in 0..stride {
-                if all_zero[p] {
-                    continue;
-                }
-                let p64_base = unsafe { comb.as_ptr().add(p * count).cast::<u64>() };
-                let mut sparse_est = 0usize;
-                let mut sw_i = 0usize;
-                let mut sampled = 0usize;
-                while sw_i < full_words {
-                    let u = unsafe {
-                        p64_base.add(sw_i * 8).read_unaligned()
-                            | p64_base.add(sw_i * 8 + 1).read_unaligned()
-                            | p64_base.add(sw_i * 8 + 2).read_unaligned()
-                            | p64_base.add(sw_i * 8 + 3).read_unaligned()
-                            | p64_base.add(sw_i * 8 + 4).read_unaligned()
-                            | p64_base.add(sw_i * 8 + 5).read_unaligned()
-                            | p64_base.add(sw_i * 8 + 6).read_unaligned()
-                            | p64_base.add(sw_i * 8 + 7).read_unaligned()
-                    };
-                    sparse_est += (u != 0) as usize;
-                    sampled += 1;
-                    sw_i += step;
-                }
-                sparse_cand[p] = sampled > 0 && sparse_est * 8 <= sampled;
-            }
         }
     } else {
         for p in 0..stride {

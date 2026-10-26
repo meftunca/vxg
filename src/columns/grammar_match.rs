@@ -6,7 +6,7 @@ fn grammar_from_block<'a>(
     Ok((templates, rows, template_rows, raw_rows))
 }
 
-#[inline(never)]
+#[inline(always)]
 fn match_single_delim_or_logfmt_stream<'a>(
     data: &'a [u8],
     tpl: &mut Template<'a>,
@@ -94,7 +94,7 @@ fn match_single_delim_or_logfmt_stream<'a>(
     *col_cap = cur_col_cap;
 }
 
-#[inline(never)]
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn match_multi_clean_stream<'a>(
     data: &'a [u8],
@@ -158,7 +158,7 @@ fn match_multi_clean_stream<'a>(
     matched_any
 }
 
-#[inline(never)]
+#[inline(always)]
 fn match_single_json_clean_stream<'a>(
     data: &'a [u8],
     tpl: &mut Template<'a>,
@@ -249,7 +249,7 @@ fn match_single_json_clean_stream<'a>(
     *col_cap = cur_col_cap;
 }
 
-#[inline(never)]
+#[inline(always)]
 fn match_single_json_qmask_stream<'a>(
     data: &'a [u8],
     tpl: &mut Template<'a>,
