@@ -23,6 +23,35 @@ fn unpack_grammar(cursor: &mut Cursor<'_>, strict: bool) -> Result<Vec<u8>> {
 fn unpack_grammar_inner(
     cursor: &mut Cursor<'_>,
     strict: bool,
+    sink: OutSink,
+) -> Result<usize> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn unpack_grammar_inner_x86_v3(
+            cursor: &mut Cursor<'_>,
+            strict: bool,
+            sink: OutSink,
+        ) -> Result<usize> {
+            unpack_grammar_inner_impl(cursor, strict, sink)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+        {
+            return unsafe { unpack_grammar_inner_x86_v3(cursor, strict, sink) };
+        }
+    }
+    unpack_grammar_inner_impl(cursor, strict, sink)
+}
+
+#[inline(always)]
+fn unpack_grammar_inner_impl(
+    cursor: &mut Cursor<'_>,
+    strict: bool,
     mut sink: OutSink,
 ) -> Result<usize> {
     let raw_len = cursor.uleb()?;
@@ -220,6 +249,7 @@ fn unpack_grammar_inner(
 
             let mut cols_uninit = core::mem::MaybeUninit::<[PreparedColumn; MAX_SLOTS]>::uninit();
             let cols: &mut [PreparedColumn; MAX_SLOTS] = unsafe { cols_uninit.assume_init_mut() };
+            let mut tail_buf = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
 
             // Fast path 1: Single-template block (`template_count == 1 && selector_width == 1`)
             if template_count == 1 && selector_width == 1 {
@@ -256,25 +286,14 @@ fn unpack_grammar_inner(
                 scratch.exec_col_arena.reserve(unbound_len);
                 let mut tpl = unbound.bind(&mut scratch);
 
-                let base = sink.base;
-                let capacity = sink.capacity;
-                let mut pos = 0usize;
-                let mut tail_buf = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
+                let (base, capacity, mut pos) = (sink.base, sink.capacity, 0usize);
 
                 if raw_count == 0 {
-                    emit_template_rows(
-                        &mut tpl,
-                        row_count,
-                        base,
-                        &mut pos,
-                        capacity,
-                        &mut tail_buf,
-                    )?;
+                    emit_template_rows(&mut tpl, row_count, base, &mut pos, capacity, &mut tail_buf)?;
                 } else {
                     let raw_slices_ptr =
                         unsafe { scratch.slice_arena.as_ptr().add(raw_slice_offset) };
-                    let mut raw_idx = 0usize;
-                    let mut row_idx = 0usize;
+                    let (mut raw_idx, mut row_idx) = (0usize, 0usize);
                     while row_idx < row_count {
                         let byte = selector_slice[row_idx >> 3];
                         let bit = (byte >> (row_idx & 7)) & 1;
@@ -299,19 +318,13 @@ fn unpack_grammar_inner(
                                 if ones_in_byte < rem_in_byte {
                                     row_idx = (row_idx + ones_in_byte).min(row_count);
                                     emit_template_rows(
-                                        &mut tpl,
-                                        row_idx - run_start,
-                                        base,
-                                        &mut pos,
-                                        capacity,
-                                        &mut tail_buf,
+                                        &mut tpl, row_idx - run_start, base, &mut pos, capacity, &mut tail_buf,
                                     )?;
                                     continue;
                                 }
                                 row_idx = (row_idx + rem_in_byte).min(row_count);
                             }
-                            while row_idx + 8 <= row_count && selector_slice[row_idx >> 3] == 0xff
-                            {
+                            while row_idx + 8 <= row_count && selector_slice[row_idx >> 3] == 0xff {
                                 row_idx += 8;
                             }
                             if row_idx < row_count {
@@ -320,12 +333,7 @@ fn unpack_grammar_inner(
                                 row_idx = (row_idx + leading_ones).min(row_count);
                             }
                             emit_template_rows(
-                                &mut tpl,
-                                row_idx - run_start,
-                                base,
-                                &mut pos,
-                                capacity,
-                                &mut tail_buf,
+                                &mut tpl, row_idx - run_start, base, &mut pos, capacity, &mut tail_buf,
                             )?;
                         }
                     }
@@ -419,7 +427,6 @@ fn unpack_grammar_inner(
             let end_cap = unsafe { base.add(capacity) };
             let mut dst = base;
             let mut raw_idx = 0usize;
-            let mut tail_buf = core::mem::MaybeUninit::<[u8; 4096]>::uninit();
             let sel_ptr = unsafe { scratch.u8_arena.as_ptr().add(sel_u8_offset) };
             let raw_slices_ptr =
                 unsafe { scratch.slice_arena.as_ptr().add(raw_slice_offset) };
@@ -433,14 +440,7 @@ fn unpack_grammar_inner(
                         dst = unsafe { tpl.emit_row(dst) };
                     } else {
                         let mut pos = unsafe { dst.offset_from(base) as usize };
-                        emit_template_row_tail(
-                            tpl,
-                            tpl.row_budget,
-                            base,
-                            &mut pos,
-                            capacity,
-                            &mut tail_buf,
-                        )?;
+                        emit_template_row_tail(tpl, tpl.row_budget, base, &mut pos, capacity, &mut tail_buf)?;
                         dst = unsafe { base.add(pos) };
                     }
                 } else {

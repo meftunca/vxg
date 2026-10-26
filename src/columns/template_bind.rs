@@ -347,8 +347,26 @@ fn emit_template_rows(
         if safe_rows > 0 {
             unsafe {
                 let mut dst = base.add(*pos);
-                for _ in 0..safe_rows {
-                    dst = tpl.emit_row(dst);
+                let slots = tpl.col_len;
+                let col_ptr = tpl.col_ptr;
+                let head = tpl.head;
+                if head.len == 0 {
+                    for _ in 0..safe_rows {
+                        for slot in 0..slots {
+                            dst = (*col_ptr.add(slot)).emit(dst);
+                        }
+                    }
+                } else if head.len <= 16 {
+                    for _ in 0..safe_rows {
+                        dst = head.emit_16(dst);
+                        for slot in 0..slots {
+                            dst = (*col_ptr.add(slot)).emit(dst);
+                        }
+                    }
+                } else {
+                    for _ in 0..safe_rows {
+                        dst = tpl.emit_row(dst);
+                    }
                 }
                 *pos = dst.offset_from(base) as usize;
             }

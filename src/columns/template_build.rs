@@ -33,6 +33,7 @@ impl PreparedTemplate {
 }
 
 impl UnboundTemplate {
+    #[inline(never)]
     fn build<'a>(
         segments: &[&'a [u8]],
         cols: &[PreparedColumn<'a>],

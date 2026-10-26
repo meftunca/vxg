@@ -2,6 +2,33 @@ fn grammar_from_block_mode<'a>(
     data: &'a [u8],
     allow_early_abort: bool,
 ) -> Result<(Vec<Template<'a>>, Vec<Row<'a>>, usize, usize, usize)> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn grammar_from_block_mode_x86_v3<'a>(
+            data: &'a [u8],
+            allow_early_abort: bool,
+        ) -> Result<(Vec<Template<'a>>, Vec<Row<'a>>, usize, usize, usize)> {
+            grammar_from_block_mode_impl(data, allow_early_abort)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+        {
+            return unsafe { grammar_from_block_mode_x86_v3(data, allow_early_abort) };
+        }
+    }
+    grammar_from_block_mode_impl(data, allow_early_abort)
+}
+
+#[inline(always)]
+fn grammar_from_block_mode_impl<'a>(
+    data: &'a [u8],
+    allow_early_abort: bool,
+) -> Result<(Vec<Template<'a>>, Vec<Row<'a>>, usize, usize, usize)> {
     let first_nl = find_byte(b'\n', data).map_or(data.len(), |i| i + 1);
     let est_rows = (data.len() / first_nl.max(24).min(64)).max(16) + 16;
     let mut templates = Vec::<Template<'a>>::with_capacity(8);

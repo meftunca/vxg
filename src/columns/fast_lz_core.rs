@@ -45,6 +45,50 @@ fn pack_fast_lz_core_const<const HASH_LEN: u32, const USE_DICT7: bool>(
     ext_vec: &mut Vec<u8>,
     lits_vec: &mut Vec<u8>,
 ) -> (usize, usize, usize) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn pack_fast_lz_core_x86_v3<const HASH_LEN: u32, const USE_DICT7: bool>(
+            data: &[u8],
+            dict4_vec: &mut Vec<u32>,
+            dict7_vec: &mut Vec<u16>,
+            tokens_vec: &mut Vec<u8>,
+            offsets_vec: &mut Vec<u8>,
+            ext_vec: &mut Vec<u8>,
+            lits_vec: &mut Vec<u8>,
+        ) -> (usize, usize, usize) {
+            pack_fast_lz_core_impl::<HASH_LEN, USE_DICT7>(
+                data, dict4_vec, dict7_vec, tokens_vec, offsets_vec, ext_vec, lits_vec,
+            )
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe {
+                pack_fast_lz_core_x86_v3::<HASH_LEN, USE_DICT7>(
+                    data, dict4_vec, dict7_vec, tokens_vec, offsets_vec, ext_vec, lits_vec,
+                )
+            };
+        }
+    }
+    pack_fast_lz_core_impl::<HASH_LEN, USE_DICT7>(
+        data, dict4_vec, dict7_vec, tokens_vec, offsets_vec, ext_vec, lits_vec,
+    )
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn pack_fast_lz_core_impl<const HASH_LEN: u32, const USE_DICT7: bool>(
+    data: &[u8],
+    dict4_vec: &mut Vec<u32>,
+    dict7_vec: &mut Vec<u16>,
+    tokens_vec: &mut Vec<u8>,
+    offsets_vec: &mut Vec<u8>,
+    ext_vec: &mut Vec<u8>,
+    lits_vec: &mut Vec<u8>,
+) -> (usize, usize, usize) {
     let n = data.len();
     let ptr = data.as_ptr();
     let (d4_len, shift4) = if n <= 512 {

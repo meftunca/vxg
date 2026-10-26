@@ -7,6 +7,50 @@ fn unpack_fast_lz_core(
     lits: &[u8],
     out: &mut [u8],
 ) -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn unpack_fast_lz_core_x86_v3(
+            seq_count: usize,
+            off_count: usize,
+            toks: &[u8],
+            offs_bytes: &[u8],
+            ext_bytes: &[u8],
+            lits: &[u8],
+            out: &mut [u8],
+        ) -> Result<()> {
+            unpack_fast_lz_core_impl(seq_count, off_count, toks, offs_bytes, ext_bytes, lits, out)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe {
+                unpack_fast_lz_core_x86_v3(
+                    seq_count,
+                    off_count,
+                    toks,
+                    offs_bytes,
+                    ext_bytes,
+                    lits,
+                    out,
+                )
+            };
+        }
+    }
+    unpack_fast_lz_core_impl(seq_count, off_count, toks, offs_bytes, ext_bytes, lits, out)
+}
+
+#[inline(always)]
+fn unpack_fast_lz_core_impl(
+    seq_count: usize,
+    off_count: usize,
+    toks: &[u8],
+    offs_bytes: &[u8],
+    ext_bytes: &[u8],
+    lits: &[u8],
+    out: &mut [u8],
+) -> Result<()> {
     if off_count != seq_count {
         return Err(invalid("fast lz offset underflow"));
     }
@@ -39,23 +83,27 @@ fn unpack_fast_lz_core(
                 let match_len = ml_code + 4;
                 if offset >= 16 {
                     unsafe {
-                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
-                        lit_pos += lit_len;
-                        dst_pos += lit_len;
-
+                        if lit_len > 0 {
+                            copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
+                            lit_pos += lit_len;
+                            dst_pos += lit_len;
+                        }
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
                         copy16_unaligned(msrc, mdst);
-                        copy16_unaligned(msrc.add(16), mdst.add(16));
+                        if match_len > 16 {
+                            copy16_unaligned(msrc.add(16), mdst.add(16));
+                        }
                         dst_pos += match_len;
                     }
                     continue;
                 } else if offset >= match_len {
                     unsafe {
-                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
-                        lit_pos += lit_len;
-                        dst_pos += lit_len;
-
+                        if lit_len > 0 {
+                            copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
+                            lit_pos += lit_len;
+                            dst_pos += lit_len;
+                        }
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
                         copy16_unaligned(msrc, mdst);
@@ -69,10 +117,11 @@ fn unpack_fast_lz_core(
                     ext_pos += 1;
                     let match_len = 19 + e;
                     unsafe {
-                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
-                        lit_pos += lit_len;
-                        dst_pos += lit_len;
-
+                        if lit_len > 0 {
+                            copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
+                            lit_pos += lit_len;
+                            dst_pos += lit_len;
+                        }
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
                         copy16_unaligned(msrc, mdst);

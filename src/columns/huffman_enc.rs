@@ -215,6 +215,23 @@ fn huf_codes(lens: &[u8; 256], max_sym: usize) -> [u16; 256] {
 
 /// Append a Huffman blob for `src` to `out` if it is strictly smaller than `limit` bytes.
 fn huf_encode(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn huf_encode_x86_v3(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
+            huf_encode_impl(src, out, limit)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe { huf_encode_x86_v3(src, out, limit) };
+        }
+    }
+    huf_encode_impl(src, out, limit)
+}
+
+#[inline(always)]
+fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
     let n = src.len();
     if n < HUF_MIN {
         return false;
@@ -265,18 +282,13 @@ fn huf_encode(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
             freq[b as usize] += 1;
         }
     }
-    let mut distinct = 0usize;
-    let mut max_sym = 0usize;
-    let mut max_freq = 0u32;
-    let mut heavy_sum = 0u32;
+    let (mut distinct, mut max_sym, mut max_freq, mut heavy_sum) = (0usize, 0usize, 0u32, 0u32);
     let heavy_thresh = (n as u32) >> 5;
     for (s, &c) in freq.iter().enumerate() {
         if c > 0 {
             distinct += 1;
             max_sym = s;
-            if c > max_freq {
-                max_freq = c;
-            }
+            max_freq = max_freq.max(c);
             if c > heavy_thresh {
                 heavy_sum += c;
             }
@@ -286,8 +298,7 @@ fn huf_encode(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
         if 2 >= limit {
             return false;
         }
-        out.push(HUF_KIND_RLE);
-        out.push(src[0]);
+        out.extend_from_slice(&[HUF_KIND_RLE, src[0]]);
         return true;
     }
     // Adaptive Entropy Gate: if the alphabet is wide and flat, skip Huffman tree & bitstream build.

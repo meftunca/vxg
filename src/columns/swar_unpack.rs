@@ -406,7 +406,22 @@ unsafe fn write_hex8_from_4bytes(dst: *mut u8, src: *const u8) {
         let ascii = vqtbl1_u8(hex_lut, zipped);
         vst1_u8(dst, ascii);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let v = _mm_cvtsi32_si128(src.cast::<i32>().read_unaligned());
+        let mask = _mm_set1_epi8(0x0f);
+        let hi = _mm_and_si128(_mm_srli_epi16(v, 4), mask);
+        let lo = _mm_and_si128(v, mask);
+        let nib = _mm_unpacklo_epi8(hi, lo);
+        let gt9 = _mm_cmpgt_epi8(nib, _mm_set1_epi8(9));
+        let ascii = _mm_add_epi8(
+            _mm_add_epi8(nib, _mm_set1_epi8(b'0' as i8)),
+            _mm_and_si128(gt9, _mm_set1_epi8((b'a' - b'0' - 10) as i8)),
+        );
+        _mm_storel_epi64(dst.cast::<__m128i>(), ascii);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     unsafe {
         let b0 = *HEX_BYTE_LUT.get_unchecked(*src as usize) as u64;
         let b1 = *HEX_BYTE_LUT.get_unchecked(*src.add(1) as usize) as u64;
@@ -430,7 +445,22 @@ unsafe fn write_hex16_from_8bytes(dst: *mut u8, src: *const u8) {
         let ascii = vqtbl1q_u8(hex_lut, zipped);
         vst1q_u8(dst, ascii);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let v = _mm_loadl_epi64(src.cast::<__m128i>());
+        let mask = _mm_set1_epi8(0x0f);
+        let hi = _mm_and_si128(_mm_srli_epi16(v, 4), mask);
+        let lo = _mm_and_si128(v, mask);
+        let nib = _mm_unpacklo_epi8(hi, lo);
+        let gt9 = _mm_cmpgt_epi8(nib, _mm_set1_epi8(9));
+        let ascii = _mm_add_epi8(
+            _mm_add_epi8(nib, _mm_set1_epi8(b'0' as i8)),
+            _mm_and_si128(gt9, _mm_set1_epi8((b'a' - b'0' - 10) as i8)),
+        );
+        _mm_storeu_si128(dst.cast::<__m128i>(), ascii);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     unsafe {
         write_hex8_from_4bytes(dst, src);
         write_hex8_from_4bytes(dst.add(8), src.add(4));
