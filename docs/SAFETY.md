@@ -5,24 +5,26 @@ hardened public decompression service before compilation, fuzzing and platform v
 
 ## CPU
 
-The public parser checks header/version, allowed flags, directory arithmetic, block sizes,
+The public parser checks header/version (`v1`–`v4`), allowed flags, directory arithmetic, block sizes,
 canonical layout, output limit, command progress, extensions, stream ranges, distances and
-exact output consumption. `decompress` checks the requested output limit before allocating.
-`Frame::decode_into` can partially modify its destination before an error; callers must
+exact output consumption. `decompress` checks the requested output limit before allocating;
+`decompress_into` and `extract_block_into` write directly into caller-provided buffers after
+verifying capacity and structural bounds (including multi-threaded disjoint block slices).
+`Frame::decode_into` / `decompress_into` can partially modify the destination before an error; callers must
 discard that output. The default full-output limit is 1 GiB, not an application policy for
 every deployment. Ordinary Vec allocation can still fail/abort under memory exhaustion.
 
-SIMD entry points are private unsafe helpers behind runtime feature detection. Full-vector
-loads/stores only execute when a whole vector is inside both valid slices; tails are exact.
-No external 64-byte padding/wild-copy contract. Copying overlap uses split slices, seed
-snapshots or completed-prefix doubling, not an aliased `copy_nonoverlapping` call.
-These are design invariants, not a claim that the uncompiled implementation passed Miri.
+SIMD entry points are private unsafe helpers behind runtime feature detection (`NEON` on `aarch64`, `SSE2`/`AVX2`/`AVX-512` on `x86_64`). Full-vector
+loads/stores only execute when a whole vector is inside valid bounds or explicitly reserved scratch arenas; tails are exact.
+Copying overlap uses split slices, seed snapshots or completed-prefix doubling, not an aliased `copy_nonoverlapping` call.
 
-## GPU/FFI
+## Public C FFI & GPU Bridge
 
-Native buffers internally include padding for packed u32 reads. GPU decode is a trusted
+The public C ABI declared in [`include/vxg.h`](../include/vxg.h) and implemented in [`src/ffi.rs`](../src/ffi.rs) wraps every entry point (`vxg_compress_into`, `vxg_decompress_into`, `vxg_extract_block_into`, etc.) in `std::panic::catch_unwind`, validates null pointers and slice bounds before constructing Rust slices, and returns negative `VXG_ERR_*` status codes on invalid inputs or panics.
+
+For the internal GPU host bridges (`native/`), native buffers internally include padding for packed `u32` reads. GPU decode is a trusted
 kernel, not a standalone parser of arbitrary untrusted bytes. Rust validates all command
-streams before dispatch. The C ABI is internal, not a safe public interface; bypassing
+streams before dispatch; bypassing
 Rust checks invalidates the kernel assumptions and can cause out-of-bounds accesses or hangs.
 All native calls are synchronous before borrowed host buffers expire. CUDA failure cleanup
 synchronizes the stream before returning. Contexts are poisoned on reported native errors.

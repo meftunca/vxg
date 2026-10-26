@@ -1,8 +1,8 @@
-# VXG 0.4 — Unified Adaptive Multi-Format Lossless Block Codec (Format v4)
+# VXG 4.0.1 — Unified Adaptive Multi-Format Lossless Block Codec (Format v4)
 
 [![CI — Source Validation](https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/ci.yml)
 [![CI — Cross-Platform Benchmarks](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml)
-[![Release v0.4.0](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.0)
+[![Release v4.0.1](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v4.0.1)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **High-throughput Rust CPU (SIMD/SWAR) codec combining an adaptive structured-column engine (NDJSON / CSV / TSV / Logfmt), a 2D/Stride pixel engine (24-bpp & 32-bpp BMP), and a const-generic Fast-LZ + 4-stream canonical Huffman engine — with zero-overhead C ABI (`staticlib` / `cdylib`) and native Metal / CUDA / Vulkan sources.**
@@ -16,12 +16,34 @@ VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the 
 | Area | Highlights |
 | :--- | :--- |
 | **Format v4 Wire Layout** | Compact 8-byte per-block directory (`payload_size \| kind << 30`, `crc32c`); full backward read compatibility with `v1`–`v3` frames |
-| **Structured Column Engine** | Automatic schema & delimiter discovery for **NDJSON, CSV, TSV, and Logfmt**; specialized models for `Dictionary`, `DecimalDelta`, `DecimalSuffix`, `Timestamp` (SWAR+SIMD), `EpochCounter` (SIMD hex), `SegmentDictionary`, and `FrontCodedDict` |
+| **Structured Column Engine** | Automatic schema & delimiter discovery for **NDJSON, Pretty-Printed JSON, CSV, TSV, CLF/Bracketed Logs, and Logfmt**; specialized models for `Dictionary`, `DecimalDelta`, `DecimalSuffix`, `Timestamp` (SWAR+SIMD), `EpochCounter` (SIMD hex), `SegmentDictionary`, and `FrontCodedDict` (with 4-bit/5-bit nibble palettes and Fast-LZ dictionary streams) |
 | **Image & Stride Engine** | 24-bpp / 32-bpp BMP and multi-stride (`1, 2, 3, 4, 8`) byte-plane transpose + `Subtract-Green` (`R-G`, `B-G`) color decorrelation + 2-level 64-bit hierarchical zero-mask & per-plane `Fast-LZ` |
 | **Prose & Source Code** | Const-generic `Fast-LZ` matcher paired with a 4-stream interleaved canonical Huffman coder |
-| **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning and SIMD prefix-sum plane interleaving |
+| **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning, 64-byte `FastPiece` unaligned `u128` row assembly, and SIMD prefix-sum plane interleaving |
 | **Integrity & Safety** | Hardware-accelerated CRC32C (`ARMv8 CRC` / `SSE4.2`); strict output-size bounds and deterministic rejection of truncated or malformed inputs |
-| **Zero-Overhead Foreign FFI** | Ships as `rlib`, `staticlib` (`libvxg.a` / `vxg.lib`), and `cdylib` (`libvxg.dylib` / `.so` / `.dll`) with [`include/vxg.h`](include/vxg.h) and ready-to-run examples for **C/C++, Python, Go, Bun/Node.js, and C#** |
+| **Zero-Allocation Rust & C ABI** | Zero-allocation `compress_into` / `decompress_into` / `extract_block_into` in Rust and C (`staticlib` `libvxg.a` / `vxg.lib`, `cdylib` `libvxg.dylib` / `.so` / `.dll`) with [`include/vxg.h`](include/vxg.h) and ready-to-run examples for **C/C++, Python, Go, Bun/Node.js, C#, and WebAssembly** |
+
+---
+
+## Local Apple Silicon Benchmark, Composite Index & Energy Highlights (1-Thread & 8-Thread, 16 MiB, 64 KiB Blocks)
+
+Measured via `vxg-bench --suite v4 --size-mib 16 --samples 5 --seconds 0.08` against native C `liblz4` (`lz4-c-a1`) and `libzstd` (`zstd-c-l1`) on Apple Silicon (`aarch64` NEON):
+- **VXG Performance Index (`VPI`):** $\text{VPI} = \frac{\sqrt{\text{Encode}_{\text{GB/s}} \cdot \text{Decode}_{\text{GB/s}}}}{\text{Ratio}}$ (higher is better).
+- **Green Codec Index (`GCI`):** $\text{GCI} = \frac{\text{VPI}}{\sqrt{J_{\text{enc}} \cdot J_{\text{dec}}}}$ using per-process kernel hardware energy (`proc_pid_rusage` `RUSAGE_INFO_V6` `ri_energy_nj` in `J/GB`, see [`docs/ENERGY_BENCHMARKS.md`](docs/ENERGY_BENCHMARKS.md)).
+
+| Dataset | VXG v4 Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG 1T Enc / Dec (`GB/s`) | VXG 8T Enc / Dec (`GB/s`) | VXG 1T / 8T `VPI` (`vs LZ4`) | VXG 1T Enc / Dec (`J/GB`) | VXG 1T `GCI` (`vs LZ4` / `Zstd-1`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`telemetry.csv`** | **0.0407** | 0.1994 | 0.0841 | 1.704 / 9.420 | **11.122 / 47.196** | **98.4 / 562.4** (`5.20x` / `4.84x`) | 2.921 / 0.671 | **70.2** (`3.53x` / `10.80x`) |
+| **`events.tsv`** | **0.0334** | 0.2223 | 0.0741 | 1.686 / 9.441 | **9.919 / 45.716** | **119.5 / 637.7** (`9.03x` / `8.28x`) | 2.952 / 0.653 | **86.0** (`8.27x` / `8.69x`) |
+| **`app-logs.logfmt`** | **0.0353** | 0.2007 | 0.0695 | 1.861 / 10.725 | **11.470 / 49.538** | **126.6 / 675.3** (`7.30x` / `7.52x`) | 2.683 / 0.590 | **100.6** (`5.47x` / `9.86x`) |
+| **`json-records.ndjson`** | **0.0227** | 0.1497 | 0.0542 | 2.202 / 12.531 | **13.772 / 54.798** | **231.8 / 1212.0** (`7.61x` / `8.08x`) | 2.108 / **0.466** | **233.9** (`5.86x` / `10.73x`) |
+| **`field-order-optional-escaping.ndjson`** | **0.0445** | 0.2132 | 0.1043 | 1.322 / 5.583 | **6.190 / 30.762** | **61.1 / 310.2** (`5.28x` / `4.90x`) | 3.777 / **0.900** | **33.1** (`4.19x` / `8.95x`) |
+| **`event-mix-identifiers.ndjson`** | **0.0248** | 0.1545 | 0.0779 | 1.756 / 8.807 | **10.532 / 44.595** | **158.4 / 872.9** (`7.35x` / `7.29x`) | 2.711 / **0.614** | **122.8** (`6.64x` / `15.54x`) |
+| **`bursty-variable-records.ndjson`** | **0.0480** | 0.2065 | 0.1196 | 1.154 / 4.523 | **7.789 / 27.442** | **47.6 / 304.5** (`4.02x` / `3.97x`) | 3.914 / 1.169 | **22.2** (`2.85x` / `8.54x`) |
+| **`source-and-docs.txt`** | **0.2782** | 0.3830 | 0.2755 | **0.614 / 2.478** | **4.306 / 16.844** | **4.4 / 30.6** (`1.01x` / `1.02x`) | **6.887 / 1.718** | **1.3** (`0.68x` / `2.17x`) |
+| **`ui-render-32bpp.bmp`** | **0.0048** | 0.0140 | 0.0091 | 9.533 / 14.246 | **36.922 / 63.932** | **2435.3 / 10153.2** (`2.09x` / `2.47x`) | 0.562 / 0.345 | **5530.4** (`1.22x` / `5.24x`) |
+| **`rgb-frame-24bpp.bmp`** | **0.0012** | 0.0227 | 0.0119 | 8.793 / 14.846 | **35.666 / 64.509** | **9206.1 / 38648.9** (`19.42x` / `19.56x`) | 0.631 / 0.368 | **19116.6** (`13.67x` / `17.18x`) |
+| **10-Dataset Geometric Mean** | **0.0250** | 0.1272 | 0.0607 | **2.094 / 8.211** | **11.750 / 41.545** | **165.9 / 883.8** (`5.27x` / `5.29x`) | **2.333 / 0.665** | **133.2** (`3.92x` / `8.59x`) |
 
 ---
 
@@ -126,9 +148,20 @@ VXG compiles out of the box into both a **static archive** (`libvxg.a` / `vxg.li
 ### Rust Library Usage
 ```rust
 let input = b"{\"ts\":\"2026-10-17T19:00:00Z\",\"seq\":1,\"status\":\"ok\"}\n";
-let frame = vxg::compress(input, &vxg::Options::default())?;
-let output = vxg::decompress(&frame, &vxg::DecodeOptions::default())?;
+let opts = vxg::Options::default();
+let dec_opts = vxg::DecodeOptions::default();
+
+// Allocating convenience API:
+let frame = vxg::compress(input, &opts)?;
+let output = vxg::decompress(&frame, &dec_opts)?;
 assert_eq!(output, input);
+
+// Zero-allocation caller-buffer API (single-thread and multi-thread):
+let mut comp_buf = vec![0u8; vxg::compress_bound(input.len(), opts.block_size)?];
+let c_len = vxg::compress_into(input, &mut comp_buf, &opts)?;
+let mut out_buf = vec![0u8; vxg::frame_raw_size(&comp_buf[..c_len])?];
+let d_len = vxg::decompress_into(&comp_buf[..c_len], &mut out_buf, &dec_opts)?;
+assert_eq!(&out_buf[..d_len], input);
 ```
 
 ### C / C++ Static or Dynamic Linking ([`examples/ffi/c_example.c`](examples/ffi/c_example.c))
@@ -194,10 +227,15 @@ CPU hash probes <= N
 ## Repository Layout
 
 ```text
-src/                     Rust codec core (columns, stride/BMP, fast-LZ, Huffman, SIMD, CRC32C, C FFI)
+src/                     Rust codec core (lib.rs, ffi.rs, simd.rs, crc32c.rs, gpu.rs, analysis.rs)
+src/columns/             Modular structured-column, stride/BMP, Fast-LZ, and canonical Huffman submodules
+src/frame/               Format v1–v4 frame encoder, parser, and zero-allocation parallel decoder
+src/block/               Block LZ encoder and SIMD/SWAR decoder submodules
+src/packing/             Command-metadata & entropy research submodules (--features bench)
+src/groups/              Fixed-group command-layout evaluator submodules (--features bench)
 src/bin/                 Production CLI (`vxg`) and multi-format benchmark harness (`vxg-bench`)
 include/vxg.h            Official C99 / C++11 header for static & dynamic linking
-examples/ffi/            Zero-copy integration examples for C, Python, Go, Bun/JS, and C#
+examples/ffi/            Zero-copy integration examples for C, Python, Go, Bun/JS, C#, and WebAssembly
 native/shaders/core.gpu  Shared GPU kernel source (Metal, Vulkan GLSL, CUDA)
 native/                  Metal, Vulkan, and CUDA host bridges
 verification/            Independent Python reference model and C++ SIMT emulator

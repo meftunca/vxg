@@ -8,7 +8,10 @@
 use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use crate::{compress, max_compressed_size, DecodeOptions, Error, Frame, Options, Simd};
+use crate::{
+    compress, compress_into, decompress_into, extract_block_into, max_compressed_size,
+    DecodeOptions, Error, Options, Simd,
+};
 
 pub const VXG_OK: isize = 0;
 pub const VXG_ERR_NULL_PTR: isize = -1;
@@ -211,14 +214,8 @@ pub unsafe extern "C" fn vxg_compress_into(
             simd: Simd::Auto,
             legacy_v2: false,
         };
-        match compress(input, &opt) {
-            Ok(encoded) => {
-                if encoded.len() > output.len() {
-                    return VXG_ERR_BUFFER_TOO_SMALL;
-                }
-                output[..encoded.len()].copy_from_slice(&encoded);
-                isize::try_from(encoded.len()).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
-            }
+        match compress_into(input, output, &opt) {
+            Ok(written) => isize::try_from(written).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),
             Err(e) => map_error(e),
         }
     }));
@@ -245,11 +242,13 @@ pub unsafe extern "C" fn vxg_decompress_into(
         return VXG_ERR_NULL_PTR;
     };
     let res = catch_unwind(AssertUnwindSafe(|| -> isize {
-        let frame = match Frame::parse(input, dst_cap) {
-            Ok(f) => f,
-            Err(e) => return map_error(e),
+        if input.len() < 32 {
+            return VXG_ERR_CORRUPT_DATA;
+        }
+        let raw_len = match usize::try_from(u64::from_le_bytes(input[8..16].try_into().unwrap())) {
+            Ok(v) => v,
+            Err(_) => return VXG_ERR_BUFFER_TOO_SMALL,
         };
-        let raw_len = frame.raw_size();
         if output.len() < raw_len {
             return VXG_ERR_BUFFER_TOO_SMALL;
         }
@@ -259,7 +258,7 @@ pub unsafe extern "C" fn vxg_decompress_into(
             max_output: dst_cap,
             verify_checksum: verify_checksum != 0,
         };
-        match frame.decode_into(&mut output[..raw_len], &opt) {
+        match decompress_into(input, &mut output[..raw_len], &opt) {
             Ok(()) => isize::try_from(raw_len).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),
             Err(e) => map_error(e),
         }
@@ -286,17 +285,13 @@ pub unsafe extern "C" fn vxg_extract_block_into(
         return VXG_ERR_NULL_PTR;
     };
     let res = catch_unwind(AssertUnwindSafe(|| -> isize {
-        let frame = match Frame::parse(input, usize::MAX) {
-            Ok(f) => f,
-            Err(e) => return map_error(e),
-        };
         let opt = DecodeOptions {
             threads: 1,
             simd: Simd::Auto,
             max_output: dst_cap,
             verify_checksum: verify_checksum != 0,
         };
-        match frame.decode_block_into(block_index, output, &opt) {
+        match extract_block_into(input, block_index, output, &opt) {
             Ok(written) => isize::try_from(written).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),
             Err(e) => map_error(e),
         }
@@ -505,6 +500,38 @@ mod tests {
         unsafe {
             vxg_free(c_ptr, alloc_c_len);
             vxg_free(d_ptr, alloc_d_len);
+        }
+
+        // Multi-block + multi-thread Rust compress_into / decompress_into / extract_block_into:
+        let multi_raw = raw.repeat(12);
+        for &threads in &[1usize, 4] {
+            let opt = Options {
+                block_size: 8192,
+                threads,
+                checksum: true,
+                ..Options::default()
+            };
+            let mut enc_buf = vec![0u8; max_compressed_size(multi_raw.len(), 8192).unwrap()];
+            let written = compress_into(&multi_raw, &mut enc_buf, &opt).unwrap();
+            let expected_frame = compress(&multi_raw, &opt).unwrap();
+            assert_eq!(&enc_buf[..written], expected_frame.as_slice());
+
+            let dec_opt = DecodeOptions {
+                threads,
+                max_output: multi_raw.len(),
+                verify_checksum: true,
+                ..DecodeOptions::default()
+            };
+            let mut dec_buf = vec![0u8; multi_raw.len()];
+            decompress_into(&enc_buf[..written], &mut dec_buf, &dec_opt).unwrap();
+            assert_eq!(dec_buf, multi_raw);
+
+            let mut blk_buf = vec![0u8; 8192];
+            for (b_idx, chunk) in multi_raw.chunks(8192).enumerate() {
+                let b_len =
+                    extract_block_into(&enc_buf[..written], b_idx, &mut blk_buf, &dec_opt).unwrap();
+                assert_eq!(&blk_buf[..b_len], chunk);
+            }
         }
     }
 }

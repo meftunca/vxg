@@ -197,10 +197,24 @@ def phase(args, folder, codec, operation):
             events = [json.loads(line) for line in output.splitlines()]
             _, ticks = work_points(events)
             elapsed = (ticks[-1]["elapsed_ns"] - ticks[0]["elapsed_ns"]) / 1e9
+            raw_done = ticks[-1]["raw_bytes_processed"]
+            e0 = ticks[0].get("process_energy_nj", 0)
+            e1 = ticks[-1].get("process_energy_nj", 0)
+            i0 = ticks[0].get("process_instructions", 0)
+            i1 = ticks[-1].get("process_instructions", 0)
+            delta_enj = max(0, e1 - e0)
+            delta_inst = max(0, i1 - i0)
+            proc_j_gb = (delta_enj / raw_done) if (delta_enj > 0 and raw_done > 0) else None
+            proc_w = (delta_enj / (elapsed * 1e9)) if (delta_enj > 0 and elapsed > 0) else None
+            proc_ipb = (delta_inst / raw_done) if (delta_inst > 0 and raw_done > 0) else None
             result = {**meta, "elapsed_seconds": elapsed,
-                      "GBps": ticks[-1]["raw_bytes_processed"] / 1e9 / elapsed,
-                      "energy_status": "unavailable_no_power_mode", "cpu_rail_J_per_GB": None,
-                      "cpu_rail_average_W": None, "incremental_cpu_J_per_GB": None}
+                      "GBps": raw_done / 1e9 / elapsed,
+                      "energy_status": "measured_process_rusage_v6" if (args.no_power and proc_j_gb is not None) else "unavailable_no_power_mode",
+                      "cpu_rail_J_per_GB": None,
+                      "cpu_rail_average_W": None, "incremental_cpu_J_per_GB": None,
+                      "process_cpu_J_per_GB": proc_j_gb,
+                      "process_cpu_average_W": proc_w,
+                      "process_instructions_per_byte": proc_ipb}
             if not args.no_power:
                 idle_after = collect_idle(folder / "idle-after.txt", 3, args.interval_ms)
                 result.update(integrate(parse_power((folder / "power.txt").read_text()), events, idle_before, idle_after))
@@ -223,18 +237,40 @@ def summarize(rows):
         item = {"codec": codec, "operation": operation, "profile": group[0]["profile"],
                 "trials": len(group), "ratio": group[0]["ratio"],
                 "incremental_usable_all_trials": all(r.get("incremental_usable", False) for r in group)}
-        for key in ("GBps", "cpu_rail_J_per_GB", "cpu_rail_average_W", "incremental_cpu_J_per_GB"):
+        for key in ("GBps", "cpu_rail_J_per_GB", "cpu_rail_average_W", "incremental_cpu_J_per_GB",
+                    "process_cpu_J_per_GB", "process_cpu_average_W", "process_instructions_per_byte"):
             values = [r[key] for r in group if r.get(key) is not None]
             item[key] = statistics.median(values) if len(values) == len(group) else None
             if values:
                 item[key + "_min"] = min(values)
                 item[key + "_max"] = max(values)
         item["energy_vs_lz4_a1"] = None
+        item["process_energy_vs_lz4_a1"] = None
         result.append(item)
     for item in result:
         baseline = next((r for r in result if r["codec"] == "lz4-a1" and r["operation"] == item["operation"]), None)
         if baseline and baseline["cpu_rail_J_per_GB"] and item["cpu_rail_J_per_GB"] is not None:
             item["energy_vs_lz4_a1"] = item["cpu_rail_J_per_GB"] / baseline["cpu_rail_J_per_GB"]
+        if baseline and baseline["process_cpu_J_per_GB"] and item["process_cpu_J_per_GB"] is not None:
+            item["process_energy_vs_lz4_a1"] = item["process_cpu_J_per_GB"] / baseline["process_cpu_J_per_GB"]
+    for codec in {r["codec"] for r in result}:
+        enc = next((r for r in result if r["codec"] == codec and r["operation"] == "encode"), None)
+        dec = next((r for r in result if r["codec"] == codec and r["operation"] == "decode"), None)
+        if enc and dec and enc.get("GBps") and dec.get("GBps") and enc.get("ratio", 0) > 0:
+            vpi = math.sqrt(enc["GBps"] * dec["GBps"]) / enc["ratio"]
+            bci = ((enc["GBps"] * dec["GBps"]) / enc["ratio"]) ** (1.0 / 3.0)
+            ej = enc.get("process_cpu_J_per_GB") or enc.get("cpu_rail_J_per_GB")
+            dj = dec.get("process_cpu_J_per_GB") or dec.get("cpu_rail_J_per_GB")
+            gci = (vpi / math.sqrt(ej * dj)) if (ej and dj and ej > 0 and dj > 0) else None
+            for row in (enc, dec):
+                row["vpi_index"] = vpi
+                row["bci_index"] = bci
+                row["gci_index"] = gci
+        else:
+            for row in [r for r in result if r["codec"] == codec]:
+                row["vpi_index"] = None
+                row["bci_index"] = None
+                row["gci_index"] = None
     return result
 
 
@@ -301,7 +337,7 @@ def main():
             write_json(args.output / "trials.json", rows)
         summary = summarize(rows)
         write_json(args.output / "summary.json", summary)
-        keys = ["codec", "operation", "profile", "trials", "ratio", "GBps", "cpu_rail_average_W", "cpu_rail_J_per_GB", "incremental_cpu_J_per_GB", "incremental_usable_all_trials", "energy_vs_lz4_a1"]
+        keys = ["codec", "operation", "profile", "trials", "ratio", "GBps", "process_cpu_average_W", "process_cpu_J_per_GB", "process_instructions_per_byte", "process_energy_vs_lz4_a1", "vpi_index", "bci_index", "gci_index", "cpu_rail_average_W", "cpu_rail_J_per_GB", "incremental_cpu_J_per_GB", "incremental_usable_all_trials", "energy_vs_lz4_a1"]
         with (args.output / "summary.csv").open("w", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=keys, extrasaction="ignore")
             writer.writeheader()

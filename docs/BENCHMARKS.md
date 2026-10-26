@@ -4,6 +4,45 @@ For the current numerical target, see [TARGET_4_006_12_15.md](TARGET_4_006_12_15
 The fourth axis, CPU energy per GB, has its own [energy protocol](ENERGY_BENCHMARKS.md)
 with sustained workloads, idle observations and explicit measurement boundaries.
 
+## VXG v4.0.1 Local Comparative Results, Composite Index & Energy (Apple Silicon `aarch64`, SIMD=`Neon`, `16 MiB`, `block=65536`)
+
+Measured on Apple Silicon (`aarch64`, SIMD=`Neon`, `liblz4 1.10.0`, `libzstd 1.5.7`, `16 MiB` per dataset, 5 samples of `0.08 s` per phase, checksums OFF) via `vxg-bench --suite v4 --size-mib 16`.
+- **VXG Performance Index (`VPI`):** $\text{VPI} = \frac{\sqrt{\text{Encode}_{\text{GB/s}} \cdot \text{Decode}_{\text{GB/s}}}}{\text{Ratio}}$ (higher is better).
+- **Balanced 3-Axis Cube Index (`BCI`):** $\text{BCI} = \left(\frac{\text{Encode}_{\text{GB/s}} \cdot \text{Decode}_{\text{GB/s}}}{\text{Ratio}}\right)^{1/3}$ (higher is better).
+- **Green Codec Index (`GCI`):** $\text{GCI} = \frac{\text{VPI}}{\sqrt{J_{\text{enc}} \cdot J_{\text{dec}}}}$ using per-process hardware energy (`proc_pid_rusage` `RUSAGE_INFO_V6` `ri_energy_nj` in `J/GB`).
+
+### 1-Thread (`threads = 1`, `block = 65536`, `16 MiB`)
+
+| Dataset | VXG Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG Enc / Dec (`GB/s`) | LZ4 Enc / Dec (`GB/s`) | Zstd-1 Enc / Dec (`GB/s`) | VXG `VPI` (`vs LZ4` / `Zstd-1`) | VXG Enc / Dec (`J/GB`) | VXG `GCI` (`vs LZ4` / `Zstd-1`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`telemetry.csv`** | **0.0407** | 0.1994 | 0.0841 | **1.704 / 9.420** | 1.906 / 7.468 | 1.163 / 2.249 | **98.4** (`5.20x` / `5.11x`) | **2.921 / 0.671** | **70.2** (`3.53x` / `10.80x`) |
+| **`events.tsv`** | **0.0334** | 0.2223 | 0.0741 | **1.686 / 9.441** | 1.505 / 5.750 | 1.323 / 2.610 | **119.5** (`9.03x` / `4.76x`) | **2.952 / 0.653** | **86.0** (`8.27x` / `8.69x`) |
+| **`app-logs.logfmt`** | **0.0353** | 0.2007 | 0.0695 | **1.861 / 10.725** | 1.735 / 6.979 | 1.264 / 2.483 | **126.6** (`7.30x` / `4.97x`) | **2.683 / 0.590** | **100.6** (`5.47x` / `9.86x`) |
+| **`json-records.ndjson`** | **0.0227** | 0.1497 | 0.0542 | **2.202 / 12.531** | 2.296 / 9.061 | 1.606 / 3.263 | **231.8** (`7.61x` / `5.49x`) | **2.108 / 0.466** | **233.9** (`5.86x` / `10.73x`) |
+| **`field-order-optional-escaping.ndjson`** | **0.0445** | 0.2132 | 0.1043 | **1.322 / 5.583** | 1.300 / 4.684 | 0.939 / 1.863 | **61.1** (`5.28x` / `4.82x`) | **3.777 / 0.900** | **33.1** (`4.19x` / `8.95x`) |
+| **`event-mix-identifiers.ndjson`** | **0.0248** | 0.1545 | 0.0779 | **1.756 / 8.807** | 1.944 / 5.702 | 1.291 / 2.290 | **158.4** (`7.35x` / `7.18x`) | **2.711 / 0.614** | **122.8** (`6.64x` / `15.54x`) |
+| **`bursty-variable-records.ndjson`** | **0.0480** | 0.2065 | 0.1196 | **1.154 / 4.523** | 1.385 / 4.320 | 0.852 / 1.737 | **47.6** (`4.02x` / `4.68x`) | **3.914 / 1.169** | **22.2** (`2.85x` / `8.54x`) |
+| **`source-and-docs.txt`** | **0.2782** | 0.3830 | 0.2755 | **0.614 / 2.478** | 0.709 / 4.009 | 0.570 / 1.526 | **4.4** (`1.01x` / `1.31x`) | **6.887 / 1.718** | **1.3** (`0.68x` / `2.17x`) |
+| **`ui-render-32bpp.bmp`** | **0.0048** | 0.0140 | 0.0091 | **9.533 / 14.246** | 13.631 / 19.663 | 6.624 / 4.768 | **2435.3** (`2.09x` / `3.95x`) | **0.562 / 0.345** | **5530.4** (`1.22x` / `5.24x`) |
+| **`rgb-frame-24bpp.bmp`** | **0.0012** | 0.0227 | 0.0119 | **8.793 / 14.846** | 11.159 / 10.381 | 7.379 / 7.063 | **9206.1** (`19.42x` / `15.22x`) | **0.631 / 0.368** | **19116.6** (`13.67x` / `17.18x`) |
+| **10-Dataset Geometric Mean** | **0.0250** | 0.1272 | 0.0607 | **2.094 / 8.211** | 2.309 / 6.933 | 1.568 / 2.666 | **165.9** (`5.27x` / `4.93x`) | **2.333 / 0.665** | **133.2** (`3.92x` / `8.59x`) |
+
+### 8-Thread (`threads = 8`, `block = 65536`, `16 MiB` — Dynamic Work-Stealing + Zero-Allocation Decode)
+
+| Dataset | VXG Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG Enc / Dec (`GB/s`) | LZ4 Enc / Dec (`GB/s`) | Zstd-1 Enc / Dec (`GB/s`) | VXG `VPI` (`vs LZ4` / `Zstd-1`) | VXG Enc / Dec (`J/GB`) | VXG `GCI` (`vs LZ4` / `Zstd-1`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`telemetry.csv`** | **0.0407** | 0.1994 | 0.0841 | **11.122 / 47.196** | 12.834 / 41.839 | 7.848 / 15.575 | **562.4** (`4.84x` / `4.28x`) | **2.639 / 0.641** | **432.4** (`3.30x` / `8.81x`) |
+| **`events.tsv`** | **0.0334** | 0.2223 | 0.0741 | **9.919 / 45.716** | 9.560 / 30.671 | 7.168 / 13.654 | **637.7** (`8.28x` / `4.77x`) | **2.625 / 0.623** | **498.7** (`7.63x` / `8.58x`) |
+| **`app-logs.logfmt`** | **0.0353** | 0.2007 | 0.0695 | **11.470 / 49.538** | 9.994 / 32.485 | 6.915 / 13.485 | **675.3** (`7.52x` / `4.86x`) | **2.461 / 0.552** | **579.2** (`5.73x` / `9.65x`) |
+| **`json-records.ndjson`** | **0.0227** | 0.1497 | 0.0542 | **13.772 / 54.798** | 12.896 / 39.135 | 8.598 / 17.224 | **1212.0** (`8.08x` / `5.40x`) | **2.028 / 0.467** | **1246.1** (`5.97x` / `10.06x`) |
+| **`field-order-optional-escaping.ndjson`** | **0.0445** | 0.2132 | 0.1043 | **6.190 / 30.762** | 7.728 / 23.581 | 4.913 / 9.655 | **310.2** (`4.90x` / `4.70x`) | **3.968 / 0.861** | **167.9** (`3.64x` / `8.11x`) |
+| **`event-mix-identifiers.ndjson`** | **0.0248** | 0.1545 | 0.0779 | **10.532 / 44.595** | 9.997 / 34.218 | 8.022 / 15.768 | **872.9** (`7.29x` / `6.05x`) | **2.398 / 0.584** | **737.8** (`6.64x` / `13.56x`) |
+| **`bursty-variable-records.ndjson`** | **0.0480** | 0.2065 | 0.1196 | **7.789 / 27.442** | 9.199 / 27.281 | 5.727 / 12.079 | **304.5** (`3.97x` / `4.38x`) | **3.697 / 1.124** | **149.4** (`2.87x` / `7.99x`) |
+| **`source-and-docs.txt`** | **0.2782** | 0.3830 | 0.2755 | **4.306 / 16.844** | 5.077 / 25.848 | 4.205 / 10.641 | **30.6** (`1.02x` / `1.26x`) | **6.433 / 1.638** | **9.4** (`0.68x` / `1.88x`) |
+| **`ui-render-32bpp.bmp`** | **0.0048** | 0.0140 | 0.0091 | **36.922 / 63.932** | 40.151 / 83.121 | 27.504 / 29.208 | **10153.2** (`2.47x` / `3.27x`) | **0.659 / 0.359** | **20873.8** (`1.58x` / `4.10x`) |
+| **`rgb-frame-24bpp.bmp`** | **0.0012** | 0.0227 | 0.0119 | **35.666 / 64.509** | 37.010 / 54.381 | 30.885 / 39.982 | **38648.9** (`19.56x` / `13.13x`) | **0.717 / 0.376** | **74433.0** (`14.57x` / `14.77x`) |
+| **10-Dataset Geometric Mean** | **0.0250** | 0.1272 | 0.0607 | **11.750 / 41.545** | 12.383 / 36.499 | 8.771 / 16.042 | **883.8** (`5.29x` / `4.53x`) | **2.274 / 0.647** | **728.7** (`3.96x` / `7.70x`) |
+
 ## VXG v0.4.0 Cross-Platform CI Benchmark Results (`macos-14`, `ubuntu-latest`, `windows-latest`)
 
 Generated automatically via [`.github/workflows/benchmarks.yml`](../.github/workflows/benchmarks.yml) using `vxg-bench --suite v4 --size-mib 16`. Raw CSV and Markdown artifacts are stored in [`reports/ci-v0.4.0/`](../reports/ci-v0.4.0/).

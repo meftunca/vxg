@@ -13,10 +13,38 @@ use vxg::{
 
 type R<T> = Result<T, Box<dyn std::error::Error>>;
 
+#[cfg(target_os = "macos")]
+fn read_rusage_counters() -> (u64, u64) {
+    #[repr(C)]
+    struct RusageInfoV6 {
+        ri_uuid: [u8; 16],
+        fields: [u64; 56],
+    }
+    unsafe extern "C" {
+        fn getpid() -> i32;
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV6) -> i32;
+    }
+    let mut ri = RusageInfoV6 {
+        ri_uuid: [0u8; 16],
+        fields: [0u64; 56],
+    };
+    if unsafe { proc_pid_rusage(getpid(), 6, &mut ri) } == 0 {
+        (ri.fields[40], ri.fields[29]) // ri_energy_nj, ri_instructions
+    } else {
+        (0, 0)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_rusage_counters() -> (u64, u64) {
+    (0, 0)
+}
+
 fn tick(event: &str, start: Instant, iterations: u64, bytes: usize) -> R<()> {
     let elapsed = start.elapsed().as_nanos();
     let unix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    println!("{{\"event\":\"{event}\",\"unix_ns\":{unix},\"elapsed_ns\":{elapsed},\"iterations\":{iterations},\"raw_bytes_processed\":{}}}", iterations as u128 * bytes as u128);
+    let (energy_nj, instructions) = read_rusage_counters();
+    println!("{{\"event\":\"{event}\",\"unix_ns\":{unix},\"elapsed_ns\":{elapsed},\"iterations\":{iterations},\"raw_bytes_processed\":{},\"process_energy_nj\":{energy_nj},\"process_instructions\":{instructions}}}", iterations as u128 * bytes as u128);
     io::stdout().flush()?;
     Ok(())
 }

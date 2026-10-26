@@ -25,19 +25,19 @@ Artifacts produced in `target/release/`:
 
 ---
 
-## 2. Zero-Allocation Caller-Buffer Design
+## 2. Zero-Allocation Caller-Buffer Design (Rust & C ABI)
 
-To achieve multi-GB/s throughput across language boundaries without FFI heap-allocation or serialization overhead, use the **caller-buffer (`_into`) API**:
+To achieve multi-GB/s throughput across language boundaries without heap-allocation or serialization overhead, VXG provides matching caller-buffer (`_into`) APIs in both Rust ([`src/lib.rs`](../src/lib.rs)) and C ([`include/vxg.h`](../include/vxg.h)):
 
-1. **Compression:**
-   - Query the upper bound once with `vxg_compress_bound(raw_len, block_size)`.
-   - Pass a caller-owned buffer (or reusable arena/pool buffer) directly to `vxg_compress_into(...)`.
-2. **Decompression (100% Zero Heap Allocation Inside VXG):**
-   - Inspect the 32-byte frame header in $O(1)$ time with `vxg_frame_raw_size(src, src_len)`.
-   - Pass a caller-allocated buffer (e.g. `uint8_t*`, Python `bytearray`, Go `[]byte`, JS `Uint8Array`, .NET `Span<byte>`) directly to `vxg_decompress_into(...)`.
-3. **$O(1)$ Random-Access Single-Block Extraction:**
-   - Query the uncompressed size of block `i` in $O(1)$ time with `vxg_frame_block_raw_size(src, src_len, i)`.
-   - Decode only block `i` directly into your destination buffer with `vxg_extract_block_into(...)`.
+1. **Compression (`vxg::compress_into` / `vxg_compress_into`):**
+   - Query the upper bound once with `vxg::compress_bound(raw_len, block_size)` / `vxg_compress_bound(raw_len, block_size)`.
+   - Pass a caller-owned buffer (or reusable arena/pool slice) directly to `compress_into` / `vxg_compress_into(...)`.
+2. **Decompression (`vxg::decompress_into` / `vxg_decompress_into` — Zero Per-Block Heap Allocation):**
+   - Inspect the 32-byte frame header in $O(1)$ time with `vxg::frame_raw_size(src)` / `vxg_frame_raw_size(src, src_len)`.
+   - Pass a caller-allocated buffer (e.g. `&mut [u8]`, `uint8_t*`, Python `bytearray`, Go `[]byte`, JS `Uint8Array`, .NET `Span<byte>`) directly to `decompress_into` / `vxg_decompress_into(...)`. Both single-thread and multi-thread (`threads > 1`) paths decode directly into disjoint slices of the destination buffer.
+3. **$O(1)$ Random-Access Single-Block Extraction (`vxg::extract_block_into` / `vxg_extract_block_into`):**
+   - Query the uncompressed size of block `i` in $O(1)$ time with `vxg::frame_block_raw_size(src, i)` / `vxg_frame_block_raw_size(src, src_len, i)`.
+   - Decode only block `i` directly into your destination buffer with `extract_block_into` / `vxg_extract_block_into(...)`.
 
 ---
 

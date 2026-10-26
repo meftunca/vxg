@@ -1,7 +1,6 @@
-# VXG1 wire specification — versions 1, 2 and 3, experimental
+# VXG1 wire specification — versions 1, 2, 3 and 4
 
-Version 3 adds structured-column blocks; see [FORMAT_V3.md](FORMAT_V3.md) for the
-extension, its canonicality rules and the encoder selection policy.
+Version 4 is the default wire format (`VERSION_V4 = 4`), introducing a compact 8-byte per-block directory and unified `BLOCK_COLUMN` packets (`RAW_PACKET`, `GRAMMAR_PACKET`, `STRIDE_PACKET`, and `FAST_LZ_PACKET` with optional 4-stream canonical Huffman coding). Version 3 added structured-column blocks with the 32-byte directory; see [FORMAT_V3.md](FORMAT_V3.md) for the v3 extension and model specifications. Decoders maintain full backward read compatibility with versions 1, 2, 3, and 4.
 
 All integers are little-endian. The format is byte-addressed and contains no implicit
 alignment padding. Native GPU implementations internally repack/align buffers; that is
@@ -12,7 +11,7 @@ not part of the file contract. No external dictionary, entropy state, or cross-b
 | Offset | Type | Meaning |
 |---:|---|---|
 | 0 | byte[4] | ASCII `VXG1` |
-| 4 | u16 | Version: 1, 2 or 3; encoders emit 2 by default, 3 with `Options { v3: true }` |
+| 4 | u16 | Version: `1`, `2`, `3`, or `4` (default encoder output is `4`; `legacy_v2: true` emits `2`, `v3: true, v4: false` emits `3`) |
 | 6 | u16 | Flags: bit 0 = CRC32C; all other bits zero |
 | 8 | u64 | Total uncompressed byte count |
 | 16 | u32 | Block size B; 4,096..1,048,576, multiple of 64 |
@@ -21,7 +20,18 @@ not part of the file contract. No external dictionary, entropy state, or cross-b
 
 The empty frame is exactly 32 bytes, with count=0, N=0 and a valid block size.
 
-## Directory: 32 bytes per block
+## Directory
+
+### Version 4 compact directory: 8 bytes per block
+
+In version 4, raw offsets and payload offsets are reconstructed deterministically by prefix sum over the contiguous block sequence:
+
+| Offset within entry | Type | Meaning |
+|---:|---|---|
+| 0 | u32 | `payload_size \| (kind << 30)`: lower 30 bits = payload byte length (`<= 1,048,576`), upper 2 bits = block kind (`0` = RAW, `1` = LZ, `2` = COLUMN) |
+| 4 | u32 | CRC32C of raw block, or zero when disabled |
+
+### Versions 1–3 directory: 32 bytes per block
 
 | Offset within entry | Type | Meaning |
 |---:|---|---|
@@ -30,7 +40,7 @@ The empty frame is exactly 32 bytes, with count=0, N=0 and a valid block size.
 | 16 | u32 | Raw block length |
 | 20 | u32 | Payload length |
 | 24 | u32 | CRC32C of raw block, or zero when disabled |
-| 28 | u32 | Kind: 0 RAW; 1 LZ; 2 COLUMN (v3 only, see [FORMAT_V3.md](FORMAT_V3.md)) |
+| 28 | u32 | Kind: 0 RAW; 1 LZ; 2 COLUMN (v3/v4, see [FORMAT_V3.md](FORMAT_V3.md)) |
 
 Raw offsets are contiguous from 0. All blocks except the last have length B. The payload
 area begins immediately after the directory; payloads are contiguous, in directory order.
