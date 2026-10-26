@@ -1,5 +1,5 @@
 /*
- * VXG v4.0.1 — Unified Adaptive Multi-Format Lossless Block Codec (Format v4)
+ * VXG v0.4.1 — Unified Adaptive Multi-Format Lossless Block Codec (Format v4)
  * Official C99 / C++11 Header for Static (`libvxg.a` / `vxg.lib`) and Dynamic
  * (`libvxg.dylib` / `libvxg.so` / `vxg.dll`) Library Integration.
  *

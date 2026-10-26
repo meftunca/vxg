@@ -4,7 +4,7 @@ For the current numerical target, see [TARGET_4_006_12_15.md](TARGET_4_006_12_15
 The fourth axis, CPU energy per GB, has its own [energy protocol](ENERGY_BENCHMARKS.md)
 with sustained workloads, idle observations and explicit measurement boundaries.
 
-## VXG v4.0.1 Local Comparative Results, Composite Index & Energy (Apple Silicon `aarch64`, SIMD=`Neon`, `16 MiB`, `block=65536`)
+## VXG v0.4.1 Local Comparative Results, Composite Index & Energy (Apple Silicon `aarch64`, SIMD=`Neon`, `16 MiB`, `block=65536`)
 
 Measured on Apple Silicon (`aarch64`, SIMD=`Neon`, `liblz4 1.10.0`, `libzstd 1.5.7`, `16 MiB` per dataset, 5 samples of `0.08 s` per phase, checksums OFF) via `vxg-bench --suite v4 --size-mib 16`.
 - **VXG Performance Index (`VPI`):** $\text{VPI} = \frac{\sqrt{\text{Encode}_{\text{GB/s}} \cdot \text{Decode}_{\text{GB/s}}}}{\text{Ratio}}$ (higher is better).

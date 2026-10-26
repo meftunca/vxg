@@ -333,7 +333,7 @@ Earlier development logs are archived in:
     - **8-Thread Throughput:** `11.750 GB/s` encode (`1.34x` Zstd-1) / `41.545 GB/s` decode (`1.14x` LZ4, `2.59x` Zstd-1)
   - Full tables recorded in [`docs/BENCHMARKS.md`](BENCHMARKS.md).
 
-## 2026-10-26 — VXG v4.0.1 Release: 10/10 Dataset `VPI` Dominance, `FAST_LZ` & Huffman ILP, Per-Process Energy & Composite Indices (`VPI`, `BCI`, `GCI`)
+## 2026-10-26 — VXG v0.4.1 Release: 10/10 Dataset `VPI` Dominance, `FAST_LZ` & Huffman ILP, Per-Process Energy & Composite Indices (`VPI`, `BCI`, `GCI`)
 
 - **Per-Process Hardware Energy (`J/GB`) & Composite Indices (`src/bin/bench_support/metrics.rs`, `src/bin/energy_workload.rs`, `scripts/energy_bench.py`):**
   - Integrated unprivileged per-process kernel hardware energy (`proc_pid_rusage` `RUSAGE_INFO_V6` `ri_energy_nj` and retired instructions `ri_instructions`) directly into `vxg-bench` and `vxg-energy-workload`.

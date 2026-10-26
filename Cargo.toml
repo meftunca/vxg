@@ -1,6 +1,6 @@
 [package]
 name = "vxg"
-version = "4.0.1"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.89"
 description = "Experimental bounded-work block codec with CPU SIMD and native GPU backends"
