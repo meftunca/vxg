@@ -39,35 +39,6 @@ impl UnboundTemplate {
         cols: &[PreparedColumn<'a>],
         scratch: &mut DecodeScratch,
     ) -> Self {
-        #[cfg(target_arch = "x86_64")]
-        {
-            #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
-            unsafe fn build_x86_v3<'a>(
-                segments: &[&'a [u8]],
-                cols: &[PreparedColumn<'a>],
-                scratch: &mut DecodeScratch,
-            ) -> UnboundTemplate {
-                UnboundTemplate::build_impl(segments, cols, scratch)
-            }
-            if std::arch::is_x86_feature_detected!("avx2")
-                && std::arch::is_x86_feature_detected!("ssse3")
-                && std::arch::is_x86_feature_detected!("sse4.1")
-                && std::arch::is_x86_feature_detected!("popcnt")
-                && std::arch::is_x86_feature_detected!("bmi1")
-                && std::arch::is_x86_feature_detected!("bmi2")
-            {
-                return unsafe { build_x86_v3(segments, cols, scratch) };
-            }
-        }
-        Self::build_impl(segments, cols, scratch)
-    }
-
-    #[inline(always)]
-    fn build_impl<'a>(
-        segments: &[&'a [u8]],
-        cols: &[PreparedColumn<'a>],
-        scratch: &mut DecodeScratch,
-    ) -> Self {
         // Step 1: Fold constant (`width == 0` / `step == 0`) columns directly into
         // `scratch.str_arena`, and absorb `const_lead` / `const_trail` for active columns.
         let mut seg_ranges = [(0usize, 0usize); MAX_SLOTS + 1];

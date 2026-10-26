@@ -51,6 +51,7 @@ const HUF_MIN: usize = 160;
 /// Streams of at least this many symbols are split into 4 interleaved bitstreams.
 const HUF_SPLIT4: usize = 1024;
 
+#[inline(never)]
 fn huf_lengths(freq: &[u32; 256]) -> Option<[u8; 256]> {
     let mut leaves_uninit = [core::mem::MaybeUninit::<u32>::uninit(); 256];
     let leaves_ptr = leaves_uninit.as_mut_ptr().cast::<u32>();
@@ -239,14 +240,12 @@ fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
     let mut freq = [0u32; 256];
     let ptr = src.as_ptr();
     if n >= 16384 {
-        // 4-way unaliased histogram avoids store-to-load forwarding stalls on zero runs.
-        let mut f1 = [0u32; 256];
-        let mut f2 = [0u32; 256];
-        let mut f3 = [0u32; 256];
-        let chunks8 = n / 8;
-        for i in 0..chunks8 {
-            unsafe {
-                let w = ptr.add(i * 8).cast::<u64>().read_unaligned().to_le();
+        #[inline(never)]
+        fn huf_hist_large(src: &[u8], freq: &mut [u32; 256]) {
+            let (mut f1, mut f2, mut f3) = ([0u32; 256], [0u32; 256], [0u32; 256]);
+            let (ptr, chunks8) = (src.as_ptr(), src.len() / 8);
+            for i in 0..chunks8 {
+                let w = unsafe { ptr.add(i * 8).cast::<u64>().read_unaligned().to_le() };
                 freq[(w & 0xff) as usize] += 1;
                 f1[((w >> 8) & 0xff) as usize] += 1;
                 f2[((w >> 16) & 0xff) as usize] += 1;
@@ -256,13 +255,14 @@ fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
                 f2[((w >> 48) & 0xff) as usize] += 1;
                 f3[(w >> 56) as usize] += 1;
             }
+            for &b in &src[chunks8 * 8..] {
+                freq[b as usize] += 1;
+            }
+            for s in 0..256 {
+                freq[s] += f1[s] + f2[s] + f3[s];
+            }
         }
-        for &b in &src[chunks8 * 8..] {
-            freq[b as usize] += 1;
-        }
-        for s in 0..256 {
-            freq[s] += f1[s] + f2[s] + f3[s];
-        }
+        huf_hist_large(src, &mut freq);
     } else {
         let chunks8 = n / 8;
         for i in 0..chunks8 {

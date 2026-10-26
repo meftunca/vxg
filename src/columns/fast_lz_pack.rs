@@ -37,27 +37,6 @@ fn emit_entropy_only(
 /// Fast 4-stream separated LZ77 + repeat-offset + NEON palette block compressor (`FAST_LZ_PACKET = 3`)
 /// for non-schematic text, source code, mixed blocks, Base64 blobs, and general binary data.
 fn pack_fast_lz_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
-        unsafe fn pack_fast_lz_into_x86_v3(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
-            pack_fast_lz_into_impl(data, out)
-        }
-        if std::arch::is_x86_feature_detected!("avx2")
-            && std::arch::is_x86_feature_detected!("ssse3")
-            && std::arch::is_x86_feature_detected!("sse4.1")
-            && std::arch::is_x86_feature_detected!("popcnt")
-            && std::arch::is_x86_feature_detected!("bmi1")
-            && std::arch::is_x86_feature_detected!("bmi2")
-        {
-            return unsafe { pack_fast_lz_into_x86_v3(data, out) };
-        }
-    }
-    pack_fast_lz_into_impl(data, out)
-}
-
-#[inline(always)]
-fn pack_fast_lz_into_impl(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
     let n = data.len();
     if !(64..=65536).contains(&n) {
         return None;

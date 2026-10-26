@@ -1,4 +1,4 @@
-#[inline(always)]
+#[inline(never)]
 fn refill_json_cache(data: &[u8], w: usize, cache: &mut (usize, u64, u64)) -> bool {
     let base = w * 64;
     let len = data.len();
