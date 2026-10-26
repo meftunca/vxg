@@ -279,42 +279,7 @@ fn encode_single_worker<const STATS: bool>(
     count: usize,
     version: u16,
 ) -> Result<(Vec<u8>, WorkStats)> {
-    if !STATS {
-        if let Some(res) = ENCODE_SCRATCH_POOL.with(|pool| {
-            let mut scratch = pool.try_borrow_mut().ok()?;
-            Some(encode_single_worker_with_scratch::<false>(
-                input,
-                opt,
-                engine,
-                count,
-                version,
-                &mut scratch,
-                true,
-            ))
-        }) {
-            return res;
-        }
-    }
     let mut scratch = block::Scratch::new();
-    encode_single_worker_with_scratch::<STATS>(
-        input,
-        opt,
-        engine,
-        count,
-        version,
-        &mut scratch,
-        false,
-    )
-}
-fn encode_single_worker_with_scratch<const STATS: bool>(
-    input: &[u8],
-    opt: &Options,
-    engine: simd::Engine,
-    count: usize,
-    version: u16,
-    scratch: &mut block::Scratch,
-    clone_out: bool,
-) -> Result<(Vec<u8>, WorkStats)> {
     let esize = frame::entry_size(version);
     let adaptive = !opt.legacy_v2;
     let table_end = frame::HEADER_SIZE
@@ -358,7 +323,7 @@ fn encode_single_worker_with_scratch<const STATS: bool>(
                     (block::RAW, p_offset, chunk.len())
                 }
                 None => {
-                    let enc = block::encode::<STATS>(chunk, scratch, engine, opt.acceleration);
+                    let enc = block::encode::<STATS>(chunk, &mut scratch, engine, opt.acceleration);
                     if STATS {
                         stats += enc.stats;
                     }
@@ -366,7 +331,7 @@ fn encode_single_worker_with_scratch<const STATS: bool>(
                 }
             }
         } else {
-            let enc = block::encode::<STATS>(chunk, scratch, engine, opt.acceleration);
+            let enc = block::encode::<STATS>(chunk, &mut scratch, engine, opt.acceleration);
             if STATS {
                 stats += enc.stats;
             }
@@ -399,14 +364,7 @@ fn encode_single_worker_with_scratch<const STATS: bool>(
     payloads[16..20].copy_from_slice(&(opt.block_size as u32).to_le_bytes());
     payloads[20..24].copy_from_slice(&(count as u32).to_le_bytes());
     payloads[24..32].copy_from_slice(&0u64.to_le_bytes());
-    let out = if clone_out {
-        let mut v = Vec::with_capacity(payloads.len());
-        v.extend_from_slice(payloads);
-        v
-    } else {
-        std::mem::take(payloads)
-    };
-    Ok((out, stats))
+    Ok((scratch.finish(), stats))
 }
 fn encode_worker<const STATS: bool>(
     input: &[u8],

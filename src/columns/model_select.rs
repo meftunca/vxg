@@ -1,4 +1,28 @@
 fn pack_model_mode(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, ModelKind) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn pack_model_mode_x86_v3(
+            values: &[&[u8]],
+            allow_v3_ext: bool,
+        ) -> (Vec<u8>, ModelKind) {
+            pack_model_mode_impl(values, allow_v3_ext)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe { pack_model_mode_x86_v3(values, allow_v3_ext) };
+        }
+    }
+    pack_model_mode_impl(values, allow_v3_ext)
+}
+
+#[inline(always)]
+fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, ModelKind) {
     let n = values.len();
     if n < 2 {
         let raw = pack_raw_model(values);

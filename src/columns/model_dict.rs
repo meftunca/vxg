@@ -238,6 +238,35 @@ fn pack_dictionary_model_mode(
     limit: usize,
     allow_front: bool,
 ) -> Option<Vec<u8>> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn pack_dictionary_model_mode_x86_v3(
+            values: &[&[u8]],
+            limit: usize,
+            allow_front: bool,
+        ) -> Option<Vec<u8>> {
+            pack_dictionary_model_mode_impl(values, limit, allow_front)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe { pack_dictionary_model_mode_x86_v3(values, limit, allow_front) };
+        }
+    }
+    pack_dictionary_model_mode_impl(values, limit, allow_front)
+}
+
+#[inline(always)]
+fn pack_dictionary_model_mode_impl(
+    values: &[&[u8]],
+    limit: usize,
+    allow_front: bool,
+) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 || 3 >= limit {
         return None;
@@ -289,17 +318,14 @@ fn pack_dictionary_model_mode(
     let mut unique = [core::mem::MaybeUninit::<&[u8]>::uninit(); 256];
     let mut unique_w0 = [core::mem::MaybeUninit::<u64>::uninit(); 256];
     let mut unique_w1 = [core::mem::MaybeUninit::<u64>::uninit(); 256];
-    let mut unique_lens = [core::mem::MaybeUninit::<u32>::uninit(); 256];
     let (w0_0, w1_0, h0) = dict_words_and_hash(first);
     let (w0_1, w1_1, h1) = dict_words_and_hash(second);
     unique[0].write(first);
     unique_w0[0].write(w0_0);
     unique_w1[0].write(w1_0);
-    unique_lens[0].write(first.len() as u32);
     unique[1].write(second);
     unique_w0[1].write(w0_1);
     unique_w1[1].write(w1_1);
-    unique_lens[1].write(second.len() as u32);
     let pos0 = (h0 as usize) & ht_mask;
     ht_hashes[pos0].write(h0);
     ht_slots[pos0] = 0;
@@ -360,7 +386,6 @@ fn pack_dictionary_model_mode(
                     unique[new_id].write(val);
                     unique_w0[new_id].write(w0);
                     unique_w1[new_id].write(w1);
-                    unique_lens[new_id].write(vlen as u32);
                     unique_len = u;
                     ht_hashes[pos].write(h);
                     unsafe {
@@ -369,8 +394,8 @@ fn pack_dictionary_model_mode(
                     break new_id as u8;
                 }
                 let idx = slot_id as usize;
-                let s_len = unsafe { unique_lens.get_unchecked(idx).assume_init() };
-                if s_len == vlen as u32 {
+                let slot_slice = unsafe { unique.get_unchecked(idx).assume_init() };
+                if slot_slice.len() == vlen {
                     let s_w0 = unsafe { unique_w0.get_unchecked(idx).assume_init() };
                     let s_w1 = unsafe { unique_w1.get_unchecked(idx).assume_init() };
                     if s_w0 == w0 && s_w1 == w1 {
@@ -378,14 +403,13 @@ fn pack_dictionary_model_mode(
                             break slot_id as u8;
                         }
                         let slot_hash = unsafe { ht_hashes.get_unchecked(pos).assume_init() };
-                        if slot_hash == h {
-                            let slot_slice = unsafe { unique.get_unchecked(idx).assume_init() };
-                            if slice_eq_fast(
+                        if slot_hash == h
+                            && slice_eq_fast(
                                 unsafe { slot_slice.get_unchecked(8..vlen - 8) },
                                 unsafe { val.get_unchecked(8..vlen - 8) },
-                            ) {
-                                break slot_id as u8;
-                            }
+                            )
+                        {
+                            break slot_id as u8;
                         }
                     }
                 }
@@ -444,9 +468,8 @@ fn pack_dictionary_model_mode(
                 unsafe { (read_u128_partial(s.as_ptr(), len) as u64).swap_bytes() }
             }
         }
-        let mut order_uninit = [core::mem::MaybeUninit::<(u64, u8)>::uninit(); 256];
         let order_slice: &mut [(u64, u8)] = unsafe {
-            let ptr = order_uninit.as_mut_ptr().cast::<(u64, u8)>();
+            let ptr = ht_hashes.as_mut_ptr().cast::<(u64, u8)>();
             for i in 0..u {
                 let s = *unique_init.get_unchecked(i);
                 *ptr.add(i) = (prefix_key_be(s), i as u8);
@@ -468,14 +491,19 @@ fn pack_dictionary_model_mode(
                 }
             }
         });
-        let mut sorted_unique_uninit = [core::mem::MaybeUninit::<&[u8]>::uninit(); 256];
-        let mut rank_of_uninit = [core::mem::MaybeUninit::<u8>::uninit(); 256];
-        let sorted_ptr = sorted_unique_uninit.as_mut_ptr().cast::<&[u8]>();
-        let rank_of_ptr = rank_of_uninit.as_mut_ptr().cast::<u8>();
+        let perm_ptr = ht_slots_uninit.as_mut_ptr().cast::<u8>();
+        let rank_of_ptr = unsafe { perm_ptr.add(256) };
         for (rank, &(_, orig_id)) in order_slice.iter().enumerate() {
             unsafe {
-                *sorted_ptr.add(rank) = *unique_init.get_unchecked(orig_id as usize);
+                *perm_ptr.add(rank) = orig_id;
                 *rank_of_ptr.add(orig_id as usize) = rank as u8;
+            }
+        }
+        let sorted_ptr = ht_hashes.as_mut_ptr().cast::<&[u8]>();
+        for rank in 0..u {
+            unsafe {
+                let orig_id = *perm_ptr.add(rank) as usize;
+                *sorted_ptr.add(rank) = *unique_init.get_unchecked(orig_id);
             }
         }
         let sorted_entries: &[&[u8]] =

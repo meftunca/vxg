@@ -53,6 +53,27 @@ fn has_structured_line_near(
 }
 
 fn pack_grammar_into(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn pack_grammar_into_x86_v3(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
+            pack_grammar_into_impl(data, out)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe { pack_grammar_into_x86_v3(data, out) };
+        }
+    }
+    pack_grammar_into_impl(data, out)
+}
+
+#[inline(always)]
+fn pack_grammar_into_impl(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
     if data.len() >= 256 {
         let sample_end = data.len().min(64);
         for &b in &data[..sample_end] {

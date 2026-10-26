@@ -11,6 +11,51 @@ fn prefix_interleave_planes(
     sub_green: bool,
     dst: &mut [u8],
 ) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn prefix_interleave_planes_x86_v3(
+            p_ptrs: [*const u8; 8],
+            const_plane: [bool; 8],
+            first: &[u8; 8],
+            stride: usize,
+            count: usize,
+            sub_green: bool,
+            dst: &mut [u8],
+        ) {
+            prefix_interleave_planes_impl(p_ptrs, const_plane, first, stride, count, sub_green, dst);
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+        {
+            unsafe {
+                prefix_interleave_planes_x86_v3(
+                    p_ptrs,
+                    const_plane,
+                    first,
+                    stride,
+                    count,
+                    sub_green,
+                    dst,
+                );
+            }
+            return;
+        }
+    }
+    prefix_interleave_planes_impl(p_ptrs, const_plane, first, stride, count, sub_green, dst);
+}
+
+#[inline(always)]
+fn prefix_interleave_planes_impl(
+    p_ptrs: [*const u8; 8],
+    const_plane: [bool; 8],
+    first: &[u8; 8],
+    stride: usize,
+    count: usize,
+    sub_green: bool,
+    dst: &mut [u8],
+) {
     debug_assert!(dst.len() >= count * stride);
     if (0..stride).all(|p| const_plane[p]) {
         let g = first[1];
@@ -251,6 +296,7 @@ fn prefix_interleave_planes(
             acc[3] = _mm_cvtsi128_si32(a3) as u8;
         } else if stride == 3 {
             #[target_feature(enable = "ssse3")]
+            #[inline]
             unsafe fn store_rgb16_ssse3(out_p: *mut u8, r0: __m128i, r1: __m128i, r2: __m128i) {
                 let m0_0 = _mm_setr_epi8(0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1, 5);
                 let m0_1 = _mm_setr_epi8(-1, 0, -1, -1, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1);

@@ -83,27 +83,23 @@ fn unpack_fast_lz_core_impl(
                 let match_len = ml_code + 4;
                 if offset >= 16 {
                     unsafe {
-                        if lit_len > 0 {
-                            copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
-                            lit_pos += lit_len;
-                            dst_pos += lit_len;
-                        }
+                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
+                        lit_pos += lit_len;
+                        dst_pos += lit_len;
+
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
                         copy16_unaligned(msrc, mdst);
-                        if match_len > 16 {
-                            copy16_unaligned(msrc.add(16), mdst.add(16));
-                        }
+                        copy16_unaligned(msrc.add(16), mdst.add(16));
                         dst_pos += match_len;
                     }
                     continue;
                 } else if offset >= match_len {
                     unsafe {
-                        if lit_len > 0 {
-                            copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
-                            lit_pos += lit_len;
-                            dst_pos += lit_len;
-                        }
+                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
+                        lit_pos += lit_len;
+                        dst_pos += lit_len;
+
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
                         copy16_unaligned(msrc, mdst);
@@ -117,11 +113,10 @@ fn unpack_fast_lz_core_impl(
                     ext_pos += 1;
                     let match_len = 19 + e;
                     unsafe {
-                        if lit_len > 0 {
-                            copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
-                            lit_pos += lit_len;
-                            dst_pos += lit_len;
-                        }
+                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
+                        lit_pos += lit_len;
+                        dst_pos += lit_len;
+
                         let msrc = out_ptr.add(dst_pos - offset);
                         let mdst = out_ptr.add(dst_pos);
                         copy16_unaligned(msrc, mdst);

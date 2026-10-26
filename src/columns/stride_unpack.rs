@@ -1,4 +1,25 @@
 fn unpack_stride_into(cursor: &mut Cursor<'_>, out: &mut [u8]) -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn unpack_stride_into_x86_v3(cursor: &mut Cursor<'_>, out: &mut [u8]) -> Result<()> {
+            unpack_stride_into_impl(cursor, out)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe { unpack_stride_into_x86_v3(cursor, out) };
+        }
+    }
+    unpack_stride_into_impl(cursor, out)
+}
+
+#[inline(always)]
+fn unpack_stride_into_impl(cursor: &mut Cursor<'_>, out: &mut [u8]) -> Result<()> {
     let raw_len = cursor.uleb()?;
     if raw_len > MAX_BLOCK_SIZE || raw_len != out.len() {
         return Err(invalid("stride raw length"));
@@ -102,7 +123,7 @@ fn unpack_stride_into(cursor: &mut Cursor<'_>, out: &mut [u8]) -> Result<()> {
                     if nz_mask_idx != nz_masks_len || nz_idx != nz_len {
                         return Err(invalid("stride nonzero consumption"));
                     }
-                    if nz_slice.contains(&0) {
+                    if find_byte(0, nz_slice).is_some() {
                         return Err(invalid("stride canonical zero residual"));
                     }
                     super_ptrs[p] = s_ptr;

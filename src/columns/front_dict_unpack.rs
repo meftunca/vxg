@@ -157,6 +157,7 @@ fn unpack_nibble_bytes_into(
     unsafe {
         use core::arch::x86_64::*;
         #[target_feature(enable = "ssse3")]
+        #[inline]
         unsafe fn unpack_nibble16_ssse3(
             src_ptr: *const u8,
             char_len: usize,
@@ -287,6 +288,7 @@ fn unpack_nibble_bytes_into(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "ssse3")]
+#[inline]
 unsafe fn unpack_front_dict_fast_ssse3(
     dst: *mut u8,
     p_ptr: *const u8,

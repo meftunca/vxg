@@ -1,6 +1,27 @@
 /// Pack a low-cardinality byte stream (e.g. Base64, hex/UUID, ASCII identifiers, XML/JSON literals)
 /// using a 4-bit (<=16), 5-bit (<=32), or 6-bit (<=64) planar 16-lane bit-packed stream + raw escape stream.
 fn pack_palette_stream(data: &[u8], out: &mut Vec<u8>) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn pack_palette_stream_x86_v3(data: &[u8], out: &mut Vec<u8>) -> bool {
+            pack_palette_stream_impl(data, out)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe { pack_palette_stream_x86_v3(data, out) };
+        }
+    }
+    pack_palette_stream_impl(data, out)
+}
+
+#[inline(always)]
+fn pack_palette_stream_impl(data: &[u8], out: &mut Vec<u8>) -> bool {
     let n = data.len();
     if n < 128 {
         return false;
@@ -235,6 +256,27 @@ fn pack_palette_stream(data: &[u8], out: &mut Vec<u8>) -> bool {
 }
 
 fn unpack_palette_stream(src: &[u8], out: &mut [u8]) -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        unsafe fn unpack_palette_stream_x86_v3(src: &[u8], out: &mut [u8]) -> Result<()> {
+            unpack_palette_stream_impl(src, out)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe { unpack_palette_stream_x86_v3(src, out) };
+        }
+    }
+    unpack_palette_stream_impl(src, out)
+}
+
+#[inline(always)]
+fn unpack_palette_stream_impl(src: &[u8], out: &mut [u8]) -> Result<()> {
     let n = out.len();
     let mut cursor = Cursor::new(src);
     let hdr = cursor.byte()?;
@@ -294,6 +336,7 @@ fn unpack_palette_stream(src: &[u8], out: &mut [u8]) -> Result<()> {
     };
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "ssse3,sse4.1")]
+    #[inline]
     unsafe fn lut16_sse41(
         dst: *mut u8,
         bits: u8,

@@ -47,6 +47,7 @@ fn push_5bit_bytes(out: &mut Vec<u8>, s: &[u8], lut_ptr: *const u8) {
     }
 }
 
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn build_front_dict_packet(
     u: usize,
@@ -81,9 +82,9 @@ fn build_front_dict_packet(
     // 1. Precalculate front+back delta dictionary stats and 256-bit char masks over `mid` in-place:
     const HEX_M0: u64 = 0x03ff_0000_0000_0000; // '0'..='9' (48..=57)
     const HEX_M1: u64 = 0x0000_007e_0000_0000; // 'a'..='f' (97..=102)
-    let mut lcp_lcs_uninit = [core::mem::MaybeUninit::<(u32, u32)>::uninit(); 256];
+    let mut lcp_lcs_uninit = [core::mem::MaybeUninit::<(u16, u16)>::uninit(); 256];
     let mut is_hex_mid_uninit = [core::mem::MaybeUninit::<bool>::uninit(); 256];
-    let lcp_lcs_ptr = lcp_lcs_uninit.as_mut_ptr().cast::<(u32, u32)>();
+    let lcp_lcs_ptr = lcp_lcs_uninit.as_mut_ptr().cast::<(u16, u16)>();
     let is_hex_mid_ptr = is_hex_mid_uninit.as_mut_ptr().cast::<bool>();
     let first = unsafe { *entries.get_unchecked(0) };
     let mut front_dict_bytes = uleb_len(first.len()) + first.len();
@@ -97,7 +98,7 @@ fn build_front_dict_packet(
         let cur = unsafe { *entries.get_unchecked(i) };
         let (lcp, lcs) = common_prefix_suffix(prev, cur);
         unsafe {
-            *lcp_lcs_ptr.add(i) = (lcp as u32, lcs as u32);
+            *lcp_lcs_ptr.add(i) = (lcp as u16, lcs as u16);
         }
         let mid = &cur[lcp..cur.len() - lcs];
         let base_hdr = uleb_len(lcp) + uleb_len(lcs);
@@ -216,11 +217,11 @@ fn build_front_dict_packet(
     let exc_width = bit_width(exc_bound.saturating_sub(1) as u64);
 
     if packed_len >= 24 && u < n {
-        let mut freq4_uninit = [core::mem::MaybeUninit::<[u32; 4]>::uninit(); 256];
-        let freq4: &mut [[u32; 4]] = unsafe {
-            let ptr = freq4_uninit.as_mut_ptr().cast::<[u32; 4]>();
+        let mut freq4_uninit = [core::mem::MaybeUninit::<[u16; 4]>::uninit(); 256];
+        let freq4: &mut [[u16; 4]] = unsafe {
+            let ptr = freq4_uninit.as_mut_ptr().cast::<[u16; 4]>();
             let s = std::slice::from_raw_parts_mut(ptr, u);
-            s.fill([0u32; 4]);
+            s.fill([0u16; 4]);
             s
         };
         let mut same_prev = 0usize;
@@ -256,7 +257,7 @@ fn build_front_dict_packet(
         }
         let mut mode_count = 0usize;
         for (r, c4) in freq4.iter().enumerate() {
-            let c = (c4[0] + c4[1] + c4[2] + c4[3]) as usize;
+            let c = (c4[0] as usize) + (c4[1] as usize) + (c4[2] as usize) + (c4[3] as usize);
             if c > mode_count {
                 mode_count = c;
                 mode_rank = r as u8;

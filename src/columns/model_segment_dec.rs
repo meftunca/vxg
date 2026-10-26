@@ -1,3 +1,4 @@
+#[inline(always)]
 fn pack_segment_dictionary_model<'a>(values: &[&'a [u8]], limit: usize) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 || 6 + (n + 7) / 8 >= limit {
@@ -291,7 +292,7 @@ fn split_decimal_suffix(value: &[u8]) -> Option<(&[u8], u64)> {
     Some((&inner[..start], decimal))
 }
 
-#[inline(never)]
+#[inline(always)]
 fn pack_decimal_suffix_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 {

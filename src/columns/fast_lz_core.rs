@@ -210,18 +210,23 @@ fn pack_fast_lz_core_impl<const HASH_LEN: u32, const USE_DICT7: bool>(
                 let h0 = hash16(w);
                 let h1 = hash16(w >> 8);
                 let cand0 = unsafe { *dict16.add(h0) as usize };
-                let cand1 = unsafe { *dict16.add(h1) as usize };
                 unsafe {
                     *dict16.add(h0) = ip as u16;
-                    *dict16.add(h1) = (ip + 1) as u16;
                 }
                 let cw0 = unsafe { ptr.add(cand0).cast::<u64>().read_unaligned().to_le() };
                 let d0 = w ^ cw0;
                 if (d0 & m4) == 0 {
                     match_pos = cand0;
                     if d0 == 0 {
+                        unsafe {
+                            *dict16.add(h1) = (ip + 1) as u16;
+                        }
                         best_ml = unsafe { match_len_from8(ptr, ip, cand0, n) };
                     } else {
+                        let cand1 = unsafe { *dict16.add(h1) as usize };
+                        unsafe {
+                            *dict16.add(h1) = (ip + 1) as u16;
+                        }
                         best_ml = (d0.trailing_zeros() >> 3) as usize;
                         if ip + 1 < limit {
                             let w_next =
@@ -244,6 +249,10 @@ fn pack_fast_lz_core_impl<const HASH_LEN: u32, const USE_DICT7: bool>(
                         }
                     }
                     break;
+                }
+                let cand1 = unsafe { *dict16.add(h1) as usize };
+                unsafe {
+                    *dict16.add(h1) = (ip + 1) as u16;
                 }
                 let cw1 = unsafe { ptr.add(cand1).cast::<u64>().read_unaligned().to_le() };
                 let d1 = (w >> 8) ^ cw1;
@@ -401,11 +410,8 @@ fn pack_fast_lz_core_impl<const HASH_LEN: u32, const USE_DICT7: bool>(
             if lit_len <= 32 && anchor + 32 <= n {
                 let lsrc = ptr.add(anchor);
                 let ldst = lit_ptr.add(lit_pos);
-                ldst.cast::<u128>()
-                    .write_unaligned(lsrc.cast::<u128>().read_unaligned());
-                ldst.add(16)
-                    .cast::<u128>()
-                    .write_unaligned(lsrc.add(16).cast::<u128>().read_unaligned());
+                copy16_unaligned(lsrc, ldst);
+                copy16_unaligned(lsrc.add(16), ldst.add(16));
                 lit_pos += lit_len;
             } else if lit_len > 0 {
                 std::ptr::copy_nonoverlapping(ptr.add(anchor), lit_ptr.add(lit_pos), lit_len);

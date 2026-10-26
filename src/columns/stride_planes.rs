@@ -5,7 +5,60 @@
 /// - `kind = 1`: nested `FAST_LZ_PACKET`
 /// - `kind = 0`: raw plane
 /// Returns `false` once `m` reaches `limit`.
+#[allow(clippy::too_many_arguments)]
 fn encode_stride_planes(
+    m: &mut Vec<u8>,
+    comb: &[u8],
+    firsts: &[u8; 8],
+    all_zero: &[bool; 8],
+    any_nz_words: Option<&[u64; 8]>,
+    stride: usize,
+    count: usize,
+    limit: usize,
+) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn encode_stride_planes_x86_v3(
+            m: &mut Vec<u8>,
+            comb: &[u8],
+            firsts: &[u8; 8],
+            all_zero: &[bool; 8],
+            any_nz_words: Option<&[u64; 8]>,
+            stride: usize,
+            count: usize,
+            limit: usize,
+        ) -> bool {
+            encode_stride_planes_impl(m, comb, firsts, all_zero, any_nz_words, stride, count, limit)
+        }
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("popcnt")
+            && std::arch::is_x86_feature_detected!("bmi1")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return unsafe {
+                encode_stride_planes_x86_v3(
+                    m,
+                    comb,
+                    firsts,
+                    all_zero,
+                    any_nz_words,
+                    stride,
+                    count,
+                    limit,
+                )
+            };
+        }
+    }
+    encode_stride_planes_impl(m, comb, firsts, all_zero, any_nz_words, stride, count, limit)
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn encode_stride_planes_impl(
     m: &mut Vec<u8>,
     comb: &[u8],
     firsts: &[u8; 8],
@@ -86,7 +139,7 @@ fn encode_stride_planes(
         }
     }
 
-    let mut lz = Vec::with_capacity(count * stride);
+    let mut lz = Vec::new();
     let mut p = 0usize;
     while p < stride {
         m.push(firsts[p]);

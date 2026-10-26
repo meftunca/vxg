@@ -12,6 +12,85 @@ fn extract_stride_planes_sse2(
     any_nz_words_arr: &mut [u64; 8],
     has_any_nz_words: &mut bool,
 ) {
+    #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn extract_stride_planes_x86_v3(
+        body: &[u8],
+        comb: &mut [u8],
+        stride: usize,
+        count: usize,
+        words: usize,
+        use_sub_green: bool,
+        first_bytes: &mut [u8; 8],
+        all_zero: &mut [bool; 8],
+        any_nz_words_arr: &mut [u64; 8],
+        has_any_nz_words: &mut bool,
+    ) {
+        extract_stride_planes_sse2_impl(
+            body,
+            comb,
+            stride,
+            count,
+            words,
+            use_sub_green,
+            first_bytes,
+            all_zero,
+            any_nz_words_arr,
+            has_any_nz_words,
+        );
+    }
+    if std::arch::is_x86_feature_detected!("avx2")
+        && std::arch::is_x86_feature_detected!("ssse3")
+        && std::arch::is_x86_feature_detected!("sse4.1")
+        && std::arch::is_x86_feature_detected!("popcnt")
+        && std::arch::is_x86_feature_detected!("bmi1")
+        && std::arch::is_x86_feature_detected!("bmi2")
+    {
+        unsafe {
+            extract_stride_planes_x86_v3(
+                body,
+                comb,
+                stride,
+                count,
+                words,
+                use_sub_green,
+                first_bytes,
+                all_zero,
+                any_nz_words_arr,
+                has_any_nz_words,
+            );
+        }
+        return;
+    }
+    extract_stride_planes_sse2_impl(
+        body,
+        comb,
+        stride,
+        count,
+        words,
+        use_sub_green,
+        first_bytes,
+        all_zero,
+        any_nz_words_arr,
+        has_any_nz_words,
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn extract_stride_planes_sse2_impl(
+    body: &[u8],
+    comb: &mut [u8],
+    stride: usize,
+    count: usize,
+    words: usize,
+    use_sub_green: bool,
+    first_bytes: &mut [u8; 8],
+    all_zero: &mut [bool; 8],
+    any_nz_words_arr: &mut [u64; 8],
+    has_any_nz_words: &mut bool,
+) {
     let body_ptr = body.as_ptr();
     let comb_ptr = comb.as_mut_ptr();
     unsafe {
@@ -37,6 +116,7 @@ fn extract_stride_planes_sse2(
                 let mut prev1 = _mm_set1_epi8(first_bytes[1] as i8);
                 let mut prev2 = _mm_set1_epi8(first_bytes[2] as i8);
                 let mut prev3 = _mm_set1_epi8(first_bytes[3] as i8);
+                let mut pv = _mm_set1_epi32(body_ptr.cast::<u32>().read_unaligned() as i32);
                 let mut or0 = zero;
                 let mut or1 = zero;
                 let mut or2 = zero;
@@ -44,11 +124,6 @@ fn extract_stride_planes_sse2(
                 let mut idx = 0usize;
                 while idx + 16 <= count {
                     let src = body_ptr.add(idx * 4);
-                    let prev_u32 = body_ptr
-                        .add(if idx > 0 { (idx - 1) * 4 } else { 0 })
-                        .cast::<u32>()
-                        .read_unaligned();
-                    let pv = _mm_set1_epi32(prev_u32 as i32);
                     let v0 = _mm_loadu_si128(src.cast::<__m128i>());
                     let v1 = _mm_loadu_si128(src.add(16).cast::<__m128i>());
                     let v2 = _mm_loadu_si128(src.add(32).cast::<__m128i>());
@@ -65,6 +140,7 @@ fn extract_stride_planes_sse2(
                         idx += 16;
                         continue;
                     }
+                    pv = _mm_shuffle_epi32::<0xff>(v3);
                     if track_nz {
                         let w = idx >> 6;
                         any_nz_words_arr[w >> 6] |= 1u64 << (w & 63);

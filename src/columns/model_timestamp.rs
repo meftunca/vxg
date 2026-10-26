@@ -57,7 +57,7 @@ fn parse_timestamp(value: &[u8]) -> Option<Timestamp> {
     })
 }
 
-#[inline(never)]
+#[inline(always)]
 fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 || 13 >= limit {

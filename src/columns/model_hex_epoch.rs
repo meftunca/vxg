@@ -143,6 +143,7 @@ fn split_hex_suffix(value: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&inner[..start], digits))
 }
 
+#[inline(always)]
 fn pack_hex_suffix_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 {
@@ -214,6 +215,7 @@ fn pack_hex_suffix_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+#[inline(always)]
 fn pack_epoch_counter_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 {
