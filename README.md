@@ -21,7 +21,7 @@ VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the 
 | **Prose & Source Code** | Const-generic `Fast-LZ` matcher paired with a 4-stream interleaved canonical Huffman coder |
 | **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning, 64-byte `FastPiece` unaligned `u128` row assembly, and SIMD prefix-sum plane interleaving |
 | **Integrity & Safety** | Hardware-accelerated CRC32C (`ARMv8 CRC` / `SSE4.2`); strict output-size bounds and deterministic rejection of truncated or malformed inputs |
-| **Zero-Allocation Rust & C ABI** | Zero-allocation `compress_into` / `decompress_into` / `extract_block_into` in Rust and C (`staticlib` `libvxg.a` / `vxg.lib`, `cdylib` `libvxg.dylib` / `.so` / `.dll`) with [`include/vxg.h`](include/vxg.h) and ready-to-run examples for **C/C++, Python, Go, Bun/Node.js, C#, and WebAssembly** |
+| **Zero-Allocation & Streaming API** | Zero-allocation `compress_into` / `decompress_into` / `extract_block_into` plus bounded-memory `StreamEncoder<W>` / `StreamDecoder<R>` (`std::io::Write` / `Read`) and multi-frame concatenated stream support in Rust and C (`staticlib` `libvxg.a` / `vxg.lib`, `cdylib` `libvxg.dylib` / `.so` / `.dll`) with [`include/vxg.h`](include/vxg.h) |
 
 ---
 
@@ -40,7 +40,7 @@ Measured via `vxg-bench --suite v4 --size-mib 16 --samples 5 --seconds 0.08` aga
 | **`field-order-optional-escaping.ndjson`** | **0.0445** | 0.2132 | 0.1043 | 1.322 / 5.583 | **6.190 / 30.762** | **61.1 / 310.2** (`5.28x` / `4.90x`) | 3.777 / **0.900** | **33.1** (`4.19x` / `8.95x`) |
 | **`event-mix-identifiers.ndjson`** | **0.0248** | 0.1545 | 0.0779 | 1.756 / 8.807 | **10.532 / 44.595** | **158.4 / 872.9** (`7.35x` / `7.29x`) | 2.711 / **0.614** | **122.8** (`6.64x` / `15.54x`) |
 | **`bursty-variable-records.ndjson`** | **0.0480** | 0.2065 | 0.1196 | 1.154 / 4.523 | **7.789 / 27.442** | **47.6 / 304.5** (`4.02x` / `3.97x`) | 3.914 / 1.169 | **22.2** (`2.85x` / `8.54x`) |
-| **`source-and-docs.txt`** | **0.2782** | 0.3830 | 0.2755 | **0.614 / 2.478** | **4.306 / 16.844** | **4.4 / 30.6** (`1.01x` / `1.02x`) | **6.887 / 1.718** | **1.3** (`0.68x` / `2.17x`) |
+| **`source-and-docs.txt`** | **0.2698** | 0.3777 | 0.2713 | **0.592 / 2.468** | **4.306 / 16.844** | **4.5 / 31.6** (`1.02x` / `1.05x`) | **6.887 / 1.718** | **1.3** (`0.68x` / `2.17x`) |
 | **`ui-render-32bpp.bmp`** | **0.0048** | 0.0140 | 0.0091 | 9.533 / 14.246 | **36.922 / 63.932** | **2435.3 / 10153.2** (`2.09x` / `2.47x`) | 0.562 / 0.345 | **5530.4** (`1.22x` / `5.24x`) |
 | **`rgb-frame-24bpp.bmp`** | **0.0012** | 0.0227 | 0.0119 | 8.793 / 14.846 | **35.666 / 64.509** | **9206.1 / 38648.9** (`19.42x` / `19.56x`) | 0.631 / 0.368 | **19116.6** (`13.67x` / `17.18x`) |
 | **10-Dataset Geometric Mean** | **0.0250** | 0.1272 | 0.0607 | **2.094 / 8.211** | **11.750 / 41.545** | **165.9 / 883.8** (`5.27x` / `5.29x`) | **2.333 / 0.665** | **133.2** (`3.92x` / `8.59x`) |

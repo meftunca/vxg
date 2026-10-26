@@ -26,10 +26,12 @@ pub mod packing;
 #[cfg(kani)]
 mod proofs;
 pub mod simd;
+pub mod stream;
 pub use block::{WorkStats, COLUMN as BLOCK_COLUMN, LZ as BLOCK_LZ, RAW as BLOCK_RAW};
 pub use error::{Error, Result};
 pub use frame::{max_compressed_size, BlockInfo, Frame, ValidatedFrame};
 pub use simd::Simd;
+pub use stream::{compress_stream, decompress_stream, StreamDecoder, StreamEncoder};
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -441,11 +443,17 @@ pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     options.validate()?;
     let mut v4_offsets = [0u32; frame::MAX_STACK_DIR_BLOCKS + 1];
     let (raw_size, block_size, count, version, checksummed) =
-        frame::validate_header_and_directory_with_offsets(
+        match frame::validate_header_and_directory_with_offsets(
             src,
             options.max_output,
             (options.threads > 1).then_some(&mut v4_offsets),
-        )?;
+        ) {
+            Ok(v) => v,
+            Err(Error::InvalidFrame("trailing bytes or incorrect total")) => {
+                return stream::decompress_concatenated(src, options);
+            }
+            Err(e) => return Err(e),
+        };
     if options.threads == 1
         || version < frame::VERSION_V4
         || (count <= frame::MAX_STACK_DIR_BLOCKS && src.len() <= u32::MAX as usize)
@@ -492,11 +500,17 @@ pub fn decompress_into(src: &[u8], out: &mut [u8], options: &DecodeOptions) -> R
     options.validate()?;
     let mut v4_offsets = [0u32; frame::MAX_STACK_DIR_BLOCKS + 1];
     let (raw_size, block_size, count, version, checksummed) =
-        frame::validate_header_and_directory_with_offsets(
+        match frame::validate_header_and_directory_with_offsets(
             src,
             options.max_output,
             (options.threads > 1).then_some(&mut v4_offsets),
-        )?;
+        ) {
+            Ok(v) => v,
+            Err(Error::InvalidFrame("trailing bytes or incorrect total")) => {
+                return stream::decompress_concatenated_into(src, out, options);
+            }
+            Err(e) => return Err(e),
+        };
     if options.threads == 1 {
         return frame::decode_validated_dir_single_thread(
             src,

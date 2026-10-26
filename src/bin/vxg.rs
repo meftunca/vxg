@@ -21,11 +21,11 @@ Usage:
   vxg c|compress   INPUT OUTPUT [--backend cpu|metal|vulkan|cuda] [--threads N|auto]
                                 [--block-size BYTES] [--acceleration 1..64]
                                 [--simd auto|scalar|sse2|avx2|avx512|neon]
-                                [--no-checksum] [--legacy] [--gpu-batch BYTES]
+                                [--no-checksum] [--legacy] [--stream] [--gpu-batch BYTES]
                                 [--force|-f] [--quiet|-q]
   vxg d|decompress INPUT OUTPUT [--backend cpu|metal|vulkan|cuda] [--threads N|auto]
                                 [--simd MODE] [--max-output BYTES]
-                                [--no-checksum|--no-verify-checksum]
+                                [--no-checksum|--no-verify-checksum] [--stream]
                                 [--gpu-batch BYTES] [--force|-f] [--quiet|-q]
   vxg t|verify     FRAME        [--threads N|auto] [--simd MODE] [--max-output BYTES]
                                 [--no-checksum|--no-verify-checksum] [--quiet|-q]
@@ -296,12 +296,14 @@ fn run_args(args: &[String]) -> R<()> {
     let mut dec = DecodeOptions::default();
     let mut gpu = GpuOptions::default();
     let mut backend = "cpu".to_owned();
+    let mut stream_mode = false;
     let mut force = false;
     let mut quiet = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
             "--backend" => backend = val(args, &mut i)?.into(),
+            "--stream" => stream_mode = true,
             "--threads" => {
                 let n = parse_threads(val(args, &mut i)?)?;
                 enc.threads = n;
@@ -339,6 +341,37 @@ fn run_args(args: &[String]) -> R<()> {
     }
     if output != "-" && !force && Path::new(output).exists() {
         return Err("output exists (use --force to replace it)".into());
+    }
+    if stream_mode && backend == "cpu" {
+        let start = std::time::Instant::now();
+        let mut r_box: Box<dyn Read> = if input == "-" {
+            Box::new(io::stdin().lock())
+        } else {
+            Box::new(fs::File::open(input)?)
+        };
+        let mut w_box: Box<dyn Write> = if output == "-" {
+            Box::new(io::stdout().lock())
+        } else {
+            let mut opts = OpenOptions::new();
+            opts.write(true);
+            if force {
+                opts.create(true).truncate(true);
+            } else {
+                opts.create_new(true);
+            }
+            Box::new(opts.open(output)?)
+        };
+        let (in_b, out_b) = if is_compress {
+            vxg::compress_stream(&mut r_box, &mut w_box, &enc)?
+        } else {
+            let written = vxg::decompress_stream(&mut r_box, &mut w_box, &dec)?;
+            (0, written)
+        };
+        if !quiet {
+            let ms = start.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("stream completed: in={in_b} out={out_b} bytes ({ms:.3} ms)");
+        }
+        return Ok(());
     }
     let bytes = read_input(input)?;
     let start = std::time::Instant::now();
@@ -497,6 +530,29 @@ mod tests {
         assert_eq!(fs::read(&blk_path).unwrap(), &data[..4096]);
 
         run_args(&s(&["decompress", vxg_str, dec_str, "-f", "-q"])).unwrap();
+        assert_eq!(fs::read(&dec_path).unwrap(), data);
+
+        // Also test --stream bounded-memory CLI path:
+        run_args(&s(&[
+            "compress",
+            raw_str,
+            vxg_str,
+            "--block-size",
+            "4096",
+            "--stream",
+            "-f",
+            "-q",
+        ]))
+        .unwrap();
+        run_args(&s(&[
+            "decompress",
+            vxg_str,
+            dec_str,
+            "--stream",
+            "-f",
+            "-q",
+        ]))
+        .unwrap();
         assert_eq!(fs::read(&dec_path).unwrap(), data);
 
         let _ = fs::remove_dir_all(&dir);

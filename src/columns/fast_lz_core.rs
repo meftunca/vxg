@@ -58,7 +58,7 @@ fn pack_fast_lz_core_const<const HASH_LEN: u32, const USE_DICT7: bool>(
     } else {
         (8192usize, 19u32)
     };
-    let (d7_len, shift7) = (8192usize, 51u32);
+    let (d7_len, shift7) = (4096usize, 52u32);
     if dict4_vec.len() < d4_len {
         dict4_vec.resize(d4_len, 0);
     } else {
@@ -166,14 +166,14 @@ fn pack_fast_lz_core_const<const HASH_LEN: u32, const USE_DICT7: bool>(
                 let h0 = hash16(w);
                 let h1 = hash16(w >> 8);
                 let cand0 = unsafe { *dict16.add(h0) as usize };
+                let cand1 = unsafe { *dict16.add(h1) as usize };
+                unsafe {
+                    *dict16.add(h0) = ip as u16;
+                    *dict16.add(h1) = (ip + 1) as u16;
+                }
                 let cw0 = unsafe { ptr.add(cand0).cast::<u64>().read_unaligned().to_le() };
                 let d0 = w ^ cw0;
                 if (d0 & m4) == 0 {
-                    let cand1 = unsafe { *dict16.add(h1) as usize };
-                    unsafe {
-                        *dict16.add(h0) = ip as u16;
-                        *dict16.add(h1) = (ip + 1) as u16;
-                    }
                     match_pos = cand0;
                     if d0 == 0 {
                         best_ml = unsafe { match_len_from8(ptr, ip, cand0, n) };
@@ -184,21 +184,39 @@ fn pack_fast_lz_core_const<const HASH_LEN: u32, const USE_DICT7: bool>(
                                 unsafe { ptr.add(ip + 1).cast::<u64>().read_unaligned().to_le() };
                             let cw1 =
                                 unsafe { ptr.add(cand1).cast::<u64>().read_unaligned().to_le() };
-                            if w_next == cw1 {
+                            let d1 = w_next ^ cw1;
+                            if d1 == 0 {
                                 ip += 1;
                                 match_pos = cand1;
                                 best_ml = unsafe { match_len_from8(ptr, ip, cand1, n) };
+                            } else {
+                                let ml1 = (d1.trailing_zeros() >> 3) as usize;
+                                if ml1 > best_ml + 1 {
+                                    ip += 1;
+                                    match_pos = cand1;
+                                    best_ml = ml1;
+                                }
                             }
                         }
                     }
                     break;
                 }
-                unsafe {
-                    *dict16.add(h0) = ip as u16;
-                    *dict16.add(h1) = (ip + 1) as u16;
+                let cw1 = unsafe { ptr.add(cand1).cast::<u64>().read_unaligned().to_le() };
+                let d1 = (w >> 8) ^ cw1;
+                if (d1 & m4) == 0 && ip + 1 < limit {
+                    ip += 1;
+                    match_pos = cand1;
+                    let w1 = unsafe { ptr.add(ip).cast::<u64>().read_unaligned().to_le() };
+                    let d1_full = w1 ^ cw1;
+                    best_ml = if d1_full == 0 {
+                        unsafe { match_len_from8(ptr, ip, cand1, n) }
+                    } else {
+                        (d1_full.trailing_zeros() >> 3) as usize
+                    };
+                    break;
                 }
                 miss += 1;
-                ip += 2 + (miss >> 4);
+                ip += 2 + (miss >> 3);
                 if (miss & 127) == 0 && ip >= 8192 && matched_so_far < 128 && ip - anchor >= 2048 {
                     return (0, 0, n);
                 }
@@ -211,12 +229,12 @@ fn pack_fast_lz_core_const<const HASH_LEN: u32, const USE_DICT7: bool>(
             while ip < limit {
                 let w = unsafe { ptr.add(ip).cast::<u64>().read_unaligned().to_le() };
                 let h0 = hash16(w);
-                let h1 = hash16(w >> 8);
                 let cand0 = unsafe { *dict16.add(h0) as usize };
                 let h7_0 = hash7(w);
                 let cw0 = unsafe { ptr.add(cand0).cast::<u64>().read_unaligned().to_le() };
                 let d0 = w ^ cw0;
                 if (d0 & m4) == 0 {
+                    let h1 = hash16(w >> 8);
                     let cand1 = unsafe { *dict16.add(h1) as usize };
                     unsafe {
                         *dict16.add(h0) = ip as u16;
@@ -257,14 +275,32 @@ fn pack_fast_lz_core_const<const HASH_LEN: u32, const USE_DICT7: bool>(
                         *dict7.add(h7_0) = ip as u16;
                     }
                     break;
+                } else if ((w ^ (w >> 8)) as u32) == 0 && ip + 1 < limit {
+                    unsafe {
+                        *dict16.add(h0) = ip as u16;
+                        *dict7.add(h7_0) = ip as u16;
+                    }
+                    match_pos = ip;
+                    ip += 1;
+                    let w1 = unsafe { ptr.add(ip).cast::<u64>().read_unaligned().to_le() };
+                    let d_rle = w ^ w1;
+                    best_ml = if d_rle == 0 {
+                        unsafe { match_len_from8(ptr, ip, match_pos, n) }
+                    } else {
+                        (d_rle.trailing_zeros() >> 3) as usize
+                    };
+                    break;
                 }
                 unsafe {
                     *dict16.add(h0) = ip as u16;
-                    *dict16.add(h1) = (ip + 1) as u16;
+                    if miss < 4 {
+                        let h1 = hash16(w >> 8);
+                        *dict16.add(h1) = (ip + 1) as u16;
+                    }
                     *dict7.add(h7_0) = ip as u16;
                 }
                 miss += 1;
-                ip += 2 + (miss >> 4);
+                ip += 2 + (miss >> 3);
                 if (miss & 127) == 0 && ip >= 8192 && matched_so_far < 128 && ip - anchor >= 2048 {
                     return (0, 0, n);
                 }
@@ -297,10 +333,15 @@ fn pack_fast_lz_core_const<const HASH_LEN: u32, const USE_DICT7: bool>(
         let ml = next_ip - ip;
 
         if next_ip < limit {
-            let tail_p = next_ip - 2;
-            let tw = unsafe { ptr.add(tail_p).cast::<u64>().read_unaligned().to_le() };
             unsafe {
                 let d16 = dict4.cast::<u16>();
+                if !USE_DICT7 && ml >= 7 {
+                    let p2 = ip + 2;
+                    let pw = ptr.add(p2).cast::<u64>().read_unaligned().to_le();
+                    *d16.add(hash4_fn::<HASH_LEN>(pw, hsh, shift4 - 1, rsh4 - 1)) = p2 as u16;
+                }
+                let tail_p = next_ip - 2;
+                let tw = ptr.add(tail_p).cast::<u64>().read_unaligned().to_le();
                 let th0 = hash4_fn::<HASH_LEN>(tw, hsh, shift4 - 1, rsh4 - 1);
                 let th1 = hash4_fn::<HASH_LEN>(tw >> 8, hsh, shift4 - 1, rsh4 - 1);
                 *d16.add(th0) = tail_p as u16;

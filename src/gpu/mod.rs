@@ -330,7 +330,6 @@ impl GpuCodec {
     ) -> Result<(Vec<u8>, GpuReport)> {
         let started = Instant::now();
         let frame = Frame::parse(input, options.max_output)?;
-        frame.validate_commands()?; // Mandatory before device code: do not remove for a benchmark.
         let batch = check_batch(options.batch_bytes, frame.block_size())?;
         let per_batch = batch / frame.block_size();
         let mut out = Vec::new();
@@ -340,42 +339,68 @@ impl GpuCodec {
         let mut batches = 0;
         let mut total_ms = Some(0.0);
         let mut first_index = 0;
+        let short_distance = frame.version() >= 2;
         for blocks in frame.blocks.chunks(per_batch) {
-            let n: usize = blocks.iter().map(|b| b.info.raw_size).sum();
-            let mut packed = Vec::new();
-            let mut desc = Vec::with_capacity(blocks.len() * 4);
-            for b in blocks {
-                desc.extend_from_slice(&[
-                    packed.len() as u32,
-                    b.info.payload_size as u32,
-                    b.info.raw_size as u32,
-                    b.info.kind,
-                ]);
-                packed.extend_from_slice(b.payload);
-            }
-            let mut decoded = vec![0u8; n.div_ceil(4) * 4];
-            let params = Params {
-                total_size: n as u32,
-                block_size: frame.block_size() as u32,
-                block_count: blocks.len() as u32,
-                operation: 1,
-            };
-            let elapsed = self.invoke(&packed, &mut decoded, &mut desc, &params)?;
-            total_ms = total_ms.zip(elapsed).map(|(a, b)| a + b);
-            batches += 1;
-            let mut p = 0;
+            let mut gpu_indices = Vec::with_capacity(blocks.len());
+            let mut n = 0usize;
             for (i, b) in blocks.iter().enumerate() {
-                let bytes = &decoded[p..p + b.info.raw_size];
-                if frame.checksummed()
-                    && options.verify_checksum
-                    && crc32c(bytes) != b.info.checksum
-                {
-                    return Err(Error::Checksum {
-                        block: first_index + i,
-                    });
+                if b.info.kind == block::COLUMN {
+                    let dst = &mut out[b.info.raw_offset..b.info.raw_offset + b.info.raw_size];
+                    crate::columns::decode_block_into(b.payload, dst)?;
+                    if frame.checksummed()
+                        && options.verify_checksum
+                        && crc32c(dst) != b.info.checksum
+                    {
+                        return Err(Error::Checksum {
+                            block: first_index + i,
+                        });
+                    }
+                } else {
+                    // Mandatory before device code: do not remove for a benchmark.
+                    block::validate(b.payload, b.info.kind, b.info.raw_size, short_distance)?;
+                    n += b.info.raw_size;
+                    gpu_indices.push(i);
                 }
-                out[b.info.raw_offset..b.info.raw_offset + b.info.raw_size].copy_from_slice(bytes);
-                p += b.info.raw_size;
+            }
+            if !gpu_indices.is_empty() {
+                let mut packed = Vec::new();
+                let mut desc = Vec::with_capacity(gpu_indices.len() * 4);
+                for &i in &gpu_indices {
+                    let b = &blocks[i];
+                    desc.extend_from_slice(&[
+                        packed.len() as u32,
+                        b.info.payload_size as u32,
+                        b.info.raw_size as u32,
+                        b.info.kind,
+                    ]);
+                    packed.extend_from_slice(b.payload);
+                }
+                let mut decoded = vec![0u8; n.div_ceil(4) * 4];
+                let params = Params {
+                    total_size: n as u32,
+                    block_size: frame.block_size() as u32,
+                    block_count: gpu_indices.len() as u32,
+                    operation: 1,
+                };
+                let elapsed = self.invoke(&packed, &mut decoded, &mut desc, &params)?;
+                total_ms = total_ms.zip(elapsed).map(|(a, b)| a + b);
+                batches += 1;
+                let mut p = 0;
+                for &i in &gpu_indices {
+                    let b = &blocks[i];
+                    let bytes = &decoded[p..p + b.info.raw_size];
+                    if frame.checksummed()
+                        && options.verify_checksum
+                        && crc32c(bytes) != b.info.checksum
+                    {
+                        return Err(Error::Checksum {
+                            block: first_index + i,
+                        });
+                    }
+                    out[b.info.raw_offset..b.info.raw_offset + b.info.raw_size]
+                        .copy_from_slice(bytes);
+                    p += b.info.raw_size;
+                }
             }
             first_index += blocks.len();
         }

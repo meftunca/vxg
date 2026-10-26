@@ -57,6 +57,12 @@ vxg_ssize_t vxg_compress_bound(size_t raw_len, size_t block_size);
 vxg_ssize_t vxg_frame_raw_size(const uint8_t *src, size_t src_len);
 
 /**
+ * Header + directory query: returns the exact compressed byte size of the first VXG frame
+ * in `src[0..src_len]`, or a negative `VXG_ERR_*` code if truncated or invalid.
+ */
+vxg_ssize_t vxg_frame_compressed_size(const uint8_t *src, size_t src_len);
+
+/**
  * O(1) header query: returns the number of independent blocks in a VXG frame,
  * or a negative `VXG_ERR_*` code if invalid.
  */

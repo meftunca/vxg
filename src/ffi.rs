@@ -125,10 +125,33 @@ pub unsafe extern "C" fn vxg_frame_raw_size(src: *const u8, src_len: usize) -> i
         return VXG_ERR_CORRUPT_DATA;
     }
     let raw = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-    usize::try_from(raw)
-        .ok()
-        .and_then(|v| isize::try_from(v).ok())
-        .unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
+    let Ok(single_raw) = usize::try_from(raw) else {
+        return VXG_ERR_BUFFER_TOO_SMALL;
+    };
+    if let Ok((frame_len, _)) = crate::frame::parse_header_and_dir(bytes, usize::MAX) {
+        if frame_len < bytes.len() && bytes[frame_len..].starts_with(b"VXG1") {
+            return match crate::stream::scan_concatenated_frames(bytes, usize::MAX) {
+                Ok((total_raw, _)) => {
+                    isize::try_from(total_raw).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
+                }
+                Err(e) => map_error(e),
+            };
+        }
+    }
+    isize::try_from(single_raw).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
+}
+
+/// Inspects the header and directory prefix of a VXG frame and returns its exact
+/// compressed byte length (`>= 32`), or a negative `VXG_ERR_*` code if truncated/invalid.
+#[no_mangle]
+pub unsafe extern "C" fn vxg_frame_compressed_size(src: *const u8, src_len: usize) -> isize {
+    let Some(bytes) = (unsafe { slice_from_raw(src, src_len) }) else {
+        return VXG_ERR_NULL_PTR;
+    };
+    match crate::frame::parse_header_and_dir(bytes, usize::MAX) {
+        Ok((frame_len, _)) => isize::try_from(frame_len).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),
+        Err(e) => map_error(e),
+    }
 }
 
 /// Inspects a VXG frame header in $O(1)$ time and returns the number of independent blocks,
@@ -245,9 +268,9 @@ pub unsafe extern "C" fn vxg_decompress_into(
         if input.len() < 32 {
             return VXG_ERR_CORRUPT_DATA;
         }
-        let raw_len = match usize::try_from(u64::from_le_bytes(input[8..16].try_into().unwrap())) {
-            Ok(v) => v,
-            Err(_) => return VXG_ERR_BUFFER_TOO_SMALL,
+        let raw_len = match unsafe { vxg_frame_raw_size(input.as_ptr(), input.len()) } {
+            x if x >= 0 => x as usize,
+            err => return err,
         };
         if output.len() < raw_len {
             return VXG_ERR_BUFFER_TOO_SMALL;

@@ -379,4 +379,54 @@ mod tests_packets {
         decode_block_into(&pkt_clf, &mut out_clf).unwrap();
         assert_eq!(out_clf, clf_logs);
     }
+
+    #[test]
+    fn test_schema_drift_and_slot_overflow_graceful_fallback() {
+        let mut mixed = Vec::new();
+        // 120 rows of core schema + 70 distinct drifting schemas (> MAX_TEMPLATES = 64)
+        // + 10 wide rows with 40 slots (> MAX_SLOTS = 32):
+        for i in 0..120usize {
+            mixed.extend_from_slice(
+                format!(
+                    "{{\"ts\":{},\"service\":\"auth\",\"status\":200,\"lat_us\":{}}}\n",
+                    1_700_000_000 + i,
+                    120 + (i % 19)
+                )
+                .as_bytes(),
+            );
+            if i < 70 {
+                mixed.extend_from_slice(
+                    format!(
+                        "{{\"drift_key_{}\":{},\"extra_{}\":\"val_{}\"}}\n",
+                        i,
+                        i * 7,
+                        i,
+                        i % 8
+                    )
+                    .as_bytes(),
+                );
+            }
+            if i < 10 {
+                let mut wide = String::from("{");
+                for s in 0..40usize {
+                    if s > 0 {
+                        wide.push(',');
+                    }
+                    wide.push_str(&format!("\"f{}\":{}", s, i * 100 + s));
+                }
+                wide.push_str("}\n");
+                mixed.extend_from_slice(wide.as_bytes());
+            }
+        }
+        let pkt = encode_grammar_block(&mixed)
+            .expect("schema drift and >32 slots must not error in adaptive mode")
+            .expect("mixed block should compress");
+        let mut out = vec![0u8; mixed.len()];
+        decode_block_into(&pkt, &mut out).unwrap();
+        assert_eq!(out, mixed);
+
+        let frame = crate::compress(&mixed, &crate::Options::default()).unwrap();
+        let dec = crate::decompress(&frame, &crate::DecodeOptions::default()).unwrap();
+        assert_eq!(dec, mixed);
+    }
 }

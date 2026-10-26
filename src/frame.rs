@@ -143,6 +143,104 @@ pub fn max_compressed_size(n: usize, block_size: usize) -> Result<usize> {
         })
         .ok_or(Error::SizeOverflow)
 }
+
+/// Validates a 32-byte VXG header and returns `(raw_size, block_size, count, version, checksummed, dir_end)`.
+pub(crate) fn parse_header_only(
+    src: &[u8],
+    max_output: usize,
+) -> Result<(usize, usize, usize, u16, bool, usize)> {
+    if src.len() < HEADER_SIZE {
+        return Err(Error::Truncated);
+    }
+    let version = u16::from_le_bytes(src[4..6].try_into().unwrap());
+    if &src[..4] != MAGIC || !(MIN_VERSION..=MAX_VERSION).contains(&version) {
+        return Err(Error::InvalidFrame("magic/version"));
+    }
+    let flags = u16::from_le_bytes(src[6..8].try_into().unwrap());
+    if flags & !1 != 0 || read_u64(src, 24)? != 0 {
+        return Err(Error::InvalidFrame("unknown flags/reserved data"));
+    }
+    let raw64 = read_u64(src, 8)?;
+    if raw64 > max_output as u64 {
+        return Err(Error::OutputLimit {
+            requested: raw64,
+            limit: max_output,
+        });
+    }
+    let raw_size = usize::try_from(raw64).map_err(|_| Error::SizeOverflow)?;
+    let block_size = read_u32(src, 16)? as usize;
+    check_block_size(block_size).map_err(|_| Error::InvalidFrame("block size"))?;
+    let count = read_u32(src, 20)? as usize;
+    let expected_count = raw_size / block_size + usize::from(raw_size % block_size != 0);
+    if count != expected_count {
+        return Err(Error::InvalidFrame("block count"));
+    }
+    let esize = entry_size(version);
+    let dir_end = count
+        .checked_mul(esize)
+        .and_then(|v| v.checked_add(HEADER_SIZE))
+        .ok_or(Error::SizeOverflow)?;
+    Ok((raw_size, block_size, count, version, flags != 0, dir_end))
+}
+
+/// Validates the header and directory prefix of `src` and returns `(frame_compressed_size, raw_size)`.
+pub(crate) fn parse_header_and_dir(src: &[u8], max_output: usize) -> Result<(usize, usize)> {
+    let (raw_size, block_size, count, version, checksummed, dir_end) =
+        parse_header_only(src, max_output)?;
+    if src.len() < dir_end {
+        return Err(Error::Truncated);
+    }
+    let esize = entry_size(version);
+    let mut next_payload = dir_end;
+    let mut next_raw = 0usize;
+    for i in 0..count {
+        let p = HEADER_SIZE + i * esize;
+        let (raw_offset, payload_offset, rn, cn, checksum, kind) = if version >= VERSION_V4 {
+            let word = read_u32(src, p)?;
+            (
+                next_raw,
+                next_payload,
+                block_size.min(raw_size - next_raw),
+                (word & V4_SIZE_MASK) as usize,
+                read_u32(src, p + 4)?,
+                word >> 30,
+            )
+        } else {
+            (
+                usize::try_from(read_u64(src, p)?).map_err(|_| Error::SizeOverflow)?,
+                usize::try_from(read_u64(src, p + 8)?).map_err(|_| Error::SizeOverflow)?,
+                read_u32(src, p + 16)? as usize,
+                read_u32(src, p + 20)? as usize,
+                read_u32(src, p + 24)?,
+                read_u32(src, p + 28)?,
+            )
+        };
+        if raw_offset != next_raw
+            || payload_offset != next_payload
+            || rn != block_size.min(raw_size - next_raw)
+        {
+            return Err(Error::InvalidFrame("non-canonical directory"));
+        }
+        let kind_size_ok = match kind {
+            block::RAW => cn == rn,
+            block::LZ => cn < rn && cn >= block::BLOCK_PREFIX,
+            block::COLUMN => version >= 3 && cn >= 2 && cn < rn,
+            _ => false,
+        };
+        if !kind_size_ok {
+            return Err(Error::InvalidFrame("block kind/size"));
+        }
+        if !checksummed && checksum != 0 {
+            return Err(Error::InvalidFrame("checksum without flag"));
+        }
+        next_payload = payload_offset.checked_add(cn).ok_or(Error::SizeOverflow)?;
+        next_raw += rn;
+    }
+    if next_raw != raw_size {
+        return Err(Error::InvalidFrame("trailing bytes or incorrect total"));
+    }
+    Ok((next_payload, raw_size))
+}
 impl<'a> Frame<'a> {
     /// Validates the header and directory before any output allocation.
     /// Command validation is fused with CPU decoding, or explicitly requested by GPU callers.

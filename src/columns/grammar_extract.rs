@@ -173,13 +173,19 @@ fn grammar_from_block_mode<'a>(
             parse_record_spans(record, spans_buf, &mut overflow_spans)
         {
             if slot_count > MAX_SLOTS {
-                return_row_vec(rows);
-                return Err(invalid("column template bounds"));
-            }
-            let spans = &spans_buf[..slot_count];
-            let index = templates
-                .iter()
-                .position(|template| {
+                if !allow_early_abort {
+                    return_row_vec(rows);
+                    return Err(invalid("column template bounds"));
+                }
+                let r_idx = rows.len();
+                raw_history[raw_hist_pos & 15] = (r_idx, record);
+                raw_hist_pos += 1;
+                rows.push(Row::Raw(record));
+                raw_rows += 1;
+                raw_bytes += record.len();
+            } else {
+                let spans = &spans_buf[..slot_count];
+                let existing = templates.iter().position(|template| {
                     if template.segments.len() != slot_count + 1 {
                         return false;
                     }
@@ -191,92 +197,108 @@ fn grammar_from_block_mode<'a>(
                         prev = end as usize;
                     }
                     slice_eq_fast(template.segments[slot_count], &record[prev..])
-                })
-                .unwrap_or_else(|| {
-                    if templates.len() == 1 && rows.len() == 1 && !clean_nl_flags[0] && !has_json_tpl {
-                        let first_slice = &data[..first_nl];
-                        rows[0] = Row::Raw(first_slice);
-                        raw_history[0] = (0, first_slice);
-                        raw_hist_pos = 1;
-                        template_rows -= 1;
-                        raw_rows += 1;
-                        raw_bytes += first_slice.len();
-                        templates.clear();
-                        clean_flags.clear();
-                        clean_nl_flags.clear();
-                        delim_flags.clear();
-                        logfmt_flags.clear();
-                        max_shared = [0u8; 16];
-                        has_json_tpl = false;
-                    }
-                    let mut segments = Vec::with_capacity(slot_count + 1);
-                    let mut prev = 0usize;
-                    for &(start, end) in spans {
-                        segments.push(&record[prev..start as usize]);
-                        prev = end as usize;
-                    }
-                    segments.push(&record[prev..]);
-                    let is_single_clean = template_is_clean(&segments);
-                    let is_clean_nl = is_single_clean
-                        && matches!(segments.last().copied(), Some(b"}\n" | b"}\r\n"));
-                    let is_clean = is_single_clean || template_is_clean_multiline_json(&segments);
-                    let delim_opt = delimited_template_delim(&segments);
-                    let is_logfmt = delim_opt.is_none() && template_is_clean_logfmt(&segments);
-                    if is_clean
-                        || segments[0].first() == Some(&b'{')
-                        || segments.iter().any(|s| s.contains(&b'['))
-                    {
-                        has_json_tpl = true;
-                    }
-                    let new_idx = templates.len();
-                    if new_idx < 16 {
-                        let mut new_max = 0u8;
-                        for prev_idx in 0..new_idx {
-                            let min_segs = templates[prev_idx].segments.len().min(segments.len());
-                            let mut common = 0usize;
-                            while common < min_segs
-                                && slice_eq_fast(
-                                    templates[prev_idx].segments[common],
-                                    segments[common],
-                                )
-                            {
-                                common += 1;
-                            }
-                            let c = common as u8;
-                            shared_segs[prev_idx][new_idx] = c;
-                            shared_segs[new_idx][prev_idx] = c;
-                            if c > max_shared[prev_idx] {
-                                max_shared[prev_idx] = c;
-                            }
-                            if c > new_max {
-                                new_max = c;
-                            }
-                        }
-                        max_shared[new_idx] = new_max;
-                    }
-                    clean_flags.push(is_clean);
-                    clean_nl_flags.push(is_clean_nl);
-                    delim_flags.push(delim_opt);
-                    logfmt_flags.push(is_logfmt);
-                    templates.push(Template {
-                        values: (0..slot_count)
-                            .map(|_| take_col_vec(est_rows))
-                            .collect(),
-                        segments,
-                    });
-                    new_idx
                 });
-            if templates.len() > MAX_TEMPLATES {
-                return_row_vec(rows);
-                return Err(invalid("column template bounds"));
+                if existing.is_none() && allow_early_abort && templates.len() >= MAX_TEMPLATES {
+                    let r_idx = rows.len();
+                    raw_history[raw_hist_pos & 15] = (r_idx, record);
+                    raw_hist_pos += 1;
+                    rows.push(Row::Raw(record));
+                    raw_rows += 1;
+                    raw_bytes += record.len();
+                } else {
+                    let index = existing.unwrap_or_else(|| {
+                        if templates.len() == 1
+                            && rows.len() == 1
+                            && !clean_nl_flags[0]
+                            && !has_json_tpl
+                        {
+                            let first_slice = &data[..first_nl];
+                            rows[0] = Row::Raw(first_slice);
+                            raw_history[0] = (0, first_slice);
+                            raw_hist_pos = 1;
+                            template_rows -= 1;
+                            raw_rows += 1;
+                            raw_bytes += first_slice.len();
+                            templates.clear();
+                            clean_flags.clear();
+                            clean_nl_flags.clear();
+                            delim_flags.clear();
+                            logfmt_flags.clear();
+                            max_shared = [0u8; 16];
+                            has_json_tpl = false;
+                        }
+                        let mut segments = Vec::with_capacity(slot_count + 1);
+                        let mut prev = 0usize;
+                        for &(start, end) in spans {
+                            segments.push(&record[prev..start as usize]);
+                            prev = end as usize;
+                        }
+                        segments.push(&record[prev..]);
+                        let is_single_clean = template_is_clean(&segments);
+                        let is_clean_nl = is_single_clean
+                            && matches!(segments.last().copied(), Some(b"}\n" | b"}\r\n"));
+                        let is_clean =
+                            is_single_clean || template_is_clean_multiline_json(&segments);
+                        let delim_opt = delimited_template_delim(&segments);
+                        let is_logfmt = delim_opt.is_none() && template_is_clean_logfmt(&segments);
+                        if is_clean
+                            || segments[0].first() == Some(&b'{')
+                            || segments.iter().any(|s| s.contains(&b'['))
+                        {
+                            has_json_tpl = true;
+                        }
+                        let new_idx = templates.len();
+                        if new_idx < 16 {
+                            let mut new_max = 0u8;
+                            for prev_idx in 0..new_idx {
+                                let min_segs =
+                                    templates[prev_idx].segments.len().min(segments.len());
+                                let mut common = 0usize;
+                                while common < min_segs
+                                    && slice_eq_fast(
+                                        templates[prev_idx].segments[common],
+                                        segments[common],
+                                    )
+                                {
+                                    common += 1;
+                                }
+                                let c = common as u8;
+                                shared_segs[prev_idx][new_idx] = c;
+                                shared_segs[new_idx][prev_idx] = c;
+                                if c > max_shared[prev_idx] {
+                                    max_shared[prev_idx] = c;
+                                }
+                                if c > new_max {
+                                    new_max = c;
+                                }
+                            }
+                            max_shared[new_idx] = new_max;
+                        }
+                        clean_flags.push(is_clean);
+                        clean_nl_flags.push(is_clean_nl);
+                        delim_flags.push(delim_opt);
+                        logfmt_flags.push(is_logfmt);
+                        templates.push(Template {
+                            values: (0..slot_count)
+                                .map(|_| take_col_vec(est_rows))
+                                .collect(),
+                            segments,
+                        });
+                        new_idx
+                    });
+                    if templates.len() > MAX_TEMPLATES {
+                        return_row_vec(rows);
+                        return Err(invalid("column template bounds"));
+                    }
+                    last_template = index;
+                    let tpl = &mut templates[index];
+                    for (slot, &(start, end)) in spans.iter().enumerate() {
+                        tpl.values[slot].push(&record[start as usize..end as usize]);
+                    }
+                    rows.push(Row::Template(index));
+                    template_rows += 1;
+                }
             }
-            last_template = index;
-            let tpl = &mut templates[index];
-            for (slot, &(start, end)) in spans.iter().enumerate() {
-                tpl.values[slot].push(&record[start as usize..end as usize]);
-            }
-            rows.push(Row::Template(index));
-            template_rows += 1;
         } else if allow_early_abort
             && record.len() >= 2
             && record.len() <= 32

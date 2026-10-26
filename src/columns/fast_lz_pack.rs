@@ -132,7 +132,7 @@ fn pack_fast_lz_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
         let mut meta_size = meta_raw_len;
 
         // Split-stream Huffman meta (flag 8): tokens | offset lo | offset hi | ext.
-        if seq_count >= 160 {
+        if hash_len == 5 && seq_count >= 160 {
             sc.lz_meta_huf.clear();
             put_huf_or_raw(&mut sc.lz_meta_huf, &sc.lz_tokens[..seq_count]);
             if sc.lz_sub_lits.len() < 2 * off_count {

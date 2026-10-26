@@ -35,33 +35,6 @@ fn unpack_fast_lz_core(
             & (lit_pos + 16 <= lit_total_len)
             & (offset <= dst_pos + lit_len)
         {
-            if offset >= 16 && ext_pos < ext_len {
-                let is_ml15 = (ml_code == 15) as usize;
-                let raw_e = unsafe { *ext_bytes.get_unchecked(ext_pos) } as usize;
-                let e = if is_ml15 != 0 { raw_e } else { 0 };
-                if e <= 13 {
-                    ext_pos += is_ml15;
-                    let match_len = ml_code + 4 + e;
-                    unsafe {
-                        let lsrc = lit_ptr.add(lit_pos);
-                        let ldst = out_ptr.add(dst_pos);
-                        ldst.cast::<u128>()
-                            .write_unaligned(lsrc.cast::<u128>().read_unaligned());
-                        lit_pos += lit_len;
-                        dst_pos += lit_len;
-
-                        let msrc = out_ptr.add(dst_pos - offset);
-                        let mdst = out_ptr.add(dst_pos);
-                        mdst.cast::<u128>()
-                            .write_unaligned(msrc.cast::<u128>().read_unaligned());
-                        mdst.add(16)
-                            .cast::<u128>()
-                            .write_unaligned(msrc.add(16).cast::<u128>().read_unaligned());
-                        dst_pos += match_len;
-                    }
-                    continue;
-                }
-            }
             if ml_code < 15 {
                 let match_len = ml_code + 4;
                 if offset >= 16 {
@@ -96,6 +69,30 @@ fn unpack_fast_lz_core(
                         let mdst = out_ptr.add(dst_pos);
                         mdst.cast::<u128>()
                             .write_unaligned(msrc.cast::<u128>().read_unaligned());
+                        dst_pos += match_len;
+                    }
+                    continue;
+                }
+            } else if offset >= 16 && ext_pos < ext_len {
+                let e = unsafe { *ext_bytes.get_unchecked(ext_pos) } as usize;
+                if e <= 13 {
+                    ext_pos += 1;
+                    let match_len = 19 + e;
+                    unsafe {
+                        let lsrc = lit_ptr.add(lit_pos);
+                        let ldst = out_ptr.add(dst_pos);
+                        ldst.cast::<u128>()
+                            .write_unaligned(lsrc.cast::<u128>().read_unaligned());
+                        lit_pos += lit_len;
+                        dst_pos += lit_len;
+
+                        let msrc = out_ptr.add(dst_pos - offset);
+                        let mdst = out_ptr.add(dst_pos);
+                        mdst.cast::<u128>()
+                            .write_unaligned(msrc.cast::<u128>().read_unaligned());
+                        mdst.add(16)
+                            .cast::<u128>()
+                            .write_unaligned(msrc.add(16).cast::<u128>().read_unaligned());
                         dst_pos += match_len;
                     }
                     continue;

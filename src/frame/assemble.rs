@@ -1,8 +1,8 @@
 use crate::{Error, Result};
 
 use super::{
-    entry_size, max_compressed_size, write_entry, WorkerOutput, ENTRY_SIZE, HEADER_SIZE, MAGIC,
-    VERSION,
+    entry_size, max_compressed_size, write_entry, WorkerOutput, HEADER_SIZE, MAGIC,
+    VERSION_RELEASE,
 };
 
 pub(crate) struct Part {
@@ -203,30 +203,44 @@ pub(crate) fn assemble(
     checksummed: bool,
 ) -> Result<Vec<u8>> {
     let bound = max_compressed_size(n, block_size)?;
-    let mut out = Vec::new();
-    out.try_reserve_exact(bound)
-        .map_err(|_| Error::SizeOverflow)?;
+    let version = VERSION_RELEASE;
+    let esize = entry_size(version);
     let count = parts.len();
-    let table_end = HEADER_SIZE + ENTRY_SIZE * count;
+    let table_end = HEADER_SIZE
+        .checked_add(esize.checked_mul(count).ok_or(Error::SizeOverflow)?)
+        .ok_or(Error::SizeOverflow)?;
+    let total_payload: usize = parts.iter().map(|p| p.bytes.len()).sum();
+    let exact_len = table_end
+        .checked_add(total_payload)
+        .ok_or(Error::SizeOverflow)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(exact_len)
+        .map_err(|_| Error::SizeOverflow)?;
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
     out.extend_from_slice(&(u16::from(checksummed)).to_le_bytes());
     out.extend_from_slice(&(n as u64).to_le_bytes());
     out.extend_from_slice(&(block_size as u32).to_le_bytes());
     out.extend_from_slice(&(count as u32).to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes());
+    out.resize(table_end, 0);
     let mut raw_offset = 0usize;
     let mut payload_offset = table_end;
-    for p in &parts {
+    for (i, p) in parts.iter().enumerate() {
         if p.bytes.len() > p.raw_size {
             return Err(Error::InvalidFrame("encoder expansion"));
         }
-        out.extend_from_slice(&(raw_offset as u64).to_le_bytes());
-        out.extend_from_slice(&(payload_offset as u64).to_le_bytes());
-        out.extend_from_slice(&(p.raw_size as u32).to_le_bytes());
-        out.extend_from_slice(&(p.bytes.len() as u32).to_le_bytes());
-        out.extend_from_slice(&p.checksum.to_le_bytes());
-        out.extend_from_slice(&p.kind.to_le_bytes());
+        write_entry(
+            &mut out,
+            HEADER_SIZE + i * esize,
+            version,
+            raw_offset,
+            payload_offset,
+            p.raw_size,
+            p.bytes.len(),
+            p.checksum,
+            p.kind,
+        );
         raw_offset += p.raw_size;
         payload_offset += p.bytes.len();
     }
