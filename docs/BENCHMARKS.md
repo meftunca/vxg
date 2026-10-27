@@ -322,3 +322,26 @@ per-line work and from reusing the decode buffer. Plain `grep -c` (BSD) on the s
 baseline, so treat the raw numbers as a weak reference, not a tuned memmem.
 
 The earlier 20–40x numbers apply only to structured, templated data.
+
+## Bigram pre-filter: upper-bound study
+
+`vxg-bigram-study` counts, per 64 KiB block, how many blocks the 256-bit alphabet filter
+rejects and how many *additional* blocks an exact bigram set would reject (needle absent,
+but every needle byte present). Exact bigram sets are an upper bound: a real compressed-domain
+filter must stay conservative at piece boundaries and cannot see adjacency inside
+non-dictionary columns. A stored hashed signature would add false positives and per-block bytes.
+
+| File (blocks) | Needle | Truly present | Alphabet rejects | Extra bigram rejects |
+| :--- | :--- | ---: | ---: | ---: |
+| `install.log` (484) | `ZZZ_NOPE` | 0 | 397 | 87 |
+| `install.log` (484) | `Installer error` | 0 | 0 | 66 |
+| `install.log` (484) | `pkg.com` | 0 | 6 | 370 |
+| `icons.json` (73) | `"gitub"` | 0 | 1 | 71 |
+| `icons.json` (73) | `hidden":true` | 0 | 0 | 73 |
+| `prof_out.txt` (67) | `schedule-nll` | 0 | 0 | 38 |
+
+Takeaway: for needles made of common characters that are not adjacent in the data, the alphabet
+filter rejects almost nothing while bigrams could reject most blocks. For needles with a rare
+byte, the alphabet filter already does the job. Free-text blocks (`FAST_LZ_PACKET`) expose no
+bigram information without decoding, so using this there needs a stored signature, i.e. a
+wire-format change.
