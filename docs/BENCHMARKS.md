@@ -422,3 +422,14 @@ The existing early exit is an exact lower bound (it never rejects a dictionary t
 which only fires near the end of a high-cardinality column. A heuristic early exit (for example
 "all of the first 64 values distinct") could cut that cost but can miss columns whose repeats
 come late, so it needs a ratio check on the corpus before use. Not implemented.
+
+### Where the encode time goes (derived from the profile above, varied NDJSON)
+
+These are calculations from the sampled shares, not separate measurements. Encode takes about
+78 ms for the 54 MiB file; the template matcher's 24.6% is about 19 ms over 300,000 rows, so
+roughly 64 ns per row of about 181 bytes, i.e. about 2.8 GB/s for 10 fields per row. That is
+already fast, so a 2x faster matcher would only save about 12% of encode time. Dictionary
+attempts (28.7%) and model selection (`pack_model_mode`, 11.4%) together are about 40%, spread
+over many columns and blocks. No single function offers a 2x encode gain; the remaining gains
+are many items of roughly 5-12% each. Multi-thread encode is the larger lever in practice (8
+threads reached 30.9 GB/s on the JSON profile file).
