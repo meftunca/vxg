@@ -203,8 +203,8 @@ fn mask_has_byte(mask: &[u64; 4], b: u8) -> bool {
     (mask[(b >> 6) as usize] & (1u64 << (b & 63))) != 0
 }
 
-/// Fast $O(1)$ header inspection returning `Some(row_count)` for `GRAMMAR_PACKET` payloads.
-pub(crate) fn grammar_block_row_count(payload: &[u8]) -> Result<Option<usize>> {
+/// Fast $O(1)$ header inspection returning `Some((row_count, ends_with_nl))` for `GRAMMAR_PACKET`.
+pub(crate) fn grammar_block_row_meta(payload: &[u8]) -> Result<Option<(usize, bool)>> {
     if payload.first() != Some(&GRAMMAR_PACKET) {
         return Ok(None);
     }
@@ -221,9 +221,21 @@ pub(crate) fn grammar_block_row_count(payload: &[u8]) -> Result<Option<usize>> {
     if dictionary_len > template_count.saturating_mul(MAX_SLOTS + 1) {
         return Err(invalid("column segment dictionary count"));
     }
-    for _ in 0..dictionary_len {
+    let mut seg_ends_nl_inline = [false; 128];
+    let mut seg_ends_nl_overflow = if dictionary_len > 128 {
+        vec![false; dictionary_len]
+    } else {
+        Vec::new()
+    };
+    let seg_ends_nl: &mut [bool] = if dictionary_len <= 128 {
+        &mut seg_ends_nl_inline[..dictionary_len]
+    } else {
+        &mut seg_ends_nl_overflow[..dictionary_len]
+    };
+    for flag in seg_ends_nl.iter_mut() {
         let len = cursor.uleb()?;
-        let _ = cursor.take(len)?;
+        let seg = cursor.take(len)?;
+        *flag = seg.last() == Some(&b'\n');
     }
     let mut slot_counts_inline = [0usize; 16];
     let mut slot_counts_overflow = if template_count > 16 {
@@ -247,18 +259,95 @@ pub(crate) fn grammar_block_row_count(payload: &[u8]) -> Result<Option<usize>> {
     if segment_width != bit_width(dictionary_len.saturating_sub(1) as u64) {
         return Err(invalid("column segment selector width"));
     }
-    for &slots in slot_counts.iter() {
+    let mut tpl_ends_nl = [true; MAX_TEMPLATES];
+    for (t_idx, &slots) in slot_counts.iter().enumerate() {
         if dictionary_len == 0 {
             return Err(invalid("empty column segment dictionary"));
         }
         let packed_len = bit_bytes(slots + 1, segment_width)?;
-        let _ = cursor.take(packed_len)?;
+        let packed_slice = cursor.take(packed_len)?;
+        let mut rdr = FastBitReader::new_validated(packed_slice, slots + 1, segment_width)?;
+        rdr.skip(slots);
+        let last_seg_idx = rdr.next_u64() as usize;
+        if last_seg_idx >= dictionary_len {
+            return Err(invalid("column segment dictionary index"));
+        }
+        tpl_ends_nl[t_idx] = seg_ends_nl[last_seg_idx];
     }
     let row_count = cursor.uleb()?;
     if row_count > raw_len.saturating_add(1) {
         return Err(invalid("column row count"));
     }
-    Ok(Some(row_count))
+    if row_count == 0 {
+        return Ok(Some((0, true)));
+    }
+    let selector_width = cursor.byte()?;
+    if selector_width != bit_width(template_count as u64) {
+        return Err(invalid("column row selector width"));
+    }
+    let selector_len = bit_bytes(row_count, selector_width)?;
+    let selector_slice = cursor.take(selector_len)?;
+    let mut sel_rdr = FastBitReader::new_validated(selector_slice, row_count, selector_width)?;
+    sel_rdr.skip(row_count - 1);
+    let last_sel = sel_rdr.next_u64() as usize;
+    if last_sel > 0 {
+        if last_sel > template_count {
+            return Err(invalid("column row selector index"));
+        }
+        return Ok(Some((row_count, tpl_ends_nl[last_sel - 1])));
+    }
+    if cursor.bytes.get(cursor.pos) == Some(&0) {
+        cursor.pos += 1;
+        let lz_len = cursor.uleb()?;
+        let lz_bytes = cursor.take(lz_len)?;
+        let mut lz_cursor = Cursor::new(lz_bytes);
+        if lz_cursor.byte()? != FAST_LZ_PACKET {
+            return Err(invalid("column raw rows lz selector"));
+        }
+        let mut probe = Cursor::new(lz_cursor.bytes);
+        probe.pos = lz_cursor.pos;
+        let unpacked_len = probe.uleb()?;
+        if unpacked_len == 0 || unpacked_len > 65536 {
+            return Err(invalid("column raw rows lz length"));
+        }
+        let ends_nl = DECODE_SCRATCH.with(|cell| -> Result<bool> {
+            let mut scratch = cell.borrow_mut();
+            scratch.raw_arena.clear();
+            scratch.raw_arena.reserve(unpacked_len + 64);
+            unsafe {
+                scratch.raw_arena.set_len(unpacked_len);
+            }
+            unpack_fast_lz_into(&mut lz_cursor, &mut scratch.raw_arena[..unpacked_len])?;
+            Ok(scratch.raw_arena[unpacked_len - 1] == b'\n')
+        })?;
+        Ok(Some((row_count, ends_nl)))
+    } else {
+        let raw_count = if selector_width == 1 {
+            let ones: usize = selector_slice.iter().map(|b| b.count_ones() as usize).sum();
+            row_count.saturating_sub(ones)
+        } else {
+            let mut r = FastBitReader::new_validated(selector_slice, row_count, selector_width)?;
+            let mut c = 0usize;
+            for _ in 0..row_count {
+                if r.next_u64() == 0 {
+                    c += 1;
+                }
+            }
+            c
+        };
+        let mut last_byte = b'\n';
+        for _ in 0..raw_count {
+            let len = cursor.uleb()?;
+            let raw = cursor.take(len)?;
+            last_byte = *raw.last().ok_or_else(|| invalid("empty raw column row"))?;
+        }
+        Ok(Some((row_count, last_byte == b'\n')))
+    }
+}
+
+/// Fast $O(1)$ header inspection returning `Some(row_count)` for `GRAMMAR_PACKET` payloads.
+pub(crate) fn grammar_block_row_count(payload: &[u8]) -> Result<Option<usize>> {
+    Ok(grammar_block_row_meta(payload)?.map(|(c, _)| c))
 }
 
 fn read_grammar_raw_rows<'a>(

@@ -76,12 +76,13 @@ pub fn block_row_count(frame_bytes: &[u8], block_index: usize) -> Result<usize> 
 pub fn frame_row_count(frame_bytes: &[u8]) -> Result<usize> {
     let parsed = Frame::parse(frame_bytes, usize::MAX)?;
     let mut total = 0usize;
+    let mut prev_open = false;
     for (idx, info) in parsed.blocks().enumerate() {
-        let count = if info.kind == BLOCK_COLUMN {
+        let (rows, ends_nl) = if info.kind == BLOCK_COLUMN {
             let payload =
                 &frame_bytes[info.payload_offset..info.payload_offset + info.payload_size];
-            if let Some(c) = crate::columns::grammar_block_row_count(payload)? {
-                c
+            if let Some(meta) = crate::columns::grammar_block_row_meta(payload)? {
+                meta
             } else {
                 let raw = decode_non_grammar_block(
                     frame_bytes,
@@ -89,7 +90,10 @@ pub fn frame_row_count(frame_bytes: &[u8]) -> Result<usize> {
                     info.raw_size,
                     &DecodeOptions::default(),
                 )?;
-                raw.split_inclusive(|&b| b == b'\n').count()
+                (
+                    raw.split_inclusive(|&b| b == b'\n').count(),
+                    raw.last() == Some(&b'\n'),
+                )
             }
         } else {
             let raw = decode_non_grammar_block(
@@ -98,9 +102,16 @@ pub fn frame_row_count(frame_bytes: &[u8]) -> Result<usize> {
                 info.raw_size,
                 &DecodeOptions::default(),
             )?;
-            raw.split_inclusive(|&b| b == b'\n').count()
+            (
+                raw.split_inclusive(|&b| b == b'\n').count(),
+                raw.last() == Some(&b'\n'),
+            )
         };
-        total = total.checked_add(count).ok_or(Error::SizeOverflow)?;
+        if rows > 0 {
+            let new_rows = if prev_open { rows - 1 } else { rows };
+            total = total.checked_add(new_rows).ok_or(Error::SizeOverflow)?;
+            prev_open = !ends_nl;
+        }
     }
     Ok(total)
 }
@@ -201,36 +212,45 @@ pub fn extract_row_range(
     let parsed = Frame::parse(frame_bytes, options.max_output)?;
     let mut out = Vec::new();
     let mut cur_global = 0usize;
+    let mut prev_open = false;
 
     for (blk_idx, info) in parsed.blocks().enumerate() {
-        if cur_global >= end_row {
+        let base_row = if prev_open { cur_global - 1 } else { cur_global };
+        if base_row >= end_row {
             break;
         }
         if info.kind == BLOCK_COLUMN {
             let payload =
                 &frame_bytes[info.payload_offset..info.payload_offset + info.payload_size];
-            if let Some(blk_rows) = crate::columns::grammar_block_row_count(payload)? {
-                let next_global = cur_global + blk_rows;
-                if next_global > start_row && cur_global < end_row {
-                    let local_start = start_row.saturating_sub(cur_global);
-                    let local_end = (end_row - cur_global).min(blk_rows);
-                    let _ = crate::columns::unpack_grammar_row_range(
-                        payload,
-                        local_start,
-                        local_end,
-                        &mut out,
-                    )?;
+            if let Some((blk_rows, ends_nl)) = crate::columns::grammar_block_row_meta(payload)? {
+                if blk_rows > 0 {
+                    let local_start = start_row.saturating_sub(base_row).min(blk_rows);
+                    let local_end = end_row.saturating_sub(base_row).min(blk_rows);
+                    if local_start < local_end {
+                        let _ = crate::columns::unpack_grammar_row_range(
+                            payload,
+                            local_start,
+                            local_end,
+                            &mut out,
+                        )?;
+                    }
+                    cur_global = base_row + blk_rows;
+                    prev_open = !ends_nl;
                 }
-                cur_global = next_global;
                 continue;
             }
         }
         let raw = decode_non_grammar_block(frame_bytes, blk_idx, info.raw_size, options)?;
-        for line in raw.split_inclusive(|&b| b == b'\n') {
-            if cur_global >= start_row && cur_global < end_row {
-                out.extend_from_slice(line);
+        if !raw.is_empty() {
+            for (r, line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
+                let g_row = base_row + r;
+                if g_row >= start_row && g_row < end_row {
+                    out.extend_from_slice(line);
+                }
             }
-            cur_global += 1;
+            let blk_rows = raw.split_inclusive(|&b| b == b'\n').count();
+            cur_global = base_row + blk_rows;
+            prev_open = raw.last() != Some(&b'\n');
         }
     }
     Ok(out)
@@ -262,41 +282,82 @@ pub fn filter_rows(
     let parsed = Frame::parse(frame_bytes, options.max_output)?;
     let mut out = Vec::new();
     let mut cur_global = 0usize;
+    let mut carry: Option<(usize, usize, usize, Vec<u8>)> = None;
 
     for (blk_idx, info) in parsed.blocks().enumerate() {
-        if out.len() >= limit {
+        if out.len() >= limit && carry.is_none() {
             break;
         }
         if info.kind == BLOCK_COLUMN {
             let payload =
                 &frame_bytes[info.payload_offset..info.payload_offset + info.payload_size];
-            if let Some(blk_rows) = crate::columns::search_grammar_block(
+            if let Some(new_rows) = crate::columns::search_grammar_block(
                 payload,
                 blk_idx,
                 cur_global,
+                &mut carry,
                 needle,
                 limit,
                 &mut out,
             )? {
-                cur_global += blk_rows;
+                cur_global += new_rows;
+                if out.len() >= limit && carry.is_none() {
+                    break;
+                }
                 continue;
             }
         }
         let raw = decode_non_grammar_block(frame_bytes, blk_idx, info.raw_size, options)?;
-        for (row_idx, line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
-            if contains_bytes(line, needle) {
+        if raw.is_empty() {
+            continue;
+        }
+        let had_carry = carry.is_some();
+        let base_row = if had_carry { cur_global - 1 } else { cur_global };
+        let lines: Vec<&[u8]> = raw.split_inclusive(|&b| b == b'\n').collect();
+        let blk_rows = lines.len();
+        for (row_idx, &line) in lines.iter().enumerate() {
+            if row_idx == 0 {
+                if let Some((c_blk, c_row, c_glob, mut c_bytes)) = carry.take() {
+                    c_bytes.extend_from_slice(line);
+                    if !c_bytes.ends_with(b"\n") && blk_rows == 1 {
+                        carry = Some((c_blk, c_row, c_glob, c_bytes));
+                        break;
+                    }
+                    if contains_bytes(&c_bytes, needle) && out.len() < limit {
+                        out.push(RowMatch {
+                            block_index: c_blk,
+                            row_index: c_row,
+                            global_row_index: c_glob,
+                            bytes: c_bytes,
+                        });
+                    }
+                    continue;
+                }
+            }
+            if row_idx == blk_rows - 1 && !line.ends_with(b"\n") {
+                carry = Some((blk_idx, row_idx, base_row + row_idx, line.to_vec()));
+                break;
+            }
+            if contains_bytes(line, needle) && out.len() < limit {
                 out.push(RowMatch {
                     block_index: blk_idx,
                     row_index: row_idx,
-                    global_row_index: cur_global + row_idx,
+                    global_row_index: base_row + row_idx,
                     bytes: line.to_vec(),
                 });
-                if out.len() >= limit {
-                    break;
-                }
             }
         }
-        cur_global += raw.split_inclusive(|&b| b == b'\n').count();
+        cur_global = base_row + blk_rows;
+    }
+    if let Some((c_blk, c_row, c_glob, c_bytes)) = carry.take() {
+        if contains_bytes(&c_bytes, needle) && out.len() < limit {
+            out.push(RowMatch {
+                block_index: c_blk,
+                row_index: c_row,
+                global_row_index: c_glob,
+                bytes: c_bytes,
+            });
+        }
     }
     Ok(out)
 }
@@ -447,19 +508,10 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..rows {
             let svc = services[i % services.len()];
-            let lvl = if i == rows - 7 {
-                "CRITICAL"
-            } else {
-                levels[i % levels.len()]
-            };
+            let lvl = if i == rows - 7 { "CRITICAL" } else { levels[i % levels.len()] };
             let line = format!(
                 "{{\"ts\":\"2026-10-17T19:{:02}:{:02}Z\",\"seq\":{},\"level\":\"{}\",\"service\":\"{}\",\"latency_us\":{}}}\n",
-                (i / 60) % 60,
-                i % 60,
-                1000 + i,
-                lvl,
-                svc,
-                100 + (i * 7) % 500
+                (i / 60) % 60, i % 60, 1000 + i, lvl, svc, 100 + (i * 7) % 500
             );
             out.extend_from_slice(line.as_bytes());
         }
@@ -475,71 +527,42 @@ mod tests {
 
         let expected_lines: Vec<&[u8]> = raw.split_inclusive(|&b| b == b'\n').collect();
         let total_rows = frame_row_count(&frame).unwrap();
-        assert!(total_rows >= expected_lines.len());
+        assert_eq!(total_rows, expected_lines.len());
 
-        // Single row random access in block 0
-        let row0 = extract_block_row(&frame, 0, 0, &dec_opts).unwrap();
-        assert_eq!(row0, expected_lines[0]);
-        let row42 = extract_block_row(&frame, 0, 42, &dec_opts).unwrap();
-        assert_eq!(row42, expected_lines[42]);
+        assert_eq!(extract_block_row(&frame, 0, 0, &dec_opts).unwrap(), expected_lines[0]);
+        assert_eq!(extract_block_row(&frame, 0, 42, &dec_opts).unwrap(), expected_lines[42]);
+        assert_eq!(
+            extract_block_row_range(&frame, 0, 10, 25, &dec_opts).unwrap(),
+            expected_lines[10..25].concat()
+        );
+        assert_eq!(extract_row_range(&frame, 0, total_rows, &dec_opts).unwrap(), raw);
 
-        // Block row range extraction
-        let range_10_25 = extract_block_row_range(&frame, 0, 10, 25, &dec_opts).unwrap();
-        let expected_10_25: Vec<u8> = expected_lines[10..25].concat();
-        assert_eq!(range_10_25, expected_10_25);
-
-        // Full-frame extract_row_range across all rows reconstructs the exact original bytes!
-        let all_rows = extract_row_range(&frame, 0, total_rows, &dec_opts).unwrap();
-        assert_eq!(all_rows, raw);
-
-        // Compressed-domain find_first on rare dictionary entry ("CRITICAL")
-        let crit = find_first(&frame, b"CRITICAL", &dec_opts)
-            .unwrap()
-            .expect("CRITICAL row");
+        let crit = find_first(&frame, b"CRITICAL", &dec_opts).unwrap().expect("CRITICAL row");
         assert!(contains_bytes(&crit.bytes, b"\"level\":\"CRITICAL\""));
         assert!(contains_bytes(&crit.bytes, b"\"seq\":3493"));
 
-        // Boundary-spanning needle ("\"level\":\"CRITICAL\"")
-        let crit_span = find_first(&frame, b"\"level\":\"CRITICAL\"", &dec_opts)
-            .unwrap()
-            .expect("boundary span match");
+        let crit_span = find_first(&frame, b"\"level\":\"CRITICAL\"", &dec_opts).unwrap().unwrap();
         assert_eq!(crit_span.global_row_index, crit.global_row_index);
         assert_eq!(crit_span.bytes, crit.bytes);
 
-        // Static segment needle ("\"service\":\"") -> instant hit at row 0
-        let static_hit = find_first(&frame, b"\"service\":\"", &dec_opts)
-            .unwrap()
-            .expect("static segment hit");
+        let static_hit = find_first(&frame, b"\"service\":\"", &dec_opts).unwrap().unwrap();
         assert_eq!(static_hit.global_row_index, 0);
         assert_eq!(static_hit.bytes, expected_lines[0]);
+        assert!(find_first(&frame, b"NON_EXISTENT_TOKEN_XYZ", &dec_opts).unwrap().is_none());
 
-        // Non-existent needle -> fast O(1) rejection returns None
-        assert!(find_first(&frame, b"NON_EXISTENT_TOKEN_XYZ", &dec_opts)
-            .unwrap()
-            .is_none());
-
-        // filter_rows with limit
         let payment_rows = filter_rows(&frame, b"\"service\":\"payment\"", 10, &dec_opts).unwrap();
         assert_eq!(payment_rows.len(), 10);
         for m in &payment_rows {
             assert!(contains_bytes(&m.bytes, b"\"service\":\"payment\""));
         }
 
-        // C FFI verification
         unsafe {
-            let ffi_cnt = vxg_frame_row_count(frame.as_ptr(), frame.len());
-            assert_eq!(ffi_cnt as usize, total_rows);
-
+            assert_eq!(vxg_frame_row_count(frame.as_ptr(), frame.len()) as usize, total_rows);
             let mut buf = [0u8; 512];
             let mut found_idx = 0usize;
             let n = vxg_find_first_into(
-                frame.as_ptr(),
-                frame.len(),
-                b"CRITICAL".as_ptr(),
-                8,
-                buf.as_mut_ptr(),
-                buf.len(),
-                &raw mut found_idx,
+                frame.as_ptr(), frame.len(), b"CRITICAL".as_ptr(), 8,
+                buf.as_mut_ptr(), buf.len(), &raw mut found_idx,
             );
             assert!(n > 0);
             assert_eq!(found_idx, crit.global_row_index);
