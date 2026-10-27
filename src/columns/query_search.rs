@@ -8,6 +8,7 @@ pub(crate) fn search_grammar_block(
     needle: &[u8],
     limit: usize,
     out: &mut Vec<crate::query::RowMatch>,
+    num: Option<&crate::query::NumFilter>,
 ) -> Result<Option<usize>> {
     if payload.first() != Some(&GRAMMAR_PACKET) {
         return Ok(None);
@@ -118,6 +119,10 @@ pub(crate) fn search_grammar_block(
         scratch.clear();
         scratch.raw_arena.reserve(raw_len.saturating_mul(2) + 16384);
 
+        if num.is_some() && !(template_count == 1 && selector_width == 1) {
+            // Numeric predicates have a column fast path only for single-template blocks.
+            return Ok(None);
+        }
         if template_count == 1 && selector_width == 1 {
             let _ = FastBitReader::new_validated(selector_slice, row_count, 1)?;
             let mut ones = 0usize;
@@ -125,6 +130,10 @@ pub(crate) fn search_grammar_block(
                 ones += b.count_ones() as usize;
             }
             let raw_count = row_count - ones;
+            if num.is_some() && (raw_count > 0 || carry.is_some()) {
+                // Raw rows or a pending cross-block row: the line-based fallback handles them.
+                return Ok(None);
+            }
             let DecodeScratch {
                 ref mut raw_arena,
                 ref mut slice_arena,
@@ -141,6 +150,20 @@ pub(crate) fn search_grammar_block(
             }
             if !cursor.done() {
                 return Err(invalid("column packet trailing bytes"));
+            }
+
+            if let Some(nf) = num {
+                return numeric_scan_single_template(
+                    nf,
+                    &tpl_segs[0],
+                    &col_slices[..slots],
+                    ones,
+                    &mut scratch,
+                    block_index,
+                    global_row_base,
+                    limit,
+                    out,
+                );
             }
 
             let had_incoming_carry = carry.is_some();

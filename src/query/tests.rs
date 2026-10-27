@@ -68,3 +68,120 @@
             assert_eq!(&buf[..n as usize], crit.bytes.as_slice());
         }
     }
+
+fn expected_u64(raw: &[u8], key: &str, cmp: NumCmp, limit: usize) -> Vec<(usize, Vec<u8>)> {
+    let f = NumFilter::new(key, cmp);
+    let mut out = Vec::new();
+    for (i, line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
+        if numeric::line_numeric_match(line, &f) {
+            out.push((i, line.to_vec()));
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn check_u64(frame: &[u8], raw: &[u8], key: &str, cmp: NumCmp, limit: usize) -> usize {
+    let dec = DecodeOptions::default();
+    let want = expected_u64(raw, key, cmp, limit);
+    let got = filter_json_u64(frame, key, cmp, limit, &dec)
+        .unwrap_or_else(|e| panic!("filter_json_u64({key}, {cmp:?}): {e:?}"));
+    assert_eq!(got.len(), want.len(), "count for {key} {cmp:?}");
+    for (g, (wi, wb)) in got.iter().zip(want.iter()) {
+        assert_eq!(g.global_row_index, *wi, "row index for {key} {cmp:?}");
+        assert_eq!(&g.bytes, wb, "row bytes for {key} {cmp:?}");
+    }
+    got.len()
+}
+
+#[test]
+fn numeric_filter_matches_line_reference_across_blocks() {
+    let raw = sample_ndjson(6000);
+    let frame = compress(&raw, &Options::default()).unwrap();
+    let mut total = 0;
+    for cmp in [
+        NumCmp::Eq(3000),
+        NumCmp::Ge(6900),
+        NumCmp::Le(1010),
+        NumCmp::Range(2500, 2600),
+        NumCmp::Eq(999_999_999),
+    ] {
+        total += check_u64(&frame, &raw, "seq", cmp, usize::MAX);
+    }
+    total += check_u64(&frame, &raw, "latency_us", NumCmp::Ge(550), usize::MAX);
+    total += check_u64(&frame, &raw, "latency_us", NumCmp::Le(120), 7);
+    assert!(total > 0, "test must exercise real matches");
+    // Missing key and a key that only exists as a string value never match.
+    assert_eq!(check_u64(&frame, &raw, "no_such_key", NumCmp::Ge(0), usize::MAX), 0);
+    assert_eq!(check_u64(&frame, &raw, "level", NumCmp::Ge(0), usize::MAX), 0);
+}
+
+#[test]
+fn numeric_filter_handles_irregular_values_and_raw_rows() {
+    let mut raw = Vec::new();
+    for i in 0..4000u64 {
+        let line = match i % 11 {
+            3 => format!("{{\"id\":{i},\"n\":1.5,\"s\":\"x\"}}\n"),
+            5 => format!("{{\"id\":{i},\"n\":\"{i}\",\"s\":\"x\"}}\n"),
+            7 => format!("{{\"id\":{i},\"s\":\"x\"}}\n"),
+            9 => format!("{{\"id\":{i},\"n\":007,\"s\":\"x\"}}\n"),
+            _ => format!("{{\"id\":{i},\"n\":{},\"s\":\"x\"}}\n", i * 3 % 977),
+        };
+        raw.extend_from_slice(line.as_bytes());
+    }
+    raw.extend_from_slice(b"{\"id\":4000,\"n\":18446744073709551615,\"s\":\"x\"}\n");
+    raw.extend_from_slice(b"{\"id\":4001,\"n\":18446744073709551616,\"s\":\"x\"}\n");
+    let frame = compress(&raw, &Options::default()).unwrap();
+    let mut total = 0;
+    for cmp in [
+        NumCmp::Eq(0),
+        NumCmp::Ge(900),
+        NumCmp::Le(5),
+        NumCmp::Range(100, 120),
+        NumCmp::Ge(u64::MAX),
+    ] {
+        total += check_u64(&frame, &raw, "n", cmp, usize::MAX);
+        total += check_u64(&frame, &raw, "id", cmp, usize::MAX);
+    }
+    assert!(total > 0);
+}
+
+#[test]
+fn numeric_filter_without_trailing_newline() {
+    let mut raw = sample_ndjson(900);
+    raw.pop(); // drop final '\n'
+    let frame = compress(&raw, &Options::default()).unwrap();
+    assert!(check_u64(&frame, &raw, "seq", NumCmp::Ge(1890), usize::MAX) > 0);
+}
+
+/// Regression: a column with more than 256 distinct values (9..=16-bit dictionary ids) used to
+/// compress fine but fail to decompress with `column bit index out of bounds`.
+#[test]
+fn wide_dictionary_columns_round_trip() {
+    let dec = DecodeOptions::default();
+    for (modulus, every) in [(256u64, 50u64), (257, 2), (257, 50), (300, 50), (977, 4), (977, 50)] {
+        let mut raw = Vec::new();
+        for i in 0..6000u64 {
+            let line = if i % every == 0 {
+                format!("{{\"id\":{i},\"n\":1.5,\"s\":\"x\"}}\n")
+            } else {
+                format!("{{\"id\":{i},\"n\":{},\"s\":\"x\"}}\n", i % modulus)
+            };
+            raw.extend_from_slice(line.as_bytes());
+        }
+        let frame = compress(&raw, &Options::default()).unwrap();
+        let out = crate::decompress(&frame, &dec)
+            .unwrap_or_else(|e| panic!("mod={modulus} every={every}: {e:?}"));
+        assert_eq!(out, raw, "mod={modulus} every={every}");
+        // Multi-threaded decode must agree.
+        let mt = DecodeOptions { threads: 4, ..DecodeOptions::default() };
+        assert_eq!(crate::decompress(&frame, &mt).unwrap(), raw);
+        // Row access and substring search go through the same column parser.
+        assert_eq!(frame_row_count(&frame).unwrap(), 6000);
+        assert_eq!(extract_row_range(&frame, 0, 6000, &dec).unwrap(), raw);
+        let hit = find_first(&frame, b"\"n\":1.5", &dec).unwrap().expect("1.5 row");
+        assert_eq!(hit.global_row_index, 0);
+    }
+}

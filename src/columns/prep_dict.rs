@@ -495,6 +495,65 @@ impl<'a> PreparedColumn<'a> {
                     if !cursor.done() {
                         return Err(invalid("column model trailing bytes"));
                     }
+                    if entries_len > 256 {
+                        // Wide dictionary (9..=16-bit ids): the u8-indexed exec streams cannot
+                        // represent it, so materialize the column as length-prefixed rows and
+                        // let the RAW stream emit it. Decode-only; encoder output is unchanged.
+                        let mut reader = FastBitReader::new_validated(packed_bytes, count, width)?;
+                        let mut total = 0usize;
+                        let mut wide_max = 0usize;
+                        let mut scan = reader;
+                        for _ in 0..count {
+                            let idx = scan.next_u64() as usize;
+                            if idx >= entries_len {
+                                return Err(invalid("column bit index out of bounds"));
+                            }
+                            let len = scratch.slice_arena[slice_offset + idx].1;
+                            total += uleb_len(len) + len;
+                            wide_max = wide_max.max(len);
+                        }
+                        let start = scratch.raw_arena.len();
+                        if start + total + 32 > scratch.raw_arena.capacity() {
+                            return Err(invalid("column wide dictionary arena overflow"));
+                        }
+                        unsafe {
+                            let mut dst = scratch.raw_arena.as_mut_ptr().add(start);
+                            for _ in 0..count {
+                                let idx = reader.next_u64() as usize;
+                                let (ptr, len) = *scratch.slice_arena.get_unchecked(slice_offset + idx);
+                                let mut v = len;
+                                loop {
+                                    let b = (v & 0x7f) as u8;
+                                    v >>= 7;
+                                    if v != 0 {
+                                        *dst = b | 0x80;
+                                        dst = dst.add(1);
+                                    } else {
+                                        *dst = b;
+                                        dst = dst.add(1);
+                                        break;
+                                    }
+                                }
+                                std::ptr::copy_nonoverlapping(ptr, dst, len);
+                                dst = dst.add(len);
+                            }
+                            scratch.raw_arena.set_len(start + total);
+                        }
+                        scratch.slice_arena.truncate(slice_offset);
+                        let rows: &'a [u8] = unsafe {
+                            std::slice::from_raw_parts(scratch.raw_arena.as_ptr().add(start), total)
+                        };
+                        return Ok(Self {
+                            const_full: ConstValue::None,
+                            const_lead: LeadValue::Empty,
+                            const_trail: b"",
+                            dict_slices: None,
+                            max_emit_len: wide_max,
+                            stream: ColumnStream::Raw {
+                                cursor: Cursor::new(rows),
+                            },
+                        });
+                    }
                     if entries_len == 1 {
                         let _ = FastBitReader::new_validated(packed_bytes, count, width)?;
                         scratch.slice_arena.truncate(slice_offset);

@@ -9,6 +9,10 @@
 
 use crate::{DecodeOptions, Error, Frame, Result, BLOCK_COLUMN};
 
+mod numeric;
+pub use numeric::NumCmp;
+pub(crate) use numeric::NumFilter;
+
 /// A single matching structured record returned by [`find_first`] or [`filter_rows`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowMatch {
@@ -286,6 +290,50 @@ pub fn filter_rows(
     limit: usize,
     options: &DecodeOptions,
 ) -> Result<Vec<RowMatch>> {
+    filter_impl(frame_bytes, &Pred::Substr(needle), limit, options)
+}
+
+/// Find up to `limit` records whose `"key":` value is an unsigned integer satisfying `cmp`.
+///
+/// Scope: flat JSON records with plain unsigned decimal integers (no sign, fraction or
+/// exponent); other values never match. On structured blocks only the target column is
+/// decoded to evaluate the predicate, and the remaining columns are decoded only if some
+/// row matches. All other blocks fall back to a per-line check with the same semantics.
+pub fn filter_json_u64(
+    frame_bytes: &[u8],
+    key: &str,
+    cmp: NumCmp,
+    limit: usize,
+    options: &DecodeOptions,
+) -> Result<Vec<RowMatch>> {
+    let nf = NumFilter::new(key, cmp);
+    filter_impl(frame_bytes, &Pred::Num(&nf), limit, options)
+}
+
+enum Pred<'a> {
+    Substr(&'a [u8]),
+    Num(&'a NumFilter),
+}
+
+impl Pred<'_> {
+    fn matches(&self, line: &[u8]) -> bool {
+        match self {
+            Pred::Substr(n) => contains_bytes(line, n),
+            Pred::Num(f) => numeric::line_numeric_match(line, f),
+        }
+    }
+    /// Whole-block rejection test usable only for substring predicates.
+    fn block_misses(&self, raw: &[u8]) -> bool {
+        matches!(self, Pred::Substr(n) if !contains_bytes(raw, n))
+    }
+}
+
+fn filter_impl(
+    frame_bytes: &[u8],
+    pred: &Pred,
+    limit: usize,
+    options: &DecodeOptions,
+) -> Result<Vec<RowMatch>> {
     options.validate()?;
     if limit == 0 {
         return Ok(Vec::new());
@@ -308,9 +356,16 @@ pub fn filter_rows(
                 blk_idx,
                 cur_global,
                 &mut carry,
-                needle,
+                match pred {
+                    Pred::Substr(n) => n,
+                    Pred::Num(_) => &[],
+                },
                 limit,
                 &mut out,
+                match pred {
+                    Pred::Num(f) => Some(*f),
+                    Pred::Substr(_) => None,
+                },
             )? {
                 cur_global += new_rows;
                 if out.len() >= limit && carry.is_none() {
@@ -324,7 +379,7 @@ pub fn filter_rows(
         if raw.is_empty() {
             continue;
         }
-        if carry.is_none() && !contains_bytes(raw, needle) {
+        if carry.is_none() && pred.block_misses(raw) {
             // Whole-block miss: one SIMD scan instead of per-line work. Only the row
             // count and a possible unterminated tail (carry) must be tracked.
             let nl = raw.iter().filter(|&&b| b == b'\n').count();
@@ -349,7 +404,7 @@ pub fn filter_rows(
                         carry = Some((c_blk, c_row, c_glob, c_bytes));
                         break;
                     }
-                    if contains_bytes(&c_bytes, needle) && out.len() < limit {
+                    if pred.matches(&c_bytes) && out.len() < limit {
                         out.push(RowMatch {
                             block_index: c_blk,
                             row_index: c_row,
@@ -364,7 +419,7 @@ pub fn filter_rows(
                 carry = Some((blk_idx, row_idx, base_row + row_idx, line.to_vec()));
                 break;
             }
-            if contains_bytes(line, needle) && out.len() < limit {
+            if pred.matches(line) && out.len() < limit {
                 out.push(RowMatch {
                     block_index: blk_idx,
                     row_index: row_idx,
@@ -376,7 +431,7 @@ pub fn filter_rows(
         cur_global = base_row + blk_rows;
     }
     if let Some((c_blk, c_row, c_glob, c_bytes)) = carry.take() {
-        if contains_bytes(&c_bytes, needle) && out.len() < limit {
+        if pred.matches(&c_bytes) && out.len() < limit {
             out.push(RowMatch {
                 block_index: c_blk,
                 row_index: c_row,
