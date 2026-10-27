@@ -433,3 +433,26 @@ attempts (28.7%) and model selection (`pack_model_mode`, 11.4%) together are abo
 over many columns and blocks. No single function offers a 2x encode gain; the remaining gains
 are many items of roughly 5-12% each. Multi-thread encode is the larger lever in practice (8
 threads reached 30.9 GB/s on the JSON profile file).
+
+### Column-style filters on varied NDJSON (existing `filter_rows`, no new code)
+
+300,000 records, single thread. Each result is verified byte-identical to a raw scan. The raw
+baseline is a naive scan, so read speedups as relative to a weak reference. Hits are
+materialized, which is part of the VXG time.
+
+| Needle | Column kind | Hits | Raw ms | VXG ms | Speedup |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| `"level":"ERROR"` | dictionary | 33,348 | 123.4 | 18.8 | 6.6x |
+| `"service":"fraud-engine"` | dictionary | 37,539 | 91.3 | 22.6 | 4.0x |
+| `"path":"/v1/login"` | dictionary | 42,929 | 96.8 | 25.2 | 3.8x |
+| `"region":"us-west-2"` | dictionary | 75,148 | 88.2 | 31.4 | 2.8x |
+| `"status":500` | numeric | 14,937 | 133.8 | 84.0 | 1.6x |
+| `"level":"NOPE"` | dictionary, value absent | 0 | 133.6 | 1.5 | 91x |
+
+`frame_row_count` on this file takes 0.585 ms.
+
+Reading: equality on dictionary columns is already pushed down well, and an absent value is
+rejected almost for free. The weak spot is numeric columns (1.6x), where the current path
+emits and verifies candidate rows. A numeric-aware predicate (decode only that column, compare
+integers, emit only matching rows) is the part of the stage 2 first slice that would add
+something new; dictionary equality is already covered.
