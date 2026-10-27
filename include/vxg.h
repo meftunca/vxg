@@ -157,6 +157,58 @@ uint8_t *vxg_alloc(size_t len);
  */
 void vxg_free(uint8_t *ptr, size_t len);
 
+/**
+ * Compressed-domain structured record count across all blocks in a VXG frame.
+ * On `GRAMMAR_PACKET` blocks this inspects only the grammar headers in O(1) time per block.
+ * Returns total record count (`>= 0`), or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_frame_row_count(const uint8_t *frame_ptr, size_t frame_len);
+
+/**
+ * Compressed-domain random-access extraction of a single record `global_row_index`
+ * directly into caller-supplied `dst[0..dst_cap]`.
+ * Returns exact byte count written (`>= 0`), or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_extract_row_into(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    size_t global_row_index,
+    uint8_t *dst,
+    size_t dst_cap
+);
+
+/**
+ * Compressed-domain range extraction of records `[start_row .. end_row)`
+ * directly into caller-supplied `dst[0..dst_cap]`.
+ * Returns exact byte count written (`>= 0`), or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_extract_row_range_into(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    size_t start_row,
+    size_t end_row,
+    uint8_t *dst,
+    size_t dst_cap
+);
+
+/**
+ * Compressed-domain predicate pushdown search for the first record containing
+ * `needle[0..needle_len]`.
+ * - If found: copies the matching record into `dst[0..dst_cap]`, stores its global
+ *   row index in `*out_row_index` (if non-NULL), and returns the record byte length (`> 0`).
+ * - If not found: stores `SIZE_MAX` in `*out_row_index` (if non-NULL) and returns `0`.
+ * - On error: returns negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_find_first_into(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const uint8_t *needle,
+    size_t needle_len,
+    uint8_t *dst,
+    size_t dst_cap,
+    size_t *out_row_index
+);
+
 #ifdef __cplusplus
 }
 #endif

@@ -31,6 +31,8 @@ Usage:
                                 [--no-checksum|--no-verify-checksum] [--quiet|-q]
   vxg block        FRAME INDEX [OUTPUT] [--simd MODE] [--max-output BYTES]
                                 [--no-checksum|--no-verify-checksum] [--force|-f]
+  vxg q|query      FRAME        [--count | --row IDX | --range START:END |
+                                 --find-first STR | --filter STR [--limit N]]
   vxg info|list    FRAME        [--summary]
   vxg hardware
   vxg gpu-check    metal|vulkan|cuda
@@ -280,6 +282,7 @@ fn run_args(args: &[String]) -> R<()> {
             }
             return gpu_check(args[1].parse()?);
         }
+        "q" | "query" => return run_query_cmd(args),
         "c" | "compress" | "d" | "decompress" => {}
         _ => return Err(format!("unknown command: {cmd}\n{HELP}").into()),
     }
@@ -558,3 +561,5 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+include!("cli_support/query.rs");

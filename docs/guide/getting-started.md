@@ -39,6 +39,7 @@ Build outputs in `target/release/`:
 | `vxg verify [FLAGS] <INPUT>` | Verify frame header, compact directory, block boundaries, and CRC32C without writing output. Alias: `vxg -t`. |
 | `vxg info [--blocks] <INPUT>` | Print frame version (`v1`–`v4`), raw/compressed byte sizes, ratio, and optional per-block breakdown (`RAW`, `LZ`, `COLUMN`). |
 | `vxg block <INPUT> <INDEX> [-o OUTPUT]` | $O(1)$ random-access extraction of a single block (`0..block_count`) without decoding other blocks. |
+| `vxg query <INPUT> [QUERY_FLAGS]` | Compressed-domain structured record random access (`--count`, `--row`, `--range`) and predicate pushdown search (`--find`, `--filter`). Alias: `vxg q`. |
 | `vxg hardware` | Print detected CPU architecture (`aarch64` / `x86_64`), active SIMD ISA (`Neon`, `Sse2`, `Avx2`, `Avx512`), and logical core count. |
 | `vxg bench [SIZE_MIB]` | Run a quick built-in synthetic throughput check (`default: 64 MiB`). |
 
@@ -73,4 +74,11 @@ vxg -d -c -T0 events.ndjson.vxg | head -n 5
 
 # 5. Extract only block #42 in O(1) time
 vxg block events.ndjson.vxg 42 -o block_42.ndjson
+
+# 6. Compressed-domain structured record random access & pushdown search
+vxg query events.ndjson.vxg --count
+vxg query events.ndjson.vxg --row 50000
+vxg query events.ndjson.vxg --range 50000:50010
+vxg query events.ndjson.vxg --find "status=500"
+vxg query events.ndjson.vxg --filter "ERROR" --limit 25
 ```

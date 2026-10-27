@@ -25,11 +25,16 @@ pub mod gpu;
 pub mod packing;
 #[cfg(kani)]
 mod proofs;
+pub mod query;
 pub mod simd;
 pub mod stream;
 pub use block::{WorkStats, COLUMN as BLOCK_COLUMN, LZ as BLOCK_LZ, RAW as BLOCK_RAW};
 pub use error::{Error, Result};
 pub use frame::{max_compressed_size, BlockInfo, Frame, ValidatedFrame};
+pub use query::{
+    block_row_count, extract_block_row, extract_block_row_range, extract_row, extract_row_range,
+    filter_rows, find_first, frame_row_count, RowMatch,
+};
 pub use simd::Simd;
 pub use stream::{compress_stream, decompress_stream, StreamDecoder, StreamEncoder};
 

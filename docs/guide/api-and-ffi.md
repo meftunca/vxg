@@ -55,6 +55,31 @@ let mut blk_buf = vec![0u8; blk_size];
 let n = vxg::extract_block_into(compressed, 0, &mut blk_buf, &opts)?;
 ```
 
+### 1.4 Compressed-Domain Structured Record Random Access & Pushdown Search
+
+When compressing structured record streams (NDJSON, CSV, TSV, logfmt, CLF logs), VXG's `GRAMMAR_PACKET` (`0x92`) stores exact row counts per block and vectorized column streams. You can query row counts, seek to individual rows or ranges (`[start_row..end_row)`), and run `find_first` / `filter_rows` directly in the compressed domain with **256-bit block alphabet pruning**, **exact interval-alignment dictionary pushdown**, and **$O(1)$ `PreparedTemplate::skip_rows`**:
+
+```rust
+use vxg::{Options, RowMatch};
+
+let opts = Options::default();
+
+// 1. Count total records across all blocks without unpacking column streams
+let total_rows: usize = vxg::frame_row_count(compressed)?;
+
+// 2. O(1) block seek + O(1) row skip to extract a single record or range
+let row_50k: Vec<u8> = vxg::extract_row(compressed, 50_000, &opts)?;
+let slice: Vec<u8> = vxg::extract_row_range(compressed, 50_000, 50_010, &opts)?;
+
+// 3. Compressed-domain predicate pushdown search (findFirst & filter)
+if let Some(hit) = vxg::find_first(compressed, b"status=500", &opts)? {
+    println!("First match at row {} (block {}): {}",
+        hit.row_index, hit.block_index, String::from_utf8_lossy(&hit.data));
+}
+
+let top_errors: Vec<RowMatch> = vxg::filter_rows(compressed, b"ERROR", 100, &opts)?;
+```
+
 ---
 
 ## 2. Streaming `std::io::Write` & `std::io::Read` API

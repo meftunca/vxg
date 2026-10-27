@@ -129,6 +129,13 @@ cargo build --release
 # O(1) random-access single-block extraction (extracts block #0 without decoding other blocks):
 ./target/release/vxg block input.vxg 0 block0.bin --force
 
+# Compressed-domain structured record random access & predicate pushdown search:
+./target/release/vxg query input.vxg --count
+./target/release/vxg query input.vxg --row 42
+./target/release/vxg query input.vxg --range 100:150
+./target/release/vxg query input.vxg --find-first '"level":"ERROR"'
+./target/release/vxg query input.vxg --filter '"service":"auth"' --limit 20
+
 # Unix streaming pipeline via stdin / stdout ('-'):
 cat input.ndjson | ./target/release/vxg c - - -q | ./target/release/vxg d - - -q > restored.ndjson
 ```
@@ -166,6 +173,13 @@ let c_len = vxg::compress_into(input, &mut comp_buf, &opts)?;
 let mut out_buf = vec![0u8; vxg::frame_raw_size(&comp_buf[..c_len])?];
 let d_len = vxg::decompress_into(&comp_buf[..c_len], &mut out_buf, &dec_opts)?;
 assert_eq!(&out_buf[..d_len], input);
+
+// Compressed-domain structured record random access & pushdown search:
+let total_rows = vxg::frame_row_count(&frame)?;
+let row0 = vxg::extract_row(&frame, 0, &dec_opts)?;
+let slice = vxg::extract_row_range(&frame, 0, 1, &dec_opts)?;
+let first_hit = vxg::find_first(&frame, b"\"status\":\"ok\"", &dec_opts)?;
+let matches = vxg::filter_rows(&frame, b"\"status\":\"ok\"", 10, &dec_opts)?;
 ```
 
 ### C / C++ Static or Dynamic Linking ([`examples/ffi/c_example.c`](examples/ffi/c_example.c))
