@@ -404,3 +404,21 @@ Encode CPU profile (macOS `sample`, top-of-stack, 4120 samples):
 | `pack_fast_lz_core` | 5.6% |
 
 These are the next stage-1 targets. No optimization has been made from this profile yet.
+
+### Dictionary attempts on high-cardinality columns (measured, varied NDJSON)
+
+Temporary counters around `pack_dictionary_model_mode` (reverted, not in the tree), grouped by the
+byte length of a column's first value, 3 samples:
+
+| First value length (typical column) | Calls | Produced a dictionary | Time in function |
+| :--- | ---: | ---: | ---: |
+| 18 (`req_id`, random hex) | 2000 | 2 | 9.2 ms (15%) |
+| 9 (mixed: `user`, `path`) | 2319 | 1234 | 19.3 ms (31%) |
+| 3, 6, 11, 14 (enums, service, region) | 1263-2080 | ~all | 3.7-7.4 ms each |
+
+Total time in the function was 62.5 ms, and it is about 29% of encode time (profile above).
+So even if every failed attempt were free, the gain is bounded by roughly 9% of encode time.
+The existing early exit is an exact lower bound (it never rejects a dictionary that would win),
+which only fires near the end of a high-cardinality column. A heuristic early exit (for example
+"all of the first 64 values distinct") could cut that cost but can miss columns whose repeats
+come late, so it needs a ratio check on the corpus before use. Not implemented.
