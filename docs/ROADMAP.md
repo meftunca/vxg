@@ -26,3 +26,5 @@ A bigram signature could let queries skip free-text blocks, but it needs a store
 field (a wire-format change). Decide this together with `map/filter/update`, since all of
 them need per-block metadata. Measured upper bound: see "Bigram pre-filter" in
 [Benchmarks](./BENCHMARKS.md).
+
+Stage 2 proposal: [Stage 2 design sketch](./STAGE2_DESIGN.md).
