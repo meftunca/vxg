@@ -305,7 +305,17 @@ Single thread, Apple aarch64, checksums off, warm cache. Every row is verified b
 | Synthetic NDJSON, 400k rows (62 MiB) | `GRAMMAR_PACKET` | `find_first` / `filter_rows` | 44–49 ms | 1.1–2.3 ms | Best case: templated, dictionary-friendly rows. |
 | `/var/log/install.log`, 231k lines (30 MiB) | `FAST_LZ_PACKET` (free text) | `filter_rows`, 6 needles | 43–81 ms | 24–35 ms | 1.4x–3.1x; bounded by decode speed (3.6 GB/s on this file). |
 
-Read the second row as the realistic one. Free-form text does not hit the grammar fast path,
+More real files (same method, all results verified identical to a raw scan):
+
+| File | Size | VXG ratio | Needles (hits) | Speedup vs naive raw scan |
+| :--- | ---: | ---: | :--- | ---: |
+| `icons.json` (pretty JSON, `@iconify-json/simple-icons`) | 4.6 MiB | 42.3% | 1, 0, 0 hits | 1.8x–2.4x |
+| `prof_out.txt` (compiler debug log) | 4.2 MiB | 8.3% | 206, 0, 1133 hits | 2.6x–3.5x |
+| `prune_list.txt` (path list) | 2.3 MiB | 5.6% | 18395, 0, 1536 hits | 1.1x (almost every line matches), 3.3x, 5.5x |
+
+When nearly every line matches, there is little to skip and the gain drops to about 1.1x.
+
+Read the second row of the first table as the realistic one. Free-form text does not hit the grammar fast path,
 so VXG must decode each block; the gain comes from one SIMD needle scan per block instead of
 per-line work and from reusing the decode buffer. Plain `grep -c` (BSD) on the same file took
 50 ms for a miss and 260 ms for `error`. The raw-scan column above uses a naive `windows()`
