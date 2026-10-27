@@ -293,3 +293,22 @@ branch misses, memory traffic, kernel occupancy and end-to-end latency alongside
 Zstd ratio is allowed to be better; do not discard those rows. No cherry-picked average over
 only compressible synthetic inputs, no single-core-vs-many-core headline, and no CPU fallback
 labeled as a GPU result.
+
+## Compressed-domain query: synthetic vs. real-world
+
+Single thread, Apple aarch64, checksums off, warm cache. Every row is verified byte-identical
+(row index and bytes) against a raw scan before timing is printed
+(`vxg-query-real`, `vxg-query-bench`).
+
+| Dataset | Block type | Operation | Raw scan | VXG query | Notes |
+| :--- | :--- | :--- | ---: | ---: | :--- |
+| Synthetic NDJSON, 400k rows (62 MiB) | `GRAMMAR_PACKET` | `find_first` / `filter_rows` | 44–49 ms | 1.1–2.3 ms | Best case: templated, dictionary-friendly rows. |
+| `/var/log/install.log`, 231k lines (30 MiB) | `FAST_LZ_PACKET` (free text) | `filter_rows`, 6 needles | 43–81 ms | 24–35 ms | 1.4x–3.1x; bounded by decode speed (3.6 GB/s on this file). |
+
+Read the second row as the realistic one. Free-form text does not hit the grammar fast path,
+so VXG must decode each block; the gain comes from one SIMD needle scan per block instead of
+per-line work and from reusing the decode buffer. Plain `grep -c` (BSD) on the same file took
+50 ms for a miss and 260 ms for `error`. The raw-scan column above uses a naive `windows()`
+baseline, so treat the raw numbers as a weak reference, not a tuned memmem.
+
+The earlier 20–40x numbers apply only to structured, templated data.

@@ -140,7 +140,7 @@ impl PreparedTemplate {
 }
 
 #[inline(always)]
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+pub(crate) fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     let nlen = needle.len();
     if nlen == 0 {
         return true;
