@@ -7,6 +7,8 @@ enum TplFilter {
         single_id: Option<u8>,
     },
     CheckAll,
+    /// Exact template-row indices already selected by a column-level predicate.
+    Hits(Vec<usize>),
 }
 
 fn classify_template_filter(

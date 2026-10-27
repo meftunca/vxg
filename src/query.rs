@@ -11,7 +11,7 @@ use crate::{DecodeOptions, Error, Frame, Result, BLOCK_COLUMN};
 
 mod numeric;
 pub use numeric::NumCmp;
-pub(crate) use numeric::NumFilter;
+pub(crate) use numeric::{line_numeric_match, NumFilter};
 
 /// A single matching structured record returned by [`find_first`] or [`filter_rows`].
 #[derive(Clone, Debug, PartialEq, Eq)]

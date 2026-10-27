@@ -8,7 +8,7 @@
 
 use std::hint::black_box;
 use std::time::Instant;
-use vxg::{DecodeOptions, Options};
+use vxg::{DecodeOptions, NumCmp, Options};
 
 fn find_sub(h: &[u8], n: &[u8]) -> bool {
     if n.is_empty() {
@@ -28,6 +28,55 @@ fn raw_filter(raw: &[u8], needle: &[u8], limit: usize) -> Vec<(usize, Vec<u8>)> 
         }
     }
     out
+}
+
+/// Independent reference for `@num:` needles: first `"key":` in the line, plain unsigned digits.
+fn raw_num_filter(raw: &[u8], key: &str, cmp: NumCmp, limit: usize) -> Vec<(usize, Vec<u8>)> {
+    let marker = format!("\"{key}\":").into_bytes();
+    let mut out = Vec::new();
+    for (i, line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
+        let Some(p) = line.windows(marker.len()).position(|w| w == marker.as_slice()) else {
+            continue;
+        };
+        let rest = &line[p + marker.len()..];
+        let n = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        if n == 0 || n > 19 || (n > 1 && rest[0] == b'0') || matches!(rest.get(n), Some(b'.' | b'e' | b'E')) {
+            continue;
+        }
+        let v: u64 = std::str::from_utf8(&rest[..n]).unwrap().parse().unwrap();
+        let hit = match cmp {
+            NumCmp::Eq(x) => v == x,
+            NumCmp::Ge(x) => v >= x,
+            NumCmp::Le(x) => v <= x,
+            NumCmp::Range(a, b) => v >= a && v <= b,
+        };
+        if hit {
+            out.push((i, line.to_vec()));
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn parse_num_spec(spec: &str) -> Option<(String, NumCmp)> {
+    // @num:key:eq:V | @num:key:ge:V | @num:key:le:V | @num:key:range:LO-HI
+    let mut it = spec.strip_prefix("@num:")?.split(':');
+    let key = it.next()?.to_string();
+    let op = it.next()?;
+    let val = it.next()?;
+    let cmp = match op {
+        "eq" => NumCmp::Eq(val.parse().ok()?),
+        "ge" => NumCmp::Ge(val.parse().ok()?),
+        "le" => NumCmp::Le(val.parse().ok()?),
+        "range" => {
+            let (a, b) = val.split_once('-')?;
+            NumCmp::Range(a.parse().ok()?, b.parse().ok()?)
+        }
+        _ => return None,
+    };
+    Some((key, cmp))
 }
 
 fn time<T>(iters: usize, mut f: impl FnMut() -> T) -> (f64, T) {
@@ -74,6 +123,21 @@ fn main() {
         "needle", "hits", "raw ms", "vxg ms", "speedup"
     );
     for needle in &args[1..] {
+        if let Some((key, cmp)) = parse_num_spec(needle) {
+            let limit = 1_000_000;
+            let (t_raw, expected) = time(5, || raw_num_filter(&raw, &key, cmp, limit));
+            let (t_vxg, got) = time(5, || vxg::filter_json_u64(&frame, &key, cmp, limit, &dec).unwrap());
+            assert_eq!(expected.len(), got.len(), "hit count mismatch for {needle:?}");
+            for ((ri, rb), m) in expected.iter().zip(got.iter()) {
+                assert_eq!(*ri, m.global_row_index, "row index mismatch for {needle:?}");
+                assert_eq!(rb, &m.bytes, "row bytes mismatch for {needle:?}");
+            }
+            println!(
+                "{:<28} {:>8} {:>12.3} {:>12.3} {:>7.1}x  [{:.1} GB/s]",
+                needle, got.len(), t_raw * 1e3, t_vxg * 1e3, t_raw / t_vxg, gb / t_vxg
+            );
+            continue;
+        }
         let n = needle.as_bytes();
         let limit = 100_000;
         let (t_raw, expected) = time(5, || raw_filter(&raw, n, limit));

@@ -3,6 +3,10 @@ fn parse_u64_digits(b: &[u8]) -> Option<u64> {
     if b.is_empty() || b.len() > 20 || !b.iter().all(u8::is_ascii_digit) {
         return None;
     }
+    if b.len() > 1 && b[0] == b'0' {
+        // Not canonical (matches the line-based fallback, which rejects leading zeros).
+        return None;
+    }
     let mut v = 0u64;
     for &d in b {
         v = v.checked_mul(10)?.checked_add(u64::from(d - b'0'))?;
@@ -10,31 +14,23 @@ fn parse_u64_digits(b: &[u8]) -> Option<u64> {
     Some(v)
 }
 
-/// Column-aware numeric filter for a single-template block with no raw rows.
+/// Column-aware numeric predicate for the template rows of a single-template block.
 ///
-/// Only the target column is decoded to evaluate the predicate; the other columns are decoded
-/// (and rows materialized) only when at least one row matches. Returns `Ok(None)` whenever the
-/// block shape is not handled so the caller can use the line-based fallback.
-#[allow(clippy::too_many_arguments)]
-fn numeric_scan_single_template<'a>(
+/// Only the target column is decoded to evaluate the predicate. Returns the target slot, its
+/// parsed column and the matching template-row indices (at most `rem`). Returns `Ok(None)`
+/// whenever the column shape is not handled; the caller then verifies rows one by one.
+fn numeric_hits<'a>(
     nf: &crate::query::NumFilter,
     segs: &[&'a [u8]],
     col_slices: &[&'a [u8]],
     ones: usize,
+    rem: usize,
     scratch: &mut DecodeScratch,
-    block_index: usize,
-    base_row: usize,
-    limit: usize,
-    out: &mut Vec<crate::query::RowMatch>,
-) -> Result<Option<usize>> {
+) -> Result<Option<(usize, PreparedColumn<'a>, Vec<usize>)>> {
     let slots = col_slices.len();
     let Some(target) = (0..slots).find(|&i| segs[i].ends_with(&nf.marker)) else {
         return Ok(None);
     };
-    let rem = limit.saturating_sub(out.len());
-    if rem == 0 {
-        return Ok(Some(ones));
-    }
     let col = PreparedColumn::parse_and_validate(col_slices[target], ones, scratch)?;
     if !matches!(col.const_lead, LeadValue::Empty) {
         return Ok(None);
@@ -62,6 +58,27 @@ fn numeric_scan_single_template<'a>(
             ColumnStream::DecimalSmall { u16_offset } => {
                 for t in 0..ones {
                     if nf.cmp.test(u64::from(scratch.u16_arena[u16_offset + t])) {
+                        hits.push(t);
+                        if hits.len() >= rem {
+                            break;
+                        }
+                    }
+                }
+            }
+            ColumnStream::Dictionary { u8_offset, .. } => {
+                // Evaluate the predicate once per dictionary entry, then scan the id array.
+                let Some((slice_off, entries)) = col.dict_slices else {
+                    return Ok(None);
+                };
+                let mut valid = [false; 256];
+                for e in 0..entries.min(256) {
+                    let (ptr, len) = scratch.slice_arena[slice_off + e];
+                    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    valid[e] = parse_u64_digits(bytes).is_some_and(|v| nf.cmp.test(v));
+                }
+                let ids = &scratch.u8_arena[u8_offset..u8_offset + ones];
+                for (t, &id) in ids.iter().enumerate() {
+                    if valid[id as usize] {
                         hits.push(t);
                         if hits.len() >= rem {
                             break;
@@ -104,39 +121,5 @@ fn numeric_scan_single_template<'a>(
             _ => return Ok(None),
         },
     }
-    if hits.is_empty() {
-        return Ok(Some(ones));
-    }
-    let mut cols_uninit = core::mem::MaybeUninit::<[PreparedColumn; MAX_SLOTS]>::uninit();
-    let cols: &mut [PreparedColumn; MAX_SLOTS] = unsafe { cols_uninit.assume_init_mut() };
-    for s in 0..slots {
-        cols[s] = if s == target {
-            col
-        } else {
-            PreparedColumn::parse_and_validate(col_slices[s], ones, scratch)?
-        };
-    }
-    let unbound = UnboundTemplate::build(segs, &cols[..slots], scratch);
-    let unbound_len = scratch.unbound_col_arena.len();
-    scratch.exec_col_arena.reserve(unbound_len);
-    let mut tpl = unbound.bind(scratch);
-    let mut row_buf = vec![0u8; tpl.row_budget.max(4096) + 64];
-    let mut cur = 0usize;
-    for &t in &hits {
-        unsafe {
-            tpl.skip_rows(t - cur);
-            let sp = row_buf.as_mut_ptr();
-            let ep = tpl.emit_row(sp);
-            let w = ep.offset_from(sp) as usize;
-            cur = t + 1;
-            out.push(crate::query::RowMatch {
-                block_index,
-                row_index: t,
-                global_row_index: base_row + t,
-                bytes: row_buf[..w].to_vec(),
-            });
-        }
-    }
-    Ok(Some(ones))
+    Ok(Some((target, col, hits)))
 }
-

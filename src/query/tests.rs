@@ -185,3 +185,29 @@ fn wide_dictionary_columns_round_trip() {
         assert_eq!(hit.global_row_index, 0);
     }
 }
+
+#[test]
+fn numeric_filter_on_small_cardinality_dictionary_column() {
+    // A column with few distinct values becomes a dictionary column; entries that are not
+    // plain unsigned integers must never match.
+    let vals = ["200", "404", "500", "\"x\"", "007", "1.5", "503", "301"];
+    let mut raw = Vec::new();
+    for i in 0..9000usize {
+        let v = vals[(i * 7 + i / 13) % vals.len()];
+        raw.extend_from_slice(format!("{{\"id\":{i},\"code\":{v},\"s\":\"x\"}}\n").as_bytes());
+    }
+    let frame = compress(&raw, &Options::default()).unwrap();
+    let mut total = 0;
+    for cmp in [
+        NumCmp::Eq(500),
+        NumCmp::Ge(500),
+        NumCmp::Le(300),
+        NumCmp::Range(300, 410),
+        NumCmp::Eq(7),
+        NumCmp::Eq(999),
+    ] {
+        total += check_u64(&frame, &raw, "code", cmp, usize::MAX);
+        total += check_u64(&frame, &raw, "code", cmp, 5);
+    }
+    assert!(total > 0);
+}

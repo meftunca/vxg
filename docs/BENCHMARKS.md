@@ -456,3 +456,29 @@ rejected almost for free. The weak spot is numeric columns (1.6x), where the cur
 emits and verifies candidate rows. A numeric-aware predicate (decode only that column, compare
 integers, emit only matching rows) is the part of the stage 2 first slice that would add
 something new; dictionary equality is already covered.
+
+### Numeric predicate pushdown: `filter_json_u64` (varied NDJSON, 300,000 records)
+
+`filter_json_u64(frame, key, NumCmp, limit, opts)` evaluates an unsigned-integer comparison
+(`Eq`, `Ge`, `Le`, `Range`) on one JSON key. On single-template structured blocks only the target
+column is decoded; the other columns are decoded only if some row matches. Dictionary columns
+evaluate the predicate once per dictionary entry, then scan the id array. Every result below is
+verified identical (row index and bytes) to an independent line-by-line reference. The raw
+baseline is a naive scan, so read speedups as relative to a weak reference.
+
+| Query | Column kind | Hits | Raw ms | VXG ms | Speedup |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| `latency_ms >= 200` | numeric | 563 | 118.8 | 5.1 | 23.5x |
+| `bytes in 100..=300` | numeric | 1,249 | 130.4 | 7.1 | 18.3x |
+| `status == 500` | dictionary (6 values) | 14,937 | 112.0 | 10.7 | 10.5x |
+| `status >= 500` | dictionary | 14,937 | 110.9 | 10.6 | 10.4x |
+| `status in 200..=204` | dictionary | 240,137 | 122.3 | 40.1 | 3.1x |
+| `ts >= 1790100000` | numeric, nearly sorted | 233,332 | 38.3 | 33.7 | 1.1x |
+
+The gain shrinks as the hit rate grows (3.1x at 80% hits, 1.1x at 78% hits on `ts`) because
+materializing matching rows dominates. Semantics: flat JSON, plain unsigned decimals only (no
+sign, fraction, exponent, or leading zeros); anything else never matches. Blocks that are not a
+single template, or columns of another model, use a per-line check with the same semantics.
+
+First version of this feature measured 0.7x-0.9x because blocks with a split line (raw rows) and
+dictionary columns bailed out to the slow path; both are handled now.

@@ -45,3 +45,11 @@ The expected win is per column, not per frame: untouched columns are copied byte
 benchmarked against the existing `filter_rows` on the varied NDJSON file and on a real log.
 That reuses existing machinery and tells us whether column-aware pushdown beats whole-row search
 before any `map`/`update` work starts.
+
+## Progress
+
+- Implemented: `filter_json_u64` (numeric `Eq`/`Ge`/`Le`/`Range` on one JSON key, column pushdown
+  on single-template blocks, per-line fallback elsewhere). Results: see Benchmarks. It returns the
+  matching rows as a new `Vec`; the frame is not modified (so `update` as "new frame" remains open).
+- Not implemented: `map`, `update`, string/multi-key predicates, multi-template blocks, per-block
+  metadata. The wire format is unchanged.

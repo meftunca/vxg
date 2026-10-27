@@ -33,7 +33,7 @@ pub use error::{Error, Result};
 pub use frame::{max_compressed_size, BlockInfo, Frame, ValidatedFrame};
 pub use query::{
     block_row_count, extract_block_row, extract_block_row_range, extract_row, extract_row_range,
-    filter_rows, find_first, frame_row_count, RowMatch,
+    filter_json_u64, filter_rows, find_first, frame_row_count, NumCmp, RowMatch,
 };
 pub use simd::Simd;
 pub use stream::{compress_stream, decompress_stream, StreamDecoder, StreamEncoder};

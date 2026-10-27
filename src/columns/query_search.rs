@@ -130,10 +130,6 @@ pub(crate) fn search_grammar_block(
                 ones += b.count_ones() as usize;
             }
             let raw_count = row_count - ones;
-            if num.is_some() && (raw_count > 0 || carry.is_some()) {
-                // Raw rows or a pending cross-block row: the line-based fallback handles them.
-                return Ok(None);
-            }
             let DecodeScratch {
                 ref mut raw_arena,
                 ref mut slice_arena,
@@ -152,20 +148,6 @@ pub(crate) fn search_grammar_block(
                 return Err(invalid("column packet trailing bytes"));
             }
 
-            if let Some(nf) = num {
-                return numeric_scan_single_template(
-                    nf,
-                    &tpl_segs[0],
-                    &col_slices[..slots],
-                    ones,
-                    &mut scratch,
-                    block_index,
-                    global_row_base,
-                    limit,
-                    out,
-                );
-            }
-
             let had_incoming_carry = carry.is_some();
             let base_row = if had_incoming_carry {
                 global_row_base - 1
@@ -176,6 +158,10 @@ pub(crate) fn search_grammar_block(
             let last_is_raw =
                 ((selector_slice[(row_count - 1) >> 3] >> ((row_count - 1) & 7)) & 1) == 0;
 
+            let row_hit = |b: &[u8]| match num {
+                Some(nf) => crate::query::line_numeric_match(b, nf),
+                None => contains_subslice(b, needle),
+            };
             let mut raw_start = 0usize;
             if let Some((c_blk, c_row, c_glob, mut c_bytes)) = carry.take() {
                 if first_is_raw && raw_count > 0 {
@@ -188,7 +174,7 @@ pub(crate) fn search_grammar_block(
                         return Ok(Some(0));
                     }
                 }
-                if contains_subslice(&c_bytes, needle) && out.len() < limit {
+                if row_hit(&c_bytes) && out.len() < limit {
                     out.push(crate::query::RowMatch {
                         block_index: c_blk,
                         row_index: c_row,
@@ -220,14 +206,31 @@ pub(crate) fn search_grammar_block(
             }
 
             let t0_segs = &tpl0_segs_inline[..=slots];
-            let can_tpl_match =
-                ones > 0 && can_template_match_fast(t0_segs, &col_slices[..slots], needle)?;
+            let mut num_plan = None;
+            let can_tpl_match = if let Some(nf) = num {
+                if ones > 0 {
+                    num_plan = numeric_hits(
+                        nf,
+                        t0_segs,
+                        &col_slices[..slots],
+                        ones,
+                        limit - out.len(),
+                        &mut scratch,
+                    )?;
+                }
+                match &num_plan {
+                    Some((_, _, hits)) => !hits.is_empty(),
+                    None => ones > 0,
+                }
+            } else {
+                ones > 0 && can_template_match_fast(t0_segs, &col_slices[..slots], needle)?
+            };
             let rem_limit = limit - out.len();
             let mut local_matches = Vec::<(usize, Vec<u8>)>::new();
             for r_idx in raw_start..raw_end {
                 let (ptr, len) = scratch.slice_arena[raw_slice_offset + r_idx];
                 let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-                if contains_subslice(slice, needle) {
+                if row_hit(slice) {
                     let row_idx = nth_selector_bit(selector_slice, row_count, false, r_idx);
                     local_matches.push((row_idx, slice.to_vec()));
                     if local_matches.len() >= rem_limit && !can_tpl_match {
@@ -244,19 +247,28 @@ pub(crate) fn search_grammar_block(
                 let mut active_dict_lens = [0usize; MAX_SLOTS];
                 let mut act_idx = 0usize;
                 for s in 0..slots {
-                    cols[s] = PreparedColumn::parse_and_validate(col_slices[s], ones, &mut scratch)?;
+                    cols[s] = match &num_plan {
+                        Some((t, col, _)) if *t == s => *col,
+                        _ => PreparedColumn::parse_and_validate(col_slices[s], ones, &mut scratch)?,
+                    };
                     if matches!(cols[s].const_full, ConstValue::None) {
                         active_dict_lens[act_idx] = cols[s].dict_slices.map_or(0, |(_, dl)| dl);
                         act_idx += 1;
                     }
                 }
                 let unbound = UnboundTemplate::build(t0_segs, &cols[..slots], &mut scratch);
-                let filter = classify_template_filter(
-                    &unbound,
-                    &active_dict_lens[..act_idx],
-                    &scratch,
-                    needle,
-                );
+                let filter = if let Some((_, _, hits)) = num_plan.take() {
+                    TplFilter::Hits(hits)
+                } else if num.is_some() {
+                    TplFilter::CheckAll
+                } else {
+                    classify_template_filter(
+                        &unbound,
+                        &active_dict_lens[..act_idx],
+                        &scratch,
+                        needle,
+                    )
+                };
                 if !matches!(filter, TplFilter::Never) {
                     let unbound_len = scratch.unbound_col_arena.len();
                     scratch.exec_col_arena.reserve(unbound_len);
@@ -272,7 +284,7 @@ pub(crate) fn search_grammar_block(
                             let written = end_p.offset_from(start_p) as usize;
                             cur_t = t_idx + 1;
                             let row_slice = &row_buf[..written];
-                            if !verify || contains_subslice(row_slice, needle) {
+                            if !verify || row_hit(row_slice) {
                                 let row_idx = if raw_count == 0 {
                                     t_idx
                                 } else {
@@ -287,6 +299,11 @@ pub(crate) fn search_grammar_block(
 
                     match filter {
                         TplFilter::Never => unreachable!(),
+                        TplFilter::Hits(hits) => {
+                            for &t in &hits {
+                                emit_and_check(t, false);
+                            }
+                        }
                         TplFilter::Always => {
                             for t_idx in 0..ones.min(rem_limit) {
                                 emit_and_check(t_idx, false);
