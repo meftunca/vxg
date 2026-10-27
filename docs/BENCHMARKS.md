@@ -345,3 +345,35 @@ filter rejects almost nothing while bigrams could reject most blocks. For needle
 byte, the alphabet filter already does the job. Free-text blocks (`FAST_LZ_PACKET`) expose no
 bigram information without decoding, so using this there needs a stored signature, i.e. a
 wire-format change.
+
+## Stage 1 baseline on real files (single thread, aarch64 NEON, checksums off)
+
+Ratio is encoded/raw (lower is better). Speeds in GB/s. LZ4 is `accel=1`, Zstd is level 1.
+
+| File | Codec | Ratio | Encode | Decode |
+| :--- | :--- | ---: | ---: | ---: |
+| `install.log` (30 MiB log) | VXG | 0.095 | 1.41 | 3.76 |
+| | LZ4 | 0.125 | 2.07 | 7.19 |
+| | Zstd-1 | 0.088 | 1.44 | 3.28 |
+| `prof_out.txt` (4 MiB debug log) | VXG | 0.083 | 1.56 | 4.12 |
+| | LZ4 | 0.114 | 2.17 | 7.69 |
+| | Zstd-1 | 0.069 | 1.62 | 3.51 |
+| `prune_list.txt` (2 MiB paths) | VXG | 0.056 | 2.13 | 4.50 |
+| | LZ4 | 0.082 | 3.47 | 11.94 |
+| | Zstd-1 | 0.047 | 2.03 | 5.15 |
+| `icons.json` (4.6 MiB JSON) | VXG | 0.423 | 0.38 | 1.57 |
+| | LZ4 | 0.659 | 0.37 | 2.54 |
+| | Zstd-1 | 0.415 | 0.48 | 1.23 |
+| `json-16m.ndjson` (16 MiB NDJSON) | VXG | 0.006 | 1.75 | 22.96 |
+| | LZ4 | 0.007 | 15.83 | 24.17 |
+| | Zstd-1 | 0.003 | 9.52 | 15.79 |
+
+What this says about where we stand:
+
+- On free-text logs and path lists VXG sits in Zstd-1's class: similar encode speed, a little
+  faster decode, a slightly worse ratio. LZ4 decodes about 1.9x-2.7x faster and encodes
+  about 1.4x-1.6x faster, with a worse ratio.
+- The largest gap is encode speed on highly repetitive structured data: 1.75 GB/s versus
+  9.5 GB/s (Zstd-1) and 15.8 GB/s (LZ4) on `json-16m.ndjson`, with about twice Zstd-1's ratio.
+  Decode there is excellent (23 GB/s).
+- These are single runs of 3 samples on one machine; treat differences under about 10% as noise.
