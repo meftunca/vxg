@@ -5,6 +5,9 @@ fn unpack_model_ext(
     mut values: &mut FlatValues,
 ) -> Result<()> {
     match tag {
+        MODEL_PATTERN => {
+            pattern_decode(cursor, count, &mut |row| values.push_slice(row))?;
+        }
         MODEL_DECIMAL_DELTA => {
             if count < 2 {
                 return Err(invalid("column decimal delta count"));

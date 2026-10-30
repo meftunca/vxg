@@ -346,6 +346,7 @@ const fn canonical_model_rank(kind: ModelKind) -> u8 {
         ModelKind::EpochCounter => 10,
         ModelKind::SegmentDict => 11,
         ModelKind::DecimalDelta => 12,
+        ModelKind::Pattern => 13,
     }
 }
 

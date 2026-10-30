@@ -561,3 +561,19 @@ ran a stale binary after a compile error. Always sanity-check that a knob change
 Three hypotheses for the free-text ratio gap against Zstd-1 are now ruled out (more match candidates,
 repeat offsets, shorter minimum match). What is left is how literals and sequence tokens are modeled
 and coded, which needs a different kind of experiment than parameter tuning.
+
+## MODEL_PATTERN (tag 15): digit/literal patterned columns
+
+Timestamps in non-ISO-Z layouts, IPv4, versions, `u012336` ids. Ratio = encoded/raw, single thread aarch64.
+
+| File | Before | After | Zstd-1 | Encode GB/s (before → after) | Decode GB/s (before → after) |
+|---|---|---|---|---|---|
+| NDJSON ts_clf | .231 | .030 | .077 | 0.92 → 0.38 | 3.75 → 1.43 |
+| NDJSON ts_iso_off | .227 | .030 | .077 | – → 0.34 | – → 1.32 |
+| NDJSON ts_iso_ms | .086 | .043 | ~.09 | – → 0.38 | – → 1.23 |
+| Apache CLF | .257 | .098 | .176 | – → 0.24 | – → 0.95 |
+| CSV / TSV | .301 | .301 | .286 | unchanged (grammar engine not selected) | |
+
+Trade-off (honest): ratio improves 2.5–7× on these files, but encode/decode are 2–2.5× slower than
+before on them (still ≈ Zstd-1 decode class). Files without pattern columns (install.log,
+ndjson_varied) are within noise. Tag 15 is unreadable by old decoders.

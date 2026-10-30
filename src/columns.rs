@@ -29,6 +29,7 @@ const MODEL_SEGMENT_DICT: u8 = 11;
 const MODEL_DECIMAL_DELTA: u8 = 12;
 const MODEL_FRONT_DICT: u8 = 13;
 const MODEL_LZ_RAW: u8 = 14;
+const MODEL_PATTERN: u8 = 15;
 const MAX_BLOCK_SIZE: usize = 1_048_576;
 const MAX_TEMPLATES: usize = 4096;
 const MAX_SLOTS: usize = 128;
@@ -59,6 +60,7 @@ enum ModelKind {
     EpochCounter,
     SegmentDict,
     DecimalDelta,
+    Pattern,
 }
 
 impl ModelKind {
@@ -77,6 +79,7 @@ impl ModelKind {
             Self::EpochCounter => "quoted-fixed-width-hex-epoch-counter",
             Self::SegmentDict => "quoted-semicolon-segment-dictionary",
             Self::DecimalDelta => "canonical-decimal-delta-bitpack",
+            Self::Pattern => "digit-field-literal-pattern-mixed-radix-delta",
         }
     }
 
@@ -95,6 +98,7 @@ impl ModelKind {
             Self::EpochCounter => 10,
             Self::SegmentDict => 11,
             Self::DecimalDelta => 12,
+            Self::Pattern => 13,
         }
     }
 }
@@ -168,8 +172,8 @@ pub struct Evaluation {
     template_count: usize,
     template_rows: usize,
     raw_rows: usize,
-    model_counts: [usize; 13],
-    model_bytes: [usize; 13],
+    model_counts: [usize; 14],
+    model_bytes: [usize; 14],
     columns: Vec<ColumnReport>,
     pack_ns: Option<u128>,
     unpack_ns: Option<u128>,
@@ -292,6 +296,7 @@ include!("columns/grammar_match.rs");
 include!("columns/grammar_extract.rs");
 include!("columns/model_dict.rs");
 include!("columns/model_front_dict.rs");
+include!("columns/model_pattern.rs");
 include!("columns/model_hex_epoch.rs");
 include!("columns/model_segment_dec.rs");
 include!("columns/model_periodic_gf2.rs");

@@ -265,6 +265,14 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                 ModelKind::Dictionary
             );
         }
+        // Unquoted digit/literal patterns (CLF / CSV / TSV timestamps, IPv4, versions, ...). Plain
+        // decimals are left to the decimal models.
+        if allow_v3_ext && parse_decimal(first_slice).is_none() {
+            try_model!(
+                |limit| pack_pattern_model(values, limit),
+                ModelKind::Pattern
+            );
+        }
         if allow_v3_ext && best_kind == ModelKind::Raw {
             let raw = pack_raw_model(values);
             if (64..=65536).contains(&(raw.len() - 1)) && raw.len() >= 128 {
@@ -445,6 +453,14 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
         try_model!(
             |limit| pack_periodic_hex_model(values, limit),
             ModelKind::PeriodicHex
+        );
+    }
+
+    // 8. Digit-field / literal pattern (timestamps in any layout, IPv4, versions, `u012336`-style ids).
+    if allow_v3_ext {
+        try_model!(
+            |limit| pack_pattern_model(values, limit),
+            ModelKind::Pattern
         );
     }
 
