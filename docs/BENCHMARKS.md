@@ -514,3 +514,26 @@ Decode was unchanged. The ratio gain is negligible while encode loses 15-23%, so
 not what separates VXG from Zstd-1 on free text. Zstd-1 uses a single-candidate fast parser too, so
 the remaining ratio gap should come from how sequences (literal lengths, match lengths, offsets)
 are entropy coded. Next step is to measure where the compressed bytes go per stream.
+
+### Where the bytes go on free text (`install.log`, `FAST_LZ_PACKET`, measured with temporary counters)
+
+Aggregated over many encodes of the file (reverted, not in the tree):
+
+| Part | Raw bytes | After coding | Share of packed output |
+| :--- | ---: | ---: | ---: |
+| Literals | 21.3 M | 15.2 M (-29%, Huffman) | 38.4% |
+| Meta: tokens + 16-bit offsets + length extensions | 29.6 M | 24.3 M (-18%) | 61.4% |
+| Headers | | 0.08 M | 0.2% |
+
+About 1,290 sequences per 64 KiB block, one every ~48 raw bytes. Offsets:
+
+- Only 1.4% equal the previous offset and 9.2% appear among the last four, so Zstd-style
+  repeat-offset coding would help little here.
+- About 874 distinct offsets per block out of ~1,290 sequences: offsets are close to random, so
+  they cost roughly log2 of their range (~10-13 bits) under any scheme.
+
+Conclusions so far: neither more match candidates (rejected above) nor repeat offsets explains
+Zstd-1's 8-17% ratio lead on free text. Remaining candidates, none tried yet: a lower minimum match
+length for text (the text path hashes 5 bytes, so 4-byte matches are never found, and the split-stream
+meta coder is tied to `HASH_LEN == 5`), joint coding of (literal length, match length) tokens, and
+literal modeling beyond order-0 Huffman. Each must be judged on a ratio-and-speed pair.
