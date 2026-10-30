@@ -582,3 +582,11 @@ CSV/TSV cause: `scan_delimited_value` rejected any unquoted field containing a s
 non-ASCII byte (e.g. a user-agent column), so the whole record failed grammar parsing and every block
 fell to `FAST_LZ`. Comma/tab-delimited fields now accept those bytes (space-delimited CLF stays strict).
 Gain comes with a ~2x encode/decode slowdown because the grammar path is now selected.
+
+### CSV encode profile (after grammar selection, `sample`, 3 runs of a 610 MB CSV)
+
+`pack_dictionary_model_mode` 17%, `parse_delimited_spans` 14%, `match_single_delim_or_logfmt_stream` 11%,
+`try_match_delimited_scalar` 10%, `pack_fast_lz_core` 6%, `huf_encode` 5%, `pack_pattern_model` only 3%.
+So the pattern model is not the encode bottleneck; ~40% is per-row span parsing / template matching
+(byte-wise `scan_delimited_value`, parsed again during matching). Next candidate: parse each row once
+and reuse spans for template matching.
