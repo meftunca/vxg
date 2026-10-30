@@ -498,6 +498,7 @@ fn scan_delimited_value(data: &[u8], pos: usize, delim: u8) -> Option<usize> {
     if first == delim || first <= b' ' || first >= 0x7f {
         return None;
     }
+    let relaxed = delim == b',' || delim == b'\t';
     let len = data.len();
     let ptr = data.as_ptr();
     let mut end = pos + 1;
@@ -506,9 +507,15 @@ fn scan_delimited_value(data: &[u8], pos: usize, delim: u8) -> Option<usize> {
         if b == delim || b == b'\n' || b == b'\r' {
             break;
         }
-        if b <= b' '
-            || b >= 0x7f
-            || matches!(b, b'"' | b'(' | b')' | b';' | b'{' | b'}' | b'[' | b']')
+        if b == b'"' || b < b' ' && b != b'\t' || b == 0x7f {
+            return None;
+        }
+        // CSV / TSV fields may hold spaces, brackets and UTF-8 text (user agents, names); only
+        // space-delimited records need the strict token alphabet.
+        if !relaxed
+            && (b <= b' '
+                || b >= 0x7f
+                || matches!(b, b'(' | b')' | b';' | b'{' | b'}' | b'[' | b']'))
         {
             return None;
         }

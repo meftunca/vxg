@@ -102,3 +102,32 @@ fn pattern_columns_query_matches_naive_scan() {
         }
     }
 }
+
+/// CSV / TSV fields with spaces, brackets, UTF-8, embedded tabs, empty fields and quotes.
+#[test]
+fn delimited_fields_with_free_text_round_trip() {
+    let dec = DecodeOptions::default();
+    let agents = ["Mozilla/5.0 (Windows NT 10.0; Win64)", "curl/8.1", "Göğüs [x] {y}", "a\tb", "", "q\"uote", " lead"];
+    for delim in [',', '\t'] {
+        for rows in [2u64, 50, 5000] {
+            let mut rng = Rng(rows * 31 + delim as u64);
+            let mut s = format!("ts{delim}agent{delim}n\n");
+            for i in 0..rows {
+                let a = agents[rng.below(agents.len() as u64) as usize];
+                s += &format!("{}{delim}{a}{delim}{}\n", 1_790_000_000 + i, rng.below(100));
+            }
+            for trailing_nl in [true, false] {
+                let mut data = s.clone().into_bytes();
+                if !trailing_nl {
+                    data.pop();
+                }
+                let enc = compress(&data, &Options::default()).unwrap();
+                assert_eq!(decompress(&enc, &dec).unwrap(), data, "delim={delim:?} rows={rows}");
+                let text = String::from_utf8(data).unwrap();
+                let want = text.lines().filter(|l| l.contains("curl")).count();
+                let got = filter_rows(&enc, b"curl", usize::MAX, &dec).unwrap().len();
+                assert_eq!(got, want);
+            }
+        }
+    }
+}

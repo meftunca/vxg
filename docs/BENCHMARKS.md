@@ -572,8 +572,13 @@ Timestamps in non-ISO-Z layouts, IPv4, versions, `u012336` ids. Ratio = encoded/
 | NDJSON ts_iso_off | .227 | .030 | .077 | – → 0.34 | – → 1.32 |
 | NDJSON ts_iso_ms | .086 | .043 | ~.09 | – → 0.38 | – → 1.23 |
 | Apache CLF | .257 | .098 | .176 | – → 0.24 | – → 0.95 |
-| CSV / TSV | .301 | .301 | .286 | unchanged (grammar engine not selected) | |
+| CSV / TSV | .301 | .188 | .286 | 0.55 → 0.23 | 1.94 → 1.13 |
 
 Trade-off (honest): ratio improves 2.5–7× on these files, but encode/decode are 2–2.5× slower than
 before on them (still ≈ Zstd-1 decode class). Files without pattern columns (install.log,
 ndjson_varied) are within noise. Tag 15 is unreadable by old decoders.
+
+CSV/TSV cause: `scan_delimited_value` rejected any unquoted field containing a space, bracket or
+non-ASCII byte (e.g. a user-agent column), so the whole record failed grammar parsing and every block
+fell to `FAST_LZ`. Comma/tab-delimited fields now accept those bytes (space-delimited CLF stays strict).
+Gain comes with a ~2x encode/decode slowdown because the grammar path is now selected.
