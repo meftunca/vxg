@@ -498,3 +498,19 @@ remaining gap to close on free text is therefore ratio against Zstd-1 (8-17% wor
 (more than two candidates per hash bucket, lazy / multi-candidate selection), better coding of
 token/offset streams, and repeat-offset coding. Each must be judged on a ratio-and-speed pair, not
 ratio alone.
+
+### Negative result: 2-way match-finder buckets (rejected, reverted)
+
+Idea: the text path (`FAST_LZ_PACKET`, `HASH_LEN = 5`) uses a direct-mapped hash table with one
+candidate per hash, so try two candidates per bucket and keep the longer match. Format unchanged.
+Interleaved A/B, 3 runs each, single thread:
+
+| File | Ratio old -> new | Encode GB/s old -> new |
+| :--- | :--- | :--- |
+| `install.log` | 0.095 -> 0.094 (-1%) | 1.41 -> 1.20 (-15%) |
+| `icons.json` | 0.423 -> 0.422 (-0.2%) | 0.388 -> 0.300 (-23%) |
+
+Decode was unchanged. The ratio gain is negligible while encode loses 15-23%, so candidate count is
+not what separates VXG from Zstd-1 on free text. Zstd-1 uses a single-candidate fast parser too, so
+the remaining ratio gap should come from how sequences (literal lengths, match lengths, offsets)
+are entropy coded. Next step is to measure where the compressed bytes go per stream.
