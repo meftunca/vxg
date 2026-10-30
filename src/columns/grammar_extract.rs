@@ -64,7 +64,7 @@ fn grammar_from_block_mode_impl<'a>(
             let tpl = unsafe { templates.get_unchecked_mut(0) };
             let slots = tpl.values.len();
             let mut row_idx = unsafe { tpl.values.get_unchecked(0).len() };
-            let mut col_cap = unsafe { tpl.values.get_unchecked(0).capacity() };
+            let mut col_cap = min_col_capacity(&tpl.values);
             let start_row_idx = row_idx;
             let use_qmask = slots >= 5
                 && (0..slots)
@@ -118,7 +118,7 @@ fn grammar_from_block_mode_impl<'a>(
                 delim_cache_for = Some(target_delim);
             }
             let mut row_idx = unsafe { tpl.values.get_unchecked(0).len() };
-            let mut col_cap = unsafe { tpl.values.get_unchecked(0).capacity() };
+            let mut col_cap = min_col_capacity(&tpl.values);
             let start_row_idx = row_idx;
             match_single_delim_or_logfmt_stream(
                 data,

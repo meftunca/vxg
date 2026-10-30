@@ -354,6 +354,12 @@ fn unpack_stride_into_impl(cursor: &mut Cursor<'_>, out: &mut [u8]) -> Result<()
                 let mut firsts = [0u8; 8];
                 let mut const_plane = [false; 8];
                 let mut p_ptrs = [std::ptr::null::<u8>(); 8];
+                // `p_ptrs` keeps raw pointers into `combined`, so it must never reallocate while
+                // they are live: size it for the whole stride up front (a later run used to grow
+                // it and leave the earlier runs' pointers dangling on a cold thread).
+                if combined.len() < stride * count {
+                    combined.resize(stride * count, 0);
+                }
                 let mut p = 0usize;
                 while p < stride {
                     firsts[p] = cursor.byte()?;

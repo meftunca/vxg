@@ -103,17 +103,18 @@ fn pack_fast_lz_core_impl<const HASH_LEN: u32, const USE_DICT7: bool>(
         (8192usize, 19u32)
     };
     let (d7_len, shift7) = (4096usize, 52u32);
+    // Always clear the whole table that this call will use. `resize` only zero-fills the *new*
+    // tail, so a table that was previously used for a smaller input kept stale positions in its
+    // old prefix; a stale position equal to the current `ip` produced `offset == 0`.
     if dict4_vec.len() < d4_len {
         dict4_vec.resize(d4_len, 0);
-    } else {
-        dict4_vec[..d4_len].fill(0);
     }
+    dict4_vec[..d4_len].fill(0);
     if USE_DICT7 {
         if dict7_vec.len() < d7_len {
             dict7_vec.resize(d7_len, 0);
-        } else {
-            dict7_vec[..d7_len].fill(0);
         }
+        dict7_vec[..d7_len].fill(0);
     }
 
     let max_seqs = n / 4 + 16;

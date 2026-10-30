@@ -44,7 +44,7 @@ fn match_single_delim_or_logfmt_stream<'a>(
                         col.reserve(256);
                     }
                 }
-                cur_col_cap = unsafe { tpl.values.get_unchecked(0).capacity() };
+                cur_col_cap = min_col_capacity(&tpl.values);
             }
             for slot in 0..slots {
                 unsafe {
@@ -76,7 +76,7 @@ fn match_single_delim_or_logfmt_stream<'a>(
                         col.reserve(256);
                     }
                 }
-                cur_col_cap = unsafe { tpl.values.get_unchecked(0).capacity() };
+                cur_col_cap = min_col_capacity(&tpl.values);
             }
             for slot in 0..slots {
                 unsafe {
@@ -131,7 +131,7 @@ fn match_multi_clean_stream<'a>(
         if slots != 0 {
             cur_last_tpl = matched_idx;
             let row_idx = unsafe { tpl.values.get_unchecked(0).len() };
-            if row_idx < unsafe { tpl.values.get_unchecked(0).capacity() } {
+            if row_idx < min_col_capacity(&tpl.values) {
                 for slot in 0..slots {
                     unsafe {
                         let col = tpl.values.get_unchecked_mut(slot);
@@ -190,7 +190,7 @@ fn match_single_json_clean_stream<'a>(
                     col.reserve(256);
                 }
             }
-            cur_col_cap = unsafe { tpl.values.get_unchecked(0).capacity() };
+            cur_col_cap = min_col_capacity(&tpl.values);
         }
         let mut pos = cur_line_start + seg0_len;
         let mut ok = true;
@@ -282,7 +282,7 @@ fn match_single_json_qmask_stream<'a>(
                     col.reserve(256);
                 }
             }
-            cur_col_cap = unsafe { tpl.values.get_unchecked(0).capacity() };
+            cur_col_cap = min_col_capacity(&tpl.values);
         }
         let mut pos = cur_line_start + seg0_len;
         let mut ok = true;

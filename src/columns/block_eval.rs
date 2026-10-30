@@ -89,7 +89,9 @@ pub(crate) fn encode_grammar_block_into(
     if data.len() > MAX_BLOCK_SIZE {
         return Err(Error::InvalidOption("column block exceeds maximum"));
     }
-    let raw_len = 1 + uleb_len(data.len()) + data.len();
+    // A COLUMN block must be strictly smaller than the raw block: the frame directory rejects
+    // `cn >= rn` for COLUMN/LZ kinds (those blocks must be stored RAW instead).
+    let raw_len = data.len();
     let start = out.len();
     match pack_grammar_into(data, out) {
         Ok(true) => {

@@ -225,7 +225,8 @@ fn build_front_dict_packet(
             s
         };
         let mut same_prev = 0usize;
-        let mut prev_r = u8::MAX;
+        // u16 sentinel: with 256 entries rank 255 is valid and must not look like a repeat.
+        let mut prev_r = u16::MAX;
         let r_ptr = ranks.as_ptr();
         let mut idx = 0usize;
         while idx + 4 <= n {
@@ -238,11 +239,11 @@ fn build_front_dict_packet(
                 freq4.get_unchecked_mut(r1 as usize)[1] += 1;
                 freq4.get_unchecked_mut(r2 as usize)[2] += 1;
                 freq4.get_unchecked_mut(r3 as usize)[3] += 1;
-                same_prev += (r0 == prev_r) as usize
+                same_prev += (u16::from(r0) == prev_r) as usize
                     + (r1 == r0) as usize
                     + (r2 == r1) as usize
                     + (r3 == r2) as usize;
-                prev_r = r3;
+                prev_r = u16::from(r3);
             }
             idx += 4;
         }
@@ -250,8 +251,8 @@ fn build_front_dict_packet(
             unsafe {
                 let r = *r_ptr.add(idx);
                 freq4.get_unchecked_mut(r as usize)[0] += 1;
-                same_prev += (r == prev_r) as usize;
-                prev_r = r;
+                same_prev += (u16::from(r) == prev_r) as usize;
+                prev_r = u16::from(r);
             }
             idx += 1;
         }
@@ -280,13 +281,13 @@ fn build_front_dict_packet(
         }
         if exc_width >= 2 && rem2 * (exc_width as usize) > rem2 + 64 {
             let mut non_mode_rep = 0usize;
-            let mut last_nm = u8::MAX;
+            let mut last_nm = u16::MAX;
             for &r in ranks {
                 if r != mode_rank {
-                    if r == last_nm {
+                    if u16::from(r) == last_nm {
                         non_mode_rep += 1;
                     } else {
-                        last_nm = r;
+                        last_nm = u16::from(r);
                     }
                 }
             }
@@ -509,7 +510,7 @@ fn build_front_dict_packet(
                 1,
                 ranks.iter().map(|&r| u64::from(r == mode_rank)),
             );
-            let mut prev_nm = u8::MAX;
+            let mut prev_nm = u16::MAX;
             push_bit_values(
                 &mut out,
                 rem2,
@@ -517,24 +518,24 @@ fn build_front_dict_packet(
                 ranks.iter().filter_map(|&r| {
                     if r == mode_rank {
                         None
-                    } else if r == prev_nm {
+                    } else if u16::from(r) == prev_nm {
                         Some(1u64)
                     } else {
-                        prev_nm = r;
+                        prev_nm = u16::from(r);
                         Some(0u64)
                     }
                 }),
             );
-            let mut prev_nm2 = u8::MAX;
+            let mut prev_nm2 = u16::MAX;
             push_bit_values(
                 &mut out,
                 exc3,
                 exc_width,
                 ranks.iter().filter_map(|&r| {
-                    if r == mode_rank || r == prev_nm2 {
+                    if r == mode_rank || u16::from(r) == prev_nm2 {
                         None
                     } else {
-                        prev_nm2 = r;
+                        prev_nm2 = u16::from(r);
                         Some(if r < mode_rank {
                             r as u64
                         } else {

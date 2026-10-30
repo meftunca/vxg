@@ -326,6 +326,16 @@ thread_local! {
         std::cell::RefCell::new(Vec::with_capacity(128));
 }
 
+/// Smallest capacity across a template's column vectors.
+///
+/// Columns come from a pool and can have different capacities, so the fast row loops must bound
+/// their unchecked writes by the minimum over *all* slots, not by slot 0 alone (that was a heap
+/// buffer overflow when slot 0 was larger than another slot).
+#[inline(always)]
+fn min_col_capacity(values: &[Vec<&[u8]>]) -> usize {
+    values.iter().map(Vec::capacity).min().unwrap_or(0)
+}
+
 #[inline(always)]
 fn take_col_vec<'a>(est_rows: usize) -> Vec<&'a [u8]> {
     let v = ENCODE_VEC_POOL.with(|cell| cell.borrow_mut().pop());
