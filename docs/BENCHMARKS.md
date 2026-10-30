@@ -482,3 +482,19 @@ single template, or columns of another model, use a per-line check with the same
 
 First version of this feature measured 0.7x-0.9x because blocks with a split line (raw rows) and
 dictionary columns bailed out to the slow path; both are handled now.
+
+### Decode CPU profile on free text (`install.log`, `FAST_LZ_PACKET` blocks, macOS `sample`)
+
+| Function | Share of decode samples |
+| :--- | ---: |
+| `unpack_fast_lz_core` (LZ copy loop) | 52% |
+| `huf_decode` (Huffman for literals / token streams) | 44% |
+| everything else | ~4% |
+
+Reading: LZ4 decodes about 1.9x faster here because it has no entropy stage, and pays for it with
+a 31% worse ratio (0.125 vs 0.095). VXG already decodes faster than Zstd-1 (3.8 vs 3.3 GB/s). The
+remaining gap to close on free text is therefore ratio against Zstd-1 (8-17% worse at equal
+64 KiB blocks), not decode speed. Candidate levers, none implemented yet: a stronger match finder
+(more than two candidates per hash bucket, lazy / multi-candidate selection), better coding of
+token/offset streams, and repeat-offset coding. Each must be judged on a ratio-and-speed pair, not
+ratio alone.
