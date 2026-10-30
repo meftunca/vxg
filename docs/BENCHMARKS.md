@@ -537,3 +537,27 @@ Zstd-1's 8-17% ratio lead on free text. Remaining candidates, none tried yet: a 
 length for text (the text path hashes 5 bytes, so 4-byte matches are never found, and the split-stream
 meta coder is tied to `HASH_LEN == 5`), joint coding of (literal length, match length) tokens, and
 literal modeling beyond order-0 Huffman. Each must be judged on a ratio-and-speed pair.
+
+### Negative result: 4-byte hash on the text path (rejected, reverted)
+
+The text path hashes 5 bytes (`HASH_LEN = 5`), so 4-byte matches are never found. Tried `HASH_LEN = 4`
+(with and without the secondary 7-byte table), env-gated, interleaved A/B on five files:
+
+| File | Ratio hl=5 -> hl=4 | Speed |
+| :--- | :--- | :--- |
+| `install.log` | 0.095 -> 0.094 (-1%) | encode and decode 15-17% slower |
+| `rust_src.txt` (concatenated sources) | 0.228 -> 0.225 (-1.3%) | 10-15% slower |
+| `icons.json` | 0.423 -> 0.431-0.437 (worse) | slower |
+| `docs_text.md` | 0.420 -> 0.421-0.426 (worse) | slower |
+| `ndjson_varied` | 0.096 -> 0.097 (worse) | about equal |
+
+Rejected: the ratio moves by +-1-3% depending on the file and the speed always drops.
+
+Process note: the first attempt at this experiment produced identical numbers for every setting
+because a zsh script did not split `$cfg` (so every run used the default), and an earlier attempt
+ran a stale binary after a compile error. Always sanity-check that a knob changes the output (here:
+`hl=6` and `7` give very different results) before trusting an A/B that shows no difference.
+
+Three hypotheses for the free-text ratio gap against Zstd-1 are now ruled out (more match candidates,
+repeat offsets, shorter minimum match). What is left is how literals and sequence tokens are modeled
+and coded, which needs a different kind of experiment than parameter tuning.
