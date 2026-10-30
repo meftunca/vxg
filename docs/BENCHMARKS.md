@@ -590,3 +590,8 @@ Gain comes with a ~2x encode/decode slowdown because the grammar path is now sel
 So the pattern model is not the encode bottleneck; ~40% is per-row span parsing / template matching
 (byte-wise `scan_delimited_value`, parsed again during matching). Next candidate: parse each row once
 and reuse spans for template matching.
+
+Follow-up: the bitmask matcher (`delimited_masks64`) and scalar matcher (`try_match_delimited_scalar`)
+still used the strict token alphabet, so CSV rows with spaces took the slow scalar path. All three
+(span parser, masks, scalar) now share the relaxed stop set for `,`/`\t`. CSV/TSV encode 0.23 → 0.37 GB/s,
+ratio unchanged (.188), decode 1.13 GB/s.

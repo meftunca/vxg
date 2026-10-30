@@ -285,6 +285,13 @@ fn template_is_clean_logfmt(segments: &[&[u8]]) -> bool {
     true
 }
 
+/// CSV / TSV unquoted fields may hold spaces, brackets and UTF-8; every matcher and mask must use
+/// the same stop set (see `scan_delimited_value`).
+#[inline(always)]
+const fn delim_is_relaxed(delim: u8) -> bool {
+    delim == b',' || delim == b'\t'
+}
+
 /// Structural bitmasks for the 64 bytes at `p` (bit `i` = byte `p[i]`):
 /// - `q`: bytes that terminate a quoted value scan (`"`, `\`, `< 0x20`), exactly the
 ///   stop set of [`scan_string`];
@@ -306,15 +313,25 @@ unsafe fn delimited_masks64(p: *const u8, delim: u8) -> (u64, u64) {
         let v_delim = vdupq_n_u8(delim);
         let v_21 = vdupq_n_u8(0x21);
         let v_5e = vdupq_n_u8(0x5e);
+        let v_7f = vdupq_n_u8(0x7f);
+        let v_rel = vdupq_n_u8(if delim_is_relaxed(delim) { 0xff } else { 0 });
         macro_rules! lane {
             ($k:expr) => {{
                 let c = vld1q_u8(p.add($k * 16));
                 let is_q = vceqq_u8(c, v_quote);
                 let q = vorrq_u8(is_q, vorrq_u8(vceqq_u8(c, v_slash), vcltq_u8(c, v_ctrl)));
-                let u = vorrq_u8(
+                let u_strict = vorrq_u8(
                     is_q,
                     vorrq_u8(vceqq_u8(c, v_delim), vcgeq_u8(vsubq_u8(c, v_21), v_5e)),
                 );
+                let u_rel = vorrq_u8(
+                    is_q,
+                    vorrq_u8(
+                        vceqq_u8(c, v_delim),
+                        vorrq_u8(vcltq_u8(c, v_ctrl), vceqq_u8(c, v_7f)),
+                    ),
+                );
+                let u = vbslq_u8(v_rel, u_rel, u_strict);
                 (vandq_u8(q, w), vandq_u8(u, w))
             }};
         }
@@ -336,6 +353,7 @@ unsafe fn delimited_masks64(p: *const u8, delim: u8) -> (u64, u64) {
         let v_delim = _mm_set1_epi8(delim as i8);
         let v_21 = _mm_set1_epi8(0x21);
         let v_5d = _mm_set1_epi8(0x5d);
+        let relaxed = delim_is_relaxed(delim);
         let mut qm = 0u64;
         let mut um = 0u64;
         for k in 0..4 {
@@ -346,8 +364,15 @@ unsafe fn delimited_masks64(p: *const u8, delim: u8) -> (u64, u64) {
             let x = _mm_sub_epi8(c, v_21);
             let in_range = _mm_cmpeq_epi8(_mm_min_epu8(x, v_5d), x);
             let stop = _mm_or_si128(is_q, _mm_cmpeq_epi8(c, v_delim));
-            let u_bits =
-                (_mm_movemask_epi8(stop) as u32 | !(_mm_movemask_epi8(in_range) as u32)) & 0xffff;
+            let u_bits = if relaxed {
+                let ctrl_or_del = _mm_or_si128(
+                    _mm_cmplt_epi8(c, _mm_set1_epi8(0x20)),
+                    _mm_cmpeq_epi8(c, _mm_set1_epi8(0x7f)),
+                );
+                (_mm_movemask_epi8(_mm_or_si128(stop, ctrl_or_del)) as u32) & 0xffff
+            } else {
+                (_mm_movemask_epi8(stop) as u32 | !(_mm_movemask_epi8(in_range) as u32)) & 0xffff
+            };
             qm |= (_mm_movemask_epi8(q) as u32 as u64) << (k * 16);
             um |= (u_bits as u64) << (k * 16);
         }
@@ -362,7 +387,12 @@ unsafe fn delimited_masks64(p: *const u8, delim: u8) -> (u64, u64) {
             if b == b'"' || b == b'\\' || b < 0x20 {
                 qm |= 1 << i;
             }
-            if b == delim || b == b'"' || b.wrapping_sub(0x21) >= 0x5e {
+            let stop = if delim_is_relaxed(delim) {
+                b == delim || b == b'"' || b < 0x20 || b == 0x7f
+            } else {
+                b == delim || b == b'"' || b.wrapping_sub(0x21) >= 0x5e
+            };
+            if stop {
                 um |= 1 << i;
             }
         }

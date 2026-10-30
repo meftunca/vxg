@@ -105,7 +105,13 @@ mod tests {
                 let (q, u) = unsafe { delimited_masks64(buf.as_ptr(), delim) };
                 for (i, &b) in buf.iter().enumerate() {
                     let eq = b == b'"' || b == b'\\' || b < 0x20;
-                    let eu = b == delim || b == b'"' || b.wrapping_sub(0x21) >= 0x5e;
+                    let eu = b == delim
+                        || b == b'"'
+                        || if delim == b',' || delim == b'\t' {
+                            b < 0x20 || b == 0x7f
+                        } else {
+                            b.wrapping_sub(0x21) >= 0x5e
+                        };
                     assert_eq!((q >> i) & 1 == 1, eq, "q byte={b:#x} i={i}");
                     assert_eq!((u >> i) & 1 == 1, eu, "u byte={b:#x} i={i} delim={delim}");
                 }

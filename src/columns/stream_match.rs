@@ -156,6 +156,7 @@ fn try_match_delimited_scalar<'a>(
     delim: u8,
     out_values: &mut [&'a [u8]; MAX_SLOTS],
 ) -> Option<usize> {
+    let relaxed = delim_is_relaxed(delim);
     let slots = segments.len() - 1;
     let rem_len = rem.len();
     let rem_ptr = rem.as_ptr();
@@ -171,7 +172,14 @@ fn try_match_delimited_scalar<'a>(
             let mut end = pos;
             while end < rem_len {
                 let b = unsafe { *rem_ptr.add(end) };
-                if b == delim || b.wrapping_sub(0x21) >= 0x5e || b == b'"' {
+                if b == delim
+                    || b == b'"'
+                    || if relaxed {
+                        b < 0x20 || b == 0x7f
+                    } else {
+                        b.wrapping_sub(0x21) >= 0x5e
+                    }
+                {
                     break;
                 }
                 end += 1;
