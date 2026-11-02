@@ -595,3 +595,27 @@ Follow-up: the bitmask matcher (`delimited_masks64`) and scalar matcher (`try_ma
 still used the strict token alphabet, so CSV rows with spaces took the slow scalar path. All three
 (span parser, masks, scalar) now share the relaxed stop set for `,`/`\t`. CSV/TSV encode 0.23 → 0.37 GB/s,
 ratio unchanged (.188), decode 1.13 GB/s.
+
+### SWAR encode, `Copy16` constant-affix decode & zero-unpack filter (`MODEL_PATTERN`)
+
+Replaced per-row byte-wise `pattern_split` + binary-search dictionary pass + `Vec<Vec<u8>>` decode
+materialization with:
+- Stack-only row-0/row-1 shape rejection (~15 ns, zero heap allocs on non-pattern columns), 32-byte SWAR
+  digit/literal mask verification, thread-local scratch, and pure integer Pass 2.
+- Zero-heap `PreparedColumn::parse_pattern` folding constant leading/trailing tokens into `const_lead` /
+  `const_trail` and routing `1..=16` B active bodies through `ColumnStream::Copy16` (`u128` copy on `z == 0`
+  and tail-digit delta update), `17..=2048` B / variable-width `Dict` through `SegmentDict`, and `> 2048` B
+  through `Raw`.
+- O(1) header-only 256-bit alphabet extraction (`pattern_col_alphabet`) wired into `can_template_match_fast`.
+
+| File | Ratio | Encode GB/s (initial tag 15 → SWAR) | Decode GB/s (initial tag 15 → `Copy16`) |
+|---|---|---|---|
+| NDJSON `ts_clf` | .030 | 0.38 → **1.04** (faster than pre-tag-15 0.92) | 1.43 → **6.77** (1.8× faster than pre-tag-15 3.75) |
+| NDJSON `ts_iso_off` | .030 | 0.34 → **1.01** | 1.32 → **6.87** |
+| NDJSON `ts_iso_ms` | .043 | 0.38 → **0.83** | 1.23 → **4.36** |
+| Apache CLF | .098 | 0.24 → **0.44** | 0.95 → **2.10** |
+| CSV / TSV | .188 | 0.37 → **0.41** | 1.13 → **1.30** |
+| `ndjson_varied` (56.5 MB) | .096 → **.091** | 0.56 → **0.73** | 3.25 → **4.26** |
+
+Zero-unpack pre-filter on `ndjson_varied` (`vxg-query-real`): `"level":"NOPE"` runs in **1.60 ms (35.4 GB/s,
+97.2× vs raw scan)** and `@num:bytes:ge:50000` in **1.59 ms (35.7 GB/s, 100.0×)**.

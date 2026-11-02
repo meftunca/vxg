@@ -218,14 +218,19 @@ impl UnboundTemplate {
                             stride,
                         }
                     }
-                    ColumnStream::Copy16 { u8_offset } => {
+                    ColumnStream::Copy16 {
+                        u8_offset,
+                        emit_len,
+                        ..
+                    } => {
                         let ptr = u8_base.add(u8_offset);
+                        let len = emit_len as usize;
                         if (1..=16).contains(&after.len) {
-                            BoundStream::Copy16After16 { ptr }
+                            BoundStream::Copy16After16 { ptr, len }
                         } else if (17..=32).contains(&after.len) {
-                            BoundStream::Copy16After32 { ptr }
+                            BoundStream::Copy16After32 { ptr, len }
                         } else {
-                            BoundStream::Copy16 { ptr }
+                            BoundStream::Copy16 { ptr, len }
                         }
                     }
                     ColumnStream::SegmentDict {

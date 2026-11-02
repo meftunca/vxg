@@ -371,6 +371,7 @@ impl Evaluation {
             ModelKind::EpochCounter,
             ModelKind::SegmentDict,
             ModelKind::DecimalDelta,
+            ModelKind::Pattern,
         ];
         for (index, kind) in model_kinds.into_iter().enumerate() {
             writeln!(out, "    {{\"model\":\"{}\",\"columns\":{},\"payload_bytes\":{}}}{}", kind.name(), self.model_counts[kind.index()], self.model_bytes[kind.index()], if index + 1 == model_kinds.len() { "" } else { "," }).unwrap();

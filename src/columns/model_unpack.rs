@@ -13,7 +13,7 @@ fn unpack_model_mode(bytes: &[u8], count: usize, strict: bool) -> Result<FlatVal
     let tag = cursor.byte()?;
     let per_value = match tag {
         MODEL_HEX_SUFFIX | MODEL_EPOCH_COUNTER | MODEL_PERIODIC_HEX | MODEL_PERIODIC_STRING
-        | MODEL_GF2_AFFINE => 24,
+        | MODEL_GF2_AFFINE | MODEL_PATTERN => 24,
         MODEL_SEGMENT_DICT => 48,
         _ => 8,
     };

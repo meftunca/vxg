@@ -131,3 +131,40 @@ fn delimited_fields_with_free_text_round_trip() {
         }
     }
 }
+
+/// Exercises all three `parse_pattern` decode tiers:
+/// 1) `Copy16` (`1..=16` fixed active bytes with folded lead/trail constants),
+/// 2) `SegmentDict` (variable-width dictionary entries `"May"` / `"September"` or `>16` active bytes),
+/// 3) `Raw` fallback (`>2048` byte row with long literal), plus zero-unpack query rejection.
+#[test]
+fn pattern_decode_tiers_and_prefilter() {
+    let dec = DecodeOptions::default();
+
+    // Tier 2: variable-width dictionary inside `MODEL_PATTERN` (`"May"` vs `"September"`).
+    let var_months = ["May", "June", "September", "December"];
+    let mut s = String::new();
+    for i in 0..1500u64 {
+        let m = var_months[(i / 300 % 4) as usize];
+        s += &format!("{{\"ts\":\"{m} {:02}, 2026 {:02}:{:02}:{:02}\",\"v\":{i}}}\n", 1 + i / 3600 % 28, i / 3600 % 24, i / 60 % 60, i % 60);
+    }
+    let raw_var = s.into_bytes();
+    let enc_var = compress(&raw_var, &Options::default()).unwrap();
+    assert_eq!(decompress(&enc_var, &dec).unwrap(), raw_var);
+    assert_eq!(filter_rows(&enc_var, b"October", usize::MAX, &dec).unwrap().len(), 0);
+    assert_eq!(
+        filter_rows(&enc_var, b"September 01", usize::MAX, &dec).unwrap().len(),
+        std::str::from_utf8(&raw_var).unwrap().lines().filter(|l| l.contains("September 01")).count()
+    );
+
+    // Tier 3: huge literal (`>2048` bytes per pattern value) -> `parse_pattern_huge` fallback.
+    let big_pad = "x".repeat(2200);
+    let mut huge = String::new();
+    for i in 0..80u64 {
+        huge += &format!("{{\"p\":\"{big_pad}-{:06}\",\"k\":{i}}}\n", 100 + i);
+    }
+    let raw_huge = huge.into_bytes();
+    let enc_huge = compress(&raw_huge, &Options::default()).unwrap();
+    assert_eq!(decompress(&enc_huge, &dec).unwrap(), raw_huge);
+    assert_eq!(filter_rows(&enc_huge, b"2025", usize::MAX, &dec).unwrap().len(), 0);
+    assert_eq!(filter_rows(&enc_huge, b"-000142\"", usize::MAX, &dec).unwrap().len(), 1);
+}

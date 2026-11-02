@@ -430,6 +430,8 @@ impl<'a> PreparedColumn<'a> {
             max_emit_len: 16,
             stream: ColumnStream::Copy16 {
                 u8_offset: out_u8_offset,
+                emit_len: 16,
+                col_mask: HEX16_COL_MASK,
             },
         })
     }

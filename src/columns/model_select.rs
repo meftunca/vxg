@@ -258,19 +258,29 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                 });
             }
         }
-        // Now check Dictionary with the tight `best_len`:
-        if !skip_dictionary {
+        let unquoted_const_hint = !skip_dictionary
+            && (n <= 64
+                || (slice_eq_fast(first_slice, values[1])
+                    && slice_eq_fast(first_slice, values[n - 1])));
+        if unquoted_const_hint {
             try_model!(
                 |limit| pack_dictionary_model_mode(values, limit, allow_v3_ext),
                 ModelKind::Dictionary
             );
         }
         // Unquoted digit/literal patterns (CLF / CSV / TSV timestamps, IPv4, versions, ...). Plain
-        // decimals are left to the decimal models.
+        // decimals are left to the decimal models. Run before high-cardinality Dictionary so
+        // monotonic timestamps tighten `best_len` upfront.
         if allow_v3_ext && parse_decimal(first_slice).is_none() {
             try_model!(
                 |limit| pack_pattern_model(values, limit),
                 ModelKind::Pattern
+            );
+        }
+        if !skip_dictionary && !unquoted_const_hint {
+            try_model!(
+                |limit| pack_dictionary_model_mode(values, limit, allow_v3_ext),
+                ModelKind::Dictionary
             );
         }
         if allow_v3_ext && best_kind == ModelKind::Raw {
@@ -310,7 +320,9 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
     // e.g. constant strings like `"eu-central-1"`), run `Dictionary` first so `best_len` is tight before
     // testing `DecimalSuffix` / `HexSuffix` / `SegmentDict`.
     let mut dict_already_tried = false;
-    if (allow_v3_ext && n <= 64) || slice_eq_fast(first_slice, values[1]) {
+    if (allow_v3_ext && n <= 64)
+        || (slice_eq_fast(first_slice, values[1]) && slice_eq_fast(first_slice, values[n - 1]))
+    {
         dict_already_tried = true;
         try_model!(
             |limit| pack_dictionary_model_mode(values, limit, allow_v3_ext),
@@ -332,6 +344,16 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
         try_model!(
             |limit| pack_decimal_suffix_model(values, limit),
             ModelKind::DecimalSuffix
+        );
+    }
+
+    // 2b. Digit-field / literal pattern (timestamps in any layout, IPv4, versions, `u012336`-style ids).
+    // Runs before `Dictionary` / `HexSuffix` so monotonic timestamps tighten `best_len` upfront;
+    // non-pattern columns exit on row 0/1 in ~15 ns on the stack.
+    if allow_v3_ext {
+        try_model!(
+            |limit| pack_pattern_model(values, limit),
+            ModelKind::Pattern
         );
     }
 
@@ -453,14 +475,6 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
         try_model!(
             |limit| pack_periodic_hex_model(values, limit),
             ModelKind::PeriodicHex
-        );
-    }
-
-    // 8. Digit-field / literal pattern (timestamps in any layout, IPv4, versions, `u012336`-style ids).
-    if allow_v3_ext {
-        try_model!(
-            |limit| pack_pattern_model(values, limit),
-            ModelKind::Pattern
         );
     }
 

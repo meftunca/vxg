@@ -78,9 +78,9 @@ impl<'a> ExecColumn<'a> {
                 BoundStream::TimestampFull { ptr, .. } => {
                     *ptr = ptr.add(n);
                 }
-                BoundStream::Copy16After16 { ptr }
-                | BoundStream::Copy16After32 { ptr }
-                | BoundStream::Copy16 { ptr } => {
+                BoundStream::Copy16After16 { ptr, .. }
+                | BoundStream::Copy16After32 { ptr, .. }
+                | BoundStream::Copy16 { ptr, .. } => {
                     *ptr = ptr.add(n * 16);
                 }
                 BoundStream::HexSuffix4 { ptr } => {

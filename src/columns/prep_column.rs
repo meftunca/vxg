@@ -46,6 +46,8 @@ enum ColumnStream<'a> {
     },
     Copy16 {
         u8_offset: usize,
+        emit_len: u8,
+        col_mask: [u64; 4],
     },
     SegmentDict {
         str_u8_offset: usize,
@@ -69,11 +71,25 @@ enum ConstValue<'a> {
     QuotedDecimal { prefix: &'a [u8], buf: [u8; 24], len: u8 },
 }
 
+const fn build_const_mask(bytes: &[u8]) -> [u64; 4] {
+    let mut m = [0u64; 4];
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        m[(b >> 6) as usize] |= 1u64 << (b & 63);
+        i += 1;
+    }
+    m
+}
+
+const HEX16_COL_MASK: [u64; 4] = build_const_mask(b"0123456789abcdef\"");
+
 #[derive(Clone, Copy)]
 enum LeadValue<'a> {
     Empty,
     QuoteOnly,
     QuotePrefix(&'a [u8]),
+    Slice(&'a [u8]),
     Inline { buf: [u8; 16], len: u8 },
 }
 
@@ -87,6 +103,7 @@ impl<'a> LeadValue<'a> {
                 dst.push(b'"');
                 dst.extend_from_slice(prefix);
             }
+            Self::Slice(s) => dst.extend_from_slice(s),
             Self::Inline { ref buf, len } => {
                 dst.extend_from_slice(&buf[..len as usize]);
             }
@@ -98,7 +115,7 @@ impl<'a> LeadValue<'a> {
 struct PreparedColumn<'a> {
     const_full: ConstValue<'a>,
     const_lead: LeadValue<'a>,
-    const_trail: &'static [u8],
+    const_trail: &'a [u8],
     dict_slices: Option<(usize, usize)>,
     max_emit_len: usize,
     stream: ColumnStream<'a>,

@@ -312,6 +312,7 @@ include!("columns/prep_dict.rs");
 include!("columns/prep_numeric.rs");
 include!("columns/prep_time_epoch.rs");
 include!("columns/prep_seg_gf2.rs");
+include!("columns/prep_pattern.rs");
 include!("columns/exec_column.rs");
 include!("columns/template_build.rs");
 include!("columns/template_bind.rs");

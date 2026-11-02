@@ -110,12 +110,15 @@ enum BoundStream<'a> {
     },
     Copy16After16 {
         ptr: *const u8,
+        len: usize,
     },
     Copy16After32 {
         ptr: *const u8,
+        len: usize,
     },
     Copy16 {
         ptr: *const u8,
+        len: usize,
     },
     SegmentDict {
         str_ptr: *const u8,
@@ -389,25 +392,25 @@ impl<'a> ExecColumn<'a> {
                         return self.after.emit_16(dst);
                     }
                 }
-                BoundStream::Copy16After16 { ptr } => {
+                BoundStream::Copy16After16 { ptr, len } => {
                     let p = *ptr;
                     *ptr = p.add(16);
                     copy16_unaligned(p, dst);
-                    dst = dst.add(16);
+                    dst = dst.add(*len);
                     return self.after.emit_16(dst);
                 }
-                BoundStream::Copy16After32 { ptr } => {
+                BoundStream::Copy16After32 { ptr, len } => {
                     let p = *ptr;
                     *ptr = p.add(16);
                     copy16_unaligned(p, dst);
-                    dst = dst.add(16);
+                    dst = dst.add(*len);
                     return self.after.emit_32(dst);
                 }
-                BoundStream::Copy16 { ptr } => {
+                BoundStream::Copy16 { ptr, len } => {
                     let p = *ptr;
                     *ptr = p.add(16);
                     copy16_unaligned(p, dst);
-                    dst = dst.add(16);
+                    dst = dst.add(*len);
                 }
                 BoundStream::HexSuffix4 { ptr } => {
                     write_hex8_from_4bytes(dst, *ptr);

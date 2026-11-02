@@ -69,9 +69,13 @@ fn classify_template_filter(
             ColumnStream::HexSuffix4 { .. }
             | ColumnStream::HexSuffix8 { .. }
             | ColumnStream::HexSuffix { .. }
-            | ColumnStream::Copy16 { .. }
             | ColumnStream::PeriodicHex { .. } => {
                 add_bytes_to_mask(&mut non_dict_col_mask, b"0123456789abcdef\"");
+            }
+            ColumnStream::Copy16 { col_mask, .. } => {
+                for i in 0..4 {
+                    non_dict_col_mask[i] |= col_mask[i];
+                }
             }
             ColumnStream::Raw { cursor } => {
                 let raw_slice = &cursor.bytes[cursor.pos..];
@@ -522,6 +526,19 @@ fn can_template_match_fast(
             MODEL_TIMESTAMP => {
                 let mut m = [0u64; 4];
                 add_bytes_to_mask(&mut m, b"\"0123456789-:TZ");
+                for i in 0..4 {
+                    block_mask[i] |= m[i];
+                }
+                if !overlaps_any_seg
+                    && !any_col_can_contain
+                    && needle.iter().all(|&b| mask_has_byte(&m, b))
+                {
+                    any_col_can_contain = true;
+                }
+            }
+            MODEL_PATTERN => {
+                let mut m = [0u64; 4];
+                pattern_col_alphabet(&mut c, &mut m)?;
                 for i in 0..4 {
                     block_mask[i] |= m[i];
                 }
