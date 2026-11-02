@@ -713,3 +713,12 @@ Measured on **`ndjson_varied.ndjson`** (`56,503,837 B` raw -> `5,167,201 B` / `9
 | `select [ts,req_id,lat] WHERE fraud&500&lat>=150` | 104.44 ms | **3.75 ms** | **27.8×** (**15.06 GB/s**) | **2.73 ms** | **37.3×** (**20.71 GB/s**) | `756 B` NDJSON |
 | `project_frame [service,status,bytes,lat]` (**splice**) | 165.26 ms | **7.09 ms** | **23.3×** (**7.97 GB/s**) | **5.26 ms** | **32.6×** (**10.73 GB/s**) | `1.42 MB` VXG (`6.78%`) |
 | `project_frame [service,lat,bytes] WHERE status==500` | 110.38 ms | **8.07 ms** | **13.7×** (**7.00 GB/s**) | **7.73 ms** | **14.3×** (**7.31 GB/s**) | `57 KB` VXG (`6.70%`) |
+
+### 3. Stage 5 — Zero-Copy `mmap` Verification & Bounded-Memory Multi-Frame `--stream` (`v0.4.3`, `8T`)
+
+| Operation (`ndjson_varied.ndjson`, `56.50 MB` raw, `300,000` rows, `8T`) | Latency | Effective Throughput | Peak Output / Stream Buffer |
+| :--- | ---: | ---: | :--- |
+| `vxg verify -t 8` (`MappedFile` + zero-output-alloc `verify_frame`) | **4.69 ms** | **12.04 GB/s** | `~512 KiB` (`64 KiB × 8` L2 scratch) |
+| `vxg verify --stream -t 8` (`FrameReader` + `verify_stream`) | **10.37 ms** | **5.45 GB/s** | `8 MiB` single-frame buffer |
+| `vxg compress --stream -t 8` (`5,167,393 B`, `9.15%`, `7` frames) | **25.97 ms** | **2.18 GB/s** | `8 MiB` bounded chunk |
+| `vxg project --cols ts,service,status,latency_ms` (`mmap` / `--stream`) | **4.73 ms** / **12.02 ms** | **11.95 GB/s** / **4.70 GB/s** | Byte-exact decoded output |

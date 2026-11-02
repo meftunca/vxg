@@ -8,7 +8,7 @@ VXG is an adaptive block-independent lossless codec and compressed-domain execut
 | **2** | Compressed-domain data ops: `filter`, `map`, `update`, zero-wire-byte bigram & nibble pushdown | **Completed in `v0.4.2`** ([Design & Benchmarks](./STAGE2_DESIGN.md)) |
 | **3** | Compound boolean `PredExpr` (`AND`/`OR`/`NOT`), scalar aggregations (`SUM`/`MIN`/`MAX`/`AVG`), and 2-tier dictionary `GROUP BY` | **Completed in `v0.4.2`** |
 | **4** | Compressed-domain `SELECT` column projection & zero-reencode `VXG -> VXG` column splicing (`project_frame`) + full CLI (`query`, `agg`, `project`) | **Completed in `v0.4.2`** |
-| **5** | Zero-copy `mmap` & bounded-memory multi-GB streaming execution for `query`, `agg`, `project`, `filter-frame`, `update`, and `map` | **Next (`v0.5.x`)** |
+| **5** | Zero-copy `mmap` & bounded-memory multi-GB streaming execution for `query`, `agg`, `project`, `filter-frame`, `update`, and `map` | **Completed in `v0.4.3`** |
 | **6** | Continuous correctness hardening (randomized differential fuzzing, sanitizers, `x86_64` / `aarch64` parity) | Ongoing ([Testing](./TESTING.md)) |
 
 ## Engineering Rules

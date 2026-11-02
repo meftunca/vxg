@@ -1,8 +1,8 @@
-# VXG 0.4.2 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
+# VXG 0.4.3 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
 
 [![CI — Source Validation](https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/ci.yml)
 [![CI — Cross-Platform Benchmarks](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml)
-[![Release v0.4.2](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.2)
+[![Release v0.4.3](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.3)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **High-throughput Rust CPU (SIMD/SWAR) codec & compressed-domain execution engine combining an adaptive structured-column engine (NDJSON / CSV / TSV / PSV / Logfmt / CLF), a 2D/Stride pixel engine (24-bpp & 32-bpp BMP), and a const-generic Fast-LZ + 4-stream canonical Huffman engine — with SQL-grade compressed-domain `SELECT` / `WHERE` / `GROUP BY` / `UPDATE` / zero-reencode column splicing, zero-overhead C ABI (`staticlib` / `cdylib`), and native Metal / CUDA / Vulkan sources.**
@@ -22,7 +22,7 @@ VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the 
 | **Prose & Source Code** | Const-generic `Fast-LZ` matcher paired with a 4-stream interleaved canonical Huffman coder |
 | **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning, 64-byte `FastPiece` unaligned `u128` row assembly, and SIMD prefix-sum plane interleaving |
 | **Integrity & Safety** | Hardware-accelerated CRC32C (`ARMv8 CRC` / `SSE4.2`); strict output-size bounds and deterministic rejection of truncated or malformed inputs |
-| **Zero-Allocation & Streaming API** | Zero-allocation `compress_into` / `decompress_into` / `extract_block_into` plus bounded-memory `StreamEncoder<W>` / `StreamDecoder<R>` (`std::io::Write` / `Read`) and multi-frame concatenated stream support in Rust and C (`staticlib` `libvxg.a` / `vxg.lib`, `cdylib` `libvxg.dylib` / `.so` / `.dll`) with [`include/vxg.h`](include/vxg.h) |
+| **Zero-Copy `mmap` & Streaming Engine** | Zero-dependency cross-platform `MappedFile` / `MappedFileMut`, zero-output-alloc parallel `verify_frame` (`12+ GB/s`, `~64 KiB` L2 scratch/thread), and bounded-memory (`O(single_frame)`) multi-GB streaming across `query`, `agg`, `project`, `filter-frame`, `update`, and `map` (`FramePeeler` split-line stitching), plus `staticlib` / `cdylib` C ABI ([`include/vxg.h`](include/vxg.h)) |
 
 ---
 
@@ -164,8 +164,10 @@ cargo build --release
 ./target/release/vxg update input.vxg patched.vxg --where status==500 --col level --set CRITICAL -f
 ./target/release/vxg map input.vxg upper.vxg --col service --upper -f
 
-# Unix streaming pipeline via stdin / stdout ('-'):
-cat input.ndjson | ./target/release/vxg c - - --stream -t auto -q | ./target/release/vxg d - - --stream -t auto -q > restored.ndjson
+# Unix bounded-memory streaming pipeline via stdin / stdout ('-') or --stream:
+cat input.ndjson | ./target/release/vxg c - - --stream -t auto -q \
+  | ./target/release/vxg project - - --cols service,status,latency_ms --stream -t auto -q \
+  | ./target/release/vxg query - --select service,latency_ms --where 'status==500' -t auto
 ```
 
 ### Running the Multi-Format Benchmark Suite Locally

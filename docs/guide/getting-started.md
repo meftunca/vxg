@@ -54,7 +54,8 @@ Build outputs in `target/release/`:
 | `-` (as `INPUT` / `OUTPUT`) | — | Read from `stdin` or write to `stdout`. |
 | `-t <N\|auto>`, `--threads <N\|auto>` | `1` | Worker thread count (`auto` or `0` uses all available logical CPU cores). |
 | `-b <BYTES>`, `--block-size <BYTES>` | `65536` | Uncompressed block size in bytes (`4096..=1048576`, multiple of `64`). |
-| `--stream` | `false` | Bounded-memory streaming mode (`StreamEncoder` / `StreamDecoder`) for arbitrarily large pipes/files. |
+| `--stream` | `false` | Bounded-memory (`O(single_frame)`) streaming mode across `compress`, `decompress`, `verify`, `query`, `agg`, `project`, `filter-frame`, `update`, and `map`. |
+| `--no-mmap` | `mmap` ON | Disable zero-copy OS memory mapping on regular files and read inputs into heap RAM instead. |
 | `--no-checksum` | Checksum ON | Disable per-block CRC32C generation or verification. |
 | `--max-output <BYTES>` | `1073741824` | Maximum allowed decompressed output size (`1 GiB` default safety guard). |
 | `-f`, `--force` | `false` | Overwrite existing output file (by default `vxg` refuses to clobber existing files). |

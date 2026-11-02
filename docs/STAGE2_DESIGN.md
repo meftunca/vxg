@@ -1,6 +1,6 @@
-# Compressed-Domain Engine (Stages 2–4): `filter`, `map`, `update`, `agg`, `group_by`, and Zero-Reencode `project`
+# Compressed-Domain Engine (Stages 2–5): `filter`, `map`, `update`, `agg`, `group_by`, Zero-Reencode `project`, and Bounded-Memory Streaming
 
-Status: **Implemented & Verified (`vxg` v0.4.2, wire format `v4` — zero wire-format changes)**.
+Status: **Implemented & Verified (`vxg` v0.4.3, wire format `v4` — zero wire-format changes)**.
 
 ## Overview
 
@@ -127,3 +127,12 @@ Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`,
 3. **Column Projection & Zero-Reencode Column Splicing (`src/ops/project.rs`, `src/columns/ops_project.rs`)**:
    - `select_columns` constructs a miniature `PreparedTemplate` over only the requested `ColTarget` slots, skipping unselected columns completely (up to **20.7 GB/s** / **37.3×** speedup).
    - `project_frame` splices compressed column payloads byte-for-byte into a new `GRAMMAR_PACKET` (`GrammarProjectOut::Spliced`, absorbing `64 KiB` split boundary lines as 1-row raw tails) at **10.7 GB/s** (**32.6×** faster than `decompress + project + compress`).
+
+## Stage 5 Extensions: Zero-Copy `mmap` & Bounded-Memory Streaming (`v0.4.3`)
+
+1. **Zero-Dependency Cross-Platform `mmap` (`src/mmap.rs`, `src/mmap/sys.rs`)**:
+   - `MappedFile`, `MappedFileMut`, and `InputBytes` provide zero-copy virtual memory views with kernel page-cache hints (`MADV_SEQUENTIAL`, `MADV_RANDOM`, `MADV_WILLNEED`) and zero external dependencies.
+2. **Zero-Output-Allocation Verification (`verify_frame`, `verify_stream`, `src/stream_ops/verify.rs`)**:
+   - Validates all directory invariants, command/grammar streams, and `CRC32C` checksums into a thread-local `64 KiB` L2-resident scratch buffer (`12.0+ GB/s` on `8T` without allocating `raw_size`).
+3. **Cross-Frame Split-Line Boundary Stitcher (`FramePeeler`, `src/stream_ops.rs`)**:
+   - Peels any unterminated tail record from frame $k$ and prepends it as a 1-block `BLOCK_RAW` prefix ahead of frame $k+1$'s borrowed `GRAMMAR_PACKET` blocks, enabling `O(single_frame)` bounded-memory execution across all 10 `*_stream` compressed-domain operations while keeping interior blocks 100% compressed.

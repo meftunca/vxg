@@ -115,23 +115,34 @@ let mapped_vxg = vxg::map_column(&frame, ColTarget::JsonKey("service"), ColOp::M
 
 ---
 
-## 3. Streaming `std::io::Write` & `std::io::Read` API
+## 3. Zero-Copy `mmap` & Bounded-Memory Compressed-Domain Streaming (`v0.4.3`)
 
-Use `StreamEncoder<W>` and `StreamDecoder<R>` for bounded-memory streaming over sockets, pipes, or multi-GB files:
+Use `MappedFile` / `InputBytes` for zero-copy file mapping, `verify_frame` / `verify_stream` for zero-output-allocation integrity checks, and the `*_stream` family (`select_columns_stream`, `project_frame_stream`, `group_by_stream`, `filter_where_stream`, etc.) for multi-GB pipes and files with `O(single_frame)` RAM:
 
 ```rust
 use std::io::{Read, Write};
-use vxg::{DecodeOptions, Options, StreamDecoder, StreamEncoder};
+use vxg::{ColTarget, DecodeOptions, InputBytes, Options, StreamDecoder, StreamEncoder};
 
+// 1. Zero-copy read-only mmap + zero-output-alloc parallel verification:
+let mapped = InputBytes::open_path("telemetry.vxg")?;
+let verified_raw_bytes = vxg::verify_frame(&mapped, &DecodeOptions { threads: 8, ..Default::default() })?;
+
+// 2. Bounded-memory multi-frame streaming codec & compressed-domain projection:
 let mut stream_bytes = Vec::new();
 {
     let mut enc = StreamEncoder::new(&mut stream_bytes, Options::default())?;
     enc.write_all(b"{\"id\":1,\"ok\":true}\n")?;
     enc.finish()?;
 }
-let mut dec = StreamDecoder::new(stream_bytes.as_slice(), DecodeOptions::default());
-let mut restored = Vec::new();
-dec.read_to_end(&mut restored)?;
+let mut projected = Vec::new();
+vxg::select_columns_stream(
+    stream_bytes.as_slice(),
+    &mut projected,
+    None,
+    &[ColTarget::JsonKey("id")],
+    usize::MAX,
+    &DecodeOptions::default(),
+)?;
 ```
 
 ---

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.3 — Zero-Copy `mmap` I/O, Zero-Output-Alloc Verification & Bounded-Memory Multi-GB Streaming
+
+- **Zero-Dependency Cross-Platform Memory-Mapped File I/O (`vxg::mmap`):**
+  - Added raw OS FFI memory-mapping (`MappedFile`, `MappedFileMut`, `InputBytes`, `mmap_supported`) across 64-bit Unix (`mmap`, `munmap`, `msync`, `madvise` `MADV_SEQUENTIAL`/`MADV_RANDOM`/`MADV_WILLNEED`) and 64-bit Windows (`CreateFileMappingW`, `MapViewOfFile`, `FlushViewOfFile`), with transparent fallback on `wasm32` / non-file descriptors and zero external crate dependencies.
+  - Added `compress_file`, `decompress_file` (`16 MiB` bounded parallel block-batch decoding for multi-GB frames + automatic destination cleanup on error), and `verify_file`.
+- **Zero-Output-Allocation Parallel Verification & `FrameReader<R>` (`vxg::stream_ops`):**
+  - Added `verify_frame` and `verify_stream`: verifies all block directory bounds, command/column streams, and per-block `CRC32C` checksums across multiple worker threads using only `~64 KiB` L2-cache-resident scratch per thread (`0` output heap allocation, in-place zero-copy `CRC32C` on `BLOCK_RAW` blocks, reaching **12.0+ GB/s** on `8T`).
+  - Added `FrameReader<R: Read>` for zero-reallocation frame-by-frame `VXG1` streaming with `O(single_frame)` memory.
+- **Bounded-Memory Multi-Frame Compressed-Domain Streaming (`FramePeeler` & `*_stream` APIs):**
+  - Added `FramePeeler` cross-frame split-line boundary stitcher preserving interior `GRAMMAR_PACKET` blocks 100% in the compressed domain while handling CSV column-0 boundary cuts, multi-frame monster lines, and unterminated EOF tails.
+  - Added 10 streaming compressed-domain APIs: `frame_row_count_stream`, `count_where_stream`, `filter_where_stream` (with early `limit` stop), `select_columns_stream` (with early `limit` stop), `aggregate_column_stream`, `group_by_stream`, `project_frame_stream`, `filter_frame_where_stream`, `update_column_stream`, and `map_column_stream`.
+  - Scaled `StreamEncoder::new` default chunk sizes (`4..16 MiB` by thread count) and eliminated intermediate `8 KiB` `io::copy` passes in `compress_stream` and `decompress_stream` (**1.8x–4.0x** faster multi-threaded streaming).
+- **CLI Default `mmap` & Universal `--stream` / `stdin` Support (`vxg`):**
+  - Enabled `mmap` by default on regular files (with `--no-mmap` opt-out) and added `--stream` + `-` (`stdin` / `stdout`) streaming execution across `verify`, `query`, `agg`, `project`, `filter-frame`, `update`, and `map`.
+
 ## 0.4.2 — Compressed-Domain Query, Analytics, Mutation, Projection & Wave 2–3 SIMD Speedups
 
 - **Compressed-Domain Column Projection & Zero-Reencode Column Splicing (`vxg::select_columns`, `vxg::project_frame`):**

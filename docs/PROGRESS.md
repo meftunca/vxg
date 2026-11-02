@@ -368,3 +368,15 @@ Earlier development logs are archived in:
 - **Stage 4 — Column Projection, Zero-Reencode Column Splicing & Full CLI (`src/ops/project.rs`, `src/bin/vxg.rs`):**
   - Added `select_columns` (miniature `PreparedTemplate` SIMD emission skipping unselected columns, up to `20.7 GB/s` / `37.3x` on `12T`) and `project_frame` (`GrammarProjectOut::Spliced` zero-reencode `VXG -> VXG` column splicing with `64 KiB` boundary-tail absorption, `10.7 GB/s` / `32.6x` on `12T`).
   - Upgraded `vxg` CLI with a recursive-descent compound `--where EXPR` parser, `vxg query --select`, `vxg agg`, `vxg project`, `vxg filter-frame`, `vxg update`, `vxg map`, and `-t N|auto` across commands; verified by 96/96 release + differential fuzz tests (`<= 600` lines across every `.rs` file).
+
+## 2026-11-02 — VXG v0.4.3 Release: Zero-Copy `mmap` I/O, Zero-Output-Alloc Verification & Bounded-Memory Multi-GB Streaming
+
+- **Zero-Dependency Cross-Platform `mmap` (`src/mmap.rs`, `src/mmap/sys.rs`):**
+  - Implemented raw OS FFI memory mapping (`MappedFile`, `MappedFileMut`, `InputBytes`, `mmap_supported`) for 64-bit Unix (`mmap`/`munmap`/`msync`/`madvise`) and 64-bit Windows (`CreateFileMappingW`/`MapViewOfFile`/`FlushViewOfFile`), plus `wasm32-unknown-unknown` clean fallback (`0` external runtime dependencies).
+  - Added `compress_file`, `decompress_file` (`16 MiB` bounded parallel block-batch decoding for multi-GB frames + automatic partial-output cleanup on failure), and `verify_file`.
+- **Zero-Output-Alloc Parallel Verification & Bounded-Memory Compressed-Domain Streaming (`src/stream_ops.rs`, `src/stream_ops/`):**
+  - Added `FrameReader<R>`, `verify_frame` (`~64 KiB` L2 scratch per worker thread, `12.0+ GB/s` warm verification on `8T`), and `verify_stream`.
+  - Added `FramePeeler` cross-frame split-line stitcher (preserving interior `GRAMMAR_PACKET` blocks compressed while handling CSV column-0 cuts, multi-frame monster lines, and unterminated EOF tails) and all 10 `*_stream` compressed-domain operations (`frame_row_count_stream`, `count_where_stream`, `filter_where_stream`, `select_columns_stream`, `aggregate_column_stream`, `group_by_stream`, `project_frame_stream`, `filter_frame_where_stream`, `update_column_stream`, `map_column_stream`).
+  - Scaled `StreamEncoder::new` default chunk sizes (`4..16 MiB` by thread count) and removed `8 KiB` `io::copy` double-buffering in `compress_stream` / `decompress_stream` (`1.8x–4.0x` faster multi-threaded streaming).
+- **CLI Default `mmap` & Universal `--stream` (`src/bin/vxg.rs`, `src/bin/cli_support/`):**
+  - Enabled `mmap` by default on regular files (`--no-mmap` opt-out) and added `--stream` + `stdin` (`-`) across `verify`, `query`, `agg`, `project`, `filter-frame`, `update`, and `map`; verified by `101/101` release tests (`tests/stage5_mmap.rs`, `tests/stage5_stream_ops.rs`).
