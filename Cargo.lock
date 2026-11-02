@@ -77,3 +77,7 @@ dependencies = [
  "mimalloc",
  "tikv-jemallocator",
 ]
+
+[[package]]
+name = "vxg-tensor"
+version = "0.1.0"

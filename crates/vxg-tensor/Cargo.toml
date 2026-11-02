@@ -1,0 +1,22 @@
+[package]
+name = "vxg-tensor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "VXG compressed-domain AI model weight codec (.vxt) with fused Apple Metal GPU and CPU SIMD GEMV kernels"
+license = "MIT"
+build = "build.rs"
+
+[features]
+default = []
+metal = []
+
+[dependencies]
+
+[lib]
+name = "vxg_tensor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vxg-tensor"
+path = "src/bin/vxg-tensor.rs"

@@ -114,4 +114,6 @@ lto = "thin"
 codegen-units = 1
 
 [workspace]
+members = [".", "crates/vxg-tensor"]
+default-members = ["."]
 exclude = ["fuzz"]
