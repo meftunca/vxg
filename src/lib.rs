@@ -212,28 +212,17 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
         });
     }
     let next_idx = std::sync::atomic::AtomicUsize::new(0);
-    let worker_outputs = std::thread::scope(|scope| -> Result<Vec<_>> {
-        let next_ref = &next_idx;
-        let mut handles = Vec::with_capacity(workers);
-        for worker in 0..workers {
-            handles.push(scope.spawn(move || {
-                encode_worker::<false>(input, options, engine, worker, workers, next_ref)
-            }));
-        }
-        let mut result = Vec::with_capacity(workers);
-        for handle in handles {
-            result.push(handle.join().map_err(|_| Error::WorkerPanic)??);
-        }
-        Ok(result)
-    })?;
-    frame::assemble_workers_into(
-        worker_outputs,
-        out,
+    let (written, _) = frame::parallel_encode_assemble(
+        workers,
         input.len(),
+        count,
         options.block_size,
         options.checksum,
         version,
-    )
+        frame::AssembleDest::Slice(out),
+        |worker| encode_worker::<false>(input, options, engine, worker, workers, &next_idx),
+    )?;
+    Ok(written)
 }
 fn compress_inner<const STATS: bool>(
     input: &[u8],
@@ -253,34 +242,18 @@ fn compress_inner<const STATS: bool>(
         return encode_single_worker::<STATS>(input, options, engine, count, version);
     }
     let next_idx = std::sync::atomic::AtomicUsize::new(0);
-    let worker_outputs = std::thread::scope(|scope| -> Result<Vec<_>> {
-        let next_ref = &next_idx;
-        let mut handles = Vec::with_capacity(workers);
-        for worker in 0..workers {
-            handles.push(scope.spawn(move || {
-                encode_worker::<STATS>(input, options, engine, worker, workers, next_ref)
-            }));
-        }
-        let mut result = Vec::with_capacity(workers);
-        for handle in handles {
-            result.push(handle.join().map_err(|_| Error::WorkerPanic)??);
-        }
-        Ok(result)
-    })?;
-    let mut stats = WorkStats::default();
-    for output in &worker_outputs {
-        stats += output.stats;
-    }
-    Ok((
-        frame::assemble_workers(
-            worker_outputs,
-            input.len(),
-            options.block_size,
-            options.checksum,
-            version,
-        )?,
-        stats,
-    ))
+    let mut out = Vec::new();
+    let (_, stats) = frame::parallel_encode_assemble(
+        workers,
+        input.len(),
+        count,
+        options.block_size,
+        options.checksum,
+        version,
+        frame::AssembleDest::Alloc(&mut out),
+        |worker| encode_worker::<STATS>(input, options, engine, worker, workers, &next_idx),
+    )?;
+    Ok((out, stats))
 }
 fn encode_single_worker<const STATS: bool>(
     input: &[u8],
@@ -390,9 +363,9 @@ fn encode_worker<const STATS: bool>(
     let worker_raw_est = capacity.saturating_mul(opt.block_size).min(input.len());
     let adaptive = !opt.legacy_v2;
     let payload_reserve = if adaptive {
-        (worker_raw_est / 16).max(opt.block_size.min(input.len()))
+        (worker_raw_est / 8).max(opt.block_size.min(input.len()) + 1024)
     } else {
-        (worker_raw_est / 4).max(opt.block_size.min(input.len()))
+        (worker_raw_est / 4).max(opt.block_size.min(input.len()) + 1024)
     };
     scratch.reserve_payloads_for(payload_reserve);
     let mut parts = Vec::with_capacity(capacity);
@@ -405,6 +378,21 @@ fn encode_worker<const STATS: bool>(
         let start_byte = index * opt.block_size;
         let end_byte = (start_byte + opt.block_size).min(input.len());
         let chunk = &input[start_byte..end_byte];
+        if !parts.is_empty() {
+            let done = parts.len();
+            let payloads = scratch.payloads_mut();
+            let cur_len = payloads.len();
+            if cur_len + chunk.len() + 1024 > payloads.capacity()
+                || (done == 1
+                    && cur_len.saturating_mul(capacity) + opt.block_size + 4096
+                        > payloads.capacity())
+            {
+                let rem_blocks = capacity.saturating_sub(done).max(2);
+                let avg = cur_len / done;
+                let est_rem = rem_blocks.saturating_mul(avg + 1024) + opt.block_size;
+                payloads.reserve(est_rem.max(chunk.len() + 1024));
+            }
+        }
         let (kind, offset, len) = if adaptive {
             match columns::encode_grammar_block_into(chunk, scratch.payloads_mut())? {
                 Some((packet_offset, packet_len)) => (block::COLUMN, packet_offset, packet_len),
@@ -450,7 +438,7 @@ fn encode_worker<const STATS: bool>(
 }
 pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     options.validate()?;
-    let mut v4_offsets = [0u32; frame::MAX_STACK_DIR_BLOCKS + 1];
+    let mut v4_offsets = [core::mem::MaybeUninit::<u32>::uninit(); frame::MAX_STACK_DIR_BLOCKS + 1];
     let (raw_size, block_size, count, version, checksummed) =
         match frame::validate_header_and_directory_with_offsets(
             src,
@@ -463,14 +451,14 @@ pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
             }
             Err(e) => return Err(e),
         };
+    if raw_size > isize::MAX as usize {
+        return Err(Error::SizeOverflow);
+    }
     if options.threads == 1
         || version < frame::VERSION_V4
         || (count <= frame::MAX_STACK_DIR_BLOCKS && src.len() <= u32::MAX as usize)
     {
-        let mut out = Vec::new();
-        out.try_reserve_exact(raw_size)
-            .map_err(|_| Error::SizeOverflow)?;
-        out.resize(raw_size, 0);
+        let mut out = vec![0u8; raw_size];
         if options.threads == 1 {
             frame::decode_validated_dir_single_thread(
                 src,
@@ -498,16 +486,13 @@ pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
         return Ok(out);
     }
     let frame = Frame::parse(src, options.max_output)?;
-    let mut out = Vec::new();
-    out.try_reserve_exact(frame.raw_size())
-        .map_err(|_| Error::SizeOverflow)?;
-    out.resize(frame.raw_size(), 0);
+    let mut out = vec![0u8; frame.raw_size()];
     frame.decode_into(&mut out, options)?;
     Ok(out)
 }
 pub fn decompress_into(src: &[u8], out: &mut [u8], options: &DecodeOptions) -> Result<()> {
     options.validate()?;
-    let mut v4_offsets = [0u32; frame::MAX_STACK_DIR_BLOCKS + 1];
+    let mut v4_offsets = [core::mem::MaybeUninit::<u32>::uninit(); frame::MAX_STACK_DIR_BLOCKS + 1];
     let (raw_size, block_size, count, version, checksummed) =
         match frame::validate_header_and_directory_with_offsets(
             src,

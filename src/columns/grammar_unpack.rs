@@ -178,7 +178,6 @@ fn unpack_grammar_inner_impl(
         return DECODE_SCRATCH.with(|cell| {
             let mut scratch = cell.borrow_mut();
             scratch.clear();
-            scratch.raw_arena.reserve(raw_len.saturating_mul(2) + 16384);
 
             fn read_raw_rows_into<'a>(
                 cursor: &mut Cursor<'a>,
@@ -259,6 +258,8 @@ fn unpack_grammar_inner_impl(
                     ones += b.count_ones() as usize;
                 }
                 let raw_count = row_count - ones;
+                let slots = slot_counts[0];
+                reserve_raw_arena_for_block(&mut scratch.raw_arena, cursor, raw_len, raw_count, Some(slots))?;
                 let DecodeScratch {
                     ref mut raw_arena,
                     ref mut slice_arena,
@@ -267,7 +268,6 @@ fn unpack_grammar_inner_impl(
                 let raw_slice_offset =
                     read_raw_rows_into(cursor, raw_count, raw_arena, slice_arena)?;
 
-                let slots = slot_counts[0];
                 for s in 0..slots {
                     let len = cursor.uleb()?;
                     let bytes = cursor.take(len)?;
@@ -359,6 +359,7 @@ fn unpack_grammar_inner_impl(
                 sel_counts[sel as usize] += 1;
             }
             let raw_total = sel_counts[0];
+            reserve_raw_arena_for_block(&mut scratch.raw_arena, cursor, raw_len, raw_total, None)?;
             let DecodeScratch {
                 ref mut raw_arena,
                 ref mut slice_arena,

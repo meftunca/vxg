@@ -239,7 +239,7 @@ fn pack_segment_dictionary_model<'a>(values: &[&'a [u8]], limit: usize) -> Optio
         let order_slice = &mut order[..dict_len];
         order_slice.sort_unstable_by(|&a, &b| dict_init[a as usize].cmp(dict_init[b as usize]));
         let mut token_map = [0u64; 256];
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_SEGMENT_DICT);
         put_uleb(&mut out, dict_len);
         for (rank, &orig_id) in order_slice.iter().enumerate() {
@@ -432,7 +432,7 @@ fn pack_decimal_suffix_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> 
         if size >= limit {
             return None;
         }
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_DECIMAL_SUFFIX);
         put_bytes(&mut out, prefix);
         out.extend_from_slice(&min.to_le_bytes());

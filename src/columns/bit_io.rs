@@ -206,7 +206,7 @@ fn push_bit_values(
     let w = width as u32;
     let needed = (count.saturating_mul(width as usize) + 7) / 8;
     let old_len = out.len();
-    out.reserve(needed + 8);
+    out.reserve(needed);
     let mut dst = unsafe { out.as_mut_ptr().add(old_len) };
     if w == 8 {
         for value in values {
@@ -228,7 +228,12 @@ fn push_bit_values(
         let w2 = w * 2;
         let w4 = w * 4;
         let w8 = w * 8;
-        for _ in 0..(count / 8) {
+        let safe8 = if needed >= 8 {
+            ((needed - 8) / (w as usize) + 1).min(count / 8)
+        } else {
+            0
+        };
+        for _ in 0..safe8 {
             let v0 = iter.next().unwrap_or(0) & mask;
             let v1 = iter.next().unwrap_or(0) & mask;
             let v2 = iter.next().unwrap_or(0) & mask;
@@ -256,7 +261,12 @@ fn push_bit_values(
     } else if w <= 14 {
         let w2 = w * 2;
         let w4 = w * 4;
-        for _ in 0..(count / 4) {
+        let safe4 = if needed >= 8 {
+            (((needed - 8) * 8 + 7) / ((w as usize) * 4) + 1).min(count / 4)
+        } else {
+            0
+        };
+        for _ in 0..safe4 {
             let v0 = iter.next().unwrap_or(0) & mask;
             let v1 = iter.next().unwrap_or(0) & mask;
             let v2 = iter.next().unwrap_or(0) & mask;
@@ -302,17 +312,191 @@ fn push_bit_values(
     }
 }
 
+#[inline(always)]
+fn push_u8_bits(out: &mut Vec<u8>, values: &[u8], width: u8) {
+    let count = values.len();
+    if width == 0 || count == 0 {
+        return;
+    }
+    if width == 8 {
+        out.extend_from_slice(values);
+        return;
+    }
+    let needed = (count * (width as usize) + 7) >> 3;
+    let old_len = out.len();
+    out.reserve(needed);
+    let mut dst = unsafe { out.as_mut_ptr().add(old_len) };
+    let src = values.as_ptr();
+    if width == 1 {
+        let chunks8 = count >> 3;
+        for i in 0..chunks8 {
+            unsafe {
+                let v = src.add(i * 8).cast::<u64>().read_unaligned().to_le() & 0x0101_0101_0101_0101;
+                *dst.add(i) = (v.wrapping_mul(0x0102_0408_1020_4080) >> 56) as u8;
+            }
+        }
+        let rem = count & 7;
+        if rem != 0 {
+            let mut b = 0u8;
+            for k in 0..rem {
+                b |= unsafe { (*src.add(chunks8 * 8 + k) & 1) << k };
+            }
+            unsafe { *dst.add(chunks8) = b; }
+        }
+        unsafe { out.set_len(old_len + needed); }
+        return;
+    }
+    let w = width as u32;
+    let (w2, w4, w8) = (w * 2, w * 4, w * 8);
+    let (mut acc, mut bits) = (0u64, 0u32);
+    let chunks8 = count >> 3;
+    let safe8 = if needed >= 8 { ((needed - 8) / (w as usize) + 1).min(chunks8) } else { 0 };
+    for i in 0..safe8 {
+        unsafe {
+            let p = src.add(i * 8);
+            let p01 = (*p as u64) | ((*p.add(1) as u64) << w);
+            let p23 = (*p.add(2) as u64) | ((*p.add(3) as u64) << w);
+            let p45 = (*p.add(4) as u64) | ((*p.add(5) as u64) << w);
+            let p67 = (*p.add(6) as u64) | ((*p.add(7) as u64) << w);
+            let chunk = (p01 | (p23 << w2)) | ((p45 | (p67 << w2)) << w4);
+            acc |= chunk << bits;
+            bits += w8;
+            dst.cast::<u64>().write_unaligned(acc.to_le());
+            dst = dst.add((bits >> 3) as usize);
+            acc >>= bits & !7;
+            bits &= 7;
+        }
+    }
+    for i in (safe8 * 8)..count {
+        let val = unsafe { *src.add(i) as u64 };
+        acc |= val << bits;
+        let new_bits = bits + w;
+        if new_bits >= 64 {
+            unsafe { dst.cast::<u64>().write_unaligned(acc.to_le()); dst = dst.add(8); }
+            acc = val >> (64 - bits);
+            bits = new_bits - 64;
+        } else {
+            bits = new_bits;
+        }
+    }
+    if bits > 0 {
+        let le = acc.to_le_bytes();
+        unsafe { std::ptr::copy_nonoverlapping(le.as_ptr(), dst, ((bits + 7) >> 3) as usize); }
+    }
+    unsafe { out.set_len(old_len + needed); }
+}
+
+#[inline(always)]
+unsafe fn pack_mask16_eq(p: *const u8, q: *const u8) -> u16 {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::*;
+        const W: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let eq = vandq_u8(vceqq_u8(vld1q_u8(p), vld1q_u8(q)), vld1q_u8(W.as_ptr()));
+        let s1 = vpaddq_u8(eq, eq);
+        let s2 = vpaddq_u8(s1, s1);
+        vgetq_lane_u16::<0>(vreinterpretq_u16_u8(vpaddq_u8(s2, s2)))
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        _mm_movemask_epi8(_mm_cmpeq_epi8(
+            _mm_loadu_si128(p.cast::<__m128i>()),
+            _mm_loadu_si128(q.cast::<__m128i>()),
+        )) as u32 as u16
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    unsafe {
+        let mut m = 0u16;
+        for k in 0..16 {
+            m |= u16::from(*p.add(k) == *q.add(k)) << k;
+        }
+        m
+    }
+}
+
+#[inline(always)]
+fn push_eq_bitmap_u8(out: &mut Vec<u8>, ranks: &[u8], target: u8) {
+    let n = ranks.len();
+    if n == 0 {
+        return;
+    }
+    let needed = (n + 7) >> 3;
+    let old_len = out.len();
+    out.reserve(needed);
+    let dst = unsafe { out.as_mut_ptr().add(old_len) };
+    let ptr = ranks.as_ptr();
+    let tgt16 = [target; 16];
+    let mut i = 0usize;
+    while i + 16 <= n {
+        unsafe {
+            let m = pack_mask16_eq(ptr.add(i), tgt16.as_ptr());
+            dst.add(i >> 3).cast::<u16>().write_unaligned(m.to_le());
+        }
+        i += 16;
+    }
+    if i < n {
+        let mut m = 0u16;
+        for k in 0..(n - i) {
+            m |= u16::from(unsafe { *ptr.add(i + k) } == target) << k;
+        }
+        let rem_bytes = (n - i + 7) >> 3;
+        unsafe {
+            std::ptr::copy_nonoverlapping(m.to_le_bytes().as_ptr(), dst.add(i >> 3), rem_bytes);
+        }
+    }
+    unsafe { out.set_len(old_len + needed); }
+}
+
+#[inline(always)]
+fn push_adj_eq_bitmap_u8(out: &mut Vec<u8>, ranks: &[u8]) {
+    let n = ranks.len();
+    if n == 0 {
+        return;
+    }
+    let needed = (n + 7) >> 3;
+    let old_len = out.len();
+    out.reserve(needed);
+    let dst = unsafe { out.as_mut_ptr().add(old_len) };
+    let ptr = ranks.as_ptr();
+    let head = n.min(16);
+    let mut m0 = 0u16;
+    for k in 1..head {
+        m0 |= u16::from(unsafe { *ptr.add(k) == *ptr.add(k - 1) }) << k;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(m0.to_le_bytes().as_ptr(), dst, (head + 7) >> 3);
+    }
+    let mut i = 16usize;
+    while i + 16 <= n {
+        unsafe {
+            let m = pack_mask16_eq(ptr.add(i), ptr.add(i - 1));
+            dst.add(i >> 3).cast::<u16>().write_unaligned(m.to_le());
+        }
+        i += 16;
+    }
+    if i < n {
+        let mut mt = 0u16;
+        for k in 0..(n - i) {
+            mt |= u16::from(unsafe { *ptr.add(i + k) == *ptr.add(i + k - 1) }) << k;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(mt.to_le_bytes().as_ptr(), dst.add(i >> 3), (n - i + 7) >> 3);
+        }
+    }
+    unsafe { out.set_len(old_len + needed); }
+}
+
 /// Append `src` to `dst` without calling `memcpy` for the small pieces that
 /// dominate structured columns (segments and values are usually 1..16 bytes).
 ///
 /// Pieces up to 32 bytes are written with two overlapping fixed-width stores;
-/// larger pieces fall back to the platform copy. `dst` is reserved with 16
-/// bytes of slack so every store stays inside the allocation, and the length
-/// advances to exactly `old_len + src.len()`.
+/// larger pieces fall back to the platform copy. Every store stays within
+/// `pos..pos + src.len()`, and the length advances to `old_len + src.len()`.
 #[inline(always)]
 fn copy_bytes(dst: &mut Vec<u8>, src: &[u8]) {
     let len = src.len();
-    dst.reserve(len + 16);
+    dst.reserve(len);
     let pos = dst.len();
     unsafe {
         let out = dst.as_mut_ptr().add(pos);
@@ -398,57 +582,6 @@ impl OutSink {
         }
         self.pos += len;
         Ok(())
-    }
-}
-
-/// Flat column storage: all value bytes live in one buffer plus one range per
-/// value. Used by the strict oracle decoder.
-#[derive(Default)]
-struct FlatValues {
-    bytes: Vec<u8>,
-    ranges: Vec<(u32, u32)>,
-}
-
-impl FlatValues {
-    fn with_capacity(values: usize, bytes: usize) -> Self {
-        Self {
-            bytes: Vec::with_capacity(bytes.min(1 << 20)),
-            ranges: Vec::with_capacity(values),
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.ranges.len()
-    }
-
-    fn get(&self, index: usize) -> Option<&[u8]> {
-        let &(offset, len) = self.ranges.get(index)?;
-        let start = offset as usize;
-        self.bytes.get(start..start.checked_add(len as usize)?)
-    }
-
-    #[inline]
-    fn begin(&self) -> u32 {
-        self.bytes.len() as u32
-    }
-
-    #[inline]
-    fn finish(&mut self, start: u32) {
-        let len = (self.bytes.len() as u32) - start;
-        self.ranges.push((start, len));
-    }
-
-    #[inline]
-    fn push_slice(&mut self, value: &[u8]) {
-        let start = self.begin();
-        copy_bytes(&mut self.bytes, value);
-        self.finish(start);
-    }
-
-    fn materialize(&self) -> Vec<Vec<u8>> {
-        (0..self.len())
-            .map(|index| self.get(index).unwrap_or_default().to_vec())
-            .collect()
     }
 }
 

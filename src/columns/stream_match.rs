@@ -1,89 +1,96 @@
-#[inline(never)]
-fn refill_json_cache(data: &[u8], w: usize, cache: &mut (usize, u64, u64)) -> bool {
-    let base = w * 64;
-    let len = data.len();
-    if base + 64 <= len {
-        let q = unsafe { json_quote_mask64(data.as_ptr().add(base)) };
-        cache.0 = w;
-        cache.1 = q;
-        true
-    } else if base < len {
-        let rem = len - base;
-        let mut tail = [0u8; 64];
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr().add(base), tail.as_mut_ptr(), rem);
-            let q = json_quote_mask64(tail.as_ptr());
-            cache.0 = w;
-            cache.1 = q;
-        }
-        true
-    } else {
-        false
-    }
-}
-
-#[inline(never)]
-fn next_json_string_slow(
-    data: &[u8],
-    mut from: usize,
-    cache: &mut (usize, u64, u64),
-) -> Option<usize> {
-    let len = data.len();
-    let ptr = data.as_ptr();
-    loop {
-        if from >= len {
-            return None;
-        }
-        let w = from >> 6;
-        if cache.0 != w && !refill_json_cache(data, w, cache) {
-            return None;
-        }
-        let m = cache.1 >> (from & 63);
-        if m != 0 {
-            let end = from + m.trailing_zeros() as usize;
-            if end >= len {
-                return None;
-            }
-            let hit = unsafe { *ptr.add(end) };
-            if hit == b'"' {
-                return Some(end + 1);
-            }
-            if hit < 0x20 || end + 1 >= len || unsafe { *ptr.add(end + 1) } < 0x20 {
-                return None;
-            }
-            from = end + 2;
-        } else {
-            from = (w + 1) * 64;
-        }
-    }
-}
-
 #[inline(always)]
 fn scan_json_string_reg(
     data: &[u8],
     pos: usize,
     cw: &mut usize,
     cq: &mut u64,
+    cp: &mut u64,
     cache: &mut (usize, u64, u64),
 ) -> Option<usize> {
+    let len = data.len();
+    let ptr = data.as_ptr();
     let from = pos + 1;
     let w = from >> 6;
     if *cw != w {
-        if !refill_json_cache(data, w, cache) { return None; }
-        (*cw, *cq) = (cache.0, cache.1);
+        let base = w * 64;
+        if base + 64 <= len {
+            *cw = w;
+            (*cq, *cp) = unsafe { json_struct_masks64(ptr.add(base)) };
+        } else {
+            if !refill_json_cache(data, w, cache) { return None; }
+            (*cw, *cq, *cp) = *cache;
+        }
     }
     let m = *cq >> (from & 63);
     let slow_from = if m != 0 {
         let end = from + m.trailing_zeros() as usize;
-        if end < data.len() && unsafe { *data.as_ptr().add(end) } == b'"' { return Some(end + 1); }
+        if end < len && unsafe { *ptr.add(end) } == b'"' { return Some(end + 1); }
         end
     } else {
-        (w + 1) * 64
+        let nw = w + 1;
+        let nbase = nw * 64;
+        if nbase + 64 <= len {
+            let (nq, np) = unsafe { json_struct_masks64(ptr.add(nbase)) };
+            (*cw, *cq, *cp) = (nw, nq, np);
+            if nq != 0 {
+                let end = nbase + nq.trailing_zeros() as usize;
+                if unsafe { *ptr.add(end) } == b'"' { return Some(end + 1); }
+                end
+            } else {
+                (nw + 1) * 64
+            }
+        } else {
+            nbase
+        }
     };
-    (cache.0, cache.1) = (*cw, *cq);
+    *cache = (*cw, *cq, *cp);
     let res = next_json_string_slow(data, slow_from, cache);
-    (*cw, *cq) = (cache.0, cache.1);
+    (*cw, *cq, *cp) = *cache;
     res
+}
+
+#[inline(always)]
+fn scan_json_prim_reg(
+    data: &[u8],
+    pos: usize,
+    cw: &mut usize,
+    cq: &mut u64,
+    cp: &mut u64,
+    cache: &mut (usize, u64, u64),
+) -> usize {
+    let len = data.len();
+    let from = pos + 1;
+    if from >= len {
+        return len;
+    }
+    let ptr = data.as_ptr();
+    let w = from >> 6;
+    if *cw != w {
+        let base = w * 64;
+        if base + 64 <= len {
+            *cw = w;
+            (*cq, *cp) = unsafe { json_struct_masks64(ptr.add(base)) };
+        } else if refill_json_cache(data, w, cache) {
+            (*cw, *cq, *cp) = *cache;
+        } else {
+            return len;
+        }
+    }
+    let m = *cp >> (from & 63);
+    if m != 0 {
+        return (from + m.trailing_zeros() as usize).min(len);
+    }
+    let nw = w + 1;
+    let nbase = nw * 64;
+    if nbase + 64 <= len {
+        let (nq, np) = unsafe { json_struct_masks64(ptr.add(nbase)) };
+        (*cw, *cq, *cp) = (nw, nq, np);
+        if np != 0 {
+            return nbase + np.trailing_zeros() as usize;
+        }
+        return scan_primitive_end(ptr, len, nbase + 63);
+    }
+    scan_primitive_end(ptr, len, pos)
 }
 
 /// Delimited (CSV/TSV/PSV) row matcher at `data[start..]`. With on-demand 64-byte
@@ -91,12 +98,15 @@ fn scan_json_string_reg(
 /// path cannot *prove* success (escape, control byte, long value, any mismatch) it
 /// defers to the scalar reference matcher, so results are identical by construction.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn try_match_delimited_stream<'a>(
     data: &'a [u8],
     start: usize,
     segments: &[&'a [u8]],
     delim: u8,
     cache: &mut (usize, u64, u64),
+    col_ptrs: &[*mut &'a [u8]; MAX_SLOTS],
+    row_idx: usize,
     out_values: &mut [&'a [u8]; MAX_SLOTS],
 ) -> Option<usize> {
     let slots = segments.len() - 1;
@@ -114,39 +124,81 @@ fn try_match_delimited_stream<'a>(
                 let fp = pos + 1;
                 let w = fp >> 6;
                 if cw != w {
-                    if !refill_delim_cache(data, w, delim, cache) { break 'fast; }
-                    (cw, cq, cu) = *cache;
+                    let base = w * 64;
+                    if base + 64 <= len {
+                        (cq, cu) = unsafe { delimited_masks64(ptr.add(base), delim) };
+                        cw = w;
+                    } else {
+                        if !refill_delim_cache(data, w, delim, cache) { break 'fast; }
+                        (cw, cq, cu) = *cache;
+                    }
                 }
                 let m = cq >> (fp & 63);
                 let end = if m != 0 {
                     fp + m.trailing_zeros() as usize
                 } else {
-                    *cache = (cw, cq, cu);
-                    let Some(e) = next_delim_bit_slow(data, delim, w, true, cache) else { break 'fast; };
-                    (cw, cq, cu) = *cache;
-                    e
+                    let nw = w + 1;
+                    let nbase = nw * 64;
+                    if nbase + 64 <= len {
+                        (cq, cu) = unsafe { delimited_masks64(ptr.add(nbase), delim) };
+                        cw = nw;
+                        if cq != 0 {
+                            nbase + cq.trailing_zeros() as usize
+                        } else {
+                            *cache = (cw, cq, cu);
+                            let Some(e) = next_delim_bit_slow(data, delim, nw, true, cache) else { break 'fast; };
+                            (cw, cq, cu) = *cache;
+                            e
+                        }
+                    } else {
+                        *cache = (cw, cq, cu);
+                        let Some(e) = next_delim_bit_slow(data, delim, w, true, cache) else { break 'fast; };
+                        (cw, cq, cu) = *cache;
+                        e
+                    }
                 };
                 if end >= len || unsafe { *ptr.add(end) } != b'"' { break 'fast; }
                 end + 1
             } else {
                 let w = pos >> 6;
                 if cw != w {
-                    if !refill_delim_cache(data, w, delim, cache) { break 'fast; }
-                    (cw, cq, cu) = *cache;
+                    let base = w * 64;
+                    if base + 64 <= len {
+                        (cq, cu) = unsafe { delimited_masks64(ptr.add(base), delim) };
+                        cw = w;
+                    } else {
+                        if !refill_delim_cache(data, w, delim, cache) { break 'fast; }
+                        (cw, cq, cu) = *cache;
+                    }
                 }
                 let m = cu >> (pos & 63);
                 let end = if m != 0 {
                     pos + m.trailing_zeros() as usize
                 } else {
-                    *cache = (cw, cq, cu);
-                    let Some(e) = next_delim_bit_slow(data, delim, w, false, cache) else { break 'fast; };
-                    (cw, cq, cu) = *cache;
-                    e
+                    let nw = w + 1;
+                    let nbase = nw * 64;
+                    if nbase + 64 <= len {
+                        (cq, cu) = unsafe { delimited_masks64(ptr.add(nbase), delim) };
+                        cw = nw;
+                        if cu != 0 {
+                            nbase + cu.trailing_zeros() as usize
+                        } else {
+                            *cache = (cw, cq, cu);
+                            let Some(e) = next_delim_bit_slow(data, delim, nw, false, cache) else { break 'fast; };
+                            (cw, cq, cu) = *cache;
+                            e
+                        }
+                    } else {
+                        *cache = (cw, cq, cu);
+                        let Some(e) = next_delim_bit_slow(data, delim, w, false, cache) else { break 'fast; };
+                        (cw, cq, cu) = *cache;
+                        e
+                    }
                 };
                 if end == pos || end > len { break 'fast; }
                 end
             };
-            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..val_end); }
+            unsafe { *col_ptrs.get_unchecked(slot).add(row_idx) = data.get_unchecked(pos..val_end); }
             pos = val_end;
             if slot + 1 < slots {
                 if pos >= len || unsafe { *ptr.add(pos) } != delim { break 'fast; }
@@ -166,7 +218,11 @@ fn try_match_delimited_stream<'a>(
         return Some(pos - start);
     }
     *cache = (cw, cq, cu);
-    try_match_delimited_scalar(unsafe { data.get_unchecked(start..) }, segments, delim, out_values)
+    let line_len = try_match_delimited_scalar(unsafe { data.get_unchecked(start..) }, segments, delim, out_values)?;
+    for slot in 0..slots {
+        unsafe { *col_ptrs.get_unchecked(slot).add(row_idx) = *out_values.get_unchecked(slot); }
+    }
+    Some(line_len)
 }
 
 /// Scalar reference matcher for delimited rows (also the fallback of the bitmask path).
@@ -350,53 +406,6 @@ fn try_match_logfmt_scalar<'a>(
     (pos - last_len <= 4096).then_some(pos)
 }
 
-thread_local! {
-    static ENCODE_VEC_POOL: std::cell::RefCell<Vec<Vec<&'static [u8]>>> =
-        std::cell::RefCell::new(Vec::with_capacity(128));
-}
-
-/// Smallest capacity across a template's column vectors.
-///
-/// Columns come from a pool and can have different capacities, so the fast row loops must bound
-/// their unchecked writes by the minimum over *all* slots, not by slot 0 alone (that was a heap
-/// buffer overflow when slot 0 was larger than another slot).
-#[inline(always)]
-fn min_col_capacity(values: &[Vec<&[u8]>]) -> usize {
-    values.iter().map(Vec::capacity).min().unwrap_or(0)
-}
-
-#[inline(always)]
-fn take_col_vec<'a>(est_rows: usize) -> Vec<&'a [u8]> {
-    let v = ENCODE_VEC_POOL.with(|cell| cell.borrow_mut().pop());
-    match v {
-        Some(mut vec_static) => {
-            vec_static.clear();
-            vec_static.reserve(est_rows);
-            unsafe { core::mem::transmute::<Vec<&'static [u8]>, Vec<&'a [u8]>>(vec_static) }
-        }
-        None => Vec::with_capacity(est_rows),
-    }
-}
-
-impl<'a> Drop for Template<'a> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        ENCODE_VEC_POOL.with(|cell| {
-            if let Ok(mut pool) = cell.try_borrow_mut() {
-                for mut col in core::mem::take(&mut self.values) {
-                    if pool.len() < 128 && col.capacity() >= 16 {
-                        col.clear();
-                        let vec_static = unsafe {
-                            core::mem::transmute::<Vec<&'a [u8]>, Vec<&'static [u8]>>(col)
-                        };
-                        pool.push(vec_static);
-                    }
-                }
-            }
-        });
-    }
-}
-
 #[inline(always)]
 fn try_match_clean_stream<'a>(
     data: &'a [u8],
@@ -562,33 +571,6 @@ fn try_match_clean_stream<'a>(
         if !switched {
             return None;
         }
-    }
-}
-
-thread_local! {
-    static ENCODE_ROW_POOL: std::cell::RefCell<Vec<Row<'static>>> =
-        std::cell::RefCell::new(Vec::with_capacity(512));
-}
-
-#[inline(always)]
-fn take_row_vec<'a>(est_rows: usize) -> Vec<Row<'a>> {
-    let mut vec_static = ENCODE_ROW_POOL.with(|cell| core::mem::take(&mut *cell.borrow_mut()));
-    vec_static.clear();
-    vec_static.reserve(est_rows);
-    unsafe { core::mem::transmute::<Vec<Row<'static>>, Vec<Row<'a>>>(vec_static) }
-}
-
-#[inline(always)]
-fn return_row_vec<'a>(mut rows: Vec<Row<'a>>) {
-    if rows.capacity() >= 64 {
-        rows.clear();
-        let vec_static = unsafe { core::mem::transmute::<Vec<Row<'a>>, Vec<Row<'static>>>(rows) };
-        ENCODE_ROW_POOL.with(|cell| {
-            let mut pool = cell.borrow_mut();
-            if vec_static.capacity() > pool.capacity() {
-                *pool = vec_static;
-            }
-        });
     }
 }
 

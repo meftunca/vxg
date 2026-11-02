@@ -77,15 +77,10 @@ fn probe_early16(values: &[&[u8]]) -> (usize, bool) {
 fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, ModelKind) {
     let n = values.len();
     if n < 2 {
-        let raw = pack_raw_model(values);
-        if allow_v3_ext && raw.len() >= 128 {
-            let mut lz = Vec::with_capacity(raw.len() / 2);
-            if pack_fast_lz_into(&raw[1..], &mut lz).is_some() && lz.len() + 8 < raw.len() {
-                lz[0] = MODEL_LZ_RAW;
-                return (lz, ModelKind::Raw);
-            }
+        if allow_v3_ext {
+            return (pack_raw_or_lz_model(values), ModelKind::Raw);
         }
-        return (raw, ModelKind::Raw);
+        return (pack_raw_model(values), ModelKind::Raw);
     }
 
     let first_slice = values[0];
@@ -119,7 +114,11 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                 if best_bytes.is_some() || len < min_raw_size || len < get_raw_size!() {
                     best_len = len;
                     best_kind = $kind;
-                    best_bytes = Some(bytes);
+                    if let Some(old) = best_bytes.replace(bytes) {
+                        put_model_buf(old);
+                    }
+                } else {
+                    put_model_buf(bytes);
                 }
             }
         }};
@@ -235,13 +234,15 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                             };
                             if 17 < lim {
                                 let step = step64;
-                                let mut out = Vec::with_capacity(17);
+                                let mut out = take_model_buf(17);
                                 out.push(MODEL_DECIMAL_AFFINE);
                                 out.extend_from_slice(&first_num.to_le_bytes());
                                 out.extend_from_slice(&step.to_le_bytes());
                                 best_len = 17;
                                 best_kind = ModelKind::DecimalAffine;
-                                best_bytes = Some(out);
+                                if let Some(old) = best_bytes.replace(out) {
+                                    put_model_buf(old);
+                                }
                             }
                         }
                         // When `affine_ok && step128 != 0 && n >= 49`, `DecimalAffine` (17 bytes, rank 2)
@@ -266,7 +267,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                                         get_raw_size!()
                                     };
                                     if ds < lim {
-                                        let mut out = Vec::with_capacity(ds);
+                                        let mut out = take_model_buf(ds);
                                         out.push(MODEL_DECIMAL_DELTA);
                                         out.extend_from_slice(&first_num.to_le_bytes());
                                         out.push(delta_width);
@@ -281,7 +282,9 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                                         );
                                         best_len = ds;
                                         best_kind = ModelKind::DecimalDelta;
-                                        best_bytes = Some(out);
+                                        if let Some(old) = best_bytes.replace(out) {
+                                            put_model_buf(old);
+                                        }
                                     }
                                 } else {
                                     let lim = if best_bytes.is_some() {
@@ -292,7 +295,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                                         get_raw_size!()
                                     };
                                     if packed_size < lim {
-                                        let mut out = Vec::with_capacity(packed_size);
+                                        let mut out = take_model_buf(packed_size);
                                         out.push(MODEL_DECIMAL_PACKED);
                                         out.extend_from_slice(&min.to_le_bytes());
                                         out.push(packed_width);
@@ -304,7 +307,9 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                                         );
                                         best_len = packed_size;
                                         best_kind = ModelKind::DecimalPacked;
-                                        best_bytes = Some(out);
+                                        if let Some(old) = best_bytes.replace(out) {
+                                            put_model_buf(old);
+                                        }
                                     }
                                 }
                             }
@@ -360,15 +365,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
             try_model!(|limit| pack_hex_suffix_model_mode(values, limit, false), ModelKind::HexSuffix);
         }
         if allow_v3_ext && best_kind == ModelKind::Raw {
-            let raw = pack_raw_model(values);
-            if (64..=65536).contains(&(raw.len() - 1)) && raw.len() >= 128 {
-                let mut lz = Vec::with_capacity(raw.len());
-                if pack_fast_lz_into(&raw[1..], &mut lz).is_some() && lz.len() + 8 < raw.len() {
-                    lz[0] = MODEL_LZ_RAW;
-                    return (lz, ModelKind::Raw);
-                }
-            }
-            return (raw, best_kind);
+            return (pack_raw_or_lz_model(values), ModelKind::Raw);
         }
         let _ = best_len;
         return (best_bytes.unwrap_or_else(|| pack_raw_model(values)), best_kind);
@@ -448,7 +445,9 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                         if let Some(gf2_out) = pack_gf2_affine_from_raw64(prefix, &hb[hdr_len..], n, lim) {
                             best_len = gf2_out.len();
                             best_kind = ModelKind::Gf2Affine;
-                            best_bytes = Some(gf2_out);
+                            if let Some(old) = best_bytes.replace(gf2_out) {
+                                put_model_buf(old);
+                            }
                         }
                     } else {
                         try_model!(|limit| pack_gf2_affine_model(values, limit), ModelKind::Gf2Affine);
@@ -482,11 +481,11 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
             }
             s == 0 || inner0[..s].ends_with(b"; ")
         };
-    let seg_chars_ok = !dec_suffix_dominates_seg
-        && (!allow_v3_ext || best_len > 6 + (n + 7) / 8)
-        && inner0.iter().all(|&b| segment_byte_ok(b) || b == b';');
-    let looks_like_segment_dict =
-        seg_chars_ok && (last_inner_byte == b' ' || find_byte(b';', inner0).is_some());
+    let can_try_seg = !dec_suffix_dominates_seg && (!allow_v3_ext || best_len > 6 + (n + 7) / 8);
+    let mut seg_chars_opt: Option<bool> = None;
+    let looks_like_segment_dict = can_try_seg
+        && (last_inner_byte == b' ' || find_byte(b';', inner0).is_some())
+        && *seg_chars_opt.insert(inner0.iter().all(|&b| segment_byte_ok(b) || b == b';'));
     if looks_like_segment_dict {
         try_model!(
             |limit| pack_segment_dictionary_model(values, limit),
@@ -529,12 +528,13 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
 
     // 6. SegmentDict fallback when `inner0` had no `;` or trailing space:
     if !looks_like_segment_dict
-        && seg_chars_ok
+        && can_try_seg
         && (!allow_v3_ext
             || best_kind == ModelKind::Raw
             || values[1..n.min(8)]
                 .iter()
                 .any(|v| v.len() >= 3 && (v[v.len() - 2] == b' ' || find_byte(b';', v).is_some())))
+        && seg_chars_opt.unwrap_or_else(|| inner0.iter().all(|&b| segment_byte_ok(b) || b == b';'))
     {
         try_model!(
             |limit| pack_segment_dictionary_model(values, limit),
@@ -555,15 +555,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
     }
 
     if allow_v3_ext && best_kind == ModelKind::Raw {
-        let raw = pack_raw_model(values);
-        if (64..=65536).contains(&(raw.len() - 1)) && raw.len() >= 128 {
-            let mut lz = Vec::with_capacity(raw.len());
-            if pack_fast_lz_into(&raw[1..], &mut lz).is_some() && lz.len() + 8 < raw.len() {
-                lz[0] = MODEL_LZ_RAW;
-                return (lz, ModelKind::Raw);
-            }
-        }
-        return (raw, best_kind);
+        return (pack_raw_or_lz_model(values), ModelKind::Raw);
     }
 
     let _ = best_len;

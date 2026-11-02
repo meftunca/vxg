@@ -66,12 +66,21 @@ impl<'a> ExecColumn<'a> {
                 BoundStream::Copy16After16 { ptr, .. }
                 | BoundStream::Copy16After32 { ptr, .. }
                 | BoundStream::Copy16 { ptr, .. } => *ptr = ptr.add(n * 16),
+                BoundStream::Copy32After16 { ptr, .. }
+                | BoundStream::Copy32After32 { ptr, .. }
+                | BoundStream::Copy32 { ptr, .. } => *ptr = ptr.add(n * 32),
                 BoundStream::HexSuffix4 { ptr } => *ptr = ptr.add(n * 4),
                 BoundStream::HexSuffix8After16 { ptr }
                 | BoundStream::HexSuffix8After32 { ptr }
                 | BoundStream::HexSuffix8 { ptr } => *ptr = ptr.add(n * 8),
                 BoundStream::HexSuffix { cursor, width } => cursor.pos += n * (*width),
-                BoundStream::SegmentDict { str_ptr, len_ptr } => {
+                BoundStream::SegmentDict16After16 { str_ptr, len_ptr }
+                | BoundStream::SegmentDict16After32 { str_ptr, len_ptr }
+                | BoundStream::SegmentDict16 { str_ptr, len_ptr }
+                | BoundStream::SegmentDict32After16 { str_ptr, len_ptr }
+                | BoundStream::SegmentDict32After32 { str_ptr, len_ptr }
+                | BoundStream::SegmentDict32 { str_ptr, len_ptr }
+                | BoundStream::SegmentDict { str_ptr, len_ptr } => {
                     let mut byte_sum = 0usize;
                     for i in 0..n {
                         byte_sum += (*len_ptr.add(i)) as usize;

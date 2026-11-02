@@ -81,11 +81,9 @@ fn raw_model_size(values: &[&[u8]]) -> usize {
 }
 
 fn pack_raw_model(values: &[&[u8]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw_model_size(values));
-    out.push(MODEL_RAW);
-    for value in values {
-        put_bytes(&mut out, value);
-    }
+    let total_size = raw_model_size(values);
+    let mut out = take_model_buf(total_size + 32);
+    write_raw_values_into(&mut out, values, total_size);
     out
 }
 
@@ -137,6 +135,11 @@ struct ModelScratch {
     raw_lens: Vec<u8>,
     raw_stream: Vec<u8>,
     raw_lz: Vec<u8>,
+    dict_slots: Vec<u32>,
+    dict_uniq: Vec<(*const u8, usize)>,
+    dict_row_ids: Vec<u32>,
+    dict_order: Vec<u32>,
+    dict_rank: Vec<u32>,
 }
 
 thread_local! {
@@ -210,7 +213,7 @@ fn dict_words_and_hash(bytes: &[u8]) -> (u64, u64, u64) {
                 b,
                 a ^ b.rotate_left(17) ^ c.rotate_left(33) ^ d.rotate_left(49) ^ (len as u64),
             )
-        } else if len >= 8 {
+        } else if len > 8 {
             let a = ptr.cast::<u64>().read_unaligned();
             let b = ptr.add(len - 8).cast::<u64>().read_unaligned();
             (a, b, a ^ b.rotate_left(31) ^ (len as u64))
@@ -270,7 +273,7 @@ fn pack_dictionary_model_mode_impl(values: &[&[u8]], limit: usize, allow_front: 
         if size >= limit {
             return None;
         }
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_DICTIONARY);
         out.push(1);
         put_bytes(&mut out, first);
@@ -502,6 +505,56 @@ fn pack_dictionary_model_mode_impl(values: &[&[u8]], limit: usize, allow_front: 
         }
         let sorted_entries: &[&[u8]] =
             unsafe { std::slice::from_raw_parts(sorted_ptr, u) };
+        #[cfg(target_arch = "aarch64")]
+        if u <= 16 {
+            unsafe {
+                use core::arch::aarch64::*;
+                let mut lut16 = [0u8; 16];
+                std::ptr::copy_nonoverlapping(rank_of_ptr, lut16.as_mut_ptr(), u);
+                let v_lut = vld1q_u8(lut16.as_ptr());
+                let p = raw_ids_slice.as_mut_ptr();
+                let mut i = 0usize;
+                while i + 16 <= n {
+                    vst1q_u8(p.add(i), vqtbl1q_u8(v_lut, vld1q_u8(p.add(i))));
+                    i += 16;
+                }
+                while i < n {
+                    *p.add(i) = *rank_of_ptr.add(*p.add(i) as usize);
+                    i += 1;
+                }
+            }
+        } else {
+            for id in raw_ids_slice.iter_mut() {
+                *id = unsafe { *rank_of_ptr.add(*id as usize) };
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        if u <= 16 {
+            unsafe {
+                use core::arch::x86_64::*;
+                let mut lut16 = [0u8; 16];
+                std::ptr::copy_nonoverlapping(rank_of_ptr, lut16.as_mut_ptr(), u);
+                let v_lut = _mm_loadu_si128(lut16.as_ptr().cast::<__m128i>());
+                let p = raw_ids_slice.as_mut_ptr();
+                let mut i = 0usize;
+                while i + 16 <= n {
+                    _mm_storeu_si128(
+                        p.add(i).cast::<__m128i>(),
+                        _mm_shuffle_epi8(v_lut, _mm_loadu_si128(p.add(i).cast::<__m128i>())),
+                    );
+                    i += 16;
+                }
+                while i < n {
+                    *p.add(i) = *rank_of_ptr.add(*p.add(i) as usize);
+                    i += 1;
+                }
+            }
+        } else {
+            for id in raw_ids_slice.iter_mut() {
+                *id = unsafe { *rank_of_ptr.add(*id as usize) };
+            }
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         for id in raw_ids_slice.iter_mut() {
             *id = unsafe { *rank_of_ptr.add(*id as usize) };
         }
@@ -519,74 +572,6 @@ fn pack_dictionary_model_mode_impl(values: &[&[u8]], limit: usize, allow_front: 
         );
     }
 
-    // Fallback for dictionaries with > 256 unique entries (`MODEL_DICTIONARY` only):
-    if n <= 256 {
-        return None;
-    }
-    let min_packed_len = (n * 9 + 7) >> 3;
-    if 3 + dict_bytes_sum + min_packed_len >= limit {
-        return None;
-    }
-    // Hash dedup (no full sort): exact size check first, then sort only the `u`
-    // unique entries and map each row to its rank via the dedup id.
-    let cap = (n * 2).next_power_of_two();
-    let mask = cap - 1;
-    let hshift = 64 - cap.trailing_zeros();
-    let mut slots: Vec<u32> = vec![u32::MAX; cap];
-    let mut uniq: Vec<&[u8]> = Vec::with_capacity(n.min(1024));
-    let mut row_ids: Vec<u32> = Vec::with_capacity(n);
-    let mut plain_dict_bytes = 0usize;
-    for &val in values {
-        // Multiplicative hash: take the high bits (low bits only see low input bits).
-        let mut pos = (hash_slice(val) >> hshift) as usize;
-        let id = loop {
-            let s = slots[pos];
-            if s == u32::MAX {
-                let id = uniq.len() as u32;
-                slots[pos] = id;
-                uniq.push(val);
-                plain_dict_bytes += uleb_len(val.len()) + val.len();
-                if 3 + plain_dict_bytes + min_packed_len >= limit {
-                    return None;
-                }
-                break id;
-            }
-            if slice_eq_fast(uniq[s as usize], val) {
-                break s;
-            }
-            pos = (pos + 1) & mask;
-        };
-        row_ids.push(id);
-    }
-    let u = uniq.len();
-    if u == n {
-        return None;
-    }
-    let width = bit_width((u - 1) as u64);
-    let packed_len = bit_bytes(n, width).ok()?;
-    let size = 1 + uleb_len(u) + plain_dict_bytes + 1 + packed_len;
-    if size >= limit {
-        return None;
-    }
-    let mut order: Vec<u32> = (0..u as u32).collect();
-    order.sort_unstable_by(|&a, &b| uniq[a as usize].cmp(uniq[b as usize]));
-    let mut rank = vec![0u32; u];
-    for (r, &id) in order.iter().enumerate() {
-        rank[id as usize] = r as u32;
-    }
-    let mut out = Vec::with_capacity(size);
-    out.push(MODEL_DICTIONARY);
-    put_uleb(&mut out, u);
-    for &id in &order {
-        put_bytes(&mut out, uniq[id as usize]);
-    }
-    out.push(width);
-    push_bit_values(
-        &mut out,
-        n,
-        width,
-        row_ids.iter().map(|&id| rank[id as usize] as u64),
-    );
-    Some(out)
+    pack_large_dict_fallback(values, dict_bytes_sum, limit)
 }
 

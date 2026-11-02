@@ -31,11 +31,13 @@ fn grammar_from_block_mode_impl<'a>(
 ) -> Result<(Vec<Template<'a>>, Vec<Row<'a>>, usize, usize, usize)> {
     let first_nl = find_byte(b'\n', data).map_or(data.len(), |i| i + 1);
     let est_rows = (data.len() / first_nl.max(24).min(64)).max(16) + 16;
-    let mut templates = Vec::<Template<'a>>::with_capacity(8);
-    let mut clean_flags = Vec::<bool>::with_capacity(8);
-    let mut clean_nl_flags = Vec::<bool>::with_capacity(8);
-    let mut delim_flags = Vec::<Option<u8>>::with_capacity(8);
-    let mut space_flags = Vec::<u8>::with_capacity(8);
+    let mut templates = take_tpl_vec();
+    let mut clean_flags_uninit = core::mem::MaybeUninit::<[bool; MAX_TEMPLATES + 1]>::uninit();
+    let mut clean_nl_flags_uninit = core::mem::MaybeUninit::<[bool; MAX_TEMPLATES + 1]>::uninit();
+    let clean_ptr = clean_flags_uninit.as_mut_ptr().cast::<bool>();
+    let clean_nl_ptr = clean_nl_flags_uninit.as_mut_ptr().cast::<bool>();
+    let mut delim_flag0: Option<u8> = None;
+    let mut space_flag0: u8 = 0;
     let mut shared_segs = [[0u8; 16]; 16];
     let mut max_shared = [0u8; 16];
     let mut has_json_tpl = false;
@@ -60,7 +62,7 @@ fn grammar_from_block_mode_impl<'a>(
 
         // Single-pass stream fast path: match directly on `data` without scanning for `\n` first,
         // and switch templates mid-line on shared prefix segments without re-scanning `0..pos`.
-        if templates.len() == 1 && clean_nl_flags[0] && !templates[0].values.is_empty() {
+        if templates.len() == 1 && unsafe { *clean_nl_ptr } && !templates[0].values.is_empty() {
             let tpl = unsafe { templates.get_unchecked_mut(0) };
             let slots = tpl.values.len();
             let mut row_idx = unsafe { tpl.values.get_unchecked(0).len() };
@@ -108,11 +110,11 @@ fn grammar_from_block_mode_impl<'a>(
                 rows.resize(rows.len() + added, Row::Template(0));
                 continue;
             }
-        } else if templates.len() == 1 && (delim_flags[0].is_some() || space_flags[0] != 0) {
+        } else if templates.len() == 1 && (delim_flag0.is_some() || space_flag0 != 0) {
             let tpl = unsafe { templates.get_unchecked_mut(0) };
             let slots = tpl.values.len();
-            let delim_opt = delim_flags[0];
-            let sk = space_flags[0];
+            let delim_opt = delim_flag0;
+            let sk = space_flag0;
             let target_delim = if let Some(d) = delim_opt {
                 d
             } else if sk == 2 {
@@ -150,10 +152,11 @@ fn grammar_from_block_mode_impl<'a>(
                 continue;
             }
         } else if !templates.is_empty() {
+            let clean_nl_slice = unsafe { std::slice::from_raw_parts(clean_nl_ptr, templates.len()) };
             if match_multi_clean_stream(
                 data,
                 &mut templates,
-                &clean_nl_flags,
+                clean_nl_slice,
                 &shared_segs,
                 &max_shared,
                 &mut last_template,
@@ -179,8 +182,7 @@ fn grammar_from_block_mode_impl<'a>(
         if !templates.is_empty() {
             let mut matched_other = None;
             for (idx, tpl) in templates.iter().enumerate() {
-                if clean_flags[idx]
-                    && !clean_nl_flags[idx]
+                if unsafe { *clean_ptr.add(idx) && !*clean_nl_ptr.add(idx) }
                     && try_match_clean_template(record, &tpl.segments, val_buf)
                 {
                     matched_other = Some(idx);
@@ -244,7 +246,7 @@ fn grammar_from_block_mode_impl<'a>(
                     let index = existing.unwrap_or_else(|| {
                         if templates.len() == 1
                             && rows.len() == 1
-                            && !clean_nl_flags[0]
+                            && unsafe { !*clean_nl_ptr }
                             && !has_json_tpl
                         {
                             let first_slice = &data[..first_nl];
@@ -255,14 +257,12 @@ fn grammar_from_block_mode_impl<'a>(
                             raw_rows += 1;
                             raw_bytes += first_slice.len();
                             templates.clear();
-                            clean_flags.clear();
-                            clean_nl_flags.clear();
-                            delim_flags.clear();
-                            space_flags.clear();
+                            delim_flag0 = None;
+                            space_flag0 = 0;
                             max_shared = [0u8; 16];
                             has_json_tpl = false;
                         }
-                        let mut segments = Vec::with_capacity(slot_count + 1);
+                        let mut segments = take_seg_vec(slot_count + 1);
                         let mut prev = 0usize;
                         for &(start, end) in spans {
                             segments.push(&record[prev..start as usize]);
@@ -317,14 +317,18 @@ fn grammar_from_block_mode_impl<'a>(
                             }
                             max_shared[new_idx] = new_max;
                         }
-                        clean_flags.push(is_clean);
-                        clean_nl_flags.push(is_clean_nl);
-                        delim_flags.push(delim_opt);
-                        space_flags.push(space_kind);
+                        if new_idx <= MAX_TEMPLATES {
+                            unsafe {
+                                *clean_ptr.add(new_idx) = is_clean;
+                                *clean_nl_ptr.add(new_idx) = is_clean_nl;
+                            }
+                        }
+                        if new_idx == 0 {
+                            delim_flag0 = delim_opt;
+                            space_flag0 = space_kind;
+                        }
                         templates.push(Template {
-                            values: (0..slot_count)
-                                .map(|_| take_col_vec(est_rows))
-                                .collect(),
+                            values: take_outer_col_vec(slot_count, est_rows),
                             segments,
                         });
                         new_idx
@@ -373,13 +377,19 @@ fn grammar_from_block_mode_impl<'a>(
                     }
                 }
                 max_shared[new_idx] = new_max;
-                clean_flags.push(false);
-                clean_nl_flags.push(true);
-                delim_flags.push(None);
-                space_flags.push(0);
+                unsafe {
+                    *clean_ptr.add(new_idx) = false;
+                    *clean_nl_ptr.add(new_idx) = true;
+                }
+                if new_idx == 0 {
+                    delim_flag0 = None;
+                    space_flag0 = 0;
+                }
+                let mut segs = take_seg_vec(1);
+                segs.push(record);
                 templates.push(Template {
                     values: Vec::new(),
-                    segments: vec![record],
+                    segments: segs,
                 });
                 for entry in &mut raw_history {
                     if entry.0 != usize::MAX && slice_eq_fast(entry.1, record) {

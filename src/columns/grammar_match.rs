@@ -121,13 +121,75 @@ unsafe fn scan_clf_bracket(ptr: *const u8, len: usize, pos: usize) -> Option<usi
     None
 }
 
+#[derive(Clone, Copy)]
+struct SegMatcher {
+    w0: u64,
+    m0: u64,
+    w1: u64,
+    m1: u64,
+    len: usize,
+}
+
+impl SegMatcher {
+    #[inline(always)]
+    fn new(seg: &[u8]) -> Self {
+        let len = seg.len();
+        let mut buf = [0u8; 16];
+        let mut msk = [0u8; 16];
+        let n = len.min(16);
+        buf[..n].copy_from_slice(&seg[..n]);
+        msk[..n].fill(0xff);
+        Self {
+            w0: u64::from_ne_bytes(buf[0..8].try_into().unwrap()),
+            m0: u64::from_ne_bytes(msk[0..8].try_into().unwrap()),
+            w1: u64::from_ne_bytes(buf[8..16].try_into().unwrap()),
+            m1: u64::from_ne_bytes(msk[8..16].try_into().unwrap()),
+            len,
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn matches(
+        &self,
+        data: &[u8],
+        ptr: *const u8,
+        total_len: usize,
+        pos: usize,
+        seg: &[u8],
+    ) -> bool {
+        if self.len <= 16 && pos + 16 <= total_len {
+            let d0 = (unsafe { ptr.add(pos).cast::<u64>().read_unaligned() } ^ self.w0) & self.m0;
+            let d1 =
+                (unsafe { ptr.add(pos + 8).cast::<u64>().read_unaligned() } ^ self.w1) & self.m1;
+            (d0 | d1) == 0
+        } else {
+            let end = pos + self.len;
+            end <= total_len && slice_eq_fast(unsafe { data.get_unchecked(pos..end) }, seg)
+        }
+    }
+}
+
+#[inline(always)]
+fn init_seg_matchers(
+    segs: &[&[u8]],
+    out: &mut [core::mem::MaybeUninit<SegMatcher>; MAX_SLOTS + 1],
+) {
+    for (i, &s) in segs.iter().enumerate() {
+        unsafe {
+            out.get_unchecked_mut(i).write(SegMatcher::new(s));
+        }
+    }
+}
+
 #[inline(always)]
 fn try_match_clf_stream<'a>(
     data: &'a [u8],
     start: usize,
     segments: &[&'a [u8]],
+    seg_matchers: &[core::mem::MaybeUninit<SegMatcher>; MAX_SLOTS + 1],
     quote_cache: &mut (usize, u64, u64),
-    out_values: &mut [&'a [u8]; MAX_SLOTS],
+    col_ptrs: &[*mut &'a [u8]; MAX_SLOTS],
+    row_idx: usize,
 ) -> Option<usize> {
     let slots = segments.len() - 1;
     let len = data.len();
@@ -142,22 +204,23 @@ fn try_match_clf_stream<'a>(
     if end0 - start < 7 {
         return None;
     }
-    unsafe { *out_values.get_unchecked_mut(0) = data.get_unchecked(start..end0); }
+    unsafe { *col_ptrs.get_unchecked(0).add(row_idx) = data.get_unchecked(start..end0); }
     let mut pos = end0;
     let mut has_structured = false;
-    let (mut cw, mut cq) = (quote_cache.0, quote_cache.1);
+    let (mut cw, mut cq, mut cp) = *quote_cache;
     for slot in 1..slots {
         let seg = unsafe { *segments.get_unchecked(slot) };
-        let next_pos = pos + seg.len();
-        if next_pos >= len || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_pos) }, seg) {
+        let sm = unsafe { seg_matchers.get_unchecked(slot).assume_init_ref() };
+        let next_pos = pos + sm.len;
+        if next_pos >= len || unsafe { !sm.matches(data, ptr, len, pos, seg) } {
             return None;
         }
         pos = next_pos;
-        let seg_last = unsafe { *seg.get_unchecked(seg.len() - 1) };
+        let seg_last = unsafe { *seg.get_unchecked(sm.len - 1) };
         if seg_last == b'[' {
             let end = unsafe { scan_clf_bracket(ptr, len, pos)? };
             has_structured = true;
-            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end); }
+            unsafe { *col_ptrs.get_unchecked(slot).add(row_idx) = data.get_unchecked(pos..end); }
             pos = end;
         } else if seg_last == b'=' {
             let mut end = pos;
@@ -171,12 +234,12 @@ fn try_match_clf_stream<'a>(
             }
             if end == pos { return None; }
             has_structured = true;
-            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end); }
+            unsafe { *col_ptrs.get_unchecked(slot).add(row_idx) = data.get_unchecked(pos..end); }
             pos = end;
         } else if unsafe { *ptr.add(pos) } == b'"' {
-            let end = scan_json_string_reg(data, pos, &mut cw, &mut cq, quote_cache)?;
+            let end = scan_json_string_reg(data, pos, &mut cw, &mut cq, &mut cp, quote_cache)?;
             has_structured = true;
-            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end); }
+            unsafe { *col_ptrs.get_unchecked(slot).add(row_idx) = data.get_unchecked(pos..end); }
             pos = end;
         } else {
             let mut end = pos;
@@ -186,17 +249,16 @@ fn try_match_clf_stream<'a>(
             if end == pos || (end < len && { let b = unsafe { *ptr.add(end) }; b > b' ' && b < 0x7f }) {
                 return None;
             }
-            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end); }
+            unsafe { *col_ptrs.get_unchecked(slot).add(row_idx) = data.get_unchecked(pos..end); }
             pos = end;
         }
     }
-    quote_cache.0 = cw;
-    quote_cache.1 = cq;
+    *quote_cache = (cw, cq, cp);
     let last_seg = unsafe { *segments.get_unchecked(slots) };
-    let next_end = pos + last_seg.len();
+    let last_sm = unsafe { seg_matchers.get_unchecked(slots).assume_init_ref() };
+    let next_end = pos + last_sm.len;
     if !has_structured
-        || next_end > len
-        || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, last_seg)
+        || unsafe { !last_sm.matches(data, ptr, len, pos, last_seg) }
     {
         return None;
     }
@@ -240,7 +302,6 @@ fn match_single_delim_or_logfmt_stream<'a>(
     delim_mask_cache: &mut (usize, u64, u64),
     val_buf: &mut [&'a [u8]; MAX_SLOTS],
 ) {
-    let segs = &tpl.segments;
     let slots = tpl.values.len();
     let total_len = data.len();
     let mut cur_line_start = *line_start;
@@ -260,19 +321,44 @@ fn match_single_delim_or_logfmt_stream<'a>(
     }
     if let Some(d) = delim_opt {
         while cur_line_start < total_len {
-            let Some(line_len) = try_match_delimited_stream(data, cur_line_start, segs, d, delim_mask_cache, val_buf) else { break; };
+            if cur_row_idx == cur_col_cap {
+                cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, true, &mut col_ptrs);
+            }
+            let Some(line_len) = try_match_delimited_stream(
+                data,
+                cur_line_start,
+                &tpl.segments,
+                d,
+                delim_mask_cache,
+                &col_ptrs,
+                cur_row_idx,
+                val_buf,
+            ) else { break; };
             cur_line_start += line_len;
-            push_vals!();
+            cur_row_idx += 1;
         }
     } else if space_kind == 2 {
+        let mut seg_matchers = [core::mem::MaybeUninit::<SegMatcher>::uninit(); MAX_SLOTS + 1];
+        init_seg_matchers(&tpl.segments, &mut seg_matchers);
         while cur_line_start < total_len {
-            let Some(line_len) = try_match_clf_stream(data, cur_line_start, segs, delim_mask_cache, val_buf) else { break; };
+            if cur_row_idx == cur_col_cap {
+                cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, true, &mut col_ptrs);
+            }
+            let Some(line_len) = try_match_clf_stream(
+                data,
+                cur_line_start,
+                &tpl.segments,
+                &seg_matchers,
+                delim_mask_cache,
+                &col_ptrs,
+                cur_row_idx,
+            ) else { break; };
             cur_line_start += line_len;
-            push_vals!();
+            cur_row_idx += 1;
         }
     } else {
         while cur_line_start < total_len {
-            let Some(line_len) = try_match_logfmt_stream(data, cur_line_start, segs, delim_mask_cache, val_buf) else { break; };
+            let Some(line_len) = try_match_logfmt_stream(data, cur_line_start, &tpl.segments, delim_mask_cache, val_buf) else { break; };
             cur_line_start += line_len;
             push_vals!();
         }
@@ -354,29 +440,28 @@ fn match_single_json_clean_stream<'a>(
     row_idx: &mut usize,
     col_cap: &mut usize,
 ) {
-    let segs = &tpl.segments;
     let slots = tpl.values.len();
-    let seg0 = segs[0];
-    let seg0_len = seg0.len();
+    let mut seg_matchers = [core::mem::MaybeUninit::<SegMatcher>::uninit(); MAX_SLOTS + 1];
+    init_seg_matchers(&tpl.segments, &mut seg_matchers);
+    let sm0 = unsafe { *seg_matchers.get_unchecked(0).assume_init_ref() };
     let total_len = data.len();
     let data_ptr = data.as_ptr();
     let mut cur_line_start = *line_start;
     let mut cur_row_idx = *row_idx;
     let mut col_ptrs = [core::ptr::null_mut(); MAX_SLOTS];
     let mut cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, false, &mut col_ptrs);
-    while cur_line_start + seg0_len <= total_len {
-        if !slice_eq_fast(unsafe { data.get_unchecked(cur_line_start..cur_line_start + seg0_len) }, seg0) {
+    while cur_line_start + sm0.len <= total_len {
+        if unsafe { !sm0.matches(data, data_ptr, total_len, cur_line_start, tpl.segments.get_unchecked(0)) } {
             break;
         }
         if cur_row_idx == cur_col_cap {
             cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, true, &mut col_ptrs);
         }
-        let mut pos = cur_line_start + seg0_len;
+        let mut pos = cur_line_start + sm0.len;
         let mut ok = true;
         for slot in 0..slots {
             if pos >= total_len { ok = false; break; }
             let first = unsafe { *data_ptr.add(pos) };
-            let next_seg = unsafe { *segs.get_unchecked(slot + 1) };
             let val_end = match first {
                 b'"' => match scan_string(data, pos) { Some(e) => e, None => { ok = false; break; } },
                 b'{' | b'[' => match scan_compound(data, pos) { Some(e) => e, None => { ok = false; break; } },
@@ -385,12 +470,12 @@ fn match_single_json_clean_stream<'a>(
             };
             unsafe { *col_ptrs.get_unchecked(slot).add(cur_row_idx) = data.get_unchecked(pos..val_end); }
             pos = val_end;
-            let next_end = pos + next_seg.len();
-            if next_end > total_len || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, next_seg) {
+            let sm = unsafe { seg_matchers.get_unchecked(slot + 1).assume_init_ref() };
+            if unsafe { !sm.matches(data, data_ptr, total_len, pos, tpl.segments.get_unchecked(slot + 1)) } {
                 ok = false;
                 break;
             }
-            pos = next_end;
+            pos += sm.len;
         }
         if !ok { break; }
         cur_line_start = pos;
@@ -410,53 +495,52 @@ fn match_single_json_qmask_stream<'a>(
     col_cap: &mut usize,
     delim_mask_cache: &mut (usize, u64, u64),
 ) {
-    let segs = &tpl.segments;
     let slots = tpl.values.len();
-    let seg0 = segs[0];
-    let seg0_len = seg0.len();
+    let mut seg_matchers = [core::mem::MaybeUninit::<SegMatcher>::uninit(); MAX_SLOTS + 1];
+    init_seg_matchers(&tpl.segments, &mut seg_matchers);
+    let sm0 = unsafe { *seg_matchers.get_unchecked(0).assume_init_ref() };
     let total_len = data.len();
     let data_ptr = data.as_ptr();
     let mut cur_line_start = *line_start;
     let mut cur_row_idx = *row_idx;
     let mut col_ptrs = [core::ptr::null_mut(); MAX_SLOTS];
     let mut cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, false, &mut col_ptrs);
-    let (mut cw, mut cq) = (delim_mask_cache.0, delim_mask_cache.1);
-    while cur_line_start + seg0_len <= total_len {
-        if !slice_eq_fast(unsafe { data.get_unchecked(cur_line_start..cur_line_start + seg0_len) }, seg0) {
+    let (mut cw, mut cq, mut cp) = *delim_mask_cache;
+    while cur_line_start + sm0.len <= total_len {
+        if unsafe { !sm0.matches(data, data_ptr, total_len, cur_line_start, tpl.segments.get_unchecked(0)) } {
             break;
         }
         if cur_row_idx == cur_col_cap {
             cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, true, &mut col_ptrs);
         }
-        let mut pos = cur_line_start + seg0_len;
+        let mut pos = cur_line_start + sm0.len;
         let mut ok = true;
         for slot in 0..slots {
             if pos >= total_len { ok = false; break; }
             let first = unsafe { *data_ptr.add(pos) };
-            let next_seg = unsafe { *segs.get_unchecked(slot + 1) };
             let val_end = match first {
-                b'"' => match scan_json_string_reg(data, pos, &mut cw, &mut cq, delim_mask_cache) {
+                b'"' => match scan_json_string_reg(data, pos, &mut cw, &mut cq, &mut cp, delim_mask_cache) {
                     Some(e) => e,
                     None => { ok = false; break; }
                 },
                 b'{' | b'[' => match scan_compound(data, pos) { Some(e) => e, None => { ok = false; break; } },
                 _ if first <= b',' || first == b'}' || first == b']' => { ok = false; break; }
-                _ => scan_primitive_end(data_ptr, total_len, pos),
+                _ => scan_json_prim_reg(data, pos, &mut cw, &mut cq, &mut cp, delim_mask_cache),
             };
             unsafe { *col_ptrs.get_unchecked(slot).add(cur_row_idx) = data.get_unchecked(pos..val_end); }
             pos = val_end;
-            let next_end = pos + next_seg.len();
-            if next_end > total_len || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, next_seg) {
+            let sm = unsafe { seg_matchers.get_unchecked(slot + 1).assume_init_ref() };
+            if unsafe { !sm.matches(data, data_ptr, total_len, pos, tpl.segments.get_unchecked(slot + 1)) } {
                 ok = false;
                 break;
             }
-            pos = next_end;
+            pos += sm.len;
         }
         if !ok { break; }
         cur_line_start = pos;
         cur_row_idx += 1;
     }
-    (delim_mask_cache.0, delim_mask_cache.1) = (cw, cq);
+    *delim_mask_cache = (cw, cq, cp);
     *line_start = cur_line_start;
     *row_idx = cur_row_idx;
     *col_cap = cur_col_cap;

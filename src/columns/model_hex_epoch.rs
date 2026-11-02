@@ -182,7 +182,7 @@ fn pack_hex_suffix_model_mode(values: &[&[u8]], limit: usize, quoted: bool) -> O
     }
     let qpad = usize::from(quoted);
     let expected_val_len = 2 * qpad + prefix.len() + first_digits.len();
-    let mut out = Vec::with_capacity(size);
+    let mut out = take_model_buf(size);
     out.push(MODEL_HEX_SUFFIX);
     put_bytes(&mut out, prefix);
     put_uleb(&mut out, width_hdr);
@@ -368,7 +368,7 @@ fn pack_epoch_counter_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
         if size >= limit {
             return None;
         }
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_EPOCH_COUNTER);
         put_bytes(&mut out, literal);
         put_uleb(&mut out, unique_len);

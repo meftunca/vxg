@@ -1,3 +1,40 @@
+#[inline(always)]
+fn unpack_u16_plus_min_to_u64(
+    packed_bytes: &[u8],
+    count: usize,
+    width: u8,
+    min: u64,
+    scratch: &mut DecodeScratch,
+) -> Result<usize> {
+    let u16_off = unpack_u16_swar(packed_bytes, count, width, 0, &mut scratch.u16_arena)?;
+    let u64_off = scratch.u64_arena.len();
+    scratch.u64_arena.reserve(count + 4);
+    unsafe {
+        let src = scratch.u16_arena.as_ptr().add(u16_off);
+        let dst = scratch.u64_arena.as_mut_ptr().add(u64_off);
+        let mut i = 0usize;
+        #[cfg(target_arch = "aarch64")]
+        {
+            use core::arch::aarch64::*;
+            let vmin = vdupq_n_u64(min);
+            while i + 4 <= count {
+                let v16 = vld1_u16(src.add(i));
+                let v32 = vmovl_u16(v16);
+                vst1q_u64(dst.add(i), vaddq_u64(vmin, vmovl_u32(vget_low_u32(v32))));
+                vst1q_u64(dst.add(i + 2), vaddq_u64(vmin, vmovl_high_u32(v32)));
+                i += 4;
+            }
+        }
+        while i < count {
+            *dst.add(i) = min + (*src.add(i) as u64);
+            i += 1;
+        }
+        scratch.u64_arena.set_len(u64_off + count);
+    }
+    scratch.u16_arena.truncate(u16_off);
+    Ok(u64_off)
+}
+
 impl<'a> PreparedColumn<'a> {
     fn parse_numeric_or_hex(
         tag: u8,
@@ -96,6 +133,18 @@ impl<'a> PreparedColumn<'a> {
                         stream: ColumnStream::DecimalSmall { u16_offset },
                     });
                 }
+                if width <= 16 && min.checked_add((1u64 << width) - 1).is_some() {
+                    let u64_offset =
+                        unpack_u16_plus_min_to_u64(packed_bytes, count, width, min, scratch)?;
+                    return Ok(Self {
+                        const_full: ConstValue::None,
+                        const_lead: LeadValue::Empty,
+                        const_trail: b"",
+                        dict_slices: None,
+                        max_emit_len: 20,
+                        stream: ColumnStream::DecimalValues { u64_offset },
+                    });
+                }
                 let reader = FastBitReader::new_validated(packed_bytes, count, width)?;
                 let max_possible_res = if width == 64 {
                     u64::MAX
@@ -164,6 +213,18 @@ impl<'a> PreparedColumn<'a> {
                         dict_slices: None,
                         max_emit_len: 4,
                         stream: ColumnStream::DecimalSmall { u16_offset },
+                    });
+                }
+                if width <= 16 && min.checked_add((1u64 << width) - 1).is_some() {
+                    let u64_offset =
+                        unpack_u16_plus_min_to_u64(packed_bytes, count, width, min, scratch)?;
+                    return Ok(Self {
+                        const_full: ConstValue::None,
+                        const_lead: LeadValue::QuotePrefix(prefix),
+                        const_trail: b"\"",
+                        dict_slices: None,
+                        max_emit_len: 20,
+                        stream: ColumnStream::DecimalValues { u64_offset },
                     });
                 }
                 let reader = FastBitReader::new_validated(packed_bytes, count, width)?;

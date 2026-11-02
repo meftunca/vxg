@@ -371,6 +371,7 @@ impl<'a> PreparedColumn<'a> {
         }
         let actual_bytes = unsafe { dst_ptr.offset_from(str_base) as usize };
         unsafe {
+            std::ptr::write_bytes(dst_ptr, 0, 32);
             scratch.u8_arena.set_len(str_u8_offset + actual_bytes);
             scratch.u16_arena.set_len(len_u16_offset + count);
         }

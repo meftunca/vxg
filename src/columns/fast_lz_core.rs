@@ -205,68 +205,65 @@ fn pack_fast_lz_core_impl<const HASH_LEN: u32, const USE_DICT7: bool>(
             let dict16 = dict4.cast::<u16>();
             let rsh16 = rsh4 - 1;
             let sh16 = shift4 - 1;
+            let lazy_mask: u64 = if HASH_LEN >= 5 {
+                0x00ff_ffff_ffff_ffff
+            } else {
+                0x0000_ffff_ffff_ffff
+            };
             let hash16 = |w: u64| -> usize { hash4_fn::<HASH_LEN>(w, hsh, sh16, rsh16) };
             while ip < limit {
                 let w = unsafe { ptr.add(ip).cast::<u64>().read_unaligned().to_le() };
                 let h0 = hash16(w);
                 let h1 = hash16(w >> 8);
-                let cand0 = unsafe { *dict16.add(h0) as usize };
+                let raw_c0 = unsafe { *dict16.add(h0) as usize };
+                let raw_c1 = unsafe { *dict16.add(h1) as usize };
                 unsafe {
                     *dict16.add(h0) = ip as u16;
+                    *dict16.add(h1) = (ip + 1) as u16;
                 }
+                let cand0 = raw_c0;
+                let cand1 = if h1 == h0 { ip } else { raw_c1 };
                 let cw0 = unsafe { ptr.add(cand0).cast::<u64>().read_unaligned().to_le() };
+                let cw1 = unsafe { ptr.add(cand1).cast::<u64>().read_unaligned().to_le() };
                 let d0 = w ^ cw0;
-                if (d0 & m4) == 0 {
-                    match_pos = cand0;
-                    if d0 == 0 {
-                        unsafe {
-                            *dict16.add(h1) = (ip + 1) as u16;
-                        }
-                        best_ml = unsafe { match_len_from8(ptr, ip, cand0, n) };
-                    } else {
-                        let cand1 = unsafe { *dict16.add(h1) as usize };
-                        unsafe {
-                            *dict16.add(h1) = (ip + 1) as u16;
-                        }
-                        best_ml = (d0.trailing_zeros() >> 3) as usize;
-                        if ip + 1 < limit {
-                            let w_next =
-                                unsafe { ptr.add(ip + 1).cast::<u64>().read_unaligned().to_le() };
-                            let cw1 =
-                                unsafe { ptr.add(cand1).cast::<u64>().read_unaligned().to_le() };
-                            let d1 = w_next ^ cw1;
-                            if d1 == 0 {
-                                ip += 1;
-                                match_pos = cand1;
-                                best_ml = unsafe { match_len_from8(ptr, ip, cand1, n) };
-                            } else {
-                                let ml1 = (d1.trailing_zeros() >> 3) as usize;
-                                if ml1 > best_ml + 1 {
+                let d1_7 = (w >> 8) ^ cw1;
+                if ((d0 & m4) == 0) | (((d1_7 & m4) == 0) & (ip + 1 < limit)) {
+                    if (d0 & m4) == 0 {
+                        match_pos = cand0;
+                        if d0 == 0 {
+                            best_ml = unsafe { match_len_from8(ptr, ip, cand0, n) };
+                        } else {
+                            best_ml = (d0.trailing_zeros() >> 3) as usize;
+                            if (d1_7 & lazy_mask) == 0 && ip + 1 < limit {
+                                let w_next = unsafe {
+                                    ptr.add(ip + 1).cast::<u64>().read_unaligned().to_le()
+                                };
+                                let d1 = w_next ^ cw1;
+                                if d1 == 0 {
                                     ip += 1;
                                     match_pos = cand1;
-                                    best_ml = ml1;
+                                    best_ml = unsafe { match_len_from8(ptr, ip, cand1, n) };
+                                } else {
+                                    let ml1 = (d1.trailing_zeros() >> 3) as usize;
+                                    if ml1 > best_ml + 1 {
+                                        ip += 1;
+                                        match_pos = cand1;
+                                        best_ml = ml1;
+                                    }
                                 }
                             }
                         }
-                    }
-                    break;
-                }
-                let cand1 = unsafe { *dict16.add(h1) as usize };
-                unsafe {
-                    *dict16.add(h1) = (ip + 1) as u16;
-                }
-                let cw1 = unsafe { ptr.add(cand1).cast::<u64>().read_unaligned().to_le() };
-                let d1 = (w >> 8) ^ cw1;
-                if (d1 & m4) == 0 && ip + 1 < limit {
-                    ip += 1;
-                    match_pos = cand1;
-                    let w1 = unsafe { ptr.add(ip).cast::<u64>().read_unaligned().to_le() };
-                    let d1_full = w1 ^ cw1;
-                    best_ml = if d1_full == 0 {
-                        unsafe { match_len_from8(ptr, ip, cand1, n) }
                     } else {
-                        (d1_full.trailing_zeros() >> 3) as usize
-                    };
+                        ip += 1;
+                        match_pos = cand1;
+                        let w1 = unsafe { ptr.add(ip).cast::<u64>().read_unaligned().to_le() };
+                        let d1_full = w1 ^ cw1;
+                        best_ml = if d1_full == 0 {
+                            unsafe { match_len_from8(ptr, ip, cand1, n) }
+                        } else {
+                            (d1_full.trailing_zeros() >> 3) as usize
+                        };
+                    }
                     break;
                 }
                 miss += 1;
@@ -408,14 +405,17 @@ fn pack_fast_lz_core_impl<const HASH_LEN: u32, const USE_DICT7: bool>(
         }
 
         unsafe {
-            if lit_len <= 32 && anchor + 32 <= n {
-                let lsrc = ptr.add(anchor);
-                let ldst = lit_ptr.add(lit_pos);
-                copy16_unaligned(lsrc, ldst);
-                copy16_unaligned(lsrc.add(16), ldst.add(16));
-                lit_pos += lit_len;
-            } else if lit_len > 0 {
-                std::ptr::copy_nonoverlapping(ptr.add(anchor), lit_ptr.add(lit_pos), lit_len);
+            if lit_len > 0 {
+                if lit_len <= 16 && anchor + 16 <= n {
+                    copy16_unaligned(ptr.add(anchor), lit_ptr.add(lit_pos));
+                } else if lit_len <= 32 && anchor + 32 <= n {
+                    let lsrc = ptr.add(anchor);
+                    let ldst = lit_ptr.add(lit_pos);
+                    copy16_unaligned(lsrc, ldst);
+                    copy16_unaligned(lsrc.add(16), ldst.add(16));
+                } else {
+                    std::ptr::copy_nonoverlapping(ptr.add(anchor), lit_ptr.add(lit_pos), lit_len);
+                }
                 lit_pos += lit_len;
             }
         }

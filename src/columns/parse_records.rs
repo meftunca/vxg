@@ -471,13 +471,14 @@ fn next_delim_bit<const IS_Q: bool>(
     next_delim_bit_slow(data, delim, w, IS_Q, cache)
 }
 
-/// Structural bitmask for 64 bytes of JSON at `p`:
-/// bit `i` = 1 iff `p[i]` stops a JSON string scan (`"`, `\`, `< 0x20`).
+/// Structural bitmasks `(quote_mask, prim_stop_mask)` for 64 bytes of JSON at `p`:
+/// - `quote_mask` bit `i` = 1 iff `p[i]` stops a JSON string scan (`"`, `\`, `< 0x20`).
+/// - `prim_stop_mask` bit `i` = 1 iff `p[i]` stops a JSON primitive (`<= ','`, `'}'`, `']'`).
 ///
 /// # Safety
 /// `p..p + 64` must be readable.
 #[inline(always)]
-unsafe fn json_quote_mask64(p: *const u8) -> u64 {
+unsafe fn json_struct_masks64(p: *const u8) -> (u64, u64) {
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use core::arch::aarch64::*;
@@ -486,6 +487,9 @@ unsafe fn json_quote_mask64(p: *const u8) -> u64 {
         let v_quote = vdupq_n_u8(b'"');
         let v_slash = vdupq_n_u8(b'\\');
         let v_ctrl = vdupq_n_u8(0x20);
+        let v_dash = vdupq_n_u8(b'-');
+        let v_rbrace = vdupq_n_u8(b'}');
+        let v_rbrack = vdupq_n_u8(b']');
         macro_rules! lane {
             ($k:expr) => {{
                 let c = vld1q_u8(p.add($k * 16));
@@ -493,18 +497,21 @@ unsafe fn json_quote_mask64(p: *const u8) -> u64 {
                     vceqq_u8(c, v_quote),
                     vorrq_u8(vceqq_u8(c, v_slash), vcltq_u8(c, v_ctrl)),
                 );
-                vandq_u8(q, w)
+                let pr = vorrq_u8(
+                    vcltq_u8(c, v_dash),
+                    vorrq_u8(vceqq_u8(c, v_rbrace), vceqq_u8(c, v_rbrack)),
+                );
+                (vandq_u8(q, w), vandq_u8(pr, w))
             }};
         }
-        let q0 = lane!(0);
-        let q1 = lane!(1);
-        let q2 = lane!(2);
-        let q3 = lane!(3);
-        let q01 = vpaddq_u8(q0, q1);
-        let q23 = vpaddq_u8(q2, q3);
-        let q = vpaddq_u8(q01, q23);
-        let r = vreinterpretq_u64_u8(vpaddq_u8(q, q));
-        vgetq_lane_u64::<0>(r)
+        let (q0, p0) = lane!(0);
+        let (q1, p1) = lane!(1);
+        let (q2, p2) = lane!(2);
+        let (q3, p3) = lane!(3);
+        let q_half = vpaddq_u8(vpaddq_u8(q0, q1), vpaddq_u8(q2, q3));
+        let p_half = vpaddq_u8(vpaddq_u8(p0, p1), vpaddq_u8(p2, p3));
+        let both = vreinterpretq_u64_u8(vpaddq_u8(q_half, p_half));
+        (vgetq_lane_u64::<0>(both), vgetq_lane_u64::<1>(both))
     }
     #[cfg(target_arch = "x86_64")]
     unsafe {
@@ -512,7 +519,11 @@ unsafe fn json_quote_mask64(p: *const u8) -> u64 {
         let v_quote = _mm_set1_epi8(b'"' as i8);
         let v_slash = _mm_set1_epi8(b'\\' as i8);
         let v_1f = _mm_set1_epi8(0x1f);
+        let v_comma = _mm_set1_epi8(b',' as i8);
+        let v_rbrace = _mm_set1_epi8(b'}' as i8);
+        let v_rbrack = _mm_set1_epi8(b']' as i8);
         let mut qm = 0u64;
+        let mut pm = 0u64;
         for k in 0..4 {
             let c = _mm_loadu_si128(p.add(k * 16).cast::<__m128i>());
             let ctrl = _mm_cmpeq_epi8(_mm_max_epu8(c, v_1f), v_1f);
@@ -520,20 +531,56 @@ unsafe fn json_quote_mask64(p: *const u8) -> u64 {
                 _mm_cmpeq_epi8(c, v_quote),
                 _mm_or_si128(_mm_cmpeq_epi8(c, v_slash), ctrl),
             );
+            let pr = _mm_or_si128(
+                _mm_cmpeq_epi8(_mm_max_epu8(c, v_comma), v_comma),
+                _mm_or_si128(_mm_cmpeq_epi8(c, v_rbrace), _mm_cmpeq_epi8(c, v_rbrack)),
+            );
             qm |= (_mm_movemask_epi8(q) as u32 as u64) << (k * 16);
+            pm |= (_mm_movemask_epi8(pr) as u32 as u64) << (k * 16);
         }
-        qm
+        (qm, pm)
     }
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let mut qm = 0u64;
+        let mut pm = 0u64;
         for i in 0..64 {
             let b = unsafe { *p.add(i) };
             if b == b'"' || b == b'\\' || b < 0x20 {
                 qm |= 1 << i;
             }
+            if b <= b',' || b == b'}' || b == b']' {
+                pm |= 1 << i;
+            }
         }
-        qm
+        (qm, pm)
+    }
+}
+
+thread_local! {
+    static ENCODE_ROW_POOL: std::cell::RefCell<Vec<Row<'static>>> =
+        std::cell::RefCell::new(Vec::with_capacity(512));
+}
+
+#[inline(always)]
+fn take_row_vec<'a>(est_rows: usize) -> Vec<Row<'a>> {
+    let mut vec_static = ENCODE_ROW_POOL.with(|cell| core::mem::take(&mut *cell.borrow_mut()));
+    vec_static.clear();
+    vec_static.reserve(est_rows);
+    unsafe { core::mem::transmute::<Vec<Row<'static>>, Vec<Row<'a>>>(vec_static) }
+}
+
+#[inline(always)]
+fn return_row_vec<'a>(mut rows: Vec<Row<'a>>) {
+    if rows.capacity() >= 64 {
+        rows.clear();
+        let vec_static = unsafe { core::mem::transmute::<Vec<Row<'a>>, Vec<Row<'static>>>(rows) };
+        ENCODE_ROW_POOL.with(|cell| {
+            let mut pool = cell.borrow_mut();
+            if vec_static.capacity() > pool.capacity() {
+                *pool = vec_static;
+            }
+        });
     }
 }
 

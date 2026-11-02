@@ -68,14 +68,14 @@ fn build_front_dict_packet(
         if size >= limit {
             return None;
         }
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_DICTIONARY);
         put_uleb(&mut out, u);
         for &entry in entries {
             put_bytes(&mut out, entry);
         }
         out.push(width);
-        push_bit_values(&mut out, n, width, ranks.iter().map(|&r| r as u64));
+        push_u8_bits(&mut out, ranks, width);
         return Some(out);
     }
 
@@ -352,14 +352,14 @@ fn build_front_dict_packet(
         if size >= limit {
             return None;
         }
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_DICTIONARY);
         put_uleb(&mut out, u);
         for &entry in entries {
             put_bytes(&mut out, entry);
         }
         out.push(width);
-        push_bit_values(&mut out, n, width, ranks.iter().map(|&r| r as u64));
+        push_u8_bits(&mut out, ranks, width);
         return Some(out);
     }
 
@@ -367,7 +367,7 @@ fn build_front_dict_packet(
     if size >= limit {
         return None;
     }
-    let mut out = Vec::with_capacity(size);
+    let mut out = take_model_buf(size);
     out.push(MODEL_FRONT_DICT);
     put_uleb(&mut out, u);
     out.push(dict_mode | (idx_mode << 2));
@@ -457,93 +457,93 @@ fn build_front_dict_packet(
     }
     match idx_mode {
         0 => {
-            push_bit_values(&mut out, n, width, ranks.iter().map(|&r| r as u64));
+            push_u8_bits(&mut out, ranks, width);
         }
         1 => {
-            push_bit_values(
-                &mut out,
-                n,
-                1,
-                (0..n).map(|i| u64::from(i > 0 && ranks[i] == ranks[i - 1])),
-            );
-            push_bit_values(
-                &mut out,
-                exc1,
-                width,
-                (0..n).filter_map(|i| {
-                    if i == 0 || ranks[i] != ranks[i - 1] {
-                        Some(ranks[i] as u64)
-                    } else {
-                        None
+            push_adj_eq_bitmap_u8(&mut out, ranks);
+            MODEL_SCRATCH.with(|cell| {
+                let mut sc = cell.borrow_mut();
+                let exc = &mut sc.raw_lens;
+                exc.clear();
+                exc.reserve(exc1 + 1);
+                if n > 0 {
+                    let p = exc.as_mut_ptr();
+                    let rp = ranks.as_ptr();
+                    let mut k = 1usize;
+                    unsafe {
+                        *p = *rp;
+                        for i in 1..n {
+                            let r = *rp.add(i);
+                            let prev = *rp.add(i - 1);
+                            *p.add(k) = r;
+                            k += (r != prev) as usize;
+                        }
+                        exc.set_len(k);
                     }
-                }),
-            );
+                    push_u8_bits(&mut out, exc, width);
+                }
+            });
         }
         2 => {
             put_uleb(&mut out, mode_rank as usize);
-            push_bit_values(
-                &mut out,
-                n,
-                1,
-                ranks.iter().map(|&r| u64::from(r == mode_rank)),
-            );
-            push_bit_values(
-                &mut out,
-                rem2,
-                exc_width,
-                ranks.iter().filter_map(|&r| {
-                    if r == mode_rank {
-                        None
-                    } else if r < mode_rank {
-                        Some(r as u64)
-                    } else {
-                        Some((r - 1) as u64)
+            push_eq_bitmap_u8(&mut out, ranks, mode_rank);
+            MODEL_SCRATCH.with(|cell| {
+                let mut sc = cell.borrow_mut();
+                let exc = &mut sc.raw_lens;
+                exc.clear();
+                exc.reserve(rem2 + 1);
+                let p = exc.as_mut_ptr();
+                let rp = ranks.as_ptr();
+                let mut k = 0usize;
+                unsafe {
+                    for i in 0..n {
+                        let r = *rp.add(i);
+                        *p.add(k) = r.wrapping_sub((r > mode_rank) as u8);
+                        k += (r != mode_rank) as usize;
                     }
-                }),
-            );
+                    exc.set_len(k);
+                }
+                push_u8_bits(&mut out, exc, exc_width);
+            });
         }
         3 => {
             put_uleb(&mut out, mode_rank as usize);
-            push_bit_values(
-                &mut out,
-                n,
-                1,
-                ranks.iter().map(|&r| u64::from(r == mode_rank)),
-            );
-            let mut prev_nm = u16::MAX;
-            push_bit_values(
-                &mut out,
-                rem2,
-                1,
-                ranks.iter().filter_map(|&r| {
-                    if r == mode_rank {
-                        None
-                    } else if u16::from(r) == prev_nm {
-                        Some(1u64)
-                    } else {
+            push_eq_bitmap_u8(&mut out, ranks, mode_rank);
+            MODEL_SCRATCH.with(|cell| {
+                let mut sc = cell.borrow_mut();
+                let ModelScratch {
+                    raw_lens,
+                    epoch_flags,
+                    ..
+                } = &mut *sc;
+                epoch_flags.clear();
+                epoch_flags.reserve(rem2 + 1);
+                raw_lens.clear();
+                raw_lens.reserve(exc3 + 1);
+                let fp = epoch_flags.as_mut_ptr();
+                let ep = raw_lens.as_mut_ptr();
+                let mut fk = 0usize;
+                let mut ek = 0usize;
+                let mut prev_nm = u16::MAX;
+                for &r in ranks {
+                    if r != mode_rank {
+                        let same = u16::from(r) == prev_nm;
+                        unsafe {
+                            *fp.add(fk) = u8::from(same);
+                            fk += 1;
+                            *ep.add(ek) = r.wrapping_sub((r > mode_rank) as u8);
+                            ek += usize::from(!same);
+                        }
                         prev_nm = u16::from(r);
-                        Some(0u64)
                     }
-                }),
-            );
-            let mut prev_nm2 = u16::MAX;
-            push_bit_values(
-                &mut out,
-                exc3,
-                exc_width,
-                ranks.iter().filter_map(|&r| {
-                    if r == mode_rank || u16::from(r) == prev_nm2 {
-                        None
-                    } else {
-                        prev_nm2 = u16::from(r);
-                        Some(if r < mode_rank {
-                            r as u64
-                        } else {
-                            (r - 1) as u64
-                        })
-                    }
-                }),
-            );
+                }
+                unsafe {
+                    epoch_flags.set_len(fk);
+                    raw_lens.set_len(ek);
+                }
+                push_u8_bits(&mut out, epoch_flags, 1);
+                push_u8_bits(&mut out, raw_lens, exc_width);
+            });
         }
         _ => unreachable!(),
     }

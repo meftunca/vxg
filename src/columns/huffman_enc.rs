@@ -1,37 +1,3 @@
-#[derive(Default)]
-struct StrideScratch {
-    planes: [Vec<u8>; 8],
-    super_mask_buf: Vec<u64>,
-    mask_buf: Vec<u64>,
-    nz_buf: Vec<u8>,
-    lz_dict4: Vec<u32>,
-    lz_dict7: Vec<u16>,
-    lz_tokens: Vec<u8>,
-    lz_offsets: Vec<u8>,
-    lz_ext: Vec<u8>,
-    lz_lits: Vec<u8>,
-    lz_meta_raw: Vec<u8>,
-    lz_meta_comp: Vec<u8>,
-    lz_lits_comp: Vec<u8>,
-    lz_lits_huf: Vec<u8>,
-    lz_meta_huf: Vec<u8>,
-    lz_sub_lits: Vec<u8>,
-    lz_sub_tokens: Vec<u8>,
-    lz_sub_offsets: Vec<u8>,
-    lz_sub_ext: Vec<u8>,
-}
-
-thread_local! {
-    static STRIDE_SCRATCH: std::cell::RefCell<StrideScratch> =
-        std::cell::RefCell::new(StrideScratch::default());
-    /// Plane buffers for `STRIDE_PACKET` mode 2 (delta planes + nested `FAST_LZ`); kept separate
-    /// from `STRIDE_SCRATCH` because the nested `FAST_LZ` coder borrows that scratch itself.
-    static STRIDE_PLANES2: std::cell::RefCell<[Vec<u8>; 8]> =
-        std::cell::RefCell::new(Default::default());
-    static STRIDE_COMBINED: std::cell::RefCell<Vec<u8>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
 // ---------------------------------------------------------------------------------------------
 // Canonical Huffman (order-0) entropy stage for FAST_LZ literal / meta streams.
 //
@@ -51,23 +17,99 @@ const HUF_MIN: usize = 160;
 /// Streams of at least this many symbols are split into 4 interleaved bitstreams.
 const HUF_SPLIT4: usize = 1024;
 
-fn huf_lengths(freq: &[u32; 256]) -> Option<[u8; 256]> {
+#[inline(always)]
+fn huf_lengths(freq: &[u32; 256], max_sym: usize, max_freq: u32) -> [u8; 256] {
     let mut leaves_uninit = [core::mem::MaybeUninit::<u32>::uninit(); 256];
     let leaves_ptr = leaves_uninit.as_mut_ptr().cast::<u32>();
-    let mut k = 0usize;
-    for (s, &c) in freq.iter().enumerate() {
-        if c > 0 {
-            unsafe {
-                *leaves_ptr.add(k) = (c << 8) | (s as u32);
+    let k: usize;
+    if max_freq < 256 {
+        let mut cnt = [0u16; 256];
+        let mut nz = 0usize;
+        for &c in &freq[..=max_sym] {
+            if c > 0 {
+                cnt[c as usize] += 1;
+                nz += 1;
             }
-            k += 1;
         }
+        k = nz;
+        let mut off = 0u16;
+        for b in &mut cnt[1..=(max_freq as usize)] {
+            let n = *b;
+            *b = off;
+            off += n;
+        }
+        for (s, &c) in freq[..=max_sym].iter().enumerate() {
+            if c > 0 {
+                unsafe {
+                    let pos = *cnt.get_unchecked(c as usize) as usize;
+                    *cnt.get_unchecked_mut(c as usize) = (pos + 1) as u16;
+                    *leaves_ptr.add(pos) = (c << 8) | (s as u32);
+                }
+            }
+        }
+    } else if max_freq < 65536 {
+        let mut tmp_uninit = [core::mem::MaybeUninit::<u32>::uninit(); 256];
+        let mut buf1_uninit = [core::mem::MaybeUninit::<u32>::uninit(); 256];
+        let tmp_ptr = tmp_uninit.as_mut_ptr().cast::<u32>();
+        let buf1_ptr = buf1_uninit.as_mut_ptr().cast::<u32>();
+        let mut cnt0 = [0u16; 256];
+        let mut cnt1 = [0u16; 256];
+        let mut nz = 0usize;
+        for (s, &c) in freq[..=max_sym].iter().enumerate() {
+            if c > 0 {
+                unsafe {
+                    *tmp_ptr.add(nz) = (c << 8) | (s as u32);
+                }
+                cnt0[(c & 0xff) as usize] += 1;
+                cnt1[((c >> 8) & 0xff) as usize] += 1;
+                nz += 1;
+            }
+        }
+        k = nz;
+        let mut off0 = 0u16;
+        for b in &mut cnt0 {
+            let n = *b;
+            *b = off0;
+            off0 += n;
+        }
+        let mut off1 = 0u16;
+        for b in &mut cnt1[..=((max_freq >> 8) as usize)] {
+            let n = *b;
+            *b = off1;
+            off1 += n;
+        }
+        for idx in 0..k {
+            unsafe {
+                let v = *tmp_ptr.add(idx);
+                let b0 = ((v >> 8) & 0xff) as usize;
+                let pos = *cnt0.get_unchecked(b0) as usize;
+                *cnt0.get_unchecked_mut(b0) = (pos + 1) as u16;
+                *buf1_ptr.add(pos) = v;
+            }
+        }
+        for idx in 0..k {
+            unsafe {
+                let v = *buf1_ptr.add(idx);
+                let b1 = ((v >> 16) & 0xff) as usize;
+                let pos = *cnt1.get_unchecked(b1) as usize;
+                *cnt1.get_unchecked_mut(b1) = (pos + 1) as u16;
+                *leaves_ptr.add(pos) = v;
+            }
+        }
+    } else {
+        let mut nz = 0usize;
+        for (s, &c) in freq[..=max_sym].iter().enumerate() {
+            if c > 0 {
+                unsafe {
+                    *leaves_ptr.add(nz) = (c << 8) | (s as u32);
+                }
+                nz += 1;
+            }
+        }
+        k = nz;
+        unsafe { std::slice::from_raw_parts_mut(leaves_ptr, k) }.sort_unstable();
     }
-    if k < 2 {
-        return None;
-    }
-    let leaves = unsafe { std::slice::from_raw_parts_mut(leaves_ptr, k) };
-    leaves.sort_unstable();
+    let leaves = unsafe { std::slice::from_raw_parts(leaves_ptr, k) };
 
     let mut q1_w = [core::mem::MaybeUninit::<u32>::uninit(); 256];
     let mut leaf_parent = [core::mem::MaybeUninit::<u8>::uninit(); 256];
@@ -153,7 +195,7 @@ fn huf_lengths(freq: &[u32; 256]) -> Option<[u8; 256]> {
                 let p = *lp_ptr.add(idx) as usize;
                 lens[sym] = *id_ptr.add(p) + 1;
             }
-            return Some(lens);
+            return lens;
         }
         let max_b = HUF_BITS as usize;
         let mut bl_count = [0u16; 16];
@@ -184,33 +226,8 @@ fn huf_lengths(freq: &[u32; 256]) -> Option<[u8; 256]> {
                 idx += 1;
             }
         }
-        Some(lens)
+        lens
     }
-}
-
-/// Canonical codes (bit-reversed for LSB-first emission), ordered by `(len, sym)`.
-fn huf_codes(lens: &[u8; 256], max_sym: usize) -> [u16; 256] {
-    let mut bl_count = [0u16; 16];
-    for &l in &lens[..=max_sym] {
-        bl_count[l as usize] += 1;
-    }
-    bl_count[0] = 0;
-    let mut next_code = [0u16; 16];
-    let mut code = 0u16;
-    for bits in 1..16 {
-        code = (code + bl_count[bits - 1]) << 1;
-        next_code[bits] = code;
-    }
-    let mut codes = [0u16; 256];
-    for s in 0..=max_sym {
-        let l = lens[s] as usize;
-        if l > 0 {
-            let c = next_code[l];
-            next_code[l] += 1;
-            codes[s] = c.reverse_bits() >> (16 - l);
-        }
-    }
-    codes
 }
 
 /// Append a Huffman blob for `src` to `out` if it is strictly smaller than `limit` bytes.
@@ -307,9 +324,7 @@ fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
     {
         return false;
     }
-    let Some(lens) = huf_lengths(&freq) else {
-        return false;
-    };
+    let lens = huf_lengths(&freq, max_sym, max_freq);
     let mut bits = 0u64;
     for s in 0..=max_sym {
         bits += freq[s] as u64 * lens[s] as u64;
@@ -349,81 +364,13 @@ fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
     if est + 24 >= limit || est * 100 > limit * 97 {
         return false;
     }
-    let codes = huf_codes(&lens, max_sym);
-    let mut packed_code = [0u32; 256];
-    for s in 0..=max_sym {
-        packed_code[s] = (codes[s] as u32) | ((lens[s] as u32) << 16);
-    }
+    let packed_code = huf_packed_codes(&lens, max_sym);
     let start = out.len();
     out.reserve(est + 32);
     out.push(HUF_KIND_HUF);
     out.push(max_sym as u8);
     for pair in nibbles[..nib_len].chunks(2) {
         out.push(pair[0] | (pair.get(1).copied().unwrap_or(0) << 4));
-    }
-
-    #[inline(always)]
-    unsafe fn encode_stream_fast(
-        part: &[u8],
-        packed_code: &[u32; 256],
-        out_ptr: *mut u8,
-        mut out_pos: usize,
-    ) -> usize {
-        let mut acc = 0u64;
-        let mut nb = 0u32;
-        let p_in = part.as_ptr();
-        let len5 = part.len() / 5 * 5;
-        let mut i = 0usize;
-        while i < len5 {
-            unsafe {
-                let pc0 = *packed_code.get_unchecked(*p_in.add(i) as usize);
-                let pc1 = *packed_code.get_unchecked(*p_in.add(i + 1) as usize);
-                let pc2 = *packed_code.get_unchecked(*p_in.add(i + 2) as usize);
-                let pc3 = *packed_code.get_unchecked(*p_in.add(i + 3) as usize);
-                let pc4 = *packed_code.get_unchecked(*p_in.add(i + 4) as usize);
-                let l0 = pc0 >> 16;
-                let l1 = pc1 >> 16;
-                let l2 = pc2 >> 16;
-                let l3 = pc3 >> 16;
-                let l4 = pc4 >> 16;
-                let l01 = l0 + l1;
-                let l23 = l2 + l3;
-                let l0123 = l01 + l23;
-                let chunk_len = l0123 + l4;
-                let c01 = u64::from(pc0 & 0xffff) | (u64::from(pc1 & 0xffff) << l0);
-                let c23 = u64::from(pc2 & 0xffff) | (u64::from(pc3 & 0xffff) << l2);
-                let c0123 = c01 | (c23 << l01);
-                let chunk_bits = c0123 | (u64::from(pc4 & 0xffff) << l0123);
-                acc |= chunk_bits << nb;
-                nb += chunk_len;
-                out_ptr.add(out_pos).cast::<u64>().write_unaligned(acc.to_le());
-                out_pos += (nb >> 3) as usize;
-                acc >>= nb & !7;
-                nb &= 7;
-            }
-            i += 5;
-        }
-        while i < part.len() {
-            let pc = unsafe { *packed_code.get_unchecked(*p_in.add(i) as usize) };
-            acc |= u64::from(pc & 0xffff) << nb;
-            nb += pc >> 16;
-            i += 1;
-        }
-        while nb >= 8 {
-            unsafe {
-                *out_ptr.add(out_pos) = acc as u8;
-            }
-            out_pos += 1;
-            acc >>= 8;
-            nb -= 8;
-        }
-        if nb > 0 {
-            unsafe {
-                *out_ptr.add(out_pos) = acc as u8;
-            }
-            out_pos += 1;
-        }
-        out_pos
     }
 
     #[inline(always)]
@@ -537,7 +484,7 @@ fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
     if n < HUF_SPLIT4 {
         let s_start = out.len();
         out.reserve((bits as usize).div_ceil(8) + 16);
-        let new_len = unsafe { encode_stream_fast(src, &packed_code, out.as_mut_ptr(), s_start) };
+        let new_len = unsafe { huf_encode_stream_fast(src, &packed_code, out.as_mut_ptr(), s_start) };
         unsafe { out.set_len(new_len) };
     } else {
         let q = n.div_ceil(4);

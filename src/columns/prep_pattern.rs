@@ -2,9 +2,9 @@
 
 #[derive(Clone, Copy)]
 enum FastPatTok<'a> {
-    Digits { width: u8, min: u64, radix: u64 },
+    Digits { width: u8, min: u64, radix: u64, div: FastDiv62 },
     Lit(&'a [u8]),
-    Dict { slice_off: u32, len: u8, fixed_width: Option<u16>, max_len: usize },
+    Dict { slice_off: u32, len: u8, fixed_width: Option<u16>, max_len: usize, div: FastDiv62 },
 }
 
 #[inline(always)]
@@ -17,15 +17,19 @@ unsafe fn write_padded_digits(dst: *mut u8, width: usize, mut val: u64) {
             }
             4 => dst.cast::<u32>().write_unaligned(*DEC_PADDED_10K.get_unchecked(val as usize)),
             3 => {
-                *dst = b'0' + (val / 100) as u8;
-                let p = TWO_DIGITS.as_ptr().add(((val % 100) as usize) * 2).cast::<u16>().read_unaligned();
+                let q = ((val as u32) * 41) >> 12;
+                *dst = b'0' + q as u8;
+                let r = (val as usize) - (q as usize) * 100;
+                let p = TWO_DIGITS.as_ptr().add(r * 2).cast::<u16>().read_unaligned();
                 dst.add(1).cast::<u16>().write_unaligned(p);
             }
             1 => *dst = b'0' + (val as u8),
             6 => {
-                let p = TWO_DIGITS.as_ptr().add(((val / 10_000) as usize) * 2).cast::<u16>().read_unaligned();
+                let hi = (val / 10_000) as usize;
+                let lo = (val % 10_000) as usize;
+                let p = TWO_DIGITS.as_ptr().add(hi * 2).cast::<u16>().read_unaligned();
                 dst.cast::<u16>().write_unaligned(p);
-                dst.add(2).cast::<u32>().write_unaligned(*DEC_PADDED_10K.get_unchecked((val % 10_000) as usize));
+                dst.add(2).cast::<u32>().write_unaligned(*DEC_PADDED_10K.get_unchecked(lo));
             }
             _ => {
                 let mut end = width;
@@ -43,68 +47,6 @@ unsafe fn write_padded_digits(dst: *mut u8, width: usize, mut val: u64) {
             }
         }
     }
-}
-
-#[inline(always)]
-fn add_digit_range_to_mask(mask: &mut [u64; 4], width: usize, min: u64, max: u64) {
-    let (mut lo, mut hi) = ([b'0'; PATTERN_MAX_DIGITS], [b'0'; PATTERN_MAX_DIGITS]);
-    unsafe {
-        write_padded_digits(lo.as_mut_ptr(), width, min);
-        write_padded_digits(hi.as_mut_ptr(), width, max);
-    }
-    let mut p = 0usize;
-    while p < width && lo[p] == hi[p] {
-        mask[(lo[p] >> 6) as usize] |= 1u64 << (lo[p] & 63);
-        p += 1;
-    }
-    if p < width {
-        for b in lo[p]..=hi[p] {
-            mask[(b >> 6) as usize] |= 1u64 << (b & 63);
-        }
-        if p + 1 < width {
-            add_bytes_to_mask(mask, b"0123456789");
-        }
-    }
-}
-
-/// Extract the exact 256-bit byte alphabet of a `MODEL_PATTERN` column from its token header alone.
-fn pattern_col_alphabet(c: &mut Cursor<'_>, mask: &mut [u64; 4]) -> Result<()> {
-    let ntok = c.uleb()?;
-    if !(1..=PATTERN_MAX_TOKENS).contains(&ntok) {
-        return Err(invalid("column pattern tokens"));
-    }
-    for _ in 0..ntok {
-        match c.byte()? {
-            0 => {
-                let width = c.byte()? as usize;
-                let (min, radix) = (c.uleb()? as u64, c.uleb()? as u64);
-                if !(1..=PATTERN_MAX_DIGITS).contains(&width) || radix == 0 {
-                    return Err(invalid("column pattern digits"));
-                }
-                let max = min.checked_add(radix - 1).ok_or_else(|| invalid("column pattern range"))?;
-                if max >= 10u64.pow(width as u32) {
-                    return Err(invalid("column pattern width"));
-                }
-                add_digit_range_to_mask(mask, width, min, max);
-            }
-            1 => {
-                let len = c.uleb()?;
-                add_bytes_to_mask(mask, c.take(len)?);
-            }
-            2 => {
-                let entries = c.uleb()?;
-                if !(2..=PATTERN_MAX_DICT).contains(&entries) {
-                    return Err(invalid("column pattern dictionary"));
-                }
-                for _ in 0..entries {
-                    let len = c.uleb()?;
-                    add_bytes_to_mask(mask, c.take(len)?);
-                }
-            }
-            _ => return Err(invalid("column pattern token kind")),
-        }
-    }
-    Ok(())
 }
 
 #[inline(always)]
@@ -189,7 +131,7 @@ impl<'a> PreparedColumn<'a> {
                     }
                     product = product.checked_mul(radix).ok_or_else(|| invalid("column pattern product"))?;
                     max_row_len = max_row_len.saturating_add(w_usize);
-                    FastPatTok::Digits { width, min, radix }
+                    FastPatTok::Digits { width, min, radix, div: FastDiv62::new(radix) }
                 }
                 1 => {
                     let len = cursor.uleb()?;
@@ -222,7 +164,13 @@ impl<'a> PreparedColumn<'a> {
                     product = product.checked_mul(entries as u64).ok_or_else(|| invalid("column pattern product"))?;
                     max_row_len = max_row_len.saturating_add(max_e);
                     let fixed_width = (min_e == max_e && max_e <= u16::MAX as usize).then_some(max_e as u16);
-                    FastPatTok::Dict { slice_off: off as u32, len: entries as u8, fixed_width, max_len: max_e }
+                    FastPatTok::Dict {
+                        slice_off: off as u32,
+                        len: entries as u8,
+                        fixed_width,
+                        max_len: max_e,
+                        div: FastDiv62::new(entries as u64),
+                    }
                 }
                 _ => return Err(invalid("column pattern token kind")),
             };
@@ -323,16 +271,17 @@ impl<'a> PreparedColumn<'a> {
             (usize::MAX, 0u64, 0usize)
         };
 
-        // Fast path 1: Fixed-width active span in `1..=16` bytes -> `ColumnStream::Copy16`.
-        if let Some(flen) = fixed_len.filter(|&l| (1..=16).contains(&l)) {
+        // Fast path 1: Fixed-width active span in `1..=32` bytes -> `Copy16` or `Copy32`.
+        if let Some(flen) = fixed_len.filter(|&l| (1..=32).contains(&l)) {
+            let stride = if flen <= 16 { 16usize } else { 32usize };
             let mut col_mask = [0u64; 4];
             let mut tok_offs = [0u8; PATTERN_MAX_TOKENS];
-            let mut cur_bytes = [0u8; 16];
+            let mut cur_bytes = [0u8; 32];
             let mut off = 0usize;
             for (i, &tok) in act_toks.iter().enumerate() {
                 tok_offs[i] = off as u8;
                 match tok {
-                    FastPatTok::Digits { width, min, radix } => {
+                    FastPatTok::Digits { width, min, radix, .. } => {
                         let w_u = width as usize;
                         add_digit_range_to_mask(&mut col_mask, w_u, min, min + radix - 1);
                         if radix == 1 {
@@ -356,19 +305,19 @@ impl<'a> PreparedColumn<'a> {
             }
 
             let tail_digits = match act_toks[act_len - 1] {
-                FastPatTok::Digits { width, min, radix } => {
+                FastPatTok::Digits { width, min, radix, .. } => {
                     Some((radix, width as usize, min, tok_offs[act_len - 1] as usize))
                 }
                 _ => None,
             };
 
-            let render_fixed = |n: u64, buf: &mut [u8; 16], slices: &[(*const u8, usize)]| -> u64 {
+            let render_fixed = |n: u64, buf: &mut [u8; 32], slices: &[(*const u8, usize)]| -> u64 {
                 let (mut rem, mut last_f) = (n, 0u64);
                 for i in (0..act_len).rev() {
                     match act_toks[i] {
-                        FastPatTok::Digits { width, min, radix } if radix > 1 => {
-                            let f = rem % radix;
-                            rem /= radix;
+                        FastPatTok::Digits { width, min, radix, div } if radix > 1 => {
+                            let (q, f) = div.div_rem(rem);
+                            rem = q;
                             if i + 1 == act_len {
                                 last_f = f;
                             }
@@ -376,12 +325,12 @@ impl<'a> PreparedColumn<'a> {
                                 write_padded_digits(buf.as_mut_ptr().add(tok_offs[i] as usize), width as usize, min + f);
                             }
                         }
-                        FastPatTok::Dict { slice_off, len, .. } => {
-                            let f = (rem % len as u64) as usize;
-                            rem /= len as u64;
+                        FastPatTok::Dict { slice_off, div, .. } => {
+                            let (q, f) = div.div_rem(rem);
+                            rem = q;
                             unsafe {
-                                let (p, l) = *slices.get_unchecked(slice_off as usize + f);
-                                std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr().add(tok_offs[i] as usize), l);
+                                let (p, l) = *slices.get_unchecked(slice_off as usize + f as usize);
+                                copy_short_exact(p, buf.as_mut_ptr().add(tok_offs[i] as usize), l);
                             }
                         }
                         _ => {}
@@ -390,12 +339,22 @@ impl<'a> PreparedColumn<'a> {
                 last_f
             };
 
+            #[inline(always)]
+            unsafe fn store_fixed(dst: *mut u8, buf: &[u8; 32], stride: usize) {
+                unsafe {
+                    copy16_unaligned(buf.as_ptr(), dst);
+                    if stride == 32 {
+                        copy16_unaligned(buf.as_ptr().add(16), dst.add(16));
+                    }
+                }
+            }
+
             let out_u8_offset = scratch.u8_arena.len();
-            scratch.u8_arena.reserve(count * 16);
+            scratch.u8_arena.reserve(count * stride);
             let out_ptr = unsafe { scratch.u8_arena.as_mut_ptr().add(out_u8_offset) };
             let mut cur = n0;
             let mut last_field = render_fixed(cur, &mut cur_bytes, &scratch.slice_arena);
-            unsafe { out_ptr.cast::<u128>().write_unaligned(u128::from_le_bytes(cur_bytes)); }
+            unsafe { store_fixed(out_ptr, &cur_bytes, stride); }
 
             for r in 1..count {
                 let packed_z = reader.next_u64();
@@ -416,7 +375,7 @@ impl<'a> PreparedColumn<'a> {
                     packed_z
                 };
                 if z == 0 {
-                    unsafe { out_ptr.add(r * 16).cast::<u128>().write_unaligned(u128::from_le_bytes(cur_bytes)); }
+                    unsafe { store_fixed(out_ptr.add(r * stride), &cur_bytes, stride); }
                     continue;
                 }
                 let delta = ((z >> 1) as i64) ^ -((z & 1) as i64);
@@ -427,7 +386,7 @@ impl<'a> PreparedColumn<'a> {
                         cur += d_u;
                         unsafe {
                             write_padded_digits(cur_bytes.as_mut_ptr().add(toff), width, min + last_field);
-                            out_ptr.add(r * 16).cast::<u128>().write_unaligned(u128::from_le_bytes(cur_bytes));
+                            store_fixed(out_ptr.add(r * stride), &cur_bytes, stride);
                         }
                         continue;
                     }
@@ -438,21 +397,26 @@ impl<'a> PreparedColumn<'a> {
                 }
                 cur = next as u64;
                 last_field = render_fixed(cur, &mut cur_bytes, &scratch.slice_arena);
-                unsafe { out_ptr.add(r * 16).cast::<u128>().write_unaligned(u128::from_le_bytes(cur_bytes)); }
+                unsafe { store_fixed(out_ptr.add(r * stride), &cur_bytes, stride); }
             }
 
-            unsafe { scratch.u8_arena.set_len(out_u8_offset + count * 16); }
+            unsafe { scratch.u8_arena.set_len(out_u8_offset + count * stride); }
+            let stream = if stride == 16 {
+                ColumnStream::Copy16 { u8_offset: out_u8_offset, emit_len: flen as u8, col_mask }
+            } else {
+                ColumnStream::Copy32 { u8_offset: out_u8_offset, emit_len: flen as u8, col_mask }
+            };
             return Ok(Self {
                 const_full: ConstValue::None,
                 const_lead,
                 const_trail,
                 dict_slices: None,
                 max_emit_len: flen,
-                stream: ColumnStream::Copy16 { u8_offset: out_u8_offset, emit_len: flen as u8, col_mask },
+                stream,
             });
         }
 
-        // Fast path 2: Variable-width or `17..=2048` active span -> `ColumnStream::SegmentDict`.
+        // Fast path 2: Variable-width or `33..=2048` active span -> `ColumnStream::SegmentDict`.
         let str_u8_offset = scratch.u8_arena.len();
         scratch.u8_arena.reserve(count.saturating_mul(max_act_len).saturating_add(96));
         let len_u16_offset = scratch.u16_arena.len();
@@ -467,8 +431,17 @@ impl<'a> PreparedColumn<'a> {
             let mut rem = n;
             for i in (0..act_len).rev() {
                 match act_toks[i] {
-                    FastPatTok::Digits { radix, .. } => { vals[i] = rem % radix; rem /= radix; }
-                    FastPatTok::Dict { len, .. } => { vals[i] = rem % len as u64; rem /= len as u64; }
+                    FastPatTok::Digits { radix, div, .. } if radix > 1 => {
+                        let (q, r) = div.div_rem(rem);
+                        vals[i] = r;
+                        rem = q;
+                    }
+                    FastPatTok::Digits { .. } => vals[i] = 0,
+                    FastPatTok::Dict { div, .. } => {
+                        let (q, r) = div.div_rem(rem);
+                        vals[i] = r;
+                        rem = q;
+                    }
                     FastPatTok::Lit(_) => {}
                 }
             }
@@ -477,7 +450,7 @@ impl<'a> PreparedColumn<'a> {
                 for i in 0..act_len {
                     match act_toks[i] {
                         FastPatTok::Lit(s) => {
-                            std::ptr::copy_nonoverlapping(s.as_ptr(), dst, s.len());
+                            copy_short_exact(s.as_ptr(), dst, s.len());
                             dst = dst.add(s.len());
                         }
                         FastPatTok::Digits { width, min, .. } => {
@@ -487,7 +460,7 @@ impl<'a> PreparedColumn<'a> {
                         }
                         FastPatTok::Dict { slice_off, .. } => {
                             let (p, l) = *slices.get_unchecked(slice_off as usize + vals[i] as usize);
-                            std::ptr::copy_nonoverlapping(p, dst, l);
+                            copy_short_exact(p, dst, l);
                             dst = dst.add(l);
                         }
                     }
@@ -522,7 +495,7 @@ impl<'a> PreparedColumn<'a> {
             };
             if z == 0 {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(prev_ptr, dst_ptr, prev_len);
+                    copy_short_exact(prev_ptr, dst_ptr, prev_len);
                     dst_ptr = dst_ptr.add(prev_len);
                     *len_base.add(r) = prev_len as u16;
                 }
@@ -544,6 +517,7 @@ impl<'a> PreparedColumn<'a> {
 
         let actual_bytes = unsafe { dst_ptr.offset_from(str_base) as usize };
         unsafe {
+            std::ptr::write_bytes(dst_ptr, 0, 32);
             scratch.u8_arena.set_len(str_u8_offset + actual_bytes);
             scratch.u16_arena.set_len(len_u16_offset + count);
         }

@@ -308,13 +308,47 @@ impl UnboundTemplate {
                             BoundStream::Copy16 { ptr, len }
                         }
                     }
+                    ColumnStream::Copy32 {
+                        u8_offset,
+                        emit_len,
+                        ..
+                    } => {
+                        let ptr = u8_base.add(u8_offset);
+                        let len = emit_len as usize;
+                        if (1..=16).contains(&after.len) {
+                            BoundStream::Copy32After16 { ptr, len }
+                        } else if (17..=32).contains(&after.len) {
+                            BoundStream::Copy32After32 { ptr, len }
+                        } else {
+                            BoundStream::Copy32 { ptr, len }
+                        }
+                    }
                     ColumnStream::SegmentDict {
                         str_u8_offset,
                         len_u16_offset,
-                    } => BoundStream::SegmentDict {
-                        str_ptr: u8_base.add(str_u8_offset),
-                        len_ptr: u16_base.add(len_u16_offset),
-                    },
+                    } => {
+                        let str_ptr = u8_base.add(str_u8_offset);
+                        let len_ptr = u16_base.add(len_u16_offset);
+                        if col.max_emit_len <= 16 {
+                            if (1..=16).contains(&after.len) {
+                                BoundStream::SegmentDict16After16 { str_ptr, len_ptr }
+                            } else if (17..=32).contains(&after.len) {
+                                BoundStream::SegmentDict16After32 { str_ptr, len_ptr }
+                            } else {
+                                BoundStream::SegmentDict16 { str_ptr, len_ptr }
+                            }
+                        } else if col.max_emit_len <= 32 {
+                            if (1..=16).contains(&after.len) {
+                                BoundStream::SegmentDict32After16 { str_ptr, len_ptr }
+                            } else if (17..=32).contains(&after.len) {
+                                BoundStream::SegmentDict32After32 { str_ptr, len_ptr }
+                            } else {
+                                BoundStream::SegmentDict32 { str_ptr, len_ptr }
+                            }
+                        } else {
+                            BoundStream::SegmentDict { str_ptr, len_ptr }
+                        }
+                    }
                     ColumnStream::PeriodicString { cursor, period } => {
                         BoundStream::PeriodicString { cursor, period }
                     }

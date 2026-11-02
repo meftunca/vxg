@@ -304,7 +304,7 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
         if size >= limit {
             return None;
         }
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_TIMESTAMP);
         out.extend_from_slice(&year.to_le_bytes());
         for (base, width) in &plans {

@@ -360,6 +360,39 @@ fn unpack_u16_swar(
         return Ok(start);
     }
 
+    if width == 16 && min == 0 {
+        #[cfg(target_endian = "little")]
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_ptr, dst_ptr.cast::<u8>(), count * 2);
+            out.set_len(start + count);
+            return Ok(start);
+        }
+    }
+    if width >= 15 {
+        let min_splat32 = (min as u32).wrapping_mul(0x0001_0001);
+        let step_bits = (width as usize) * 2;
+        let (mut row, mut bit_pos) = (0usize, 0usize);
+        while row < count {
+            let (byte_pos, bit_off) = (bit_pos >> 3, (bit_pos & 7) as u32);
+            let raw = if byte_pos + 8 <= bytes.len() {
+                u64::from_le(unsafe { src_ptr.add(byte_pos).cast::<u64>().read_unaligned() })
+            } else {
+                u64::from_le(unsafe {
+                    read_u128_partial(src_ptr.add(byte_pos), bytes.len() - byte_pos) as u64
+                })
+            };
+            let v = raw >> bit_off;
+            let u16x2 = ((v & m) as u32) | ((((v >> w) & m) as u32) << 16);
+            unsafe {
+                dst_ptr.add(row).cast::<u32>().write_unaligned(u16x2.wrapping_add(min_splat32).to_le());
+            }
+            row += 2;
+            bit_pos += step_bits;
+        }
+        unsafe { out.set_len(start + count); }
+        return Ok(start);
+    }
+
     let min_splat = (min as u64).wrapping_mul(0x0001_0001_0001_0001);
     let step_bits = (width as usize) * 4;
     let mut row = 0usize;

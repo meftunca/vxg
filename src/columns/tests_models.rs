@@ -186,13 +186,26 @@ mod tests {
                             let mut fresh_cache = (usize::MAX, 0u64, 0u64);
                             for use_shared in [false, true] {
                                 let mut a: [&[u8]; MAX_SLOTS] = [&[]; MAX_SLOTS];
+                                let mut scratch_a: [&[u8]; MAX_SLOTS] = [&[]; MAX_SLOTS];
+                                let mut col_ptrs: [*mut &[u8]; MAX_SLOTS] =
+                                    [core::ptr::null_mut(); MAX_SLOTS];
+                                for s in 0..slots {
+                                    col_ptrs[s] = unsafe { a.as_mut_ptr().add(s) };
+                                }
                                 let cache_ref = if use_shared {
                                     &mut shared_cache
                                 } else {
                                     &mut fresh_cache
                                 };
                                 let fast = try_match_delimited_stream(
-                                    data, start, &segments, delim, cache_ref, &mut a,
+                                    data,
+                                    start,
+                                    &segments,
+                                    delim,
+                                    cache_ref,
+                                    &col_ptrs,
+                                    0,
+                                    &mut scratch_a,
                                 );
                                 assert_eq!(fast, slow, "delim={delim} slots={slots} row={rem:?}");
                                 if fast.is_some() {

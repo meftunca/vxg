@@ -109,6 +109,218 @@ struct Template<'a> {
     values: Vec<Vec<&'a [u8]>>,
 }
 
+thread_local! {
+    static ENCODE_VEC_POOL: std::cell::RefCell<Vec<Vec<&'static [u8]>>> =
+        std::cell::RefCell::new(Vec::with_capacity(128));
+    static ENCODE_SEG_POOL: std::cell::RefCell<Vec<Vec<&'static [u8]>>> =
+        std::cell::RefCell::new(Vec::with_capacity(16));
+    static ENCODE_OUTER_POOL: std::cell::RefCell<Vec<Vec<Vec<&'static [u8]>>>> =
+        std::cell::RefCell::new(Vec::with_capacity(16));
+    static ENCODE_TPL_POOL: std::cell::RefCell<Vec<Vec<Template<'static>>>> =
+        std::cell::RefCell::new(Vec::with_capacity(8));
+    static COL_BUF_POOL: std::cell::RefCell<Vec<Vec<u8>>> =
+        std::cell::RefCell::new(Vec::with_capacity(8));
+}
+
+#[inline(always)]
+fn take_tpl_vec<'a>() -> Vec<Template<'a>> {
+    match ENCODE_TPL_POOL.with(|cell| cell.borrow_mut().pop()) {
+        Some(mut v) => {
+            v.clear();
+            unsafe { core::mem::transmute::<Vec<Template<'static>>, Vec<Template<'a>>>(v) }
+        }
+        None => Vec::with_capacity(8),
+    }
+}
+
+#[inline(always)]
+fn return_tpl_vec<'a>(mut v: Vec<Template<'a>>) {
+    v.clear();
+    if (4..=64).contains(&v.capacity()) {
+        ENCODE_TPL_POOL.with(|cell| {
+            if let Ok(mut pool) = cell.try_borrow_mut() {
+                if pool.len() < 8 {
+                    let vs = unsafe {
+                        core::mem::transmute::<Vec<Template<'a>>, Vec<Template<'static>>>(v)
+                    };
+                    pool.push(vs);
+                }
+            }
+        });
+    }
+}
+
+#[inline(always)]
+fn take_model_buf(cap: usize) -> Vec<u8> {
+    match COL_BUF_POOL.with(|cell| cell.borrow_mut().pop()) {
+        Some(mut buf) => {
+            buf.clear();
+            buf.reserve(cap);
+            buf
+        }
+        None => Vec::with_capacity(cap.max(4096)),
+    }
+}
+
+#[inline(always)]
+fn put_model_buf(mut buf: Vec<u8>) {
+    if (64..=131_072).contains(&buf.capacity()) {
+        buf.clear();
+        COL_BUF_POOL.with(|cell| {
+            if let Ok(mut pool) = cell.try_borrow_mut() {
+                if pool.len() < 8 {
+                    pool.push(buf);
+                }
+            }
+        });
+    }
+}
+
+/// Smallest capacity across a template's column vectors.
+///
+/// Columns come from a pool and can have different capacities, so the fast row loops must bound
+/// their unchecked writes by the minimum over *all* slots, not by slot 0 alone (that was a heap
+/// buffer overflow when slot 0 was larger than another slot).
+#[inline(always)]
+fn min_col_capacity(values: &[Vec<&[u8]>]) -> usize {
+    values.iter().map(Vec::capacity).min().unwrap_or(0)
+}
+
+#[inline(always)]
+fn take_col_vec<'a>(est_rows: usize) -> Vec<&'a [u8]> {
+    let v = ENCODE_VEC_POOL.with(|cell| cell.borrow_mut().pop());
+    match v {
+        Some(mut vec_static) => {
+            vec_static.clear();
+            vec_static.reserve(est_rows);
+            unsafe { core::mem::transmute::<Vec<&'static [u8]>, Vec<&'a [u8]>>(vec_static) }
+        }
+        None => Vec::with_capacity(est_rows),
+    }
+}
+
+#[inline(always)]
+fn take_seg_vec<'a>(cap: usize) -> Vec<&'a [u8]> {
+    match ENCODE_SEG_POOL.with(|cell| cell.borrow_mut().pop()) {
+        Some(mut v) => {
+            v.clear();
+            v.reserve(cap);
+            unsafe { core::mem::transmute::<Vec<&'static [u8]>, Vec<&'a [u8]>>(v) }
+        }
+        None => Vec::with_capacity(cap.max(32)),
+    }
+}
+
+#[inline(always)]
+fn take_outer_col_vec<'a>(slots: usize, est_rows: usize) -> Vec<Vec<&'a [u8]>> {
+    let mut outer = match ENCODE_OUTER_POOL.with(|cell| cell.borrow_mut().pop()) {
+        Some(mut v) => {
+            v.clear();
+            v.reserve(slots);
+            unsafe { core::mem::transmute::<Vec<Vec<&'static [u8]>>, Vec<Vec<&'a [u8]>>>(v) }
+        }
+        None => Vec::with_capacity(slots.max(32)),
+    };
+    for _ in 0..slots {
+        outer.push(take_col_vec(est_rows));
+    }
+    outer
+}
+
+#[inline(always)]
+fn reserve_raw_arena_for_block(
+    raw_arena: &mut Vec<u8>,
+    cursor: &Cursor<'_>,
+    raw_len: usize,
+    raw_count: usize,
+    single_slots: Option<usize>,
+) -> Result<()> {
+    let has_lz_raw = raw_count > 0 && cursor.bytes.get(cursor.pos) == Some(&0);
+    let mut lz_dict_cols = 0usize;
+    let mut need_raw = has_lz_raw;
+    if let Some(slots) = single_slots.filter(|_| raw_count == 0) {
+        let mut cprobe = *cursor;
+        for _ in 0..slots {
+            let len = cprobe.uleb()?;
+            let cb = cprobe.take(len)?;
+            if let Some(&t) = cb.first() {
+                if matches!(
+                    t,
+                    MODEL_RAW | MODEL_LZ_RAW | MODEL_DICTIONARY | MODEL_FRONT_DICT | MODEL_PATTERN
+                ) {
+                    need_raw = true;
+                    if t == MODEL_FRONT_DICT && cb.get(1).is_some_and(|&h| (h & 0x80) != 0) {
+                        lz_dict_cols += 1;
+                    }
+                }
+            }
+        }
+    } else {
+        need_raw = true;
+        lz_dict_cols = cursor.bytes[cursor.pos..]
+            .windows(2)
+            .filter(|w| w[0] == MODEL_FRONT_DICT && (w[1] & 0x80) != 0)
+            .count();
+    }
+    if need_raw {
+        let cap = if raw_len <= 65536 && lz_dict_cols == 0 && !has_lz_raw {
+            98_304
+        } else {
+            raw_len.saturating_mul(2 + lz_dict_cols) + 16384
+        };
+        raw_arena.reserve(cap);
+    }
+    Ok(())
+}
+
+impl<'a> Drop for Template<'a> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        let mut outer = core::mem::take(&mut self.values);
+        ENCODE_VEC_POOL.with(|cell| {
+            if let Ok(mut pool) = cell.try_borrow_mut() {
+                for mut col in outer.drain(..) {
+                    if pool.len() < 128 && col.capacity() >= 16 {
+                        col.clear();
+                        let vec_static = unsafe {
+                            core::mem::transmute::<Vec<&'a [u8]>, Vec<&'static [u8]>>(col)
+                        };
+                        pool.push(vec_static);
+                    }
+                }
+            } else {
+                outer.clear();
+            }
+        });
+        if (8..=256).contains(&outer.capacity()) {
+            ENCODE_OUTER_POOL.with(|cell| {
+                if let Ok(mut pool) = cell.try_borrow_mut() {
+                    if pool.len() < 16 {
+                        let o_static = unsafe {
+                            core::mem::transmute::<Vec<Vec<&'a [u8]>>, Vec<Vec<&'static [u8]>>>(outer)
+                        };
+                        pool.push(o_static);
+                    }
+                }
+            });
+        }
+        let mut segs = core::mem::take(&mut self.segments);
+        if (8..=256).contains(&segs.capacity()) {
+            segs.clear();
+            ENCODE_SEG_POOL.with(|cell| {
+                if let Ok(mut pool) = cell.try_borrow_mut() {
+                    if pool.len() < 16 {
+                        let s_static = unsafe {
+                            core::mem::transmute::<Vec<&'a [u8]>, Vec<&'static [u8]>>(segs)
+                        };
+                        pool.push(s_static);
+                    }
+                }
+            });
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Row<'a> {
     Template(usize),

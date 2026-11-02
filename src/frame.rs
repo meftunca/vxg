@@ -474,7 +474,7 @@ impl<'a> ValidatedFrame<'a> {
 mod assemble;
 mod decode;
 
-pub(crate) use assemble::{assemble, assemble_workers, assemble_workers_into, Part};
+pub(crate) use assemble::{assemble, parallel_encode_assemble, AssembleDest, Part};
 use decode::decode_frame_into;
 pub(crate) use decode::{
     decode_validated_dir_multi_thread, decode_validated_dir_single_thread,

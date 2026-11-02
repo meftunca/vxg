@@ -406,7 +406,7 @@ fn pack_pattern_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
 
         let w = best_w as u8;
         let is_exc = |z: u64| best_w < 64 && z >> best_w != 0;
-        let mut out = Vec::with_capacity(64 + (delta_len * best_w).div_ceil(8));
+        let mut out = take_model_buf(64 + (delta_len * best_w).div_ceil(8));
         out.push(MODEL_PATTERN);
         put_uleb(&mut out, ntok);
         for tok in &toks {

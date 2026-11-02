@@ -92,14 +92,26 @@ unsafe fn write_decimal_fast(dst: *mut u8, value: u64) -> usize {
             dst.cast::<u32>().write_unaligned(entry as u32);
             (entry >> 32) as usize
         } else if value < 100_000_000 {
-            let hi = (value / 10_000) as usize;
-            let lo = (value % 10_000) as usize;
+            let v32 = value as u32;
+            let hi = (v32 / 10_000) as usize;
+            let lo = (v32 - (hi as u32) * 10_000) as usize;
             let hi_entry = *DEC_10K.get_unchecked(hi);
             let hi_len = (hi_entry >> 32) as usize;
             dst.cast::<u32>().write_unaligned(hi_entry as u32);
-            let lo_digits = *DEC_PADDED_10K.get_unchecked(lo);
-            dst.add(hi_len).cast::<u32>().write_unaligned(lo_digits);
+            dst.add(hi_len)
+                .cast::<u32>()
+                .write_unaligned(*DEC_PADDED_10K.get_unchecked(lo));
             hi_len + 4
+        } else if value < 1_000_000_000_000 {
+            let hi = (value / 100_000_000) as usize;
+            let lo8 = value % 100_000_000;
+            let hi_entry = *DEC_10K.get_unchecked(hi);
+            let hi_len = (hi_entry >> 32) as usize;
+            dst.cast::<u32>().write_unaligned(hi_entry as u32);
+            let lo_u64 = (*DEC_PADDED_10K.get_unchecked((lo8 / 10_000) as usize) as u64)
+                | ((*DEC_PADDED_10K.get_unchecked((lo8 % 10_000) as usize) as u64) << 32);
+            dst.add(hi_len).cast::<u64>().write_unaligned(lo_u64);
+            hi_len + 8
         } else {
             write_decimal_large(dst, value)
         }
@@ -108,31 +120,96 @@ unsafe fn write_decimal_fast(dst: *mut u8, value: u64) -> usize {
 
 #[cold]
 #[inline(never)]
-unsafe fn write_decimal_large(dst: *mut u8, mut value: u64) -> usize {
-    let mut buffer = [0u8; 24];
-    let mut position = buffer.len();
-    while value >= 10_000 {
-        let rem = (value % 10_000) as usize;
-        value /= 10_000;
-        position -= 4;
-        unsafe {
-            buffer
-                .as_mut_ptr()
-                .add(position)
+unsafe fn write_decimal_large(dst: *mut u8, value: u64) -> usize {
+    unsafe {
+        if value < 10_000_000_000_000_000 {
+            let top8 = value / 100_000_000;
+            let bot8 = value % 100_000_000;
+            let hi_entry = *DEC_10K.get_unchecked((top8 / 10_000) as usize);
+            let hi_len = (hi_entry >> 32) as usize;
+            dst.cast::<u32>().write_unaligned(hi_entry as u32);
+            dst.add(hi_len)
                 .cast::<u32>()
-                .write_unaligned(*DEC_PADDED_10K.get_unchecked(rem));
+                .write_unaligned(*DEC_PADDED_10K.get_unchecked((top8 % 10_000) as usize));
+            let bot_u64 = (*DEC_PADDED_10K.get_unchecked((bot8 / 10_000) as usize) as u64)
+                | ((*DEC_PADDED_10K.get_unchecked((bot8 % 10_000) as usize) as u64) << 32);
+            dst.add(hi_len + 4).cast::<u64>().write_unaligned(bot_u64);
+            hi_len + 12
+        } else {
+            let top4 = (value / 10_000_000_000_000_000) as usize;
+            let rem16 = value % 10_000_000_000_000_000;
+            let mid8 = rem16 / 100_000_000;
+            let bot8 = rem16 % 100_000_000;
+            let hi_entry = *DEC_10K.get_unchecked(top4);
+            let hi_len = (hi_entry >> 32) as usize;
+            dst.cast::<u32>().write_unaligned(hi_entry as u32);
+            let mid_u64 = (*DEC_PADDED_10K.get_unchecked((mid8 / 10_000) as usize) as u64)
+                | ((*DEC_PADDED_10K.get_unchecked((mid8 % 10_000) as usize) as u64) << 32);
+            let bot_u64 = (*DEC_PADDED_10K.get_unchecked((bot8 / 10_000) as usize) as u64)
+                | ((*DEC_PADDED_10K.get_unchecked((bot8 % 10_000) as usize) as u64) << 32);
+            dst.add(hi_len).cast::<u64>().write_unaligned(mid_u64);
+            dst.add(hi_len + 8).cast::<u64>().write_unaligned(bot_u64);
+            hi_len + 16
         }
     }
-    let hi_entry = unsafe { *DEC_10K.get_unchecked(value as usize) };
-    let hi_len = (hi_entry >> 32) as usize;
-    position -= hi_len;
-    let hi_bytes = (hi_entry as u32).to_le_bytes();
-    buffer[position..position + hi_len].copy_from_slice(&hi_bytes[..hi_len]);
-    let total_len = buffer.len() - position;
-    unsafe {
-        std::ptr::copy_nonoverlapping(buffer.as_ptr().add(position), dst, total_len);
+}
+
+/// Exact division-free `n / d` and `n % d` for `0 <= n < 2^62` and `2 <= d <= 2^62`.
+#[derive(Clone, Copy)]
+struct FastDiv62 {
+    mul: u64,
+    shr: u32,
+    d: u64,
+}
+
+impl FastDiv62 {
+    #[inline(always)]
+    fn new(d: u64) -> Self {
+        if d <= 1 {
+            Self { mul: 0, shr: 0, d }
+        } else if d.is_power_of_two() {
+            Self { mul: 1u64 << 63, shr: d.trailing_zeros() - 1, d }
+        } else {
+            let k = 63 - d.leading_zeros();
+            let mul = (((1u128 << (63 + k)) + (d as u128 - 1)) / (d as u128)) as u64;
+            Self { mul, shr: k - 1, d }
+        }
     }
-    total_len
+
+    #[inline(always)]
+    fn div_rem(self, n: u64) -> (u64, u64) {
+        let q = (((n as u128 * self.mul as u128) >> 64) as u64) >> self.shr;
+        (q, n - q * self.d)
+    }
+}
+
+/// Exact-bounds inline copy without overread or overwrite (avoids `memcpy` calls on short tokens).
+#[inline(always)]
+unsafe fn copy_short_exact(src: *const u8, dst: *mut u8, len: usize) {
+    unsafe {
+        if len == 1 {
+            *dst = *src;
+        } else if len <= 4 {
+            if len >= 2 {
+                let a = src.cast::<u16>().read_unaligned();
+                let b = src.add(len - 2).cast::<u16>().read_unaligned();
+                dst.cast::<u16>().write_unaligned(a);
+                dst.add(len - 2).cast::<u16>().write_unaligned(b);
+            }
+        } else if len <= 8 {
+            let a = src.cast::<u32>().read_unaligned();
+            let b = src.add(len - 4).cast::<u32>().read_unaligned();
+            dst.cast::<u32>().write_unaligned(a);
+            dst.add(len - 4).cast::<u32>().write_unaligned(b);
+        } else if len <= 16 {
+            let a = src.cast::<u64>().read_unaligned();
+            let b = src.add(len - 8).cast::<u64>().read_unaligned();
+            dst.cast::<u64>().write_unaligned(a);
+            dst.add(len - 8).cast::<u64>().write_unaligned(b);
+        } else {
+            std::ptr::copy_nonoverlapping(src, dst, len);
+        }
+    }
 }
 
 #[inline(always)]
@@ -411,6 +488,64 @@ fn scan_value(data: &[u8], pos: usize) -> Option<usize> {
         b'{' | b'[' => scan_compound(data, pos),
         _ if first <= b',' || first == b'}' || first == b']' => None,
         _ => Some(scan_primitive_end(data.as_ptr(), data.len(), pos)),
+    }
+}
+
+#[inline(never)]
+fn refill_json_cache(data: &[u8], w: usize, cache: &mut (usize, u64, u64)) -> bool {
+    let base = w * 64;
+    let len = data.len();
+    if base + 64 <= len {
+        let (q, p) = unsafe { json_struct_masks64(data.as_ptr().add(base)) };
+        *cache = (w, q, p);
+        true
+    } else if base < len {
+        let rem = len - base;
+        let mut tail = [0u8; 64];
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr().add(base), tail.as_mut_ptr(), rem);
+            let (q, p) = json_struct_masks64(tail.as_ptr());
+            *cache = (w, q, p);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+#[inline(never)]
+fn next_json_string_slow(
+    data: &[u8],
+    mut from: usize,
+    cache: &mut (usize, u64, u64),
+) -> Option<usize> {
+    let len = data.len();
+    let ptr = data.as_ptr();
+    loop {
+        if from >= len {
+            return None;
+        }
+        let w = from >> 6;
+        if cache.0 != w && !refill_json_cache(data, w, cache) {
+            return None;
+        }
+        let m = cache.1 >> (from & 63);
+        if m != 0 {
+            let end = from + m.trailing_zeros() as usize;
+            if end >= len {
+                return None;
+            }
+            let hit = unsafe { *ptr.add(end) };
+            if hit == b'"' {
+                return Some(end + 1);
+            }
+            if hit < 0x20 || end + 1 >= len || unsafe { *ptr.add(end + 1) } < 0x20 {
+                return None;
+            }
+            from = end + 2;
+        } else {
+            from = (w + 1) * 64;
+        }
     }
 }
 

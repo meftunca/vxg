@@ -1,3 +1,37 @@
+#[derive(Default)]
+struct StrideScratch {
+    planes: [Vec<u8>; 8],
+    super_mask_buf: Vec<u64>,
+    mask_buf: Vec<u64>,
+    nz_buf: Vec<u8>,
+    lz_dict4: Vec<u32>,
+    lz_dict7: Vec<u16>,
+    lz_tokens: Vec<u8>,
+    lz_offsets: Vec<u8>,
+    lz_ext: Vec<u8>,
+    lz_lits: Vec<u8>,
+    lz_meta_raw: Vec<u8>,
+    lz_meta_comp: Vec<u8>,
+    lz_lits_comp: Vec<u8>,
+    lz_lits_huf: Vec<u8>,
+    lz_meta_huf: Vec<u8>,
+    lz_sub_lits: Vec<u8>,
+    lz_sub_tokens: Vec<u8>,
+    lz_sub_offsets: Vec<u8>,
+    lz_sub_ext: Vec<u8>,
+}
+
+thread_local! {
+    static STRIDE_SCRATCH: std::cell::RefCell<StrideScratch> =
+        std::cell::RefCell::new(StrideScratch::default());
+    /// Plane buffers for `STRIDE_PACKET` mode 2 (delta planes + nested `FAST_LZ`); kept separate
+    /// from `STRIDE_SCRATCH` because the nested `FAST_LZ` coder borrows that scratch itself.
+    static STRIDE_PLANES2: std::cell::RefCell<[Vec<u8>; 8]> =
+        std::cell::RefCell::new(Default::default());
+    static STRIDE_COMBINED: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Fused inclusive prefix sum + optional Subtract-Green inverse + interleave:
 /// `c_p[i] = first[p] + sum(planes[p][..=i])`, and if `sub_green`, `c_0 += c_1`, `c_2 += c_1`.
 /// Each channel keeps its own SIMD-resident carry, so 3–4 independent dependency chains run

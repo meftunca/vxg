@@ -93,7 +93,7 @@ fn pack_periodic_string_model<'a>(values: &[&'a [u8]], limit: usize) -> Option<V
         for &v in values {
             plain_quoted(v)?;
         }
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_PERIODIC_STRING);
         put_uleb(&mut out, period);
         for &v in values {
@@ -201,7 +201,7 @@ fn pack_periodic_hex_model<'a>(values: &[&'a [u8]], limit: usize) -> Option<Vec<
                 return None;
             }
         }
-        let mut out = Vec::with_capacity(size);
+        let mut out = take_model_buf(size);
         out.push(MODEL_PERIODIC_HEX);
         put_uleb(&mut out, period);
         for &v in values {
@@ -450,7 +450,7 @@ fn pack_gf2_affine_from_raw64(
         }
         prev = word;
     }
-    let mut out = Vec::with_capacity(size);
+    let mut out = take_model_buf(size);
     out.push(MODEL_GF2_AFFINE);
     put_bytes(&mut out, prefix);
     out.extend_from_slice(&x0.to_le_bytes());
@@ -517,7 +517,7 @@ fn pack_gf2_affine_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
         }
         prev = word;
     }
-    let mut out = Vec::with_capacity(size);
+    let mut out = take_model_buf(size);
     out.push(MODEL_GF2_AFFINE);
     put_bytes(&mut out, prefix);
     out.extend_from_slice(&train[0].to_le_bytes());

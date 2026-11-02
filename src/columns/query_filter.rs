@@ -74,7 +74,7 @@ fn classify_template_filter(
             ColumnStream::PeriodicHex { .. } => {
                 add_bytes_to_mask(&mut non_dict_col_mask, b"0123456789abcdef\"");
             }
-            ColumnStream::Copy16 { col_mask, .. } => {
+            ColumnStream::Copy16 { col_mask, .. } | ColumnStream::Copy32 { col_mask, .. } => {
                 for i in 0..4 {
                     non_dict_col_mask[i] |= col_mask[i];
                 }

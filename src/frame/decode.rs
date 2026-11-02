@@ -43,67 +43,86 @@ pub(super) fn decode_frame_into(
     let aborted = AtomicBool::new(false);
     let out_addr = out.as_mut_ptr() as usize;
     let blocks = &frame.blocks[..];
-    let batch = (blocks.len() / (workers * 4)).clamp(1, 8);
+    let max_batch = (blocks.len() / (workers * 8)).clamp(1, 4);
+    let tail_cutoff = blocks.len().saturating_sub(workers * 4);
     std::thread::scope(|scope| {
         let next_ref = &next_idx;
         let abort_ref = &aborted;
-        let mut handles = Vec::with_capacity(workers);
-        for _ in 0..workers {
-            handles.push(scope.spawn(move || -> Result<()> {
-                loop {
-                    if abort_ref.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    let start = next_ref.fetch_add(batch, Ordering::Relaxed);
-                    if start >= blocks.len() {
-                        return Ok(());
-                    }
-                    let end = (start + batch).min(blocks.len());
-                    for idx in start..end {
-                        let b = &blocks[idx];
-                        // SAFETY: `Frame::parse` verified that all blocks `0..blocks.len()` cover
-                        // disjoint ranges `b.info.raw_offset .. b.info.raw_offset + b.info.raw_size`
-                        // within `0..frame.raw_size` (`== out.len()`), and each `idx` is claimed
-                        // by at most one worker via `fetch_add(batch)`.
-                        let target = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                (out_addr + b.info.raw_offset) as *mut u8,
-                                b.info.raw_size,
+        let run_worker = || -> Result<()> {
+            loop {
+                if abort_ref.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                let step = if next_ref.load(Ordering::Relaxed) < tail_cutoff {
+                    max_batch
+                } else {
+                    1
+                };
+                let start = next_ref.fetch_add(step, Ordering::Relaxed);
+                if start >= blocks.len() {
+                    return Ok(());
+                }
+                let end = (start + step).min(blocks.len());
+                for idx in start..end {
+                    let b = &blocks[idx];
+                    // SAFETY: `Frame::parse` verified that all blocks `0..blocks.len()` cover
+                    // disjoint ranges `b.info.raw_offset .. b.info.raw_offset + b.info.raw_size`
+                    // within `0..frame.raw_size` (`== out.len()`), and each `idx` is claimed
+                    // by at most one worker via `fetch_add(batch)`.
+                    let target = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            (out_addr + b.info.raw_offset) as *mut u8,
+                            b.info.raw_size,
+                        )
+                    };
+                    let res = if let Some(_proof) = proof {
+                        unsafe {
+                            block::decode_validated(
+                                b.payload,
+                                b.info.kind,
+                                target,
+                                engine,
+                                short_distance,
                             )
-                        };
-                        let res = if let Some(_proof) = proof {
-                            unsafe {
-                                block::decode_validated(
-                                    b.payload,
-                                    b.info.kind,
-                                    target,
-                                    engine,
-                                    short_distance,
-                                )
-                            }
-                        } else {
-                            block::decode(b.payload, b.info.kind, target, engine, short_distance)
-                        };
-                        if let Err(e) = res {
-                            abort_ref.store(true, Ordering::Relaxed);
-                            return Err(e);
                         }
-                        if verify && crc32c(target) != b.info.checksum {
-                            abort_ref.store(true, Ordering::Relaxed);
-                            return Err(Error::Checksum { block: idx });
-                        }
+                    } else {
+                        block::decode(b.payload, b.info.kind, target, engine, short_distance)
+                    };
+                    if let Err(e) = res {
+                        abort_ref.store(true, Ordering::Relaxed);
+                        return Err(e);
+                    }
+                    if verify && crc32c(target) != b.info.checksum {
+                        abort_ref.store(true, Ordering::Relaxed);
+                        return Err(Error::Checksum { block: idx });
                     }
                 }
-            }));
+            }
+        };
+        let mut handles_uninit = [const {
+            core::mem::MaybeUninit::<std::thread::ScopedJoinHandle<'_, Result<()>>>::uninit()
+        }; 256];
+        let spawned = workers - 1;
+        for slot in handles_uninit.iter_mut().take(spawned) {
+            slot.write(scope.spawn(run_worker));
         }
-        for h in handles {
-            h.join().map_err(|_| Error::WorkerPanic)??;
+        let mut first_err = run_worker().err();
+        for slot in handles_uninit.iter_mut().take(spawned) {
+            match unsafe { slot.assume_init_read() }.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) if first_err.is_none() => first_err = Some(e),
+                Err(_) if first_err.is_none() => first_err = Some(Error::WorkerPanic),
+                _ => {}
+            }
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     })
 }
 
-pub(crate) const MAX_STACK_DIR_BLOCKS: usize = 512;
+pub(crate) const MAX_STACK_DIR_BLOCKS: usize = 4096;
 
 pub(crate) fn validate_header_and_directory(
     src: &[u8],
@@ -115,7 +134,7 @@ pub(crate) fn validate_header_and_directory(
 pub(crate) fn validate_header_and_directory_with_offsets(
     src: &[u8],
     max_output: usize,
-    mut v4_offsets: Option<&mut [u32; MAX_STACK_DIR_BLOCKS + 1]>,
+    mut v4_offsets: Option<&mut [core::mem::MaybeUninit<u32>; MAX_STACK_DIR_BLOCKS + 1]>,
 ) -> Result<(usize, usize, usize, u16, bool)> {
     if src.len() < HEADER_SIZE {
         return Err(Error::Truncated);
@@ -156,7 +175,7 @@ pub(crate) fn validate_header_and_directory_with_offsets(
         && src.len() <= u32::MAX as usize;
     if record_v4 {
         if let Some(ref mut offs) = v4_offsets {
-            offs[0] = dir_end as u32;
+            offs[0].write(dir_end as u32);
         }
     }
     let mut next_payload = dir_end;
@@ -209,7 +228,7 @@ pub(crate) fn validate_header_and_directory_with_offsets(
         next_payload = end;
         if record_v4 {
             if let Some(ref mut offs) = v4_offsets {
-                offs[i + 1] = end as u32;
+                offs[i + 1].write(end as u32);
             }
         }
     }
@@ -228,7 +247,7 @@ pub(crate) fn decode_validated_dir_multi_thread(
     count: usize,
     version: u16,
     checksummed: bool,
-    v4_offsets: &[u32; MAX_STACK_DIR_BLOCKS + 1],
+    v4_offsets: &[core::mem::MaybeUninit<u32>; MAX_STACK_DIR_BLOCKS + 1],
     options: &DecodeOptions,
 ) -> Result<()> {
     if out.len() != raw_size {
@@ -261,87 +280,92 @@ pub(crate) fn decode_validated_dir_multi_thread(
     let verify = checksummed && options.verify_checksum;
     let short_distance = version >= 2;
     let esize = entry_size(version);
-    let batch = (count / (workers * 4)).clamp(1, 8);
+    let max_batch = (count / (workers * 8)).clamp(1, 4);
+    let tail_cutoff = count.saturating_sub(workers * 4);
     std::thread::scope(|scope| {
+        let next_ref = &next_idx;
+        let abort_ref = &aborted;
+        let run_worker = || -> Result<()> {
+            loop {
+                if abort_ref.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                let step = if next_ref.load(Ordering::Relaxed) < tail_cutoff {
+                    max_batch
+                } else {
+                    1
+                };
+                let start = next_ref.fetch_add(step, Ordering::Relaxed);
+                if start >= count {
+                    return Ok(());
+                }
+                let end = (start + step).min(count);
+                for idx in start..end {
+                    let p = HEADER_SIZE + idx * esize;
+                    let raw_offset = idx * block_size;
+                    let rn = block_size.min(raw_size - raw_offset);
+                    let (payload_offset, cn, checksum, kind) = if version >= VERSION_V4 {
+                        let word = unsafe {
+                            u32::from_le_bytes(src.get_unchecked(p..p + 4).try_into().unwrap())
+                        };
+                        let csum = unsafe {
+                            u32::from_le_bytes(src.get_unchecked(p + 4..p + 8).try_into().unwrap())
+                        };
+                        let p_off = unsafe { v4_offsets.get_unchecked(idx).assume_init() as usize };
+                        let p_end =
+                            unsafe { v4_offsets.get_unchecked(idx + 1).assume_init() as usize };
+                        (p_off, p_end - p_off, csum, word >> 30)
+                    } else {
+                        let p_off = unsafe {
+                            u64::from_le_bytes(src.get_unchecked(p + 8..p + 16).try_into().unwrap())
+                                as usize
+                        };
+                        let cn = unsafe {
+                            u32::from_le_bytes(
+                                src.get_unchecked(p + 20..p + 24).try_into().unwrap(),
+                            ) as usize
+                        };
+                        let csum = unsafe {
+                            u32::from_le_bytes(
+                                src.get_unchecked(p + 24..p + 28).try_into().unwrap(),
+                            )
+                        };
+                        let kind = unsafe {
+                            u32::from_le_bytes(
+                                src.get_unchecked(p + 28..p + 32).try_into().unwrap(),
+                            )
+                        };
+                        (p_off, cn, csum, kind)
+                    };
+                    let payload = unsafe { src.get_unchecked(payload_offset..payload_offset + cn) };
+                    let target = unsafe {
+                        std::slice::from_raw_parts_mut((out_addr + raw_offset) as *mut u8, rn)
+                    };
+                    if let Err(e) = block::decode(payload, kind, target, engine, short_distance) {
+                        abort_ref.store(true, Ordering::Relaxed);
+                        return Err(e);
+                    }
+                    if verify && crc32c(target) != checksum {
+                        abort_ref.store(true, Ordering::Relaxed);
+                        return Err(Error::Checksum { block: idx });
+                    }
+                }
+            }
+        };
         let mut handles_uninit = [const {
             core::mem::MaybeUninit::<std::thread::ScopedJoinHandle<'_, Result<()>>>::uninit()
         }; 256];
-        let next_ref = &next_idx;
-        let abort_ref = &aborted;
-        for w in 0..workers {
-            handles_uninit[w].write(scope.spawn(move || -> Result<()> {
-                loop {
-                    if abort_ref.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    let start = next_ref.fetch_add(batch, Ordering::Relaxed);
-                    if start >= count {
-                        return Ok(());
-                    }
-                    let end = (start + batch).min(count);
-                    for idx in start..end {
-                        let p = HEADER_SIZE + idx * esize;
-                        let raw_offset = idx * block_size;
-                        let rn = block_size.min(raw_size - raw_offset);
-                        let (payload_offset, cn, checksum, kind) = if version >= VERSION_V4 {
-                            let word = unsafe {
-                                u32::from_le_bytes(src.get_unchecked(p..p + 4).try_into().unwrap())
-                            };
-                            let csum = unsafe {
-                                u32::from_le_bytes(src.get_unchecked(p + 4..p + 8).try_into().unwrap())
-                            };
-                            let p_off = unsafe { *v4_offsets.get_unchecked(idx) as usize };
-                            let p_end = unsafe { *v4_offsets.get_unchecked(idx + 1) as usize };
-                            (p_off, p_end - p_off, csum, word >> 30)
-                        } else {
-                            let p_off = unsafe {
-                                u64::from_le_bytes(src.get_unchecked(p + 8..p + 16).try_into().unwrap()) as usize
-                            };
-                            let cn = unsafe {
-                                u32::from_le_bytes(src.get_unchecked(p + 20..p + 24).try_into().unwrap()) as usize
-                            };
-                            let csum = unsafe {
-                                u32::from_le_bytes(src.get_unchecked(p + 24..p + 28).try_into().unwrap())
-                            };
-                            let kind = unsafe {
-                                u32::from_le_bytes(src.get_unchecked(p + 28..p + 32).try_into().unwrap())
-                            };
-                            (p_off, cn, csum, kind)
-                        };
-                        let payload = unsafe { src.get_unchecked(payload_offset..payload_offset + cn) };
-                        let target = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                (out_addr + raw_offset) as *mut u8,
-                                rn,
-                            )
-                        };
-                        if let Err(e) = block::decode(payload, kind, target, engine, short_distance) {
-                            abort_ref.store(true, Ordering::Relaxed);
-                            return Err(e);
-                        }
-                        if verify && crc32c(target) != checksum {
-                            abort_ref.store(true, Ordering::Relaxed);
-                            return Err(Error::Checksum { block: idx });
-                        }
-                    }
-                }
-            }));
+        let spawned = workers - 1;
+        for slot in handles_uninit.iter_mut().take(spawned) {
+            slot.write(scope.spawn(run_worker));
         }
-        let mut first_err = None;
-        for h in handles_uninit.iter_mut().take(workers) {
-            let handle = unsafe { h.assume_init_read() };
-            match handle.join() {
+        let mut first_err = run_worker().err();
+        for slot in handles_uninit.iter_mut().take(spawned) {
+            match unsafe { slot.assume_init_read() }.join() {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                }
-                Err(_) => {
-                    if first_err.is_none() {
-                        first_err = Some(Error::WorkerPanic);
-                    }
-                }
+                Ok(Err(e)) if first_err.is_none() => first_err = Some(e),
+                Err(_) if first_err.is_none() => first_err = Some(Error::WorkerPanic),
+                _ => {}
             }
         }
         if let Some(e) = first_err {

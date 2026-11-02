@@ -1,26 +1,15 @@
 #[derive(Clone, Copy)]
 enum BoundStream<'a> {
-    Raw {
-        cursor: Cursor<'a>,
-    },
+    Raw { cursor: Cursor<'a> },
     RawShort16After16 { ptr: *const u8 },
     RawShort16After32 { ptr: *const u8 },
     RawShort16 { ptr: *const u8 },
     RawShort48After16 { ptr: *const u8 },
     RawShort48After32 { ptr: *const u8 },
     RawShort48 { ptr: *const u8 },
-    Dictionary16 {
-        entries: *const FastPiece,
-        idx_ptr: *const u8,
-    },
-    Dictionary32 {
-        entries: *const FastPiece,
-        idx_ptr: *const u8,
-    },
-    Dictionary48 {
-        entries: *const FastPiece,
-        idx_ptr: *const u8,
-    },
+    Dictionary16 { entries: *const FastPiece, idx_ptr: *const u8 },
+    Dictionary32 { entries: *const FastPiece, idx_ptr: *const u8 },
+    Dictionary48 { entries: *const FastPiece, idx_ptr: *const u8 },
     DictionaryPair32 {
         entries0: *const FastPiece,
         entries1: *const FastPiece,
@@ -33,116 +22,47 @@ enum BoundStream<'a> {
         idx_ptr0: *const u8,
         idx_delta: isize,
     },
-    DictionaryQuad32 {
-        entries0: *const FastPiece,
-        idx_ptr0: *const u8,
-        p_off: [u16; 3],
-        u_off: [u16; 3],
-    },
-    DictionaryQuad48 {
-        entries0: *const FastPiece,
-        idx_ptr0: *const u8,
-        p_off: [u16; 3],
-        u_off: [u16; 3],
-    },
-    DictionaryLong {
-        entries: *const FastPiece,
-        idx_ptr: *const u8,
-    },
-    DecimalAffineSmall16 {
-        current: u64,
-        step: u64,
-    },
-    DecimalAffineSmall32 {
-        current: u64,
-        step: u64,
-    },
-    DecimalAffineSmall48 {
-        current: u64,
-        step: u64,
-    },
-    DecimalAffineSmall {
-        current: u64,
-        step: u64,
-    },
-    DecimalAffine {
-        current: u64,
-        step: u64,
-    },
-    DecimalSmall16 {
-        val_ptr: *const u16,
-    },
-    DecimalSmall32 {
-        val_ptr: *const u16,
-    },
-    DecimalSmall48 {
-        val_ptr: *const u16,
-    },
-    DecimalSmall {
-        val_ptr: *const u16,
-    },
+    DictionaryQuad32 { entries0: *const FastPiece, idx_ptr0: *const u8, p_off: [u16; 3], u_off: [u16; 3] },
+    DictionaryQuad48 { entries0: *const FastPiece, idx_ptr0: *const u8, p_off: [u16; 3], u_off: [u16; 3] },
+    DictionaryLong { entries: *const FastPiece, idx_ptr: *const u8 },
+    DecimalAffineSmall16 { current: u64, step: u64 },
+    DecimalAffineSmall32 { current: u64, step: u64 },
+    DecimalAffineSmall48 { current: u64, step: u64 },
+    DecimalAffineSmall { current: u64, step: u64 },
+    DecimalAffine { current: u64, step: u64 },
+    DecimalSmall16 { val_ptr: *const u16 },
+    DecimalSmall32 { val_ptr: *const u16 },
+    DecimalSmall48 { val_ptr: *const u16 },
+    DecimalSmall { val_ptr: *const u16 },
     DecimalPackedAfter16 { min: u64, reader: FastBitReader<'a> },
-    DecimalPacked {
-        min: u64,
-        reader: FastBitReader<'a>,
-    },
+    DecimalPacked { min: u64, reader: FastBitReader<'a> },
     DecimalValuesAfter16 { val_ptr: *const u64 },
     DecimalValuesAfter32 { val_ptr: *const u64 },
-    DecimalValues {
-        val_ptr: *const u64,
-    },
-    HexSuffix4 {
-        ptr: *const u8,
-    },
+    DecimalValues { val_ptr: *const u64 },
+    HexSuffix4 { ptr: *const u8 },
     HexSuffix8After16 { ptr: *const u8 },
     HexSuffix8After32 { ptr: *const u8 },
-    HexSuffix8 {
-        ptr: *const u8,
-    },
-    HexSuffix {
-        cursor: Cursor<'a>,
-        width: usize,
-    },
-    TimestampMinSec16 {
-        min_ptr: *const u8,
-        sec_ptr: *const u8,
-    },
-    TimestampMinSec32 {
-        min_ptr: *const u8,
-        sec_ptr: *const u8,
-    },
-    TimestampMinSec {
-        min_ptr: *const u8,
-        sec_ptr: *const u8,
-    },
-    TimestampFull {
-        ptr: *const u8,
-        stride: usize,
-    },
-    Copy16After16 {
-        ptr: *const u8,
-        len: usize,
-    },
-    Copy16After32 {
-        ptr: *const u8,
-        len: usize,
-    },
-    Copy16 {
-        ptr: *const u8,
-        len: usize,
-    },
-    SegmentDict {
-        str_ptr: *const u8,
-        len_ptr: *const u16,
-    },
-    PeriodicString {
-        cursor: Cursor<'a>,
-        period: usize,
-    },
-    PeriodicHex {
-        cursor: Cursor<'a>,
-        period: usize,
-    },
+    HexSuffix8 { ptr: *const u8 },
+    HexSuffix { cursor: Cursor<'a>, width: usize },
+    TimestampMinSec16 { min_ptr: *const u8, sec_ptr: *const u8 },
+    TimestampMinSec32 { min_ptr: *const u8, sec_ptr: *const u8 },
+    TimestampMinSec { min_ptr: *const u8, sec_ptr: *const u8 },
+    TimestampFull { ptr: *const u8, stride: usize },
+    Copy16After16 { ptr: *const u8, len: usize },
+    Copy16After32 { ptr: *const u8, len: usize },
+    Copy16 { ptr: *const u8, len: usize },
+    Copy32After16 { ptr: *const u8, len: usize },
+    Copy32After32 { ptr: *const u8, len: usize },
+    Copy32 { ptr: *const u8, len: usize },
+    SegmentDict16After16 { str_ptr: *const u8, len_ptr: *const u16 },
+    SegmentDict16After32 { str_ptr: *const u8, len_ptr: *const u16 },
+    SegmentDict16 { str_ptr: *const u8, len_ptr: *const u16 },
+    SegmentDict32After16 { str_ptr: *const u8, len_ptr: *const u16 },
+    SegmentDict32After32 { str_ptr: *const u8, len_ptr: *const u16 },
+    SegmentDict32 { str_ptr: *const u8, len_ptr: *const u16 },
+    SegmentDict { str_ptr: *const u8, len_ptr: *const u16 },
+    PeriodicString { cursor: Cursor<'a>, period: usize },
+    PeriodicHex { cursor: Cursor<'a>, period: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -440,6 +360,27 @@ impl<'a> ExecColumn<'a> {
                     copy16_unaligned(p, dst);
                     dst = dst.add(*len);
                 }
+                BoundStream::Copy32After16 { ptr, len } => {
+                    let p = *ptr;
+                    *ptr = p.add(32);
+                    copy16_unaligned(p, dst);
+                    copy16_unaligned(p.add(16), dst.add(16));
+                    return self.after.emit_16(dst.add(*len));
+                }
+                BoundStream::Copy32After32 { ptr, len } => {
+                    let p = *ptr;
+                    *ptr = p.add(32);
+                    copy16_unaligned(p, dst);
+                    copy16_unaligned(p.add(16), dst.add(16));
+                    return self.after.emit_32(dst.add(*len));
+                }
+                BoundStream::Copy32 { ptr, len } => {
+                    let p = *ptr;
+                    *ptr = p.add(32);
+                    copy16_unaligned(p, dst);
+                    copy16_unaligned(p.add(16), dst.add(16));
+                    dst = dst.add(*len);
+                }
                 BoundStream::HexSuffix4 { ptr } => {
                     write_hex8_from_4bytes(dst, *ptr);
                     *ptr = ptr.add(4);
@@ -469,6 +410,57 @@ impl<'a> ExecColumn<'a> {
                         dst.add(i * 2).cast::<u16>().write_unaligned(pair);
                     }
                     dst = dst.add(w * 2);
+                }
+                BoundStream::SegmentDict16After16 { str_ptr, len_ptr } => {
+                    let len = **len_ptr as usize;
+                    *len_ptr = len_ptr.add(1);
+                    let p = *str_ptr;
+                    *str_ptr = p.add(len);
+                    copy16_unaligned(p, dst);
+                    return self.after.emit_16(dst.add(len));
+                }
+                BoundStream::SegmentDict16After32 { str_ptr, len_ptr } => {
+                    let len = **len_ptr as usize;
+                    *len_ptr = len_ptr.add(1);
+                    let p = *str_ptr;
+                    *str_ptr = p.add(len);
+                    copy16_unaligned(p, dst);
+                    return self.after.emit_32(dst.add(len));
+                }
+                BoundStream::SegmentDict16 { str_ptr, len_ptr } => {
+                    let len = **len_ptr as usize;
+                    *len_ptr = len_ptr.add(1);
+                    let p = *str_ptr;
+                    *str_ptr = p.add(len);
+                    copy16_unaligned(p, dst);
+                    dst = dst.add(len);
+                }
+                BoundStream::SegmentDict32After16 { str_ptr, len_ptr } => {
+                    let len = **len_ptr as usize;
+                    *len_ptr = len_ptr.add(1);
+                    let p = *str_ptr;
+                    *str_ptr = p.add(len);
+                    copy16_unaligned(p, dst);
+                    copy16_unaligned(p.add(16), dst.add(16));
+                    return self.after.emit_16(dst.add(len));
+                }
+                BoundStream::SegmentDict32After32 { str_ptr, len_ptr } => {
+                    let len = **len_ptr as usize;
+                    *len_ptr = len_ptr.add(1);
+                    let p = *str_ptr;
+                    *str_ptr = p.add(len);
+                    copy16_unaligned(p, dst);
+                    copy16_unaligned(p.add(16), dst.add(16));
+                    return self.after.emit_32(dst.add(len));
+                }
+                BoundStream::SegmentDict32 { str_ptr, len_ptr } => {
+                    let len = **len_ptr as usize;
+                    *len_ptr = len_ptr.add(1);
+                    let p = *str_ptr;
+                    *str_ptr = p.add(len);
+                    copy16_unaligned(p, dst);
+                    copy16_unaligned(p.add(16), dst.add(16));
+                    dst = dst.add(len);
                 }
                 BoundStream::SegmentDict { str_ptr, len_ptr } => {
                     let len = **len_ptr as usize;

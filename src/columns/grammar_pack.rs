@@ -137,6 +137,7 @@ fn pack_grammar_into_impl(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
                 || (templates.len() > 2 && raw_rows > template_rows * 2 && raw_bytes * 2 > data.len())))
     {
         return_row_vec(rows);
+        return_tpl_vec(templates);
         return Ok(false);
     }
     out.push(GRAMMAR_PACKET);
@@ -296,8 +297,10 @@ fn pack_grammar_into_impl(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
                 .ok_or(Error::SizeOverflow)?;
             put_uleb(out, model.len());
             out.extend_from_slice(&model);
+            put_model_buf(model);
         }
     }
+    return_tpl_vec(templates);
     Ok(true)
 }
 
@@ -372,6 +375,7 @@ fn pack_grammar(data: &[u8]) -> Result<PackedGrammar> {
                 .ok_or(Error::SizeOverflow)?;
             put_uleb(&mut out, model.len());
             out.extend_from_slice(&model);
+            put_model_buf(model);
             stats.columns.push(ColumnStat {
                 template: template_index,
                 slot,
@@ -381,6 +385,7 @@ fn pack_grammar(data: &[u8]) -> Result<PackedGrammar> {
             });
         }
     }
+    return_tpl_vec(templates);
     Ok(PackedGrammar { bytes: out, stats })
 }
 
@@ -565,17 +570,7 @@ impl DecodeScratch {
 }
 
 std::thread_local! {
-    static DECODE_SCRATCH: std::cell::RefCell<DecodeScratch> = std::cell::RefCell::new(DecodeScratch {
-        u8_arena: Vec::with_capacity(16384),
-        u16_arena: Vec::with_capacity(4096),
-        u32_arena: Vec::with_capacity(4096),
-        u64_arena: Vec::with_capacity(4096),
-        piece_arena: Vec::with_capacity(512),
-        str_arena: Vec::with_capacity(4096),
-        slice_arena: Vec::with_capacity(512),
-        raw_arena: Vec::with_capacity(262144),
-        unbound_col_arena: Vec::with_capacity(256),
-        exec_col_arena: Vec::with_capacity(256),
-    });
+    static DECODE_SCRATCH: std::cell::RefCell<DecodeScratch> =
+        std::cell::RefCell::new(DecodeScratch::default());
 }
 
