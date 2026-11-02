@@ -1,6 +1,6 @@
 {
   "name": "vxg-docs",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "private": true,
   "type": "module",
   "description": "VXG — Vectorized Execution Grammar Codec Documentation",

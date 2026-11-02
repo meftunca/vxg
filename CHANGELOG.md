@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.4 — Compressed-Domain `ORDER BY` / `Top-K`, Expanded C/FFI Analytics ABI & Interactive VitePress Charts
+
+- **Compressed-Domain `ORDER BY` / `Top-K` Heap Engine (`vxg::ops`, `vxg::stream_ops`):**
+  - Added `SortDir`, `SortKey`, `top_k_by`, `select_top_k_by`, `top_k_by_stream`, and `select_top_k_by_stream` with deterministic `NULLS LAST` ordering and `global_row_index` tie-breaking across threads and multi-frame streams.
+  - Added $O(1)$ `MODEL_DECIMAL_PACKED` / `MODEL_DECIMAL_AFFINE` numeric zone-map block skipping, `AtomicU64` cross-worker monotonic bound pruning, pre-pruned dictionary `alive` bitmaps, `TplRowMap::Offset` $O(1)$ row indexing on boundary-split 1-template blocks, and bounded per-template `CandTracker` ($\le K$ candidate rows materialized per template).
+  - Reaches **35.6–42.3 GB/s** (`1.33–1.64 ms`, **54x–72x** faster than `decompress` + $O(N)$ `select_nth_unstable_by` partial sort) on `56.5 MB` (`300,000`-row) `ndjson_varied.ndjson` across 8 threads.
+  - Extended `vxg query` with `--order-by COL [--desc|--asc]` (both `mmap` and `--stream`) and `vxg agg` with `--order-by key|rows|count|sum|avg|min|max [--desc|--asc] [--limit K]`.
+- **Shared Expression Parser & Expanded Zero-Overhead C/FFI ABI (`include/vxg.h`, `src/ffi/`):**
+  - Promoted the recursive-descent compound `WHERE` and column-target parser to `vxg::ops` (`ParsedWhere`, `ParsedColPred`, `parse_col_target`, `parse_col_list`).
+  - Added 8 panic-safe C ABI functions (`vxg_verify_frame`, `vxg_compress_file`, `vxg_decompress_file`, `vxg_verify_file`, `vxg_count_where_str`, `vxg_aggregate_col` + 64-byte `vxg_agg_stats_t`, `vxg_select_alloc`, `vxg_project_frame_alloc`).
+- **Interactive Zero-Dependency VitePress Charts (`docs/.vitepress/theme/`):**
+  - Added interactive Vue 3 benchmark chart components (`CodecBenchmarkChart`, `CompressedOpsChart`, `EnergyBenchmarkChart`) across `docs/index.md`, `docs/BENCHMARKS.md`, `docs/ENERGY_BENCHMARKS.md`, and `docs/STAGE2_DESIGN.md` with zero extra npm dependencies.
+
 ## 0.4.3 — Zero-Copy `mmap` I/O, Zero-Output-Alloc Verification & Bounded-Memory Multi-GB Streaming
 
 - **Zero-Dependency Cross-Platform Memory-Mapped File I/O (`vxg::mmap`):**

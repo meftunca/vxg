@@ -1,11 +1,11 @@
-# VXG 0.4.3 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
+# VXG 0.4.4 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
 
 [![CI — Source Validation](https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/ci.yml)
 [![CI — Cross-Platform Benchmarks](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml)
-[![Release v0.4.3](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.3)
+[![Release v0.4.4](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.4)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**High-throughput Rust CPU (SIMD/SWAR) codec & compressed-domain execution engine combining an adaptive structured-column engine (NDJSON / CSV / TSV / PSV / Logfmt / CLF), a 2D/Stride pixel engine (24-bpp & 32-bpp BMP), and a const-generic Fast-LZ + 4-stream canonical Huffman engine — with SQL-grade compressed-domain `SELECT` / `WHERE` / `GROUP BY` / `UPDATE` / zero-reencode column splicing, zero-overhead C ABI (`staticlib` / `cdylib`), and native Metal / CUDA / Vulkan sources.**
+**High-throughput Rust CPU (SIMD/SWAR) codec & compressed-domain execution engine combining an adaptive structured-column engine (NDJSON / CSV / TSV / PSV / Logfmt / CLF), a 2D/Stride pixel engine (24-bpp & 32-bpp BMP), and a const-generic Fast-LZ + 4-stream canonical Huffman engine — with SQL-grade compressed-domain `SELECT` / `WHERE` / `ORDER BY Top-K` / `GROUP BY` / `UPDATE` / zero-reencode column splicing, zero-overhead C ABI (`staticlib` / `cdylib`), and native Metal / CUDA / Vulkan sources.**
 
 VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the optimal lossless representation (`BLOCK_COLUMN`, `BLOCK_LZ`, or `BLOCK_RAW`). Every block is self-contained, enabling **$O(1)$ random-access block extraction** and **linear multi-core scaling** without cross-block decompression dependencies.
 
@@ -17,7 +17,7 @@ VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the 
 | :--- | :--- |
 | **Format v4 Wire Layout** | Compact 8-byte per-block directory (`payload_size \| kind << 30`, `crc32c`); full backward read compatibility with `v1`–`v3` frames |
 | **Structured Column Engine** | Automatic schema & delimiter discovery for **NDJSON, Pretty-Printed JSON, CSV, TSV, PSV, CLF/Bracketed Logs, and Logfmt**; 11 specialized models including `Dictionary`, `DecimalDelta`, `DecimalSuffix`, `Timestamp` (SWAR+SIMD), `HexSuffix` (quoted & unquoted SIMD hex), `EpochCounter`, `SegmentDictionary`, `FrontCodedDict`, and `Pattern` (`MODEL_PATTERN` SWAR + `Copy16`) |
-| **Compressed-Domain SQL & Splicing** | Execute compound boolean `WHERE` (`&&` / `\|\|` / `!`), `SELECT` column projection, `SUM`/`MIN`/`MAX`/`AVG` + `GROUP BY` analytics, `UPDATE`/`MAP` mutations, and **zero-reencode `VXG -> VXG` column splicing** directly on compressed blocks (`10–39 GB/s`, `15x–72x` faster than naive decode + scan) |
+| **Compressed-Domain SQL & Splicing** | Execute compound boolean `WHERE` (`&&` / `\|\|` / `!`), `SELECT` column projection, `ORDER BY` / `Top-K` heap queries (`35–42 GB/s`), `SUM`/`MIN`/`MAX`/`AVG` + `GROUP BY` analytics, `UPDATE`/`MAP` mutations, and **zero-reencode `VXG -> VXG` column splicing** directly on compressed blocks (`10–42 GB/s`, `15x–72x` faster than naive decode + scan) |
 | **Image & Stride Engine** | 24-bpp / 32-bpp BMP and multi-stride (`1, 2, 3, 4, 8`) byte-plane transpose + `Subtract-Green` (`R-G`, `B-G`) color decorrelation + 2-level 64-bit hierarchical zero-mask & per-plane `Fast-LZ` |
 | **Prose & Source Code** | Const-generic `Fast-LZ` matcher paired with a 4-stream interleaved canonical Huffman coder |
 | **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning, 64-byte `FastPiece` unaligned `u128` row assembly, and SIMD prefix-sum plane interleaving |
@@ -211,6 +211,7 @@ let where_ok = vxg::PredExpr::col(vxg::ColPred::json_str("status", vxg::StrCmp::
 let stats = vxg::aggregate_column(&frame, Some(&where_ok), vxg::ColTarget::JsonKey("seq"), &dec_opts)?;
 let cols = [vxg::ColTarget::JsonKey("ts"), vxg::ColTarget::JsonKey("status")];
 let projected = vxg::select_columns(&frame, Some(&where_ok), &cols, 10, &dec_opts)?;
+let top_rows = vxg::top_k_by(&frame, Some(&where_ok), vxg::ColTarget::JsonKey("seq"), vxg::SortDir::Desc, 5, &dec_opts)?;
 let slim_frame = vxg::project_frame(&frame, None, &cols, &opts, &dec_opts)?;
 ```
 

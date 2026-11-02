@@ -21,7 +21,7 @@ export default defineConfig({
     ['meta', { name: 'og:description', content: '5x smaller than LZ4, 2.4x smaller than Zstd, and up to 54 GB/s multi-threaded decompression with O(1) random block access.' }]
   ],
   themeConfig: {
-    siteTitle: 'VXG v0.4.3',
+    siteTitle: 'VXG v0.4.4',
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Architecture', link: '/guide/architecture' },
