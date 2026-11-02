@@ -264,75 +264,92 @@ fn huf_decode_impl(blob: &[u8], dst: &mut [u8]) -> Result<()> {
             let mut b1 = b_ptr.cast::<u64>().read_unaligned().to_le();
             let mut b2 = c_ptr.cast::<u64>().read_unaligned().to_le();
             let mut b3 = d_ptr.cast::<u64>().read_unaligned().to_le();
-            while (i < fast_lim)
-                & (bp0 <= a_bit_lim)
-                & (bp1 <= b_bit_lim)
-                & (bp2 <= c_bit_lim)
-                & (bp3 <= d_bit_lim)
-            {
-                macro_rules! step4 {
-                    ($off:expr) => {{
-                        let e0 = *tbl_ptr.add((b0 & mask) as usize);
-                        let e1 = *tbl_ptr.add((b1 & mask) as usize);
-                        let e2 = *tbl_ptr.add((b2 & mask) as usize);
-                        let e3 = *tbl_ptr.add((b3 & mask) as usize);
-                        let l0 = (e0 as u8) as usize;
-                        let l1 = (e1 as u8) as usize;
-                        let l2 = (e2 as u8) as usize;
-                        let l3 = (e3 as u8) as usize;
-                        b0 >>= l0;
-                        b1 >>= l1;
-                        b2 >>= l2;
-                        b3 >>= l3;
-                        bp0 += l0;
-                        bp1 += l1;
-                        bp2 += l2;
-                        bp3 += l3;
-                        *wp0.add($off) = (e0 >> 8) as u8;
-                        *wp1.add($off) = (e1 >> 8) as u8;
-                        *wp2.add($off) = (e2 >> 8) as u8;
-                        *wp3.add($off) = (e3 >> 8) as u8;
-                    }};
-                    ($off:expr, reload) => {{
-                        let e0 = *tbl_ptr.add((b0 & mask) as usize);
-                        let e1 = *tbl_ptr.add((b1 & mask) as usize);
-                        let e2 = *tbl_ptr.add((b2 & mask) as usize);
-                        let e3 = *tbl_ptr.add((b3 & mask) as usize);
-                        let nb0 =
-                            a_ptr.add(bp0 >> 3).cast::<u64>().read_unaligned().to_le() >> (bp0 & 7);
-                        let nb1 =
-                            b_ptr.add(bp1 >> 3).cast::<u64>().read_unaligned().to_le() >> (bp1 & 7);
-                        let nb2 =
-                            c_ptr.add(bp2 >> 3).cast::<u64>().read_unaligned().to_le() >> (bp2 & 7);
-                        let nb3 =
-                            d_ptr.add(bp3 >> 3).cast::<u64>().read_unaligned().to_le() >> (bp3 & 7);
-                        let l0 = (e0 as u8) as usize;
-                        let l1 = (e1 as u8) as usize;
-                        let l2 = (e2 as u8) as usize;
-                        let l3 = (e3 as u8) as usize;
-                        b0 = nb0 >> l0;
-                        b1 = nb1 >> l1;
-                        b2 = nb2 >> l2;
-                        b3 = nb3 >> l3;
-                        bp0 += l0;
-                        bp1 += l1;
-                        bp2 += l2;
-                        bp3 += l3;
-                        *wp0.add($off) = (e0 >> 8) as u8;
-                        *wp1.add($off) = (e1 >> 8) as u8;
-                        *wp2.add($off) = (e2 >> 8) as u8;
-                        *wp3.add($off) = (e3 >> 8) as u8;
-                    }};
+            macro_rules! step4 {
+                ($off:expr) => {{
+                    let e0 = *tbl_ptr.add((b0 & mask) as usize);
+                    let e1 = *tbl_ptr.add((b1 & mask) as usize);
+                    let e2 = *tbl_ptr.add((b2 & mask) as usize);
+                    let e3 = *tbl_ptr.add((b3 & mask) as usize);
+                    let l0 = (e0 as u8) as usize;
+                    let l1 = (e1 as u8) as usize;
+                    let l2 = (e2 as u8) as usize;
+                    let l3 = (e3 as u8) as usize;
+                    b0 >>= l0;
+                    b1 >>= l1;
+                    b2 >>= l2;
+                    b3 >>= l3;
+                    bp0 += l0;
+                    bp1 += l1;
+                    bp2 += l2;
+                    bp3 += l3;
+                    *wp0.add($off) = (e0 >> 8) as u8;
+                    *wp1.add($off) = (e1 >> 8) as u8;
+                    *wp2.add($off) = (e2 >> 8) as u8;
+                    *wp3.add($off) = (e3 >> 8) as u8;
+                }};
+                ($off:expr, reload) => {{
+                    let e0 = *tbl_ptr.add((b0 & mask) as usize);
+                    let e1 = *tbl_ptr.add((b1 & mask) as usize);
+                    let e2 = *tbl_ptr.add((b2 & mask) as usize);
+                    let e3 = *tbl_ptr.add((b3 & mask) as usize);
+                    let nb0 = a_ptr.add(bp0 >> 3).cast::<u64>().read_unaligned().to_le() >> (bp0 & 7);
+                    let nb1 = b_ptr.add(bp1 >> 3).cast::<u64>().read_unaligned().to_le() >> (bp1 & 7);
+                    let nb2 = c_ptr.add(bp2 >> 3).cast::<u64>().read_unaligned().to_le() >> (bp2 & 7);
+                    let nb3 = d_ptr.add(bp3 >> 3).cast::<u64>().read_unaligned().to_le() >> (bp3 & 7);
+                    let l0 = (e0 as u8) as usize;
+                    let l1 = (e1 as u8) as usize;
+                    let l2 = (e2 as u8) as usize;
+                    let l3 = (e3 as u8) as usize;
+                    b0 = nb0 >> l0;
+                    b1 = nb1 >> l1;
+                    b2 = nb2 >> l2;
+                    b3 = nb3 >> l3;
+                    bp0 += l0;
+                    bp1 += l1;
+                    bp2 += l2;
+                    bp3 += l3;
+                    *wp0.add($off) = (e0 >> 8) as u8;
+                    *wp1.add($off) = (e1 >> 8) as u8;
+                    *wp2.add($off) = (e2 >> 8) as u8;
+                    *wp3.add($off) = (e3 >> 8) as u8;
+                }};
+            }
+            if max_len <= 9 {
+                let fast_lim5 = lens4[3].saturating_sub(5);
+                while (i < fast_lim5)
+                    & (bp0 <= a_bit_lim)
+                    & (bp1 <= b_bit_lim)
+                    & (bp2 <= c_bit_lim)
+                    & (bp3 <= d_bit_lim)
+                {
+                    step4!(0);
+                    step4!(1);
+                    step4!(2);
+                    step4!(3);
+                    step4!(4, reload);
+                    wp0 = wp0.add(5);
+                    wp1 = wp1.add(5);
+                    wp2 = wp2.add(5);
+                    wp3 = wp3.add(5);
+                    i += 5;
                 }
-                step4!(0);
-                step4!(1);
-                step4!(2);
-                step4!(3, reload);
-                wp0 = wp0.add(4);
-                wp1 = wp1.add(4);
-                wp2 = wp2.add(4);
-                wp3 = wp3.add(4);
-                i += 4;
+            } else {
+                while (i < fast_lim)
+                    & (bp0 <= a_bit_lim)
+                    & (bp1 <= b_bit_lim)
+                    & (bp2 <= c_bit_lim)
+                    & (bp3 <= d_bit_lim)
+                {
+                    step4!(0);
+                    step4!(1);
+                    step4!(2);
+                    step4!(3, reload);
+                    wp0 = wp0.add(4);
+                    wp1 = wp1.add(4);
+                    wp2 = wp2.add(4);
+                    wp3 = wp3.add(4);
+                    i += 4;
+                }
             }
         }
     }
@@ -352,7 +369,12 @@ fn put_huf_or_raw(out: &mut Vec<u8>, src: &[u8]) {
     let mark = out.len();
     let reserve = uleb_len(src.len());
     out.resize(mark + reserve, 0);
-    if huf_encode(src, out, src.len()) {
+    let huf_limit = if src.len() < HUF_SPLIT4 {
+        src.len().saturating_sub(40)
+    } else {
+        src.len()
+    };
+    if huf_encode(src, out, huf_limit) {
         let blob_len = out.len() - (mark + reserve);
         let mut hdr = [0u8; 5];
         let mut hlen = 0usize;

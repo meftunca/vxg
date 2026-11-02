@@ -233,19 +233,11 @@ fn dict_words_and_hash(bytes: &[u8]) -> (u64, u64, u64) {
     (w0, w1, m ^ (m >> 29))
 }
 
-fn pack_dictionary_model_mode(
-    values: &[&[u8]],
-    limit: usize,
-    allow_front: bool,
-) -> Option<Vec<u8>> {
+fn pack_dictionary_model_mode(values: &[&[u8]], limit: usize, allow_front: bool) -> Option<Vec<u8>> {
     #[cfg(target_arch = "x86_64")]
     {
         #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
-        unsafe fn pack_dictionary_model_mode_x86_v3(
-            values: &[&[u8]],
-            limit: usize,
-            allow_front: bool,
-        ) -> Option<Vec<u8>> {
+        unsafe fn pack_dictionary_model_mode_x86_v3(values: &[&[u8]], limit: usize, allow_front: bool) -> Option<Vec<u8>> {
             pack_dictionary_model_mode_impl(values, limit, allow_front)
         }
         if std::arch::is_x86_feature_detected!("avx2")
@@ -262,11 +254,7 @@ fn pack_dictionary_model_mode(
 }
 
 #[inline(always)]
-fn pack_dictionary_model_mode_impl(
-    values: &[&[u8]],
-    limit: usize,
-    allow_front: bool,
-) -> Option<Vec<u8>> {
+fn pack_dictionary_model_mode_impl(values: &[&[u8]], limit: usize, allow_front: bool) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 || 3 >= limit {
         return None;
@@ -379,7 +367,13 @@ fn pack_dictionary_model_mode_impl(
                     if 1 + uleb_len(u) + est_dict + 1 + min_packed >= limit {
                         return None;
                     }
+                    if allow_front && n > 288 && new_id == 64 && row_idx <= 66 {
+                        return None;
+                    }
                     if new_id >= 256 {
+                        if allow_front && row_idx <= 272 {
+                            return None;
+                        }
                         overflowed_small_ht = true;
                         break 0;
                     }
@@ -530,7 +524,7 @@ fn pack_dictionary_model_mode_impl(
         return None;
     }
     let min_packed_len = (n * 9 + 7) >> 3;
-    if 4 + min_packed_len >= limit {
+    if 3 + dict_bytes_sum + min_packed_len >= limit {
         return None;
     }
     // Hash dedup (no full sort): exact size check first, then sort only the `u`

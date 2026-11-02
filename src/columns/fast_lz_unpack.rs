@@ -70,62 +70,60 @@ fn unpack_fast_lz_core_impl(
         let mut lit_len = (tok & 0x0f) as usize;
         let ml_code = (tok >> 4) as usize;
         let offset = u16::from_le(unsafe { off_ptr.add(seq_idx).read_unaligned() }) as usize;
-        if offset == 0 {
-            return Err(invalid("fast lz zero offset"));
-        }
-
+        let next_lit_dst = dst_pos + lit_len;
         if (lit_len < 15)
             & (dst_pos + 48 <= raw_len)
             & (lit_pos + 16 <= lit_total_len)
-            & (offset <= dst_pos + lit_len)
+            & (offset.wrapping_sub(1) < next_lit_dst)
         {
-            if ml_code < 15 {
+            if ml_code <= 12 {
                 let match_len = ml_code + 4;
-                if offset >= 16 {
+                if offset >= match_len {
                     unsafe {
                         copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
                         lit_pos += lit_len;
-                        dst_pos += lit_len;
-
-                        let msrc = out_ptr.add(dst_pos - offset);
-                        let mdst = out_ptr.add(dst_pos);
+                        let msrc = out_ptr.add(next_lit_dst - offset);
+                        let mdst = out_ptr.add(next_lit_dst);
                         copy16_unaligned(msrc, mdst);
-                        copy16_unaligned(msrc.add(16), mdst.add(16));
-                        dst_pos += match_len;
-                    }
-                    continue;
-                } else if offset >= match_len {
-                    unsafe {
-                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
-                        lit_pos += lit_len;
-                        dst_pos += lit_len;
-
-                        let msrc = out_ptr.add(dst_pos - offset);
-                        let mdst = out_ptr.add(dst_pos);
-                        copy16_unaligned(msrc, mdst);
-                        dst_pos += match_len;
+                        dst_pos = next_lit_dst + match_len;
                     }
                     continue;
                 }
-            } else if offset >= 16 && ext_pos < ext_len {
-                let e = unsafe { *ext_bytes.get_unchecked(ext_pos) } as usize;
-                if e <= 13 {
-                    ext_pos += 1;
-                    let match_len = 19 + e;
+            } else if offset >= 16 {
+                if ml_code < 15 {
+                    let match_len = ml_code + 4;
                     unsafe {
                         copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
                         lit_pos += lit_len;
-                        dst_pos += lit_len;
-
-                        let msrc = out_ptr.add(dst_pos - offset);
-                        let mdst = out_ptr.add(dst_pos);
+                        let msrc = out_ptr.add(next_lit_dst - offset);
+                        let mdst = out_ptr.add(next_lit_dst);
                         copy16_unaligned(msrc, mdst);
                         copy16_unaligned(msrc.add(16), mdst.add(16));
-                        dst_pos += match_len;
+                        dst_pos = next_lit_dst + match_len;
                     }
                     continue;
+                } else if ext_pos < ext_len {
+                    let e = unsafe { *ext_bytes.get_unchecked(ext_pos) } as usize;
+                    if e <= 13 {
+                        ext_pos += 1;
+                        let match_len = 19 + e;
+                        unsafe {
+                            copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
+                            lit_pos += lit_len;
+                            let msrc = out_ptr.add(next_lit_dst - offset);
+                            let mdst = out_ptr.add(next_lit_dst);
+                            copy16_unaligned(msrc, mdst);
+                            copy16_unaligned(msrc.add(16), mdst.add(16));
+                            dst_pos = next_lit_dst + match_len;
+                        }
+                        continue;
+                    }
                 }
             }
+        }
+
+        if offset == 0 {
+            return Err(invalid("fast lz zero offset"));
         }
 
         if lit_len == 15 {
@@ -174,11 +172,14 @@ fn unpack_fast_lz_core_impl(
                 let ldst = out_ptr.add(dst_pos);
                 copy16_unaligned(lsrc, ldst);
                 if lit_len > 16 {
-                    // Slack verified above: dst has >= 32 spare bytes, lits >= 16.
-                    let mut i = 16usize;
-                    while i < lit_len {
-                        copy16_unaligned(lsrc.add(i), ldst.add(i));
-                        i += 16;
+                    if lit_len <= 32 {
+                        copy16_unaligned(lsrc.add(16), ldst.add(16));
+                    } else {
+                        let mut i = 16usize;
+                        while i < lit_len {
+                            copy16_unaligned(lsrc.add(i), ldst.add(i));
+                            i += 16;
+                        }
                     }
                 }
                 lit_pos += lit_len;

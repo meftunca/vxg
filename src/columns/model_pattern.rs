@@ -101,6 +101,30 @@ enum PatTok<'a> {
     Dict(Vec<&'a [u8]>),
 }
 
+/// True when `v0` and `v1` split into the same pattern shape AND share identical non-digit literals.
+#[inline(always)]
+fn pattern_r1_same_literals(v0: &[u8], v1: &[u8]) -> bool {
+    let mut s0 = [PatSpan { digit: false, start: 0, end: 0 }; PATTERN_MAX_TOKENS];
+    let mut s1 = [PatSpan { digit: false, start: 0, end: 0 }; PATTERN_MAX_TOKENS];
+    let Some(n0) = pattern_split(v0, &mut s0) else { return false };
+    if v1.len() != v0.len() || pattern_split(v1, &mut s1) != Some(n0) {
+        return false;
+    }
+    let mut any_dig = false;
+    for t in 0..n0 {
+        let (a, b) = (s0[t], s1[t]);
+        if a.digit != b.digit || a.start != b.start || a.end != b.end {
+            return false;
+        }
+        if a.digit {
+            any_dig = true;
+        } else if &v0[a.start as usize..a.end as usize] != &v1[b.start as usize..b.end as usize] {
+            return false;
+        }
+    }
+    any_dig
+}
+
 fn pack_pattern_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 || limit < 16 {
@@ -165,10 +189,13 @@ fn pack_pattern_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
 
     PATTERN_SCRATCH.with(|cell| {
         let mut sc = cell.borrow_mut();
+        let total_dig = n * ndig;
         sc.dig_vals.clear();
-        sc.dig_vals.resize(n * ndig, 0);
-        sc.dict_ids.clear();
-        sc.dict_ids.resize(n * nlit, 0);
+        sc.dig_vals.reserve(total_dig);
+        unsafe {
+            sc.dig_vals.set_len(total_dig);
+        }
+        let mut has_dict_lit = false;
 
         let mut mins = [u64::MAX; PATTERN_MAX_TOKENS];
         let mut maxs = [0u64; PATTERN_MAX_TOKENS];
@@ -220,10 +247,15 @@ fn pack_pattern_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
                         let x = pattern_digits_value(part);
                         mins[d] = mins[d].min(x);
                         maxs[d] = maxs[d].max(x);
-                        sc.dig_vals[dig_base + d] = x;
+                        unsafe { *sc.dig_vals.get_unchecked_mut(dig_base + d) = x; }
                         d += 1;
                     } else {
                         if part != lit0[l] {
+                            if !has_dict_lit {
+                                sc.dict_ids.clear();
+                                sc.dict_ids.resize(n * nlit, 0);
+                                has_dict_lit = true;
+                            }
                             let extra = &mut dict_extra[l];
                             let id = if let Some(pos) = extra.iter().position(|e| *e == part) {
                                 (pos + 1) as u8
@@ -313,29 +345,49 @@ fn pack_pattern_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
         let mut hist = [0usize; 65];
         let (mut n0, mut prev_num) = (0u64, 0u64);
         let active_steps = &steps[..nsteps];
-        for r in 0..n {
-            let dig_row = &dig_vals[r * ndig..(r + 1) * ndig];
-            let lit_row = &dict_ids[r * nlit..(r + 1) * nlit];
-            let mut acc = 0u64;
-            for &st in active_steps {
-                match st {
-                    StepKind::Dig { idx, min, radix } => {
+        if !has_dict_lit {
+            for r in 0..n {
+                let dig_row = unsafe { dig_vals.get_unchecked(r * ndig..(r + 1) * ndig) };
+                let mut acc = 0u64;
+                for &st in active_steps {
+                    if let StepKind::Dig { idx, min, radix } = st {
                         acc = acc * radix + (unsafe { *dig_row.get_unchecked(idx as usize) } - min);
                     }
-                    StepKind::Dict { idx, radix } => {
-                        let ins = unsafe { *lit_row.get_unchecked(idx as usize) } as usize;
-                        acc = acc * radix + remaps[idx as usize][ins] as u64;
+                }
+                if r == 0 {
+                    n0 = acc;
+                } else {
+                    let z = zz(acc as i64 - prev_num as i64);
+                    deltas.push(z);
+                    hist[(64 - z.leading_zeros()) as usize] += 1;
+                }
+                prev_num = acc;
+            }
+        } else {
+            for r in 0..n {
+                let dig_row = &dig_vals[r * ndig..(r + 1) * ndig];
+                let lit_row = &dict_ids[r * nlit..(r + 1) * nlit];
+                let mut acc = 0u64;
+                for &st in active_steps {
+                    match st {
+                        StepKind::Dig { idx, min, radix } => {
+                            acc = acc * radix + (unsafe { *dig_row.get_unchecked(idx as usize) } - min);
+                        }
+                        StepKind::Dict { idx, radix } => {
+                            let ins = unsafe { *lit_row.get_unchecked(idx as usize) } as usize;
+                            acc = acc * radix + remaps[idx as usize][ins] as u64;
+                        }
                     }
                 }
+                if r == 0 {
+                    n0 = acc;
+                } else {
+                    let z = zz(acc as i64 - prev_num as i64);
+                    deltas.push(z);
+                    hist[(64 - z.leading_zeros()) as usize] += 1;
+                }
+                prev_num = acc;
             }
-            if r == 0 {
-                n0 = acc;
-            } else {
-                let z = zz(acc as i64 - prev_num as i64);
-                deltas.push(z);
-                hist[(64 - z.leading_zeros()) as usize] += 1;
-            }
-            prev_num = acc;
         }
 
         let delta_len = deltas.len();

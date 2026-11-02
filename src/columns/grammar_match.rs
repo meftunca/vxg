@@ -43,6 +43,84 @@ fn template_is_clean_clf(segments: &[&[u8]]) -> bool {
     }
 }
 
+const CLF_IP_OK: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut b = 0x21usize;
+    while b < 0x7f {
+        t[b] = !matches!(
+            b as u8,
+            b'=' | b',' | b'\t' | b'|' | b'"' | b'(' | b')' | b';' | b'{' | b'}' | b'[' | b']'
+        );
+        b += 1;
+    }
+    t
+};
+
+const CLF_TOK_OK: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut b = 0x21usize;
+    while b < 0x7f {
+        t[b] = !matches!(b as u8, b'"' | b'[' | b']' | b'{' | b'}' | b'=');
+        b += 1;
+    }
+    t
+};
+
+#[inline(always)]
+unsafe fn scan_clf_bracket(ptr: *const u8, len: usize, pos: usize) -> Option<usize> {
+    let mut end = pos;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::*;
+        let v_close = vdupq_n_u8(b']');
+        let v_open = vdupq_n_u8(b'[');
+        let v_20 = vdupq_n_u8(0x20);
+        let v_5f = vdupq_n_u8(0x5f);
+        while end + 16 <= len {
+            let c = vld1q_u8(ptr.add(end));
+            let bad = vorrq_u8(vcgeq_u8(vsubq_u8(c, v_20), v_5f), vceqq_u8(c, v_open));
+            let stop = vorrq_u8(vceqq_u8(c, v_close), bad);
+            let m = vget_lane_u64::<0>(vreinterpret_u64_u8(vshrn_n_u16::<4>(vreinterpretq_u16_u8(stop))));
+            if m != 0 {
+                let idx = (m.trailing_zeros() >> 2) as usize;
+                let hit = end + idx;
+                return (*ptr.add(hit) == b']' && hit > pos).then_some(hit);
+            }
+            end += 16;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        let v_close = _mm_set1_epi8(b']' as i8);
+        let v_open = _mm_set1_epi8(b'[' as i8);
+        let v_1f = _mm_set1_epi8(0x1f);
+        let v_7f = _mm_set1_epi8(0x7f);
+        while end + 16 <= len {
+            let c = _mm_loadu_si128(ptr.add(end).cast::<__m128i>());
+            let ctrl = _mm_or_si128(_mm_cmpeq_epi8(_mm_max_epu8(c, v_1f), v_1f), _mm_cmpeq_epi8(_mm_min_epu8(c, v_7f), v_7f));
+            let stop = _mm_or_si128(_mm_cmpeq_epi8(c, v_close), _mm_or_si128(_mm_cmpeq_epi8(c, v_open), ctrl));
+            let m = _mm_movemask_epi8(stop) as u32;
+            if m != 0 {
+                let hit = end + m.trailing_zeros() as usize;
+                return (*ptr.add(hit) == b']' && hit > pos).then_some(hit);
+            }
+            end += 16;
+        }
+    }
+    while end < len {
+        let b = unsafe { *ptr.add(end) };
+        if b == b']' {
+            return (end > pos).then_some(end);
+        }
+        if b < 0x20 || b >= 0x7f || b == b'[' {
+            return None;
+        }
+        end += 1;
+    }
+    None
+}
+
 #[inline(always)]
 fn try_match_clf_stream<'a>(
     data: &'a [u8],
@@ -54,35 +132,20 @@ fn try_match_clf_stream<'a>(
     let slots = segments.len() - 1;
     let len = data.len();
     let ptr = data.as_ptr();
-    if start >= len {
-        return None;
-    }
-    let b0 = unsafe { *ptr.add(start) };
-    if !b0.is_ascii_digit() {
+    if start >= len || !unsafe { *ptr.add(start) }.is_ascii_digit() {
         return None;
     }
     let mut end0 = start + 1;
-    while end0 < len {
-        let b = unsafe { *ptr.add(end0) };
-        if b <= b' '
-            || b >= 0x7f
-            || matches!(
-                b,
-                b'=' | b',' | b'\t' | b'|' | b'"' | b'(' | b')' | b';' | b'{' | b'}' | b'[' | b']'
-            )
-        {
-            break;
-        }
+    while end0 < len && CLF_IP_OK[unsafe { *ptr.add(end0) } as usize] {
         end0 += 1;
     }
     if end0 - start < 7 {
         return None;
     }
-    unsafe {
-        *out_values.get_unchecked_mut(0) = data.get_unchecked(start..end0);
-    }
+    unsafe { *out_values.get_unchecked_mut(0) = data.get_unchecked(start..end0); }
     let mut pos = end0;
     let mut has_structured = false;
+    let (mut cw, mut cq) = (quote_cache.0, quote_cache.1);
     for slot in 1..slots {
         let seg = unsafe { *segments.get_unchecked(slot) };
         let next_pos = pos + seg.len();
@@ -92,76 +155,43 @@ fn try_match_clf_stream<'a>(
         pos = next_pos;
         let seg_last = unsafe { *seg.get_unchecked(seg.len() - 1) };
         if seg_last == b'[' {
-            let mut end = pos;
-            while end < len {
-                let b = unsafe { *ptr.add(end) };
-                if b == b']' {
-                    break;
-                }
-                if b < 0x20 || b >= 0x7f || b == b'[' {
-                    return None;
-                }
-                end += 1;
-            }
-            if end == pos || end >= len {
-                return None;
-            }
+            let end = unsafe { scan_clf_bracket(ptr, len, pos)? };
             has_structured = true;
-            unsafe {
-                *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end);
-            }
+            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end); }
             pos = end;
         } else if seg_last == b'=' {
             let mut end = pos;
             while end < len {
                 let b = unsafe { *ptr.add(end) };
-                if b <= b' ' || b >= 0x7f {
-                    break;
-                }
-                if matches!(b, b'"' | b'[' | b']' | b'{' | b'}') {
+                if !CLF_TOK_OK[b as usize] && b != b'=' {
+                    if b <= b' ' || b >= 0x7f { break; }
                     return None;
                 }
                 end += 1;
             }
-            if end == pos {
-                return None;
-            }
+            if end == pos { return None; }
             has_structured = true;
-            unsafe {
-                *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end);
-            }
+            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end); }
+            pos = end;
+        } else if unsafe { *ptr.add(pos) } == b'"' {
+            let end = scan_json_string_reg(data, pos, &mut cw, &mut cq, quote_cache)?;
+            has_structured = true;
+            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end); }
             pos = end;
         } else {
-            let first = unsafe { *ptr.add(pos) };
-            if first == b'"' {
-                let end = scan_json_string_cached(data, pos, quote_cache)?;
-                has_structured = true;
-                unsafe {
-                    *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end);
-                }
-                pos = end;
-            } else {
-                let mut end = pos;
-                while end < len {
-                    let b = unsafe { *ptr.add(end) };
-                    if b <= b' ' || b >= 0x7f {
-                        break;
-                    }
-                    if matches!(b, b'"' | b'[' | b']' | b'{' | b'}' | b'=') {
-                        return None;
-                    }
-                    end += 1;
-                }
-                if end == pos {
-                    return None;
-                }
-                unsafe {
-                    *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end);
-                }
-                pos = end;
+            let mut end = pos;
+            while end < len && CLF_TOK_OK[unsafe { *ptr.add(end) } as usize] {
+                end += 1;
             }
+            if end == pos || (end < len && { let b = unsafe { *ptr.add(end) }; b > b' ' && b < 0x7f }) {
+                return None;
+            }
+            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end); }
+            pos = end;
         }
     }
+    quote_cache.0 = cw;
+    quote_cache.1 = cq;
     let last_seg = unsafe { *segments.get_unchecked(slots) };
     let next_end = pos + last_seg.len();
     if !has_structured
@@ -173,6 +203,29 @@ fn try_match_clf_stream<'a>(
     let tail_nl = if last_seg.ends_with(b"\r\n") { 2 } else { 1 };
     let body_len = (next_end - start) - tail_nl;
     (16..=4096).contains(&body_len).then_some(next_end - start)
+}
+
+#[inline(always)]
+fn refresh_col_ptrs<'a>(
+    cols: &mut [Vec<&'a [u8]>],
+    slots: usize,
+    row_idx: usize,
+    grow: bool,
+    ptrs: &mut [*mut &'a [u8]; MAX_SLOTS],
+) -> usize {
+    let mut min_cap = usize::MAX;
+    for slot in 0..slots {
+        unsafe {
+            let col = cols.get_unchecked_mut(slot);
+            if grow {
+                col.set_len(row_idx);
+                col.reserve(256);
+            }
+            min_cap = min_cap.min(col.capacity());
+            *ptrs.get_unchecked_mut(slot) = col.as_mut_ptr();
+        }
+    }
+    min_cap
 }
 
 #[inline(never)]
@@ -192,103 +245,36 @@ fn match_single_delim_or_logfmt_stream<'a>(
     let total_len = data.len();
     let mut cur_line_start = *line_start;
     let mut cur_row_idx = *row_idx;
-    let mut cur_col_cap = *col_cap;
-    if let Some(d) = delim_opt {
-        while cur_line_start < total_len {
-            let Some(line_len) = try_match_delimited_stream(
-                data,
-                cur_line_start,
-                segs,
-                d,
-                delim_mask_cache,
-                val_buf,
-            ) else {
-                break;
-            };
-            cur_line_start += line_len;
+    let mut col_ptrs = [core::ptr::null_mut(); MAX_SLOTS];
+    let mut cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, false, &mut col_ptrs);
+    macro_rules! push_vals {
+        () => {
             if cur_row_idx == cur_col_cap {
-                for slot in 0..slots {
-                    unsafe {
-                        let col = tpl.values.get_unchecked_mut(slot);
-                        col.set_len(cur_row_idx);
-                        col.reserve(256);
-                    }
-                }
-                cur_col_cap = min_col_capacity(&tpl.values);
+                cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, true, &mut col_ptrs);
             }
             for slot in 0..slots {
-                unsafe {
-                    *tpl.values
-                        .get_unchecked_mut(slot)
-                        .as_mut_ptr()
-                        .add(cur_row_idx) = *val_buf.get_unchecked(slot);
-                }
+                unsafe { *col_ptrs.get_unchecked(slot).add(cur_row_idx) = *val_buf.get_unchecked(slot); }
             }
             cur_row_idx += 1;
+        };
+    }
+    if let Some(d) = delim_opt {
+        while cur_line_start < total_len {
+            let Some(line_len) = try_match_delimited_stream(data, cur_line_start, segs, d, delim_mask_cache, val_buf) else { break; };
+            cur_line_start += line_len;
+            push_vals!();
         }
     } else if space_kind == 2 {
         while cur_line_start < total_len {
-            let Some(line_len) = try_match_clf_stream(
-                data,
-                cur_line_start,
-                segs,
-                delim_mask_cache,
-                val_buf,
-            ) else {
-                break;
-            };
+            let Some(line_len) = try_match_clf_stream(data, cur_line_start, segs, delim_mask_cache, val_buf) else { break; };
             cur_line_start += line_len;
-            if cur_row_idx == cur_col_cap {
-                for slot in 0..slots {
-                    unsafe {
-                        let col = tpl.values.get_unchecked_mut(slot);
-                        col.set_len(cur_row_idx);
-                        col.reserve(256);
-                    }
-                }
-                cur_col_cap = min_col_capacity(&tpl.values);
-            }
-            for slot in 0..slots {
-                unsafe {
-                    *tpl.values
-                        .get_unchecked_mut(slot)
-                        .as_mut_ptr()
-                        .add(cur_row_idx) = *val_buf.get_unchecked(slot);
-                }
-            }
-            cur_row_idx += 1;
+            push_vals!();
         }
     } else {
         while cur_line_start < total_len {
-            let Some(line_len) = try_match_logfmt_stream(
-                data,
-                cur_line_start,
-                segs,
-                delim_mask_cache,
-                val_buf,
-            ) else {
-                break;
-            };
+            let Some(line_len) = try_match_logfmt_stream(data, cur_line_start, segs, delim_mask_cache, val_buf) else { break; };
             cur_line_start += line_len;
-            if cur_row_idx == cur_col_cap {
-                for slot in 0..slots {
-                    unsafe {
-                        let col = tpl.values.get_unchecked_mut(slot);
-                        col.set_len(cur_row_idx);
-                        col.reserve(256);
-                    }
-                }
-                cur_col_cap = min_col_capacity(&tpl.values);
-            }
-            for slot in 0..slots {
-                unsafe {
-                    *tpl.values
-                        .get_unchecked_mut(slot)
-                        .as_mut_ptr()
-                        .add(cur_row_idx) = *val_buf.get_unchecked(slot);
-                }
-            }
-            cur_row_idx += 1;
+            push_vals!();
         }
     }
     *line_start = cur_line_start;
@@ -376,73 +362,37 @@ fn match_single_json_clean_stream<'a>(
     let data_ptr = data.as_ptr();
     let mut cur_line_start = *line_start;
     let mut cur_row_idx = *row_idx;
-    let mut cur_col_cap = *col_cap;
+    let mut col_ptrs = [core::ptr::null_mut(); MAX_SLOTS];
+    let mut cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, false, &mut col_ptrs);
     while cur_line_start + seg0_len <= total_len {
-        if !slice_eq_fast(
-            unsafe { data.get_unchecked(cur_line_start..cur_line_start + seg0_len) },
-            seg0,
-        ) {
+        if !slice_eq_fast(unsafe { data.get_unchecked(cur_line_start..cur_line_start + seg0_len) }, seg0) {
             break;
         }
         if cur_row_idx == cur_col_cap {
-            for slot in 0..slots {
-                unsafe {
-                    let col = tpl.values.get_unchecked_mut(slot);
-                    col.set_len(cur_row_idx);
-                    col.reserve(256);
-                }
-            }
-            cur_col_cap = min_col_capacity(&tpl.values);
+            cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, true, &mut col_ptrs);
         }
         let mut pos = cur_line_start + seg0_len;
         let mut ok = true;
         for slot in 0..slots {
-            if pos >= total_len {
-                ok = false;
-                break;
-            }
+            if pos >= total_len { ok = false; break; }
             let first = unsafe { *data_ptr.add(pos) };
             let next_seg = unsafe { *segs.get_unchecked(slot + 1) };
             let val_end = match first {
-                b'"' => match scan_string(data, pos) {
-                    Some(e) => e,
-                    None => {
-                        ok = false;
-                        break;
-                    }
-                },
-                b'{' | b'[' => match scan_compound(data, pos) {
-                    Some(e) => e,
-                    None => {
-                        ok = false;
-                        break;
-                    }
-                },
-                _ if first <= b',' || first == b'}' || first == b']' => {
-                    ok = false;
-                    break;
-                }
+                b'"' => match scan_string(data, pos) { Some(e) => e, None => { ok = false; break; } },
+                b'{' | b'[' => match scan_compound(data, pos) { Some(e) => e, None => { ok = false; break; } },
+                _ if first <= b',' || first == b'}' || first == b']' => { ok = false; break; }
                 _ => scan_primitive_end(data_ptr, total_len, pos),
             };
-            unsafe {
-                *tpl.values
-                    .get_unchecked_mut(slot)
-                    .as_mut_ptr()
-                    .add(cur_row_idx) = data.get_unchecked(pos..val_end);
-            }
+            unsafe { *col_ptrs.get_unchecked(slot).add(cur_row_idx) = data.get_unchecked(pos..val_end); }
             pos = val_end;
             let next_end = pos + next_seg.len();
-            if next_end > total_len
-                || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, next_seg)
-            {
+            if next_end > total_len || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, next_seg) {
                 ok = false;
                 break;
             }
             pos = next_end;
         }
-        if !ok {
-            break;
-        }
+        if !ok { break; }
         cur_line_start = pos;
         cur_row_idx += 1;
     }
@@ -468,76 +418,45 @@ fn match_single_json_qmask_stream<'a>(
     let data_ptr = data.as_ptr();
     let mut cur_line_start = *line_start;
     let mut cur_row_idx = *row_idx;
-    let mut cur_col_cap = *col_cap;
+    let mut col_ptrs = [core::ptr::null_mut(); MAX_SLOTS];
+    let mut cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, false, &mut col_ptrs);
+    let (mut cw, mut cq) = (delim_mask_cache.0, delim_mask_cache.1);
     while cur_line_start + seg0_len <= total_len {
-        if !slice_eq_fast(
-            unsafe { data.get_unchecked(cur_line_start..cur_line_start + seg0_len) },
-            seg0,
-        ) {
+        if !slice_eq_fast(unsafe { data.get_unchecked(cur_line_start..cur_line_start + seg0_len) }, seg0) {
             break;
         }
         if cur_row_idx == cur_col_cap {
-            for slot in 0..slots {
-                unsafe {
-                    let col = tpl.values.get_unchecked_mut(slot);
-                    col.set_len(cur_row_idx);
-                    col.reserve(256);
-                }
-            }
-            cur_col_cap = min_col_capacity(&tpl.values);
+            cur_col_cap = refresh_col_ptrs(&mut tpl.values, slots, cur_row_idx, true, &mut col_ptrs);
         }
         let mut pos = cur_line_start + seg0_len;
         let mut ok = true;
         for slot in 0..slots {
-            if pos >= total_len {
-                ok = false;
-                break;
-            }
+            if pos >= total_len { ok = false; break; }
             let first = unsafe { *data_ptr.add(pos) };
             let next_seg = unsafe { *segs.get_unchecked(slot + 1) };
             let val_end = match first {
-                b'"' => match scan_json_string_cached(data, pos, delim_mask_cache) {
+                b'"' => match scan_json_string_reg(data, pos, &mut cw, &mut cq, delim_mask_cache) {
                     Some(e) => e,
-                    None => {
-                        ok = false;
-                        break;
-                    }
+                    None => { ok = false; break; }
                 },
-                b'{' | b'[' => match scan_compound(data, pos) {
-                    Some(e) => e,
-                    None => {
-                        ok = false;
-                        break;
-                    }
-                },
-                _ if first <= b',' || first == b'}' || first == b']' => {
-                    ok = false;
-                    break;
-                }
+                b'{' | b'[' => match scan_compound(data, pos) { Some(e) => e, None => { ok = false; break; } },
+                _ if first <= b',' || first == b'}' || first == b']' => { ok = false; break; }
                 _ => scan_primitive_end(data_ptr, total_len, pos),
             };
-            unsafe {
-                *tpl.values
-                    .get_unchecked_mut(slot)
-                    .as_mut_ptr()
-                    .add(cur_row_idx) = data.get_unchecked(pos..val_end);
-            }
+            unsafe { *col_ptrs.get_unchecked(slot).add(cur_row_idx) = data.get_unchecked(pos..val_end); }
             pos = val_end;
             let next_end = pos + next_seg.len();
-            if next_end > total_len
-                || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, next_seg)
-            {
+            if next_end > total_len || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, next_seg) {
                 ok = false;
                 break;
             }
             pos = next_end;
         }
-        if !ok {
-            break;
-        }
+        if !ok { break; }
         cur_line_start = pos;
         cur_row_idx += 1;
     }
+    (delim_mask_cache.0, delim_mask_cache.1) = (cw, cq);
     *line_start = cur_line_start;
     *row_idx = cur_row_idx;
     *col_cap = cur_col_cap;

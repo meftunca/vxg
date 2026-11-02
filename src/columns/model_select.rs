@@ -22,6 +22,58 @@ fn pack_model_mode(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, ModelKind)
 }
 
 #[inline(always)]
+fn probe_early16(values: &[&[u8]]) -> (usize, bool) {
+    let n = values.len();
+    let m = n.min(16);
+    let mut fp = [0u64; 16];
+    for (i, &v) in values[..m].iter().enumerate() {
+        let len = v.len();
+        fp[i] = if len >= 8 {
+            unsafe {
+                let p = v.as_ptr();
+                p.cast::<u64>().read_unaligned()
+                    ^ p.add(len - 8).cast::<u64>().read_unaligned().rotate_left(29)
+                    ^ (len as u64)
+            }
+        } else if len >= 4 {
+            unsafe {
+                let p = v.as_ptr();
+                (p.cast::<u32>().read_unaligned() as u64)
+                    | ((p.add(len - 4).cast::<u32>().read_unaligned() as u64) << 32)
+                    ^ (len as u64)
+            }
+        } else if len > 0 {
+            (v[0] as u64) | ((v[len >> 1] as u64) << 8) | ((v[len - 1] as u64) << 16) | ((len as u64) << 24)
+        } else {
+            0
+        };
+    }
+    let mut dups = 0usize;
+    let mut first_diff: Option<&[u8]> = None;
+    for i in 1..m {
+        let f = fp[i];
+        let mut matched = false;
+        for j in 0..i {
+            if fp[j] == f && slice_eq_fast(values[i], values[j]) {
+                dups += 1;
+                if j == 0 {
+                    matched = true;
+                }
+                break;
+            }
+        }
+        if first_diff.is_none() && !matched && (f != fp[0] || !slice_eq_fast(values[i], values[0])) {
+            first_diff = Some(values[i]);
+        }
+    }
+    if first_diff.is_none() && n > m && !slice_eq_fast(values[n - 1], values[0]) {
+        first_diff = Some(values[n - 1]);
+    }
+    let same_pat_lits = first_diff.is_some_and(|dv| pattern_r1_same_literals(values[0], dv));
+    (dups, same_pat_lits)
+}
+
+#[inline(always)]
 fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, ModelKind) {
     let n = values.len();
     if n < 2 {
@@ -76,6 +128,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
     let is_quoted = first_slice.len() >= 2
         && first_slice[0] == b'"'
         && first_slice[first_slice.len() - 1] == b'"';
+    let (dups16, same_pat_lits) = probe_early16(values);
 
     if !is_quoted {
         // Non-quoted values cannot match any of the 8 quoted-only models
@@ -260,15 +313,15 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                 });
             }
         }
+        if is_all_decimal && best_bytes.is_some() && allow_v3_ext && dups16 < 8 && n > 64 {
+            skip_dictionary = true;
+        }
         let unquoted_const_hint = !skip_dictionary
             && (n <= 64
-                || (slice_eq_fast(first_slice, values[1])
-                    && slice_eq_fast(first_slice, values[n - 1])));
+                || (dups16 >= 2 && !same_pat_lits)
+                || (slice_eq_fast(first_slice, values[1]) && slice_eq_fast(first_slice, values[n - 1])));
         if unquoted_const_hint {
-            try_model!(
-                |limit| pack_dictionary_model_mode(values, limit, allow_v3_ext),
-                ModelKind::Dictionary
-            );
+            try_model!(|limit| pack_dictionary_model_mode(values, limit, allow_v3_ext), ModelKind::Dictionary);
         }
         // Unquoted digit/literal patterns (CLF / CSV / TSV timestamps, IPv4, versions, ...) and
         // unquoted fixed-width lowercase hex ids (`8201e2bd73ab4876`). Plain decimals are left to
@@ -280,34 +333,31 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
             && hex_nibble(first_slice[first_slice.len() - 2]).is_some()
             && hex_nibble(first_slice[first_slice.len() - 3]).is_some()
             && hex_nibble(first_slice[first_slice.len() - 4]).is_some();
-        let unquoted_hex_early_dup = unquoted_hex_tail
-            && (1..n.min(16)).any(|i| (0..i).any(|j| slice_eq_fast(values[i], values[j])));
+        let unquoted_hex_early_dup = unquoted_hex_tail && dups16 > 0;
         if unquoted_hex_tail && !unquoted_hex_early_dup && !unquoted_const_hint {
-            try_model!(
-                |limit| pack_hex_suffix_model_mode(values, limit, false),
-                ModelKind::HexSuffix
-            );
+            try_model!(|limit| pack_hex_suffix_model_mode(values, limit, false), ModelKind::HexSuffix);
             if best_kind == ModelKind::HexSuffix {
                 skip_dictionary = true;
             }
         }
-        if allow_v3_ext && !is_all_decimal && best_kind != ModelKind::HexSuffix {
-            try_model!(
-                |limit| pack_pattern_model(values, limit),
-                ModelKind::Pattern
-            );
+        if allow_v3_ext
+            && !is_all_decimal
+            && best_kind != ModelKind::HexSuffix
+            && !(best_kind == ModelKind::Dictionary && dups16 >= 3 && !same_pat_lits)
+        {
+            try_model!(|limit| pack_pattern_model(values, limit), ModelKind::Pattern);
+            if best_kind == ModelKind::Pattern && dups16 == 0 && n >= 16 {
+                skip_dictionary = true;
+            }
         }
         if !skip_dictionary && !unquoted_const_hint {
-            try_model!(
-                |limit| pack_dictionary_model_mode(values, limit, allow_v3_ext),
-                ModelKind::Dictionary
-            );
+            if best_bytes.is_none() && dups16 == 0 {
+                let _ = get_raw_size!();
+            }
+            try_model!(|limit| pack_dictionary_model_mode(values, limit, allow_v3_ext), ModelKind::Dictionary);
         }
         if unquoted_hex_tail && (unquoted_hex_early_dup || unquoted_const_hint) {
-            try_model!(
-                |limit| pack_hex_suffix_model_mode(values, limit, false),
-                ModelKind::HexSuffix
-            );
+            try_model!(|limit| pack_hex_suffix_model_mode(values, limit, false), ModelKind::HexSuffix);
         }
         if allow_v3_ext && best_kind == ModelKind::Raw {
             let raw = pack_raw_model(values);
@@ -321,10 +371,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
             return (raw, best_kind);
         }
         let _ = best_len;
-        return (
-            best_bytes.unwrap_or_else(|| pack_raw_model(values)),
-            best_kind,
-        );
+        return (best_bytes.unwrap_or_else(|| pack_raw_model(values)), best_kind);
     }
 
     // Quoted value path (`first_slice` starts and ends with `"`):
@@ -333,10 +380,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
 
     // 1. Timestamp (only possible when `first_slice.len() == 22` and ends with `Z"`):
     if first_slice.len() == 22 && last_inner_byte == b'Z' {
-        try_model!(
-            |limit| pack_timestamp_model(values, limit),
-            ModelKind::Timestamp
-        );
+        try_model!(|limit| pack_timestamp_model(values, limit), ModelKind::Timestamp);
         if best_kind == ModelKind::Timestamp && (allow_v3_ext || best_len <= 25) {
             return (best_bytes.unwrap(), best_kind);
         }
@@ -346,14 +390,11 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
     // e.g. constant strings like `"eu-central-1"`), run `Dictionary` first so `best_len` is tight before
     // testing `DecimalSuffix` / `HexSuffix` / `SegmentDict`.
     let mut dict_already_tried = false;
-    if (allow_v3_ext && n <= 64)
+    if (allow_v3_ext && (n <= 64 || (dups16 >= 2 && !same_pat_lits)))
         || (slice_eq_fast(first_slice, values[1]) && slice_eq_fast(first_slice, values[n - 1]))
     {
         dict_already_tried = true;
-        try_model!(
-            |limit| pack_dictionary_model_mode(values, limit, allow_v3_ext),
-            ModelKind::Dictionary
-        );
+        try_model!(|limit| pack_dictionary_model_mode(values, limit, allow_v3_ext), ModelKind::Dictionary);
         if best_kind == ModelKind::Dictionary
             && best_len <= 3 + uleb_len(first_slice.len()) + first_slice.len()
         {
@@ -363,24 +404,9 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
 
     // 2. Trailing decimal digit -> `DecimalSuffix`:
     if last_inner_byte.is_ascii_digit()
-        && values
-            .get(1)
-            .is_some_and(|v1| v1.len() >= 2 && v1[v1.len() - 2].is_ascii_digit())
+        && values.get(1).is_some_and(|v1| v1.len() >= 2 && v1[v1.len() - 2].is_ascii_digit())
     {
-        try_model!(
-            |limit| pack_decimal_suffix_model(values, limit),
-            ModelKind::DecimalSuffix
-        );
-    }
-
-    // 2b. Digit-field / literal pattern (timestamps in any layout, IPv4, versions, `u012336`-style ids).
-    // Runs before `Dictionary` / `HexSuffix` so monotonic timestamps tighten `best_len` upfront;
-    // non-pattern columns exit on row 0/1 in ~15 ns on the stack.
-    if allow_v3_ext {
-        try_model!(
-            |limit| pack_pattern_model(values, limit),
-            ModelKind::Pattern
-        );
+        try_model!(|limit| pack_decimal_suffix_model(values, limit), ModelKind::DecimalSuffix);
     }
 
     // 3. Multi-byte lowercase hex suffix -> `EpochCounter`, `Gf2Affine`, `HexSuffix`:
@@ -390,37 +416,58 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
         && hex_nibble(inner0[inner0.len() - 2]).is_some()
         && hex_nibble(inner0[inner0.len() - 3]).is_some()
         && hex_nibble(inner0[inner0.len() - 4]).is_some();
+
+    // 2b. Digit-field / literal pattern (timestamps in any layout, IPv4, versions, `u012336`-style ids).
+    if allow_v3_ext
+        && !(best_kind == ModelKind::Dictionary && dups16 >= 3 && !same_pat_lits)
+        && !(has_multi_hex_tail && inner0.len() >= 16 && dups16 == 0 && !same_pat_lits)
+    {
+        try_model!(|limit| pack_pattern_model(values, limit), ModelKind::Pattern);
+    }
+
     if has_multi_hex_tail {
-        let has_early_dup = inner0.len() < 16
-            || (1..values.len().min(8)).any(|i| (0..i).any(|j| slice_eq_fast(values[i], values[j])));
+        let has_early_dup = inner0.len() < 16 || dups16 > 0;
         if has_early_dup && allow_v3_ext && !dict_already_tried {
             dict_already_tried = true;
-            try_model!(
-                |limit| pack_dictionary_model_mode(values, limit, true),
-                ModelKind::Dictionary
-            );
+            try_model!(|limit| pack_dictionary_model_mode(values, limit, true), ModelKind::Dictionary);
         }
+        try_model!(|limit| pack_hex_suffix_model(values, limit), ModelKind::HexSuffix);
         if inner0.len() >= 16 {
-            try_model!(
-                |limit| pack_epoch_counter_model(values, limit),
-                ModelKind::EpochCounter
-            );
-            try_model!(
-                |limit| pack_gf2_affine_model(values, limit),
-                ModelKind::Gf2Affine
-            );
+            try_model!(|limit| pack_epoch_counter_model(values, limit), ModelKind::EpochCounter);
+            if best_kind == ModelKind::HexSuffix {
+                if let Some((prefix, first_digits)) = split_hex_suffix(first_slice) {
+                    let hdr_len = 1 + uleb_len(prefix.len()) + prefix.len() + 1;
+                    let raw64_opt = first_digits
+                        .len()
+                        .eq(&16)
+                        .then(|| best_bytes.as_deref())
+                        .flatten()
+                        .filter(|b| b.len() == hdr_len + n * 8);
+                    if let Some(hb) = raw64_opt {
+                        let lim = effective_limit(best_len, best_kind, ModelKind::Gf2Affine);
+                        if let Some(gf2_out) = pack_gf2_affine_from_raw64(prefix, &hb[hdr_len..], n, lim) {
+                            best_len = gf2_out.len();
+                            best_kind = ModelKind::Gf2Affine;
+                            best_bytes = Some(gf2_out);
+                        }
+                    } else {
+                        try_model!(|limit| pack_gf2_affine_model(values, limit), ModelKind::Gf2Affine);
+                    }
+                }
+            } else {
+                try_model!(|limit| pack_gf2_affine_model(values, limit), ModelKind::Gf2Affine);
+            }
+        }
+        if matches!(best_kind, ModelKind::HexSuffix | ModelKind::EpochCounter | ModelKind::Gf2Affine)
+            && dups16 == 0
+            && n >= 16
+        {
+            dict_already_tried = true;
         }
         if !has_early_dup && allow_v3_ext && !dict_already_tried {
             dict_already_tried = true;
-            try_model!(
-                |limit| pack_dictionary_model_mode(values, limit, true),
-                ModelKind::Dictionary
-            );
+            try_model!(|limit| pack_dictionary_model_mode(values, limit, true), ModelKind::Dictionary);
         }
-        try_model!(
-            |limit| pack_hex_suffix_model(values, limit),
-            ModelKind::HexSuffix
-        );
     }
 
     // 4. Every valid SegmentDict value consists exclusively of bytes satisfying `segment_byte_ok(b) || b == b';'`.
@@ -447,12 +494,15 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
         );
     }
 
-    // 5. Dictionary model (skip if already tried or if SegmentDict/DecimalSuffix already succeeded and the first 8 rows are all distinct):
+    // 5. Dictionary model (skip if already tried or if SegmentDict/DecimalSuffix/Pattern already succeeded and first 16 rows are distinct):
     let skip_dict_after_seg = (best_kind == ModelKind::SegmentDict
-        || (best_kind == ModelKind::DecimalSuffix && allow_v3_ext))
-        && values.len() >= 8
-        && (1..8).all(|i| (0..i).all(|j| !slice_eq_fast(values[i], values[j])));
+        || (matches!(best_kind, ModelKind::DecimalSuffix | ModelKind::Pattern) && allow_v3_ext))
+        && n >= 8
+        && dups16 == 0;
     if !dict_already_tried && !skip_dict_after_seg {
+        if best_bytes.is_none() && dups16 == 0 {
+            let _ = get_raw_size!();
+        }
         try_model!(
             |limit| pack_dictionary_model_mode(values, limit, allow_v3_ext),
             ModelKind::Dictionary

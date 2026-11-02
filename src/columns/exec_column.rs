@@ -3,6 +3,12 @@ enum BoundStream<'a> {
     Raw {
         cursor: Cursor<'a>,
     },
+    RawShort16After16 { ptr: *const u8 },
+    RawShort16After32 { ptr: *const u8 },
+    RawShort16 { ptr: *const u8 },
+    RawShort48After16 { ptr: *const u8 },
+    RawShort48After32 { ptr: *const u8 },
+    RawShort48 { ptr: *const u8 },
     Dictionary16 {
         entries: *const FastPiece,
         idx_ptr: *const u8,
@@ -75,16 +81,21 @@ enum BoundStream<'a> {
     DecimalSmall {
         val_ptr: *const u16,
     },
+    DecimalPackedAfter16 { min: u64, reader: FastBitReader<'a> },
     DecimalPacked {
         min: u64,
         reader: FastBitReader<'a>,
     },
+    DecimalValuesAfter16 { val_ptr: *const u64 },
+    DecimalValuesAfter32 { val_ptr: *const u64 },
     DecimalValues {
         val_ptr: *const u64,
     },
     HexSuffix4 {
         ptr: *const u8,
     },
+    HexSuffix8After16 { ptr: *const u8 },
+    HexSuffix8After32 { ptr: *const u8 },
     HexSuffix8 {
         ptr: *const u8,
     },
@@ -293,6 +304,18 @@ impl<'a> ExecColumn<'a> {
                     dst.cast::<u32>().write_unaligned(entry as u32);
                     dst = dst.add((entry >> 32) as usize);
                 }
+                BoundStream::DecimalValuesAfter16 { val_ptr } => {
+                    let val = **val_ptr;
+                    *val_ptr = val_ptr.add(1);
+                    let len = write_decimal_fast(dst, val);
+                    return self.after.emit_16(dst.add(len));
+                }
+                BoundStream::DecimalValuesAfter32 { val_ptr } => {
+                    let val = **val_ptr;
+                    *val_ptr = val_ptr.add(1);
+                    let len = write_decimal_fast(dst, val);
+                    return self.after.emit_32(dst.add(len));
+                }
                 BoundStream::DecimalValues { val_ptr } => {
                     let val = **val_ptr;
                     *val_ptr = val_ptr.add(1);
@@ -307,6 +330,11 @@ impl<'a> ExecColumn<'a> {
                     if (1..=16).contains(&self.after.len) {
                         return self.after.emit_16(dst);
                     }
+                }
+                BoundStream::DecimalPackedAfter16 { min, reader } => {
+                    let val = *min + reader.next_u64();
+                    let len = write_decimal_fast(dst, val);
+                    return self.after.emit_16(dst.add(len));
                 }
                 BoundStream::DecimalPacked { min, reader } => {
                     let val = *min + reader.next_u64();
@@ -417,6 +445,16 @@ impl<'a> ExecColumn<'a> {
                     *ptr = ptr.add(4);
                     dst = dst.add(8);
                 }
+                BoundStream::HexSuffix8After16 { ptr } => {
+                    write_hex16_from_8bytes(dst, *ptr);
+                    *ptr = ptr.add(8);
+                    return self.after.emit_16(dst.add(16));
+                }
+                BoundStream::HexSuffix8After32 { ptr } => {
+                    write_hex16_from_8bytes(dst, *ptr);
+                    *ptr = ptr.add(8);
+                    return self.after.emit_32(dst.add(16));
+                }
                 BoundStream::HexSuffix8 { ptr } => {
                     write_hex16_from_8bytes(dst, *ptr);
                     *ptr = ptr.add(8);
@@ -449,6 +487,54 @@ impl<'a> ExecColumn<'a> {
                     if (1..=16).contains(&self.after.len) {
                         return self.after.emit_16(dst);
                     }
+                }
+                BoundStream::RawShort16After16 { ptr } => {
+                    let p = *ptr;
+                    let len = *p as usize;
+                    *ptr = p.add(1 + len);
+                    copy16_unaligned(p.add(1), dst);
+                    return self.after.emit_16(dst.add(len));
+                }
+                BoundStream::RawShort16After32 { ptr } => {
+                    let p = *ptr;
+                    let len = *p as usize;
+                    *ptr = p.add(1 + len);
+                    copy16_unaligned(p.add(1), dst);
+                    return self.after.emit_32(dst.add(len));
+                }
+                BoundStream::RawShort16 { ptr } => {
+                    let p = *ptr;
+                    let len = *p as usize;
+                    *ptr = p.add(1 + len);
+                    copy16_unaligned(p.add(1), dst);
+                    dst = dst.add(len);
+                }
+                BoundStream::RawShort48After16 { ptr } => {
+                    let p = *ptr;
+                    let len = *p as usize;
+                    *ptr = p.add(1 + len);
+                    copy16_unaligned(p.add(1), dst);
+                    copy16_unaligned(p.add(17), dst.add(16));
+                    copy16_unaligned(p.add(33), dst.add(32));
+                    return self.after.emit_16(dst.add(len));
+                }
+                BoundStream::RawShort48After32 { ptr } => {
+                    let p = *ptr;
+                    let len = *p as usize;
+                    *ptr = p.add(1 + len);
+                    copy16_unaligned(p.add(1), dst);
+                    copy16_unaligned(p.add(17), dst.add(16));
+                    copy16_unaligned(p.add(33), dst.add(32));
+                    return self.after.emit_32(dst.add(len));
+                }
+                BoundStream::RawShort48 { ptr } => {
+                    let p = *ptr;
+                    let len = *p as usize;
+                    *ptr = p.add(1 + len);
+                    copy16_unaligned(p.add(1), dst);
+                    copy16_unaligned(p.add(17), dst.add(16));
+                    copy16_unaligned(p.add(33), dst.add(32));
+                    dst = dst.add(len);
                 }
                 BoundStream::Raw { cursor } => {
                     let len = cursor.uleb().unwrap_unchecked();

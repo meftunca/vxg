@@ -59,25 +59,31 @@ fn next_json_string_slow(
 }
 
 #[inline(always)]
-fn scan_json_string_cached(
+fn scan_json_string_reg(
     data: &[u8],
     pos: usize,
+    cw: &mut usize,
+    cq: &mut u64,
     cache: &mut (usize, u64, u64),
 ) -> Option<usize> {
     let from = pos + 1;
     let w = from >> 6;
-    if cache.0 != w && !refill_json_cache(data, w, cache) {
-        return None;
+    if *cw != w {
+        if !refill_json_cache(data, w, cache) { return None; }
+        (*cw, *cq) = (cache.0, cache.1);
     }
-    let m = cache.1 >> (from & 63);
-    if m != 0 {
+    let m = *cq >> (from & 63);
+    let slow_from = if m != 0 {
         let end = from + m.trailing_zeros() as usize;
-        if end < data.len() && unsafe { *data.as_ptr().add(end) } == b'"' {
-            return Some(end + 1);
-        }
-        return next_json_string_slow(data, end, cache);
-    }
-    next_json_string_slow(data, (w + 1) * 64, cache)
+        if end < data.len() && unsafe { *data.as_ptr().add(end) } == b'"' { return Some(end + 1); }
+        end
+    } else {
+        (w + 1) * 64
+    };
+    (cache.0, cache.1) = (*cw, *cq);
+    let res = next_json_string_slow(data, slow_from, cache);
+    (*cw, *cq) = (cache.0, cache.1);
+    res
 }
 
 /// Delimited (CSV/TSV/PSV) row matcher at `data[start..]`. With on-demand 64-byte
@@ -96,55 +102,70 @@ fn try_match_delimited_stream<'a>(
     let slots = segments.len() - 1;
     let len = data.len();
     let ptr = data.as_ptr();
+    let last_seg = unsafe { *segments.get_unchecked(slots) };
+    let last_b0 = if last_seg.len() == 1 { Some(last_seg[0]) } else { None };
+    let (mut cw, mut cq, mut cu) = *cache;
     'fast: {
         let mut pos = start;
         for slot in 0..slots {
-            if pos >= len {
-                break 'fast;
-            }
+            if pos >= len { break 'fast; }
             let first = unsafe { *ptr.add(pos) };
             let val_end = if first == b'"' {
-                let Some(end) = next_delim_bit::<true>(data, delim, pos + 1, cache) else {
-                    break 'fast;
-                };
-                if end >= len || unsafe { *ptr.add(end) } != b'"' {
-                    break 'fast;
+                let fp = pos + 1;
+                let w = fp >> 6;
+                if cw != w {
+                    if !refill_delim_cache(data, w, delim, cache) { break 'fast; }
+                    (cw, cq, cu) = *cache;
                 }
+                let m = cq >> (fp & 63);
+                let end = if m != 0 {
+                    fp + m.trailing_zeros() as usize
+                } else {
+                    *cache = (cw, cq, cu);
+                    let Some(e) = next_delim_bit_slow(data, delim, w, true, cache) else { break 'fast; };
+                    (cw, cq, cu) = *cache;
+                    e
+                };
+                if end >= len || unsafe { *ptr.add(end) } != b'"' { break 'fast; }
                 end + 1
             } else {
-                let Some(end) = next_delim_bit::<false>(data, delim, pos, cache) else {
-                    break 'fast;
-                };
-                if end == pos || end > len {
-                    break 'fast;
+                let w = pos >> 6;
+                if cw != w {
+                    if !refill_delim_cache(data, w, delim, cache) { break 'fast; }
+                    (cw, cq, cu) = *cache;
                 }
+                let m = cu >> (pos & 63);
+                let end = if m != 0 {
+                    pos + m.trailing_zeros() as usize
+                } else {
+                    *cache = (cw, cq, cu);
+                    let Some(e) = next_delim_bit_slow(data, delim, w, false, cache) else { break 'fast; };
+                    (cw, cq, cu) = *cache;
+                    e
+                };
+                if end == pos || end > len { break 'fast; }
                 end
             };
-            unsafe {
-                *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..val_end);
-            }
+            unsafe { *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..val_end); }
             pos = val_end;
             if slot + 1 < slots {
-                if pos >= len || unsafe { *ptr.add(pos) } != delim {
-                    break 'fast;
-                }
+                if pos >= len || unsafe { *ptr.add(pos) } != delim { break 'fast; }
+                pos += 1;
+            } else if let Some(lb) = last_b0 {
+                if pos - start > 4096 || pos >= len || unsafe { *ptr.add(pos) } != lb { break 'fast; }
                 pos += 1;
             } else {
-                if pos - start > 4096 {
-                    break 'fast;
-                }
-                let last_seg = unsafe { *segments.get_unchecked(slots) };
                 let next_end = pos + last_seg.len();
-                if next_end > len
-                    || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, last_seg)
-                {
+                if pos - start > 4096 || next_end > len || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, last_seg) {
                     break 'fast;
                 }
                 pos = next_end;
             }
         }
+        *cache = (cw, cq, cu);
         return Some(pos - start);
     }
+    *cache = (cw, cq, cu);
     try_match_delimited_scalar(unsafe { data.get_unchecked(start..) }, segments, delim, out_values)
 }
 

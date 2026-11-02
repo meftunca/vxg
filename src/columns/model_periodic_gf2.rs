@@ -365,6 +365,101 @@ fn learn_affine_recurrence(values: &[u64]) -> Option<[u64; GF2_COEFFICIENTS]> {
     Some(coefficients)
 }
 
+fn pack_gf2_affine_from_raw64(
+    prefix: &[u8],
+    raw_le: &[u8],
+    n: usize,
+    limit: usize,
+) -> Option<Vec<u8>> {
+    if n <= GF2_TRAIN_TRANSITIONS + 1 || raw_le.len() != n * 8 {
+        return None;
+    }
+    let size = 1 + uleb_len(prefix.len()) + prefix.len() + 8 + 8 * GF2_COEFFICIENTS;
+    if size >= limit {
+        return None;
+    }
+    let ptr = raw_le.as_ptr().cast::<u64>();
+    let rd = |i: usize| unsafe { u64::from_le(ptr.add(i).read_unaligned()) };
+    let mut head = [0u64; 8];
+    for i in 0..8 {
+        let w = rd(i);
+        if head[..i].contains(&w) {
+            return None;
+        }
+        head[i] = w;
+    }
+    let x0 = head[0];
+    let y0 = head[1];
+    let mut basis_mask = [0u64; 64];
+    let mut basis_out = [0u64; 64];
+    let mut rank = 0usize;
+    let mut prev = y0;
+    for i in 2..=GF2_TRAIN_TRANSITIONS {
+        let next = rd(i);
+        let mut mask = prev ^ x0;
+        let mut output = next ^ y0;
+        prev = next;
+        let mut inserted = false;
+        while mask != 0 {
+            let pivot = 63 - mask.leading_zeros() as usize;
+            let pm = unsafe { *basis_mask.get_unchecked(pivot) };
+            if pm != 0 {
+                mask ^= pm;
+                output ^= unsafe { *basis_out.get_unchecked(pivot) };
+            } else {
+                unsafe {
+                    *basis_mask.get_unchecked_mut(pivot) = mask;
+                    *basis_out.get_unchecked_mut(pivot) = output;
+                }
+                rank += 1;
+                inserted = true;
+                break;
+            }
+        }
+        if !inserted && output != 0 {
+            return None;
+        }
+    }
+    if rank != 64 {
+        return None;
+    }
+    let mut coefficients = [0u64; GF2_COEFFICIENTS];
+    for bit in 0..64 {
+        let mut val = basis_out[bit];
+        let mut rem = basis_mask[bit] ^ (1u64 << bit);
+        while rem != 0 {
+            let k = rem.trailing_zeros() as usize;
+            val ^= unsafe { *coefficients.get_unchecked(k) };
+            rem &= rem - 1;
+        }
+        coefficients[bit] = val;
+    }
+    let mut val64 = y0;
+    let mut rem64 = x0;
+    while rem64 != 0 {
+        let k = rem64.trailing_zeros() as usize;
+        val64 ^= unsafe { *coefficients.get_unchecked(k) };
+        rem64 &= rem64 - 1;
+    }
+    coefficients[64] = val64;
+    let lut = build_gf2_nibble_lut(&coefficients);
+    for i in (GF2_TRAIN_TRANSITIONS + 1)..n {
+        let word = rd(i);
+        if apply_affine_lut(&lut, prev) != word {
+            return None;
+        }
+        prev = word;
+    }
+    let mut out = Vec::with_capacity(size);
+    out.push(MODEL_GF2_AFFINE);
+    put_bytes(&mut out, prefix);
+    out.extend_from_slice(&x0.to_le_bytes());
+    for coefficient in coefficients {
+        out.extend_from_slice(&coefficient.to_le_bytes());
+    }
+    Some(out)
+}
+
 fn pack_gf2_affine_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
     // The transform plus the fixed prefix absolutely cost more than this
     // bound, so a hopeless column never pays for the parse or the solver.

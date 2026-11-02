@@ -134,17 +134,21 @@ fn pack_fast_lz_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
         // Split-stream Huffman meta (flag 8): tokens | offset lo | offset hi | ext.
         if hash_len == 5 && seq_count >= 160 {
             sc.lz_meta_huf.clear();
+            sc.lz_meta_huf.reserve(meta_raw_len + 32);
             put_huf_or_raw(&mut sc.lz_meta_huf, &sc.lz_tokens[..seq_count]);
-            if sc.lz_sub_lits.len() < 2 * off_count {
-                sc.lz_sub_lits.resize(2 * off_count, 0);
+            put_uleb(&mut sc.lz_meta_huf, off_count);
+            let lo_start = sc.lz_meta_huf.len();
+            sc.lz_meta_huf.reserve(off_count);
+            if sc.lz_sub_lits.len() < off_count {
+                sc.lz_sub_lits.resize(off_count, 0);
             }
-            let (lo_dst, hi_dst) = sc.lz_sub_lits[..2 * off_count].split_at_mut(off_count);
+            let hi_dst = &mut sc.lz_sub_lits[..off_count];
+            let lo_p = unsafe { sc.lz_meta_huf.as_mut_ptr().add(lo_start) };
             let mut oi = 0usize;
             #[cfg(target_arch = "aarch64")]
             unsafe {
                 use core::arch::aarch64::*;
                 let src_p = sc.lz_offsets.as_ptr();
-                let lo_p = lo_dst.as_mut_ptr();
                 let hi_p = hi_dst.as_mut_ptr();
                 while oi + 16 <= off_count {
                     let pair = vld2q_u8(src_p.add(oi * 2));
@@ -157,7 +161,6 @@ fn pack_fast_lz_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
             unsafe {
                 use core::arch::x86_64::*;
                 let src_p = sc.lz_offsets.as_ptr();
-                let lo_p = lo_dst.as_mut_ptr();
                 let hi_p = hi_dst.as_mut_ptr();
                 let mask = _mm_set1_epi16(0x00ff);
                 while oi + 16 <= off_count {
@@ -171,21 +174,14 @@ fn pack_fast_lz_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
                 }
             }
             while oi < off_count {
-                lo_dst[oi] = sc.lz_offsets[2 * oi];
+                unsafe { *lo_p.add(oi) = sc.lz_offsets[2 * oi]; }
                 hi_dst[oi] = sc.lz_offsets[2 * oi + 1];
                 oi += 1;
             }
-            if hash_len == 5 {
-                put_uleb(&mut sc.lz_meta_huf, off_count);
-                sc.lz_meta_huf.extend_from_slice(&sc.lz_sub_lits[..off_count]);
-                put_huf_or_raw(&mut sc.lz_meta_huf, &sc.lz_sub_lits[off_count..2 * off_count]);
-                put_uleb(&mut sc.lz_meta_huf, ext_len);
-                sc.lz_meta_huf.extend_from_slice(&sc.lz_ext);
-            } else {
-                put_huf_or_raw(&mut sc.lz_meta_huf, &sc.lz_sub_lits[..off_count]);
-                put_huf_or_raw(&mut sc.lz_meta_huf, &sc.lz_sub_lits[off_count..2 * off_count]);
-                put_huf_or_raw(&mut sc.lz_meta_huf, &sc.lz_ext);
-            }
+            unsafe { sc.lz_meta_huf.set_len(lo_start + off_count); }
+            put_huf_or_raw(&mut sc.lz_meta_huf, &sc.lz_sub_lits[..off_count]);
+            put_uleb(&mut sc.lz_meta_huf, ext_len);
+            sc.lz_meta_huf.extend_from_slice(&sc.lz_ext);
             if sc.lz_meta_huf.len() + 8 < meta_size {
                 meta_size = sc.lz_meta_huf.len();
                 flags |= 8;

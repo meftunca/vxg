@@ -238,8 +238,8 @@ fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
     }
     let mut freq = [0u32; 256];
     let ptr = src.as_ptr();
-    if n >= 16384 {
-        // 4-way unaliased histogram avoids store-to-load forwarding stalls on zero runs.
+    if n >= 1024 {
+        // 4-way unaliased histogram avoids store-to-load forwarding stalls on zero/digit runs.
         let mut f1 = [0u32; 256];
         let mut f2 = [0u32; 256];
         let mut f3 = [0u32; 256];

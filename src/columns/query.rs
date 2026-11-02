@@ -36,20 +36,10 @@ impl<'a> ExecColumn<'a> {
                 | BoundStream::Dictionary32 { idx_ptr, .. }
                 | BoundStream::Dictionary48 { idx_ptr, .. }
                 | BoundStream::DictionaryLong { idx_ptr, .. }
-                | BoundStream::DictionaryPair32 {
-                    idx_ptr0: idx_ptr, ..
-                }
-                | BoundStream::DictionaryPair48 {
-                    idx_ptr0: idx_ptr, ..
-                }
-                | BoundStream::DictionaryQuad32 {
-                    idx_ptr0: idx_ptr, ..
-                }
-                | BoundStream::DictionaryQuad48 {
-                    idx_ptr0: idx_ptr, ..
-                } => {
-                    *idx_ptr = idx_ptr.add(n);
-                }
+                | BoundStream::DictionaryPair32 { idx_ptr0: idx_ptr, .. }
+                | BoundStream::DictionaryPair48 { idx_ptr0: idx_ptr, .. }
+                | BoundStream::DictionaryQuad32 { idx_ptr0: idx_ptr, .. }
+                | BoundStream::DictionaryQuad48 { idx_ptr0: idx_ptr, .. } => *idx_ptr = idx_ptr.add(n),
                 BoundStream::DecimalAffineSmall16 { current, step }
                 | BoundStream::DecimalAffineSmall32 { current, step }
                 | BoundStream::DecimalAffineSmall48 { current, step }
@@ -60,38 +50,27 @@ impl<'a> ExecColumn<'a> {
                 BoundStream::DecimalSmall16 { val_ptr }
                 | BoundStream::DecimalSmall32 { val_ptr }
                 | BoundStream::DecimalSmall48 { val_ptr }
-                | BoundStream::DecimalSmall { val_ptr } => {
-                    *val_ptr = val_ptr.add(n);
-                }
-                BoundStream::DecimalValues { val_ptr } => {
-                    *val_ptr = val_ptr.add(n);
-                }
-                BoundStream::DecimalPacked { reader, .. } => {
-                    reader.skip(n);
-                }
+                | BoundStream::DecimalSmall { val_ptr } => *val_ptr = val_ptr.add(n),
+                BoundStream::DecimalValuesAfter16 { val_ptr }
+                | BoundStream::DecimalValuesAfter32 { val_ptr }
+                | BoundStream::DecimalValues { val_ptr } => *val_ptr = val_ptr.add(n),
+                BoundStream::DecimalPackedAfter16 { reader, .. }
+                | BoundStream::DecimalPacked { reader, .. } => reader.skip(n),
                 BoundStream::TimestampMinSec16 { min_ptr, sec_ptr }
                 | BoundStream::TimestampMinSec32 { min_ptr, sec_ptr }
                 | BoundStream::TimestampMinSec { min_ptr, sec_ptr } => {
                     *min_ptr = min_ptr.add(n);
                     *sec_ptr = sec_ptr.add(n);
                 }
-                BoundStream::TimestampFull { ptr, .. } => {
-                    *ptr = ptr.add(n);
-                }
+                BoundStream::TimestampFull { ptr, .. } => *ptr = ptr.add(n),
                 BoundStream::Copy16After16 { ptr, .. }
                 | BoundStream::Copy16After32 { ptr, .. }
-                | BoundStream::Copy16 { ptr, .. } => {
-                    *ptr = ptr.add(n * 16);
-                }
-                BoundStream::HexSuffix4 { ptr } => {
-                    *ptr = ptr.add(n * 4);
-                }
-                BoundStream::HexSuffix8 { ptr } => {
-                    *ptr = ptr.add(n * 8);
-                }
-                BoundStream::HexSuffix { cursor, width } => {
-                    cursor.pos += n * (*width);
-                }
+                | BoundStream::Copy16 { ptr, .. } => *ptr = ptr.add(n * 16),
+                BoundStream::HexSuffix4 { ptr } => *ptr = ptr.add(n * 4),
+                BoundStream::HexSuffix8After16 { ptr }
+                | BoundStream::HexSuffix8After32 { ptr }
+                | BoundStream::HexSuffix8 { ptr } => *ptr = ptr.add(n * 8),
+                BoundStream::HexSuffix { cursor, width } => cursor.pos += n * (*width),
                 BoundStream::SegmentDict { str_ptr, len_ptr } => {
                     let mut byte_sum = 0usize;
                     for i in 0..n {
@@ -99,6 +78,18 @@ impl<'a> ExecColumn<'a> {
                     }
                     *len_ptr = len_ptr.add(n);
                     *str_ptr = str_ptr.add(byte_sum);
+                }
+                BoundStream::RawShort16After16 { ptr }
+                | BoundStream::RawShort16After32 { ptr }
+                | BoundStream::RawShort16 { ptr }
+                | BoundStream::RawShort48After16 { ptr }
+                | BoundStream::RawShort48After32 { ptr }
+                | BoundStream::RawShort48 { ptr } => {
+                    let mut p = *ptr;
+                    for _ in 0..n {
+                        p = p.add(1 + *p as usize);
+                    }
+                    *ptr = p;
                 }
                 BoundStream::Raw { cursor } => {
                     for _ in 0..n {

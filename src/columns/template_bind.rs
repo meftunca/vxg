@@ -133,7 +133,63 @@ impl UnboundTemplate {
             };
             let bound = unsafe {
                 match col.stream {
-                    ColumnStream::Raw { cursor } => BoundStream::Raw { cursor },
+                    ColumnStream::Raw { cursor } => {
+                        let rem = &cursor.bytes[cursor.pos..];
+                        let max_e = col.max_emit_len;
+                        let short_ptr = if max_e <= 48 && !rem.is_empty() {
+                            let pad = if max_e <= 16 { 16usize } else { 48usize };
+                            let a_ptr = scratch.raw_arena.as_mut_ptr();
+                            let a_addr = a_ptr as usize;
+                            let a_len = scratch.raw_arena.len();
+                            let a_cap = scratch.raw_arena.capacity();
+                            let r_addr = rem.as_ptr() as usize;
+                            let r_len = rem.len();
+                            if r_addr >= a_addr && r_addr - a_addr <= a_len && r_len <= a_len - (r_addr - a_addr) {
+                                let off = r_addr - a_addr;
+                                if off + r_len + pad <= a_len {
+                                    Some(a_ptr.add(off).cast_const())
+                                } else {
+                                    let need = (off + r_len + pad) - a_len;
+                                    if a_len + need <= a_cap {
+                                        std::ptr::write_bytes(a_ptr.add(a_len), 0, need);
+                                        scratch.raw_arena.set_len(a_len + need);
+                                        Some(a_ptr.add(off).cast_const())
+                                    } else {
+                                        None
+                                    }
+                                }
+                            } else if a_len + r_len + pad <= a_cap {
+                                let dst = a_ptr.add(a_len);
+                                std::ptr::copy_nonoverlapping(rem.as_ptr(), dst, r_len);
+                                std::ptr::write_bytes(dst.add(r_len), 0, pad);
+                                scratch.raw_arena.set_len(a_len + r_len + pad);
+                                Some(dst.cast_const())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(ptr) = short_ptr {
+                            if max_e <= 16 {
+                                if (1..=16).contains(&after.len) {
+                                    BoundStream::RawShort16After16 { ptr }
+                                } else if (17..=32).contains(&after.len) {
+                                    BoundStream::RawShort16After32 { ptr }
+                                } else {
+                                    BoundStream::RawShort16 { ptr }
+                                }
+                            } else if (1..=16).contains(&after.len) {
+                                BoundStream::RawShort48After16 { ptr }
+                            } else if (17..=32).contains(&after.len) {
+                                BoundStream::RawShort48After32 { ptr }
+                            } else {
+                                BoundStream::RawShort48 { ptr }
+                            }
+                        } else {
+                            BoundStream::Raw { cursor }
+                        }
+                    }
                     ColumnStream::Dictionary {
                         piece_offset,
                         u8_offset,
@@ -188,13 +244,32 @@ impl UnboundTemplate {
                         }
                     }
                     ColumnStream::DecimalPacked { min, reader } => {
-                        BoundStream::DecimalPacked { min, reader }
+                        if (1..=16).contains(&after.len) {
+                            BoundStream::DecimalPackedAfter16 { min, reader }
+                        } else {
+                            BoundStream::DecimalPacked { min, reader }
+                        }
                     }
-                    ColumnStream::DecimalValues { u64_offset } => BoundStream::DecimalValues {
-                        val_ptr: u64_base.add(u64_offset),
-                    },
+                    ColumnStream::DecimalValues { u64_offset } => {
+                        let val_ptr = u64_base.add(u64_offset);
+                        if (1..=16).contains(&after.len) {
+                            BoundStream::DecimalValuesAfter16 { val_ptr }
+                        } else if (17..=32).contains(&after.len) {
+                            BoundStream::DecimalValuesAfter32 { val_ptr }
+                        } else {
+                            BoundStream::DecimalValues { val_ptr }
+                        }
+                    }
                     ColumnStream::HexSuffix4 { ptr } => BoundStream::HexSuffix4 { ptr },
-                    ColumnStream::HexSuffix8 { ptr } => BoundStream::HexSuffix8 { ptr },
+                    ColumnStream::HexSuffix8 { ptr } => {
+                        if (1..=16).contains(&after.len) {
+                            BoundStream::HexSuffix8After16 { ptr }
+                        } else if (17..=32).contains(&after.len) {
+                            BoundStream::HexSuffix8After32 { ptr }
+                        } else {
+                            BoundStream::HexSuffix8 { ptr }
+                        }
+                    }
                     ColumnStream::HexSuffix { cursor, width } => {
                         BoundStream::HexSuffix { cursor, width }
                     }

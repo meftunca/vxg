@@ -128,6 +128,41 @@ fn format_inline_decimal(val: u64) -> ([u8; 24], u8) {
     (buf, len as u8)
 }
 
+#[inline(always)]
+fn validate_raw_column(buf: &[u8], count: usize, err_msg: &'static str) -> Result<usize> {
+    let len = buf.len();
+    let ptr = buf.as_ptr();
+    let mut pos = 0usize;
+    let mut max_len = 0usize;
+    for _ in 0..count {
+        if pos >= len {
+            return Err(invalid("unexpected eof"));
+        }
+        let b0 = unsafe { *ptr.add(pos) };
+        let rlen = if b0 < 0x80 {
+            pos += 1;
+            b0 as usize
+        } else {
+            let mut c = Cursor::new(buf);
+            c.pos = pos;
+            let v = c.uleb()?;
+            pos = c.pos;
+            v
+        };
+        if len - pos < rlen {
+            return Err(invalid("unexpected eof"));
+        }
+        pos += rlen;
+        if rlen > max_len {
+            max_len = rlen;
+        }
+    }
+    if pos != len {
+        return Err(invalid(err_msg));
+    }
+    Ok(max_len)
+}
+
 impl<'a> PreparedColumn<'a> {
     fn parse_and_validate(
         bytes: &'a [u8],
@@ -142,17 +177,7 @@ impl<'a> PreparedColumn<'a> {
         match tag {
             MODEL_RAW => {
                 let body_start = cursor.pos;
-                let mut max_len = 0usize;
-                for _ in 0..count {
-                    let len = cursor.uleb()?;
-                    let _ = cursor.take(len)?;
-                    if len > max_len {
-                        max_len = len;
-                    }
-                }
-                if !cursor.done() {
-                    return Err(invalid("column model trailing bytes"));
-                }
+                let max_len = validate_raw_column(&bytes[body_start..], count, "column model trailing bytes")?;
                 let mut stream_cursor = Cursor::new(bytes);
                 stream_cursor.pos = body_start;
                 Ok(Self {
@@ -190,18 +215,7 @@ impl<'a> PreparedColumn<'a> {
                         raw_len,
                     )
                 };
-                let mut sub = Cursor::new(unpacked);
-                let mut max_len = 0usize;
-                for _ in 0..count {
-                    let len = sub.uleb()?;
-                    let _ = sub.take(len)?;
-                    if len > max_len {
-                        max_len = len;
-                    }
-                }
-                if !sub.done() {
-                    return Err(invalid("column lz raw trailing bytes"));
-                }
+                let max_len = validate_raw_column(unpacked, count, "column lz raw trailing bytes")?;
                 Ok(Self {
                     const_full: ConstValue::None,
                     const_lead: LeadValue::Empty,

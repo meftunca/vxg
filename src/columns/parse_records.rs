@@ -311,36 +311,40 @@ unsafe fn delimited_masks64(p: *const u8, delim: u8) -> (u64, u64) {
         let v_slash = vdupq_n_u8(b'\\');
         let v_ctrl = vdupq_n_u8(0x20);
         let v_delim = vdupq_n_u8(delim);
-        let v_21 = vdupq_n_u8(0x21);
-        let v_5e = vdupq_n_u8(0x5e);
-        let v_7f = vdupq_n_u8(0x7f);
-        let v_rel = vdupq_n_u8(if delim_is_relaxed(delim) { 0xff } else { 0 });
-        macro_rules! lane {
-            ($k:expr) => {{
-                let c = vld1q_u8(p.add($k * 16));
-                let is_q = vceqq_u8(c, v_quote);
-                let q = vorrq_u8(is_q, vorrq_u8(vceqq_u8(c, v_slash), vcltq_u8(c, v_ctrl)));
-                let u_strict = vorrq_u8(
-                    is_q,
-                    vorrq_u8(vceqq_u8(c, v_delim), vcgeq_u8(vsubq_u8(c, v_21), v_5e)),
-                );
-                let u_rel = vorrq_u8(
-                    is_q,
-                    vorrq_u8(
-                        vceqq_u8(c, v_delim),
-                        vorrq_u8(vcltq_u8(c, v_ctrl), vceqq_u8(c, v_7f)),
-                    ),
-                );
-                let u = vbslq_u8(v_rel, u_rel, u_strict);
-                (vandq_u8(q, w), vandq_u8(u, w))
-            }};
-        }
-        let (q0, u0) = lane!(0);
-        let (q1, u1) = lane!(1);
-        let (q2, u2) = lane!(2);
-        let (q3, u3) = lane!(3);
-        let q = vpaddq_u8(vpaddq_u8(q0, q1), vpaddq_u8(q2, q3));
-        let u = vpaddq_u8(vpaddq_u8(u0, u1), vpaddq_u8(u2, u3));
+        let (q, u) = if delim_is_relaxed(delim) {
+            let v_7f = vdupq_n_u8(0x7f);
+            macro_rules! lane_rel {
+                ($k:expr) => {{
+                    let c = vld1q_u8(p.add($k * 16));
+                    let q_base = vorrq_u8(vceqq_u8(c, v_quote), vcltq_u8(c, v_ctrl));
+                    let q = vorrq_u8(q_base, vceqq_u8(c, v_slash));
+                    let u = vorrq_u8(q_base, vorrq_u8(vceqq_u8(c, v_delim), vceqq_u8(c, v_7f)));
+                    (vandq_u8(q, w), vandq_u8(u, w))
+                }};
+            }
+            let (q0, u0) = lane_rel!(0);
+            let (q1, u1) = lane_rel!(1);
+            let (q2, u2) = lane_rel!(2);
+            let (q3, u3) = lane_rel!(3);
+            (vpaddq_u8(vpaddq_u8(q0, q1), vpaddq_u8(q2, q3)), vpaddq_u8(vpaddq_u8(u0, u1), vpaddq_u8(u2, u3)))
+        } else {
+            let v_21 = vdupq_n_u8(0x21);
+            let v_5e = vdupq_n_u8(0x5e);
+            macro_rules! lane_st {
+                ($k:expr) => {{
+                    let c = vld1q_u8(p.add($k * 16));
+                    let is_q = vceqq_u8(c, v_quote);
+                    let q = vorrq_u8(is_q, vorrq_u8(vceqq_u8(c, v_slash), vcltq_u8(c, v_ctrl)));
+                    let u = vorrq_u8(is_q, vorrq_u8(vceqq_u8(c, v_delim), vcgeq_u8(vsubq_u8(c, v_21), v_5e)));
+                    (vandq_u8(q, w), vandq_u8(u, w))
+                }};
+            }
+            let (q0, u0) = lane_st!(0);
+            let (q1, u1) = lane_st!(1);
+            let (q2, u2) = lane_st!(2);
+            let (q3, u3) = lane_st!(3);
+            (vpaddq_u8(vpaddq_u8(q0, q1), vpaddq_u8(q2, q3)), vpaddq_u8(vpaddq_u8(u0, u1), vpaddq_u8(u2, u3)))
+        };
         let r = vreinterpretq_u64_u8(vpaddq_u8(q, u));
         (vgetq_lane_u64::<0>(r), vgetq_lane_u64::<1>(r))
     }

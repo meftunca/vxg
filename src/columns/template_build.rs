@@ -2,6 +2,7 @@
 struct UnboundExecColumn<'a> {
     stream: ColumnStream<'a>,
     after_range: (usize, usize),
+    max_emit_len: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -244,6 +245,7 @@ impl UnboundTemplate {
                 core::mem::transmute(UnboundExecColumn {
                     stream: col.stream,
                     after_range,
+                    max_emit_len: col.max_emit_len,
                 })
             };
             scratch.unbound_col_arena.push(unbound_col);
