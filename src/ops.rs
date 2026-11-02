@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::{frame, query, DecodeOptions, Frame, Options, Result, RowMatch, BLOCK_COLUMN};
 
 pub(crate) mod agg;
-mod emit;
+pub(crate) mod emit;
 pub(crate) mod expr;
 mod filter_frame;
 pub(crate) mod line;
@@ -15,16 +15,17 @@ pub(crate) mod project;
 pub(crate) mod project_line;
 mod transform;
 
-pub(crate) use line::parse_canonical_u64;
 pub use agg::{agg_line, decode_group_token_ref, AggStats, GroupKey, GroupRow};
 pub use expr::{line_matches_expr, PredExpr};
-pub use project_line::project_line;
+pub(crate) use line::parse_canonical_u64;
 pub use line::{
     apply_line_col_op, apply_token_op, decode_delim_str, encode_delim_str, encode_json_str,
     eval_token_pred, find_delimited_col_span, find_json_key_span, find_line_col_span,
     format_col_str, line_matches_col_pred, unescape_json_str, ColOp, ColPred, ColTarget, StrCmp,
     ValuePred,
 };
+pub use project_line::project_line;
+pub(crate) use project_line::validate_projection_cols;
 
 pub(super) struct SyncCell<T>(UnsafeCell<T>);
 
@@ -401,15 +402,10 @@ pub fn filter_column(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload =
+                    &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
                 if let Some(new_rows) = crate::columns::search_grammar_block_col_pred(
-                    payload,
-                    blk_idx,
-                    cur_global,
-                    &mut carry,
-                    pred,
-                    limit,
-                    &mut out,
+                    payload, blk_idx, cur_global, &mut carry, pred, limit, &mut out,
                 )? {
                     cur_global += new_rows;
                     if out.len() >= limit && carry.is_none() {

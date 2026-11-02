@@ -56,12 +56,15 @@ fn format_group_key_json(key: &vxg::GroupKey) -> String {
 fn execute_agg_to_string(args: &[String]) -> R<String> {
     if args.len() < 3 {
         return Err(
-            "usage: vxg agg FRAME [--group-by GCOL] [--col ACOL] [--where EXPR] [--limit N] [--json] [--threads N|auto]"
+            "usage: vxg agg FRAME [--group-by GCOL] [--col ACOL] [--where EXPR] [--limit N] [--json] [--stream] [--no-mmap] [--threads N|auto]"
                 .into(),
         );
     }
-    let frame = read_input(&args[1])?;
+    let input = &args[1];
     let mut opts = DecodeOptions::default();
+    let mut explicit_max_out = false;
+    let mut stream_mode = false;
+    let mut use_mmap = true;
     let mut group_spec: Option<String> = None;
     let mut agg_spec: Option<String> = None;
     let mut where_spec: Option<String> = None;
@@ -77,13 +80,21 @@ fn execute_agg_to_string(args: &[String]) -> R<String> {
             "--json" => as_json = true,
             "--threads" | "-t" => opts.threads = parse_threads(val(args, &mut i)?)?,
             "--no-checksum" | "--no-verify-checksum" => opts.verify_checksum = false,
-            "--max-output" => opts.max_output = val(args, &mut i)?.parse()?,
+            "--max-output" => {
+                opts.max_output = val(args, &mut i)?.parse()?;
+                explicit_max_out = true;
+            }
+            "--stream" => stream_mode = true,
+            "--no-mmap" => use_mmap = false,
             x => return Err(format!("unknown agg option {x}").into()),
         }
         i += 1;
     }
     if group_spec.is_none() && agg_spec.is_none() {
         return Err("specify --col ACOL and/or --group-by GCOL for 'vxg agg'".into());
+    }
+    if !explicit_max_out {
+        opts.max_output = usize::MAX;
     }
 
     let owned_where = where_spec.as_deref().map(parse_where_expr).transpose()?;
@@ -94,7 +105,16 @@ fn execute_agg_to_string(args: &[String]) -> R<String> {
     if let Some(gs) = group_spec.as_deref() {
         let gcol = parse_col_target(gs)?;
         let acol = agg_spec.as_deref().map(parse_col_target).transpose()?;
-        let groups = vxg::group_by(&frame, where_ref.as_ref(), gcol, acol, &opts)?;
+        let groups = if stream_mode || input == "-" {
+            let mut rdr = open_stream_reader(input)?;
+            vxg::group_by_stream(&mut rdr, where_ref.as_ref(), gcol, acol, &opts)?
+        } else {
+            let frame = read_input_bytes(input, use_mmap)?;
+            if let vxg::InputBytes::Mapped(ref m) = frame {
+                m.advise_sequential();
+            }
+            vxg::group_by(&frame, where_ref.as_ref(), gcol, acol, &opts)?
+        };
         for row in groups.iter().take(limit) {
             if as_json {
                 let k_json = format_group_key_json(&row.key);
@@ -123,7 +143,16 @@ fn execute_agg_to_string(args: &[String]) -> R<String> {
         }
     } else {
         let acol = parse_col_target(agg_spec.as_deref().unwrap())?;
-        let st = vxg::aggregate_column(&frame, where_ref.as_ref(), acol, &opts)?;
+        let st = if stream_mode || input == "-" {
+            let mut rdr = open_stream_reader(input)?;
+            vxg::aggregate_column_stream(&mut rdr, where_ref.as_ref(), acol, &opts)?
+        } else {
+            let frame = read_input_bytes(input, use_mmap)?;
+            if let vxg::InputBytes::Mapped(ref m) = frame {
+                m.advise_sequential();
+            }
+            vxg::aggregate_column(&frame, where_ref.as_ref(), acol, &opts)?
+        };
         if as_json {
             out.push_str(&format!("{{{}}}\n", format_agg_stats_json_fields(&st)));
         } else {

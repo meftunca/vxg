@@ -273,4 +273,118 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn cli_mmap_and_multi_frame_stream_pipeline_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("vxg_cli_stage5_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let raw_path = dir.join("multi.ndjson");
+        let stream_vxg = dir.join("multi_stream.vxg");
+        let nommap_vxg = dir.join("nommap.vxg");
+        let proj_vxg = dir.join("proj_stream.vxg");
+        let upd_vxg = dir.join("upd_stream.vxg");
+        let map_vxg = dir.join("map_stream.vxg");
+        let flt_vxg = dir.join("flt_stream.vxg");
+        let dec_path = dir.join("dec_mmap.ndjson");
+
+        let services = ["auth-api", "edge-proxy", "billing", "search"];
+        let mut raw = Vec::new();
+        // ~320 KiB so StreamEncoder with block_size=4096 (64 blocks = 256 KiB) emits multiple frames with split lines!
+        for i in 0..4200usize {
+            let svc = services[i % services.len()];
+            let status = if i % 12 == 0 { 500 } else { 200 };
+            let bytes = 50 + (i % 40) * 5;
+            raw.extend_from_slice(
+                format!(
+                    "{{\"seq\":{i},\"service\":\"{svc}\",\"status\":{status},\"bytes\":{bytes},\"note\":\"entry-{i:05}\"}}\n"
+                )
+                .as_bytes(),
+            );
+        }
+        fs::write(&raw_path, &raw).unwrap();
+        let raw_s = raw_path.to_str().unwrap();
+        let stream_s = stream_vxg.to_str().unwrap();
+        let nommap_s = nommap_vxg.to_str().unwrap();
+        let proj_s = proj_vxg.to_str().unwrap();
+        let upd_s = upd_vxg.to_str().unwrap();
+        let map_s = map_vxg.to_str().unwrap();
+        let flt_s = flt_vxg.to_str().unwrap();
+        let dec_s = dec_path.to_str().unwrap();
+
+        // Compress both as multi-frame `--stream` and single-frame `--no-mmap`:
+        run_args(&s(&[
+            "compress", raw_s, stream_s, "--block-size", "4096", "--stream", "-q",
+        ]))
+        .unwrap();
+        run_args(&s(&[
+            "compress", raw_s, nommap_s, "--block-size", "4096", "--no-mmap", "-q",
+        ]))
+        .unwrap();
+        run_args(&s(&["verify", stream_s, "--stream", "-q"])).unwrap();
+        run_args(&s(&["verify", nommap_s, "--no-mmap", "-q"])).unwrap();
+        run_args(&s(&["info", stream_s, "--summary", "--no-mmap"])).unwrap();
+
+        // Zero-copy mmap decompress of multi-frame `.vxg`:
+        run_args(&s(&["decompress", stream_s, dec_s, "-q"])).unwrap();
+        assert_eq!(fs::read(&dec_path).unwrap(), raw);
+
+        // `query --stream` parity vs whole-file mmap `query`:
+        for extra in [vec!["--stream"], vec!["--no-mmap"], vec![]] {
+            let mut q_cnt = s(&["query", stream_s, "--count", "--where", "status==500"]);
+            q_cnt.extend(extra.iter().map(|x| (*x).to_owned()));
+            assert_eq!(
+                String::from_utf8(execute_query_to_vec(&q_cnt).unwrap()).unwrap(),
+                "350\n"
+            );
+
+            let mut q_sel = s(&[
+                "query", stream_s, "--select", "seq,service", "--where", "status==500", "--limit", "2",
+            ]);
+            q_sel.extend(extra.iter().map(|x| (*x).to_owned()));
+            assert_eq!(
+                String::from_utf8(execute_query_to_vec(&q_sel).unwrap()).unwrap(),
+                "{\"seq\":0,\"service\":\"auth-api\"}\n{\"seq\":12,\"service\":\"auth-api\"}\n"
+            );
+        }
+
+        // `agg --stream` parity vs whole-file `agg`:
+        let agg_ref = execute_agg_to_string(&s(&[
+            "agg", nommap_s, "--group-by", "service", "--col", "bytes", "--json",
+        ]))
+        .unwrap();
+        let agg_stm = execute_agg_to_string(&s(&[
+            "agg", stream_s, "--group-by", "service", "--col", "bytes", "--json", "--stream",
+        ]))
+        .unwrap();
+        assert_eq!(agg_stm, agg_ref);
+
+        // Chained `--stream` frame transforms (`project` -> `update` -> `map` -> `filter-frame`):
+        run_args(&s(&[
+            "project", stream_s, proj_s, "--cols", "seq,service,status,bytes", "--stream", "-q",
+        ]))
+        .unwrap();
+        run_args(&s(&[
+            "update", proj_s, upd_s, "--where", "status==500", "--col", "service", "--set", "alert-svc", "--stream", "-q",
+        ]))
+        .unwrap();
+        run_args(&s(&[
+            "map", upd_s, map_s, "--col", "service", "--upper", "--stream", "-q",
+        ]))
+        .unwrap();
+        run_args(&s(&[
+            "filter-frame", map_s, flt_s, "--where", "service==ALERT-SVC", "--stream", "-q",
+        ]))
+        .unwrap();
+        run_args(&s(&["verify", flt_s, "--stream", "-q"])).unwrap();
+        assert_eq!(
+            String::from_utf8(
+                execute_query_to_vec(&s(&["query", flt_s, "--count", "--stream"])).unwrap()
+            )
+            .unwrap(),
+            "350\n"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

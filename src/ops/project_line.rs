@@ -6,7 +6,7 @@ use super::line::{
     encode_json_str, scan_json_str_end, scan_json_val_end, unescape_json_str, ColTarget,
 };
 
-pub(super) fn validate_projection_cols(cols: &[ColTarget<'_>]) -> Result<()> {
+pub(crate) fn validate_projection_cols(cols: &[ColTarget<'_>]) -> Result<()> {
     if cols.is_empty() || cols.len() > 128 {
         return Err(Error::InvalidOption("projection requires 1..=128 columns"));
     }

@@ -12,15 +12,16 @@
 pub mod analysis;
 #[cfg(feature = "bench")]
 pub mod baselines;
-pub mod columns;
-#[cfg(feature = "bench")]
-pub mod groups;
 mod block;
 pub mod checksum;
+pub mod columns;
 mod error;
 pub mod ffi;
 mod frame;
 pub mod gpu;
+#[cfg(feature = "bench")]
+pub mod groups;
+pub mod mmap;
 pub mod ops;
 #[cfg(feature = "bench")]
 pub mod packing;
@@ -29,9 +30,14 @@ mod proofs;
 pub mod query;
 pub mod simd;
 pub mod stream;
+pub mod stream_ops;
 pub use block::{WorkStats, COLUMN as BLOCK_COLUMN, LZ as BLOCK_LZ, RAW as BLOCK_RAW};
 pub use error::{Error, Result};
 pub use frame::{max_compressed_size, BlockInfo, Frame, ValidatedFrame};
+pub use mmap::{
+    compress_file, decompress_file, mmap_supported, verify_file, InputBytes, MappedFile,
+    MappedFileMut,
+};
 pub use ops::{
     aggregate_column, count_where, filter_column, filter_frame, filter_frame_where, filter_where,
     group_by, map_column, project_frame, select_columns, update_column, AggStats, ColOp, ColPred,
@@ -43,6 +49,11 @@ pub use query::{
 };
 pub use simd::Simd;
 pub use stream::{compress_stream, decompress_stream, StreamDecoder, StreamEncoder};
+pub use stream_ops::{
+    aggregate_column_stream, count_where_stream, filter_frame_where_stream, filter_where_stream,
+    frame_row_count_stream, group_by_stream, map_column_stream, project_frame_stream,
+    select_columns_stream, update_column_stream, verify_frame, verify_stream, FrameReader,
+};
 
 #[derive(Clone, Debug)]
 pub struct Options {

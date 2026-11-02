@@ -1,13 +1,13 @@
 use crate::{block, checksum::crc32c, frame, simd, Error, Options, Result};
 
-pub(super) enum BytesRef<'a> {
+pub(crate) enum BytesRef<'a> {
     Borrowed(&'a [u8]),
     Owned(Vec<u8>),
 }
 
 impl BytesRef<'_> {
     #[inline]
-    pub(super) fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         match self {
             BytesRef::Borrowed(s) => s,
             BytesRef::Owned(v) => v,
@@ -15,11 +15,11 @@ impl BytesRef<'_> {
     }
 }
 
-pub(super) struct ReadyBlock<'a> {
-    pub(super) payload: BytesRef<'a>,
-    pub(super) kind: u32,
-    pub(super) raw_size: usize,
-    pub(super) checksum: u32,
+pub(crate) struct ReadyBlock<'a> {
+    pub(crate) payload: BytesRef<'a>,
+    pub(crate) kind: u32,
+    pub(crate) raw_size: usize,
+    pub(crate) checksum: u32,
 }
 
 #[inline]
@@ -48,7 +48,9 @@ fn append_v4_frame(
     let mut raw_total = 0usize;
     let mut payload_total = 0usize;
     for b in blocks {
-        raw_total = raw_total.checked_add(b.raw_size).ok_or(Error::SizeOverflow)?;
+        raw_total = raw_total
+            .checked_add(b.raw_size)
+            .ok_or(Error::SizeOverflow)?;
         payload_total = payload_total
             .checked_add(b.payload.as_slice().len())
             .ok_or(Error::SizeOverflow)?;
@@ -88,7 +90,10 @@ fn append_v4_frame(
     Ok(())
 }
 
-pub(super) fn emit_ready_blocks(ready: &[ReadyBlock<'_>], enc_options: &Options) -> Result<Vec<u8>> {
+pub(crate) fn emit_ready_blocks(
+    ready: &[ReadyBlock<'_>],
+    enc_options: &Options,
+) -> Result<Vec<u8>> {
     let est_cap: usize = ready
         .iter()
         .map(|rb| 40 + rb.payload.as_slice().len())
@@ -151,28 +156,31 @@ pub(super) fn encode_raw_chunks<'a>(
 ) -> Result<()> {
     for chunk in raw.chunks(chunk_size.max(1)) {
         scratch.payloads_mut().clear();
-        let (kind, off, len) = match crate::columns::encode_grammar_block_into(
-            chunk,
-            scratch.payloads_mut(),
-        )? {
-            Some((po, pl)) => (block::COLUMN, po, pl),
-            None if (512..=65536).contains(&chunk.len()) => {
-                let p = scratch.payloads_mut();
-                let o = p.len();
-                p.extend_from_slice(chunk);
-                (block::RAW, o, chunk.len())
-            }
-            None => {
-                let enc = block::encode::<false>(chunk, scratch, engine, enc_options.acceleration);
-                (enc.kind, enc.offset, enc.len)
-            }
-        };
+        let (kind, off, len) =
+            match crate::columns::encode_grammar_block_into(chunk, scratch.payloads_mut())? {
+                Some((po, pl)) => (block::COLUMN, po, pl),
+                None if (512..=65536).contains(&chunk.len()) => {
+                    let p = scratch.payloads_mut();
+                    let o = p.len();
+                    p.extend_from_slice(chunk);
+                    (block::RAW, o, chunk.len())
+                }
+                None => {
+                    let enc =
+                        block::encode::<false>(chunk, scratch, engine, enc_options.acceleration);
+                    (enc.kind, enc.offset, enc.len)
+                }
+            };
         let bytes = scratch.payloads_mut()[off..off + len].to_vec();
         out.push(ReadyBlock {
             payload: BytesRef::Owned(bytes),
             kind,
             raw_size: chunk.len(),
-            checksum: if enc_options.checksum { crc32c(chunk) } else { 0 },
+            checksum: if enc_options.checksum {
+                crc32c(chunk)
+            } else {
+                0
+            },
         });
     }
     Ok(())

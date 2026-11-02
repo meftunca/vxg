@@ -21,36 +21,36 @@ Usage:
   vxg c|compress   INPUT OUTPUT [--backend cpu|metal|vulkan|cuda] [--threads N|auto]
                                 [--block-size BYTES] [--acceleration 1..64]
                                 [--simd auto|scalar|sse2|avx2|avx512|neon]
-                                [--no-checksum] [--legacy] [--stream] [--gpu-batch BYTES]
-                                [--force|-f] [--quiet|-q]
+                                [--no-checksum] [--legacy] [--stream] [--no-mmap]
+                                [--gpu-batch BYTES] [--force|-f] [--quiet|-q]
   vxg d|decompress INPUT OUTPUT [--backend cpu|metal|vulkan|cuda] [--threads N|auto]
                                 [--simd MODE] [--max-output BYTES]
-                                [--no-checksum|--no-verify-checksum] [--stream]
+                                [--no-checksum|--no-verify-checksum] [--stream] [--no-mmap]
                                 [--gpu-batch BYTES] [--force|-f] [--quiet|-q]
   vxg t|verify     FRAME        [--threads N|auto] [--simd MODE] [--max-output BYTES]
-                                [--no-checksum|--no-verify-checksum] [--quiet|-q]
+                                [--no-checksum|--no-verify-checksum] [--stream] [--no-mmap] [-q]
   vxg block        FRAME INDEX [OUTPUT] [--simd MODE] [--max-output BYTES]
-                                [--no-checksum|--no-verify-checksum] [--force|-f]
+                                [--no-checksum|--no-verify-checksum] [--no-mmap] [--force|-f]
   vxg q|query      FRAME        [--count | --row IDX | --range START:END |
                                  --find-first STR | --filter STR | --where EXPR |
-                                 --select COL1,COL2,...] [--limit N] [-t N|auto]
+                                 --select COL1,COL2,...] [--limit N] [--stream] [--no-mmap] [-t N|auto]
   vxg agg          FRAME        [--group-by GCOL] [--col ACOL] [--where EXPR]
-                                [--limit N] [--json] [-t N|auto]
-  vxg project      INPUT OUTPUT --cols COL1,COL2,... [--where EXPR] [-t N|auto] [-f] [-q]
-  vxg filter-frame INPUT OUTPUT --where EXPR [--block-size BYTES] [--no-checksum] [-f] [-q]
-  vxg update       INPUT OUTPUT --where SPEC --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [-f] [-q]
-  vxg map          INPUT OUTPUT --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [-f] [-q]
-  vxg info|list    FRAME        [--summary]
+                                [--limit N] [--json] [--stream] [--no-mmap] [-t N|auto]
+  vxg project      INPUT OUTPUT --cols COL1,COL2,... [--where EXPR] [--stream] [--no-mmap] [-t N|auto] [-f] [-q]
+  vxg filter-frame INPUT OUTPUT --where EXPR [--block-size BYTES] [--no-checksum] [--stream] [--no-mmap] [-f] [-q]
+  vxg update       INPUT OUTPUT --where SPEC --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [--stream] [--no-mmap] [-f] [-q]
+  vxg map          INPUT OUTPUT --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [--stream] [--no-mmap] [-f] [-q]
+  vxg info|list    FRAME        [--summary] [--no-mmap]
   vxg hardware
   vxg gpu-check    metal|vulkan|cuda
   vxg --version|-V
   vxg --help|-h
 
 Notes:
-  Use '-' as INPUT or OUTPUT to read from stdin or write to stdout.
+  Regular files are memory-mapped (zero-copy mmap) by default; pass --no-mmap to read into heap RAM.
+  Pass --stream (or '-' stdin) for O(single_frame) bounded-memory multi-GB streaming execution.
   Compression output is a new file unless --force (-f) is explicitly supplied.
   GPU features require native SDKs at build time. No silent CPU fallback.
-  Numbers are bytes, not MiB. Default block 65536; GPU batch 16777216.
 "#;
 
 fn val<'a>(args: &'a [String], i: &mut usize) -> R<&'a str> {
@@ -69,13 +69,13 @@ fn parse_threads(s: &str) -> R<usize> {
     }
 }
 
-fn read_input(path: &str) -> R<Vec<u8>> {
+fn read_input_bytes(path: &str, allow_mmap: bool) -> R<vxg::InputBytes> {
     if path == "-" {
         let mut buf = Vec::new();
         io::stdin().lock().read_to_end(&mut buf)?;
-        Ok(buf)
+        Ok(vxg::InputBytes::Owned(buf))
     } else {
-        Ok(fs::read(path)?)
+        Ok(vxg::InputBytes::open_path_mode(path, allow_mmap)?)
     }
 }
 
@@ -151,14 +151,19 @@ fn run_args(args: &[String]) -> R<()> {
             return Ok(());
         }
         "info" | "list" => {
-            if args.len() < 2 || args.len() > 3 {
-                return Err("usage: vxg info FRAME [--summary]".into());
+            if args.len() < 2 || args.len() > 4 {
+                return Err("usage: vxg info FRAME [--summary] [--no-mmap]".into());
             }
-            let summary_only = args.get(2).map(String::as_str) == Some("--summary");
-            if args.len() == 3 && !summary_only {
-                return Err(format!("unknown option {}", args[2]).into());
+            let mut summary_only = false;
+            let mut use_mmap = true;
+            for opt in &args[2..] {
+                match opt.as_str() {
+                    "--summary" => summary_only = true,
+                    "--no-mmap" => use_mmap = false,
+                    x => return Err(format!("unknown option {x}").into()),
+                }
             }
-            let bytes = read_input(&args[1])?;
+            let bytes = read_input_bytes(&args[1], use_mmap)?;
             let frames = Frame::parse_all(&bytes, usize::MAX)?;
             let mut raw_blocks = 0usize;
             let mut lz_blocks = 0usize;
@@ -221,36 +226,65 @@ fn run_args(args: &[String]) -> R<()> {
         }
         "t" | "test" | "verify" => {
             if args.len() < 2 {
-                return Err("usage: vxg verify FRAME [--threads N|auto] [--simd MODE] [--max-output BYTES] [--no-checksum] [--quiet]".into());
+                return Err("usage: vxg verify FRAME [--threads N|auto] [--simd MODE] [--max-output BYTES] [--no-checksum] [--stream] [--no-mmap] [--quiet]".into());
             }
             let input = &args[1];
             let mut dec = DecodeOptions::default();
+            let mut explicit_max_out = false;
+            let mut stream_mode = false;
+            let mut use_mmap = true;
             let mut quiet = false;
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
                     "--threads" | "-t" => dec.threads = parse_threads(val(args, &mut i)?)?,
                     "--simd" => dec.simd = val(args, &mut i)?.parse()?,
-                    "--max-output" => dec.max_output = val(args, &mut i)?.parse()?,
+                    "--max-output" => {
+                        dec.max_output = val(args, &mut i)?.parse()?;
+                        explicit_max_out = true;
+                    }
                     "--no-checksum" | "--no-verify-checksum" => dec.verify_checksum = false,
+                    "--stream" => stream_mode = true,
+                    "--no-mmap" => use_mmap = false,
                     "--quiet" | "-q" => quiet = true,
                     x => return Err(format!("unknown option {x}").into()),
                 }
                 i += 1;
             }
-            let bytes = read_input(input)?;
+            if !explicit_max_out {
+                dec.max_output = usize::MAX;
+            }
             let start = std::time::Instant::now();
+            if stream_mode || input == "-" {
+                let mut rdr = open_stream_reader(input)?;
+                let (raw_len, enc_len) = vxg::verify_stream(&mut rdr, &dec)?;
+                let elapsed = start.elapsed().as_secs_f64();
+                if !quiet {
+                    let gbps = raw_len as f64 / elapsed.max(1e-9) / 1e9;
+                    eprintln!(
+                        "OK: stream raw={raw_len} encoded={enc_len} checksum_verified={} ({:.3} ms, {:.3} GB/s)",
+                        dec.verify_checksum,
+                        elapsed * 1000.0,
+                        gbps
+                    );
+                }
+                return Ok(());
+            }
+            let bytes = read_input_bytes(input, use_mmap)?;
+            if let vxg::InputBytes::Mapped(ref m) = bytes {
+                m.advise_sequential();
+            }
             let frames = Frame::parse_all(&bytes, dec.max_output)?;
-            let decoded = vxg::decompress(&bytes, &dec)?;
+            let raw_len = vxg::verify_frame(&bytes, &dec)?;
             let elapsed = start.elapsed().as_secs_f64();
             if !quiet {
-                let gbps = decoded.len() as f64 / elapsed.max(1e-9) / 1e9;
+                let gbps = raw_len as f64 / elapsed.max(1e-9) / 1e9;
                 let total_blocks: usize = frames.iter().map(Frame::block_count).sum();
                 let all_csum = frames.iter().all(Frame::checksummed);
                 eprintln!(
                     "OK: version={} raw={} encoded={} blocks={} checksum_verified={} ({:.3} ms, {:.3} GB/s)",
                     frames[0].version(),
-                    decoded.len(),
+                    raw_len,
                     bytes.len(),
                     total_blocks,
                     all_csum && dec.verify_checksum,
@@ -262,7 +296,7 @@ fn run_args(args: &[String]) -> R<()> {
         }
         "block" | "extract-block" => {
             if args.len() < 3 {
-                return Err("usage: vxg block FRAME INDEX [OUTPUT] [--simd MODE] [--max-output BYTES] [--no-checksum] [--force]".into());
+                return Err("usage: vxg block FRAME INDEX [OUTPUT] [--simd MODE] [--max-output BYTES] [--no-checksum] [--no-mmap] [--force]".into());
             }
             let input = &args[1];
             let block_idx: usize = args[2].parse()?;
@@ -273,12 +307,14 @@ fn run_args(args: &[String]) -> R<()> {
                 i += 1;
             }
             let mut dec = DecodeOptions::default();
+            let mut use_mmap = true;
             let mut force = false;
             while i < args.len() {
                 match args[i].as_str() {
                     "--simd" => dec.simd = val(args, &mut i)?.parse()?,
                     "--max-output" => dec.max_output = val(args, &mut i)?.parse()?,
                     "--no-checksum" | "--no-verify-checksum" => dec.verify_checksum = false,
+                    "--no-mmap" => use_mmap = false,
                     "--force" | "-f" => force = true,
                     x => return Err(format!("unknown option {x}").into()),
                 }
@@ -287,7 +323,10 @@ fn run_args(args: &[String]) -> R<()> {
             if output != "-" && !force && Path::new(output).exists() {
                 return Err("output exists (use --force to replace it)".into());
             }
-            let bytes = read_input(input)?;
+            let bytes = read_input_bytes(input, use_mmap)?;
+            if let vxg::InputBytes::Mapped(ref m) = bytes {
+                m.advise_random();
+            }
             let f = Frame::parse(&bytes, usize::MAX)?;
             let out = f.decode_block(block_idx, &dec)?;
             write_output(output, &out, force)?;
@@ -319,6 +358,8 @@ fn run_args(args: &[String]) -> R<()> {
     let mut gpu = GpuOptions::default();
     let mut backend = "cpu".to_owned();
     let mut stream_mode = false;
+    let mut use_mmap = true;
+    let mut explicit_max_out = false;
     let mut force = false;
     let mut quiet = false;
     let mut i = 3;
@@ -326,6 +367,7 @@ fn run_args(args: &[String]) -> R<()> {
         match args[i].as_str() {
             "--backend" => backend = val(args, &mut i)?.into(),
             "--stream" => stream_mode = true,
+            "--no-mmap" => use_mmap = false,
             "--threads" | "-t" => {
                 let n = parse_threads(val(args, &mut i)?)?;
                 enc.threads = n;
@@ -353,6 +395,7 @@ fn run_args(args: &[String]) -> R<()> {
                 let n = val(args, &mut i)?.parse()?;
                 dec.max_output = n;
                 gpu.max_output = n;
+                explicit_max_out = true;
             }
             "--gpu-batch" => gpu.batch_bytes = val(args, &mut i)?.parse()?,
             "--force" | "-f" => force = true,
@@ -365,29 +408,32 @@ fn run_args(args: &[String]) -> R<()> {
         return Err("output exists (use --force to replace it)".into());
     }
     if stream_mode && backend == "cpu" {
+        if !explicit_max_out {
+            dec.max_output = usize::MAX;
+        }
         let start = std::time::Instant::now();
-        let mut r_box: Box<dyn Read> = if input == "-" {
-            Box::new(io::stdin().lock())
-        } else {
-            Box::new(fs::File::open(input)?)
-        };
-        let mut w_box: Box<dyn Write> = if output == "-" {
-            Box::new(io::stdout().lock())
-        } else {
-            let mut opts = OpenOptions::new();
-            opts.write(true);
-            if force {
-                opts.create(true).truncate(true);
+        let existed = output != "-" && Path::new(output).exists();
+        let mut r_box = open_stream_reader(input)?;
+        let mut w_box = open_stream_writer(output, force)?;
+        let res: R<(u64, u64)> = (|| {
+            let pair = if is_compress {
+                vxg::compress_stream(&mut r_box, &mut w_box, &enc)?
             } else {
-                opts.create_new(true);
+                let written = vxg::decompress_stream(&mut r_box, &mut w_box, &dec)?;
+                (0, written)
+            };
+            w_box.flush()?;
+            Ok(pair)
+        })();
+        let (in_b, out_b) = match res {
+            Ok(pair) => pair,
+            Err(e) => {
+                drop(w_box);
+                if output != "-" && !existed {
+                    let _ = fs::remove_file(output);
+                }
+                return Err(e);
             }
-            Box::new(opts.open(output)?)
-        };
-        let (in_b, out_b) = if is_compress {
-            vxg::compress_stream(&mut r_box, &mut w_box, &enc)?
-        } else {
-            let written = vxg::decompress_stream(&mut r_box, &mut w_box, &dec)?;
-            (0, written)
         };
         if !quiet {
             let ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -395,7 +441,36 @@ fn run_args(args: &[String]) -> R<()> {
         }
         return Ok(());
     }
-    let bytes = read_input(input)?;
+    if backend == "cpu" && use_mmap && input != "-" && output != "-" && vxg::mmap_supported() {
+        if !explicit_max_out {
+            dec.max_output = usize::MAX;
+        }
+        let start = std::time::Instant::now();
+        let (in_len, out_len) = if is_compress {
+            vxg::compress_file(input, output, &enc, force)?
+        } else {
+            let in_len = fs::metadata(input)?.len();
+            let raw_b = vxg::decompress_file(input, output, &dec, force)?;
+            (in_len, raw_b)
+        };
+        if !quiet {
+            let elapsed = start.elapsed().as_secs_f64();
+            let raw_b = if is_compress { in_len } else { out_len };
+            let enc_b = if is_compress { out_len } else { in_len };
+            let ratio = if raw_b == 0 {
+                1.0
+            } else {
+                enc_b as f64 / raw_b as f64
+            };
+            let gbps = raw_b as f64 / elapsed.max(1e-9) / 1e9;
+            eprintln!(
+                "{in_len} -> {out_len} bytes (ratio={ratio:.4}); {:.3} ms ({gbps:.3} GB/s zero-copy mmap)",
+                elapsed * 1000.0
+            );
+        }
+        return Ok(());
+    }
+    let bytes = read_input_bytes(input, use_mmap)?;
     let start = std::time::Instant::now();
     let result = if backend == "cpu" {
         if is_compress {
@@ -421,8 +496,16 @@ fn run_args(args: &[String]) -> R<()> {
     let codec_elapsed = start.elapsed().as_secs_f64();
     write_output(output, &result, force)?;
     if !quiet {
-        let raw_bytes = if is_compress { bytes.len() } else { result.len() };
-        let enc_bytes = if is_compress { result.len() } else { bytes.len() };
+        let raw_bytes = if is_compress {
+            bytes.len()
+        } else {
+            result.len()
+        };
+        let enc_bytes = if is_compress {
+            result.len()
+        } else {
+            bytes.len()
+        };
         let ratio = if raw_bytes == 0 {
             1.0
         } else {

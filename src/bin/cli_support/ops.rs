@@ -1,3 +1,39 @@
+const STREAM_BUF_CAP: usize = 256 * 1024;
+
+fn open_stream_reader(path: &str) -> R<Box<dyn Read>> {
+    if path == "-" {
+        Ok(Box::new(io::BufReader::with_capacity(
+            STREAM_BUF_CAP,
+            io::stdin().lock(),
+        )))
+    } else {
+        Ok(Box::new(io::BufReader::with_capacity(
+            STREAM_BUF_CAP,
+            fs::File::open(path)?,
+        )))
+    }
+}
+
+fn open_stream_writer(path: &str, force: bool) -> R<Box<dyn Write>> {
+    if path == "-" {
+        return Ok(Box::new(io::BufWriter::with_capacity(
+            STREAM_BUF_CAP,
+            io::stdout().lock(),
+        )));
+    }
+    let mut opts = OpenOptions::new();
+    opts.write(true);
+    if force {
+        opts.create(true).truncate(true);
+    } else {
+        opts.create_new(true);
+    }
+    Ok(Box::new(io::BufWriter::with_capacity(
+        STREAM_BUF_CAP,
+        opts.open(path)?,
+    )))
+}
+
 enum OwnedPred {
     StrEq(Vec<u8>),
     StrNe(Vec<u8>),
@@ -174,6 +210,9 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
     }
     let mut enc = Options::default();
     let mut dec = DecodeOptions::default();
+    let mut explicit_max_out = false;
+    let mut stream_mode = false;
+    let mut use_mmap = true;
     let mut where_spec: Option<String> = None;
     let mut col_spec: Option<String> = None;
     let mut cols_spec: Option<String> = None;
@@ -205,7 +244,12 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
                 enc.checksum = false;
                 dec.verify_checksum = false;
             }
-            "--max-output" => dec.max_output = val(args, &mut i)?.parse()?,
+            "--max-output" => {
+                dec.max_output = val(args, &mut i)?.parse()?;
+                explicit_max_out = true;
+            }
+            "--stream" => stream_mode = true,
+            "--no-mmap" => use_mmap = false,
             "--force" | "-f" => force = true,
             "--quiet" | "-q" => quiet = true,
             x => return Err(format!("unknown option {x}").into()),
@@ -215,7 +259,125 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
     if output != "-" && !force && Path::new(output).exists() {
         return Err("output exists (use --force to replace it)".into());
     }
-    let frame_bytes = read_input(input)?;
+    if !explicit_max_out {
+        dec.max_output = usize::MAX;
+    }
+
+    if stream_mode || input == "-" {
+        let start = std::time::Instant::now();
+        let existed = output != "-" && Path::new(output).exists();
+        let mut rdr = open_stream_reader(input)?;
+        let mut wtr = open_stream_writer(output, force)?;
+        let res: R<u64> = (|| {
+            let written = match cmd {
+                "filter-frame" => {
+                    let ws = where_spec
+                        .as_deref()
+                        .ok_or("--where EXPR is required for filter-frame")?;
+                    let owned = parse_where_expr(ws)?;
+                    let arena = PredArena::new();
+                    let expr = arena.build(&owned);
+                    vxg::filter_frame_where_stream(&mut rdr, &mut wtr, &expr, &enc, &dec)?
+                }
+                "project" => {
+                    let cs = cols_spec
+                        .as_deref()
+                        .or(col_spec.as_deref())
+                        .ok_or("--cols COL1,COL2,... is required for project")?;
+                    let cols = parse_col_list(cs)?;
+                    let owned = where_spec.as_deref().map(parse_where_expr).transpose()?;
+                    let arena = PredArena::new();
+                    let expr_opt = owned.as_ref().map(|e| arena.build(e));
+                    vxg::project_frame_stream(
+                        &mut rdr,
+                        &mut wtr,
+                        expr_opt.as_ref(),
+                        &cols,
+                        &enc,
+                        &dec,
+                    )?
+                }
+                "update" | "map" => {
+                    let cs = col_spec.as_deref().ok_or("--col COL is required")?;
+                    let target_col = parse_col_target(cs)?;
+                    let act = action.as_ref().ok_or(
+                        "specify one column action: --set VAL | --set-raw RAW | --upper | --lower | --redact | --add N",
+                    )?;
+                    let upper_fn = |b: &[u8]| b.to_ascii_uppercase();
+                    let lower_fn = |b: &[u8]| b.to_ascii_lowercase();
+                    let add_delta = match act {
+                        CliColAction::Add(d) => *d,
+                        _ => 0,
+                    };
+                    let add_fn = |v: u64| {
+                        if add_delta >= 0 {
+                            v.saturating_add(add_delta as u64)
+                        } else {
+                            v.saturating_sub(add_delta.unsigned_abs())
+                        }
+                    };
+                    let col_op = match act {
+                        CliColAction::SetStr(b) => vxg::ColOp::SetStr(b),
+                        CliColAction::SetRaw(b) => vxg::ColOp::SetRaw(b),
+                        CliColAction::Redact => vxg::ColOp::SetStr(b"[REDACTED]"),
+                        CliColAction::Upper => vxg::ColOp::MapStr(&upper_fn),
+                        CliColAction::Lower => vxg::ColOp::MapStr(&lower_fn),
+                        CliColAction::Add(_) => vxg::ColOp::MapU64(&add_fn),
+                    };
+                    if cmd == "update" {
+                        let ws =
+                            where_spec.as_deref().ok_or("--where SPEC is required for update")?;
+                        let (w_col, w_pred) = parse_where_spec(ws)?;
+                        let pred = vxg::ColPred {
+                            col: w_col,
+                            pred: w_pred.as_value_pred(),
+                        };
+                        vxg::update_column_stream(
+                            &mut rdr,
+                            &mut wtr,
+                            &pred,
+                            target_col,
+                            col_op,
+                            &enc,
+                            &dec,
+                        )?
+                    } else {
+                        if where_spec.is_some() {
+                            return Err(
+                                "map applies to all rows; use 'vxg update' with --where".into()
+                            );
+                        }
+                        vxg::map_column_stream(&mut rdr, &mut wtr, target_col, col_op, &enc, &dec)?
+                    }
+                }
+                _ => unreachable!(),
+            };
+            wtr.flush()?;
+            Ok(written)
+        })();
+        let written = match res {
+            Ok(w) => w,
+            Err(e) => {
+                drop(wtr);
+                if output != "-" && !existed {
+                    let _ = fs::remove_file(output);
+                }
+                return Err(e);
+            }
+        };
+        if !quiet {
+            eprintln!(
+                "{cmd} (stream): {written} frame bytes ({:.3} ms)",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        return Ok(());
+    }
+
+    let frame_bytes = read_input_bytes(input, use_mmap)?;
+    if let vxg::InputBytes::Mapped(ref m) = frame_bytes {
+        m.advise_sequential();
+    }
     let start = std::time::Instant::now();
 
     let result = match cmd {

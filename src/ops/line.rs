@@ -96,6 +96,7 @@ impl<'a> ColPred<'a> {
 }
 
 /// Mutation / mapping operation applied to a target column.
+#[derive(Clone, Copy)]
 pub enum ColOp<'a> {
     /// Set the column to a logical string value (automatically JSON-quoted/escaped for `JsonKey`,
     /// or quoted when needed for `Delimited`).
@@ -188,7 +189,8 @@ pub fn unescape_json_str(raw_tok: &[u8]) -> Option<Cow<'_, [u8]>> {
                         return None;
                     }
                     i += 6;
-                    let cp = 0x10000 + (((u32::from(code) - 0xd800) << 10) | (u32::from(lo) - 0xdc00));
+                    let cp =
+                        0x10000 + (((u32::from(code) - 0xd800) << 10) | (u32::from(lo) - 0xdc00));
                     char::from_u32(cp)?
                 } else {
                     char::from_u32(u32::from(code))?
@@ -222,7 +224,14 @@ pub fn encode_json_str(s: &[u8], out: &mut Vec<u8>) {
             b'\r' => out.extend_from_slice(b"\\r"),
             b'\t' => out.extend_from_slice(b"\\t"),
             0x00..=0x1f => {
-                out.extend_from_slice(&[b'\\', b'u', b'0', b'0', HEX[(b >> 4) as usize], HEX[(b & 15) as usize]]);
+                out.extend_from_slice(&[
+                    b'\\',
+                    b'u',
+                    b'0',
+                    b'0',
+                    HEX[(b >> 4) as usize],
+                    HEX[(b & 15) as usize],
+                ]);
             }
             _ => out.push(b),
         }
@@ -251,7 +260,9 @@ pub fn encode_delim_str(s: &[u8], delim: u8, out: &mut Vec<u8>) {
                 || if relaxed {
                     b < 0x20
                 } else {
-                    b <= b' ' || b >= 0x7f || matches!(b, b'(' | b')' | b';' | b'{' | b'}' | b'[' | b']')
+                    b <= b' '
+                        || b >= 0x7f
+                        || matches!(b, b'(' | b')' | b';' | b'{' | b'}' | b'[' | b']')
                 }
         });
     if needs_quotes {

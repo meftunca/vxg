@@ -142,8 +142,11 @@ fn pack_stride_into(data: &[u8], out: &mut Vec<u8>) -> Option<()> {
 
         let mut first_bytes = [0u8; 8];
         let mut all_zero = [false; 8];
+        #[allow(unused_mut)]
         let mut any_nz_words_arr = [0u64; 8];
+        #[allow(unused_mut)]
         let mut has_any_nz_words = false;
+        #[allow(unused_variables)]
         let words = count.div_ceil(64);
         #[allow(unused_variables)]
         let body_ptr = body.as_ptr();

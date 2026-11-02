@@ -66,9 +66,9 @@ pub struct StreamEncoder<W: Write> {
 
 impl<W: Write> StreamEncoder<W> {
     /// Creates a new streaming encoder with a bounded default chunk size
-    /// (`16` blocks or `options.threads` blocks, capped at `16 MiB`).
+    /// (`4..16 MiB` scaled by `options.threads`, capped at `16 MiB`).
     pub fn new(writer: W, options: Options) -> Result<Self> {
-        let blocks = options.threads.clamp(1, 32).max(16);
+        let blocks = (options.threads.clamp(1, 32) * 16).clamp(64, 256);
         let chunk_size = options
             .block_size
             .saturating_mul(blocks)
@@ -79,14 +79,14 @@ impl<W: Write> StreamEncoder<W> {
     /// Creates a new streaming encoder flushing a self-contained VXG frame every `chunk_size` bytes.
     pub fn with_chunk_size(writer: W, options: Options, chunk_size: usize) -> Result<Self> {
         options.validate()?;
-        let blocks = chunk_size.max(options.block_size).div_ceil(options.block_size);
+        let blocks = chunk_size
+            .max(options.block_size)
+            .div_ceil(options.block_size);
         let aligned_chunk = blocks
             .checked_mul(options.block_size)
             .ok_or(Error::SizeOverflow)?;
         if aligned_chunk > (64 << 20) {
-            return Err(Error::InvalidOption(
-                "stream chunk_size must be <= 64 MiB",
-            ));
+            return Err(Error::InvalidOption("stream chunk_size must be <= 64 MiB"));
         }
         let max_enc = max_compressed_size(aligned_chunk, options.block_size)?;
         Ok(Self {
@@ -116,8 +116,8 @@ impl<W: Write> StreamEncoder<W> {
             .writer
             .as_mut()
             .ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
-        let bound = max_compressed_size(self.raw_buf.len(), self.options.block_size)
-            .map_err(to_io_err)?;
+        let bound =
+            max_compressed_size(self.raw_buf.len(), self.options.block_size).map_err(to_io_err)?;
         if self.enc_buf.len() < bound {
             self.enc_buf.resize(bound, 0);
         }
@@ -289,7 +289,24 @@ pub fn compress_stream<R: Read, W: Write>(
     options: &Options,
 ) -> Result<(u64, u64)> {
     let mut enc = StreamEncoder::new(writer, options.clone())?;
-    io::copy(&mut reader, &mut enc).map_err(from_io_err)?;
+    enc.raw_buf.resize(enc.chunk_size, 0);
+    let mut filled = 0usize;
+    loop {
+        match reader.read(&mut enc.raw_buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                filled += n;
+                if filled == enc.chunk_size {
+                    enc.flush_chunk().map_err(from_io_err)?;
+                    enc.raw_buf.resize(enc.chunk_size, 0);
+                    filled = 0;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(from_io_err(e)),
+        }
+    }
+    enc.raw_buf.truncate(filled);
     if !enc.raw_buf.is_empty() || enc.frames_emitted == 0 {
         enc.flush_chunk().map_err(from_io_err)?;
     }
@@ -306,9 +323,11 @@ pub fn decompress_stream<R: Read, W: Write>(
     options: &DecodeOptions,
 ) -> Result<u64> {
     let mut dec = StreamDecoder::new(reader, options.clone())?;
-    let written = io::copy(&mut dec, &mut writer).map_err(from_io_err)?;
+    while dec.load_next_frame().map_err(from_io_err)? {
+        writer.write_all(&dec.out_buf).map_err(from_io_err)?;
+    }
     writer.flush().map_err(from_io_err)?;
-    Ok(written)
+    Ok(dec.total_out)
 }
 
 /// Computes the total uncompressed size and frame boundaries across one or more concatenated `VXG1` frames.
@@ -349,7 +368,11 @@ pub(crate) fn decompress_concatenated(src: &[u8], options: &DecodeOptions) -> Re
     for (start, end, raw_size) in spans {
         let mut f_opt = options.clone();
         f_opt.max_output = raw_size;
-        decompress_into(&src[start..end], &mut out[out_pos..out_pos + raw_size], &f_opt)?;
+        decompress_into(
+            &src[start..end],
+            &mut out[out_pos..out_pos + raw_size],
+            &f_opt,
+        )?;
         out_pos += raw_size;
     }
     Ok(out)
@@ -371,7 +394,11 @@ pub(crate) fn decompress_concatenated_into(
     for (start, end, raw_size) in spans {
         let mut f_opt = options.clone();
         f_opt.max_output = raw_size;
-        decompress_into(&src[start..end], &mut out[out_pos..out_pos + raw_size], &f_opt)?;
+        decompress_into(
+            &src[start..end],
+            &mut out[out_pos..out_pos + raw_size],
+            &f_opt,
+        )?;
         out_pos += raw_size;
     }
     Ok(())
