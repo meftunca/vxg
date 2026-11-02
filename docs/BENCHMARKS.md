@@ -619,3 +619,21 @@ materialization with:
 
 Zero-unpack pre-filter on `ndjson_varied` (`vxg-query-real`): `"level":"NOPE"` runs in **1.60 ms (35.4 GB/s,
 97.2× vs raw scan)** and `@num:bytes:ge:50000` in **1.59 ms (35.7 GB/s, 100.0×)**.
+
+### CLF stream matcher & unquoted `MODEL_HEX_SUFFIX` (`v4`)
+
+1. Added `template_is_clean_clf` + `try_match_clf_stream` (single-pass bracketed/quoted/`key=val` stream
+   matcher using the 64-byte SIMD quote-mask cache), eliminating per-row `\n` search + `parse_record_spans`
+   on Apache CLF and bracketed logs.
+2. Extended `MODEL_HEX_SUFFIX` (`width_hdr = 64 + raw_len` on `v4`) to unquoted fixed-width lowercase hex
+   columns (e.g. CSV/TSV `req_id` / trace IDs), packing via NEON/SSE2 `parse_hex_u64_le` and decoding via
+   `ColumnStream::HexSuffix8` without `FAST_LZ` fallback.
+
+Single-thread comparison vs LZ4 (`1.10.0`) and Zstd-1 (`1.5.7`) (`vxg-bench --samples 5`, independent 64 KiB blocks):
+
+| File | VXG ratio | Zstd-1 ratio | LZ4 ratio | VXG enc / dec (GB/s) | Zstd-1 enc / dec (GB/s) | LZ4 enc / dec (GB/s) |
+|---|---|---|---|---|---|---|
+| Apache CLF (`data.clf`) | **.098** | .176 | .284 | **0.53 / 2.20** | 0.71 / 1.66 | 0.94 / 3.71 |
+| CSV (`data.csv`) | **.182** | .286 | .446 | **0.52 / 1.75** | 0.59 / 1.42 | 0.70 / 3.84 |
+| NDJSON `ts_clf` | **.030** | .077 | .147 | **0.82 / 5.26** | 0.81 / 1.40 | 1.71 / 4.92 |
+| `ndjson_varied` (56.5 MB) | **.091** | .166 | .290 | **0.74 / 3.10** | 0.56 / 0.95 | 1.13 / 4.11 |

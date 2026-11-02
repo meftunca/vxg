@@ -68,8 +68,10 @@ fn classify_template_filter(
             }
             ColumnStream::HexSuffix4 { .. }
             | ColumnStream::HexSuffix8 { .. }
-            | ColumnStream::HexSuffix { .. }
-            | ColumnStream::PeriodicHex { .. } => {
+            | ColumnStream::HexSuffix { .. } => {
+                add_bytes_to_mask(&mut non_dict_col_mask, b"0123456789abcdef");
+            }
+            ColumnStream::PeriodicHex { .. } => {
                 add_bytes_to_mask(&mut non_dict_col_mask, b"0123456789abcdef\"");
             }
             ColumnStream::Copy16 { col_mask, .. } => {
@@ -510,9 +512,17 @@ fn can_template_match_fast(
             MODEL_HEX_SUFFIX | MODEL_EPOCH_COUNTER | MODEL_GF2_AFFINE => {
                 let plen = c.uleb()?;
                 let prefix = c.take(plen)?;
+                let is_quoted = if tag == MODEL_HEX_SUFFIX {
+                    c.uleb()? <= 64
+                } else {
+                    true
+                };
                 let mut m = [0u64; 4];
                 add_bytes_to_mask(&mut m, prefix);
-                add_bytes_to_mask(&mut m, b"\"0123456789abcdefABCDEF");
+                add_bytes_to_mask(&mut m, b"0123456789abcdefABCDEF");
+                if is_quoted {
+                    add_bytes_to_mask(&mut m, b"\"");
+                }
                 for i in 0..4 {
                     block_mask[i] |= m[i];
                 }

@@ -6,11 +6,181 @@ fn grammar_from_block<'a>(
     Ok((templates, rows, template_rows, raw_rows))
 }
 
+#[inline(always)]
+fn template_is_clean_clf(segments: &[&[u8]]) -> bool {
+    let slots = segments.len().saturating_sub(1);
+    if !(4..=MAX_SLOTS).contains(&slots) || !segments[0].is_empty() {
+        return false;
+    }
+    let mut prev_bracket = false;
+    for &seg in &segments[1..slots] {
+        let Some(rest) = (if prev_bracket {
+            seg.strip_prefix(b"] ")
+        } else {
+            seg.strip_prefix(b" ")
+        }) else {
+            return false;
+        };
+        if rest.is_empty() {
+            prev_bracket = false;
+        } else if rest == b"[" {
+            prev_bracket = true;
+        } else if rest.len() >= 2
+            && rest.last() == Some(&b'=')
+            && rest[..rest.len() - 1]
+                .iter()
+                .all(|&b| is_logfmt_key_byte(b))
+        {
+            prev_bracket = false;
+        } else {
+            return false;
+        }
+    }
+    if prev_bracket {
+        matches!(segments[slots], b"]\n" | b"]\r\n")
+    } else {
+        matches!(segments[slots], b"\n" | b"\r\n")
+    }
+}
+
+#[inline(always)]
+fn try_match_clf_stream<'a>(
+    data: &'a [u8],
+    start: usize,
+    segments: &[&'a [u8]],
+    quote_cache: &mut (usize, u64, u64),
+    out_values: &mut [&'a [u8]; MAX_SLOTS],
+) -> Option<usize> {
+    let slots = segments.len() - 1;
+    let len = data.len();
+    let ptr = data.as_ptr();
+    if start >= len {
+        return None;
+    }
+    let b0 = unsafe { *ptr.add(start) };
+    if !b0.is_ascii_digit() {
+        return None;
+    }
+    let mut end0 = start + 1;
+    while end0 < len {
+        let b = unsafe { *ptr.add(end0) };
+        if b <= b' '
+            || b >= 0x7f
+            || matches!(
+                b,
+                b'=' | b',' | b'\t' | b'|' | b'"' | b'(' | b')' | b';' | b'{' | b'}' | b'[' | b']'
+            )
+        {
+            break;
+        }
+        end0 += 1;
+    }
+    if end0 - start < 7 {
+        return None;
+    }
+    unsafe {
+        *out_values.get_unchecked_mut(0) = data.get_unchecked(start..end0);
+    }
+    let mut pos = end0;
+    let mut has_structured = false;
+    for slot in 1..slots {
+        let seg = unsafe { *segments.get_unchecked(slot) };
+        let next_pos = pos + seg.len();
+        if next_pos >= len || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_pos) }, seg) {
+            return None;
+        }
+        pos = next_pos;
+        let seg_last = unsafe { *seg.get_unchecked(seg.len() - 1) };
+        if seg_last == b'[' {
+            let mut end = pos;
+            while end < len {
+                let b = unsafe { *ptr.add(end) };
+                if b == b']' {
+                    break;
+                }
+                if b < 0x20 || b >= 0x7f || b == b'[' {
+                    return None;
+                }
+                end += 1;
+            }
+            if end == pos || end >= len {
+                return None;
+            }
+            has_structured = true;
+            unsafe {
+                *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end);
+            }
+            pos = end;
+        } else if seg_last == b'=' {
+            let mut end = pos;
+            while end < len {
+                let b = unsafe { *ptr.add(end) };
+                if b <= b' ' || b >= 0x7f {
+                    break;
+                }
+                if matches!(b, b'"' | b'[' | b']' | b'{' | b'}') {
+                    return None;
+                }
+                end += 1;
+            }
+            if end == pos {
+                return None;
+            }
+            has_structured = true;
+            unsafe {
+                *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end);
+            }
+            pos = end;
+        } else {
+            let first = unsafe { *ptr.add(pos) };
+            if first == b'"' {
+                let end = scan_json_string_cached(data, pos, quote_cache)?;
+                has_structured = true;
+                unsafe {
+                    *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end);
+                }
+                pos = end;
+            } else {
+                let mut end = pos;
+                while end < len {
+                    let b = unsafe { *ptr.add(end) };
+                    if b <= b' ' || b >= 0x7f {
+                        break;
+                    }
+                    if matches!(b, b'"' | b'[' | b']' | b'{' | b'}' | b'=') {
+                        return None;
+                    }
+                    end += 1;
+                }
+                if end == pos {
+                    return None;
+                }
+                unsafe {
+                    *out_values.get_unchecked_mut(slot) = data.get_unchecked(pos..end);
+                }
+                pos = end;
+            }
+        }
+    }
+    let last_seg = unsafe { *segments.get_unchecked(slots) };
+    let next_end = pos + last_seg.len();
+    if !has_structured
+        || next_end > len
+        || !slice_eq_fast(unsafe { data.get_unchecked(pos..next_end) }, last_seg)
+    {
+        return None;
+    }
+    let tail_nl = if last_seg.ends_with(b"\r\n") { 2 } else { 1 };
+    let body_len = (next_end - start) - tail_nl;
+    (16..=4096).contains(&body_len).then_some(next_end - start)
+}
+
 #[inline(never)]
 fn match_single_delim_or_logfmt_stream<'a>(
     data: &'a [u8],
     tpl: &mut Template<'a>,
     delim_opt: Option<u8>,
+    space_kind: u8,
     line_start: &mut usize,
     row_idx: &mut usize,
     col_cap: &mut usize,
@@ -30,6 +200,38 @@ fn match_single_delim_or_logfmt_stream<'a>(
                 cur_line_start,
                 segs,
                 d,
+                delim_mask_cache,
+                val_buf,
+            ) else {
+                break;
+            };
+            cur_line_start += line_len;
+            if cur_row_idx == cur_col_cap {
+                for slot in 0..slots {
+                    unsafe {
+                        let col = tpl.values.get_unchecked_mut(slot);
+                        col.set_len(cur_row_idx);
+                        col.reserve(256);
+                    }
+                }
+                cur_col_cap = min_col_capacity(&tpl.values);
+            }
+            for slot in 0..slots {
+                unsafe {
+                    *tpl.values
+                        .get_unchecked_mut(slot)
+                        .as_mut_ptr()
+                        .add(cur_row_idx) = *val_buf.get_unchecked(slot);
+                }
+            }
+            cur_row_idx += 1;
+        }
+    } else if space_kind == 2 {
+        while cur_line_start < total_len {
+            let Some(line_len) = try_match_clf_stream(
+                data,
+                cur_line_start,
+                segs,
                 delim_mask_cache,
                 val_buf,
             ) else {

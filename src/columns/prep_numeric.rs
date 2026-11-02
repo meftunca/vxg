@@ -313,10 +313,14 @@ impl<'a> PreparedColumn<'a> {
                 }
                 let prefix_len = cursor.uleb()?;
                 let prefix = cursor.take(prefix_len)?;
-                let width = cursor.uleb()?;
-                if width == 0 || width > 64 {
+                let width_hdr = cursor.uleb()?;
+                let (quoted, width) = if (1..=64).contains(&width_hdr) {
+                    (true, width_hdr)
+                } else if (68..=128).contains(&width_hdr) {
+                    (false, width_hdr - 64)
+                } else {
                     return Err(invalid("column hex width"));
-                }
+                };
                 let raw_total = count.checked_mul(width).ok_or(Error::SizeOverflow)?;
                 let raw_slice = cursor.take(raw_total)?;
                 if !cursor.done() {
@@ -336,10 +340,17 @@ impl<'a> PreparedColumn<'a> {
                         width,
                     }
                 };
+                let (const_lead, const_trail): (LeadValue<'a>, &'a [u8]) = if quoted {
+                    (LeadValue::QuotePrefix(prefix), b"\"")
+                } else if prefix.is_empty() {
+                    (LeadValue::Empty, b"")
+                } else {
+                    (LeadValue::Slice(prefix), b"")
+                };
                 Ok(Self {
                     const_full: ConstValue::None,
-                    const_lead: LeadValue::QuotePrefix(prefix),
-                    const_trail: b"\"",
+                    const_lead,
+                    const_trail,
                     dict_slices: None,
                     max_emit_len: width * 2,
                     stream,

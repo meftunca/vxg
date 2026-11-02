@@ -83,6 +83,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
         // `Gf2Affine`, `Timestamp`, `EpochCounter`, `SegmentDict`).
         // Check if it's a canonical decimal column in a single pass!
         let mut skip_dictionary = false;
+        let mut is_all_decimal = false;
         if let Some(first_num) = parse_decimal(first_slice) {
             if let Some(second_num) = parse_decimal(values[1]) {
                 MODEL_SCRATCH.with(|cell| {
@@ -135,6 +136,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                     }
 
                     if all_decimal {
+                        is_all_decimal = true;
                         unsafe {
                             sc.parsed_u64.set_len(n);
                         }
@@ -268,10 +270,28 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                 ModelKind::Dictionary
             );
         }
-        // Unquoted digit/literal patterns (CLF / CSV / TSV timestamps, IPv4, versions, ...). Plain
-        // decimals are left to the decimal models. Run before high-cardinality Dictionary so
-        // monotonic timestamps tighten `best_len` upfront.
-        if allow_v3_ext && parse_decimal(first_slice).is_none() {
+        // Unquoted digit/literal patterns (CLF / CSV / TSV timestamps, IPv4, versions, ...) and
+        // unquoted fixed-width lowercase hex ids (`8201e2bd73ab4876`). Plain decimals are left to
+        // the decimal models.
+        let unquoted_hex_tail = allow_v3_ext
+            && !is_all_decimal
+            && first_slice.len() >= 8
+            && hex_nibble(first_slice[first_slice.len() - 1]).is_some()
+            && hex_nibble(first_slice[first_slice.len() - 2]).is_some()
+            && hex_nibble(first_slice[first_slice.len() - 3]).is_some()
+            && hex_nibble(first_slice[first_slice.len() - 4]).is_some();
+        let unquoted_hex_early_dup = unquoted_hex_tail
+            && (1..n.min(16)).any(|i| (0..i).any(|j| slice_eq_fast(values[i], values[j])));
+        if unquoted_hex_tail && !unquoted_hex_early_dup && !unquoted_const_hint {
+            try_model!(
+                |limit| pack_hex_suffix_model_mode(values, limit, false),
+                ModelKind::HexSuffix
+            );
+            if best_kind == ModelKind::HexSuffix {
+                skip_dictionary = true;
+            }
+        }
+        if allow_v3_ext && !is_all_decimal && best_kind != ModelKind::HexSuffix {
             try_model!(
                 |limit| pack_pattern_model(values, limit),
                 ModelKind::Pattern
@@ -281,6 +301,12 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
             try_model!(
                 |limit| pack_dictionary_model_mode(values, limit, allow_v3_ext),
                 ModelKind::Dictionary
+            );
+        }
+        if unquoted_hex_tail && (unquoted_hex_early_dup || unquoted_const_hint) {
+            try_model!(
+                |limit| pack_hex_suffix_model_mode(values, limit, false),
+                ModelKind::HexSuffix
             );
         }
         if allow_v3_ext && best_kind == ModelKind::Raw {

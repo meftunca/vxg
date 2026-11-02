@@ -227,20 +227,28 @@ fn unpack_model_mode(bytes: &[u8], count: usize, strict: bool) -> Result<FlatVal
                 return Err(invalid("column hex count"));
             }
             let prefix = read_bytes(&mut cursor)?;
-            let width = cursor.uleb()?;
-            if width == 0 || width > 64 {
+            let width_hdr = cursor.uleb()?;
+            let (quoted, width) = if (1..=64).contains(&width_hdr) {
+                (true, width_hdr)
+            } else if (68..=128).contains(&width_hdr) {
+                (false, width_hdr - 64)
+            } else {
                 return Err(invalid("column hex width"));
-            }
+            };
             for _ in 0..count {
                 let raw = cursor.take(width)?;
                 let start = values.begin();
-                values.bytes.push(b'"');
+                if quoted {
+                    values.bytes.push(b'"');
+                }
                 values.bytes.extend_from_slice(&prefix);
                 for &byte in raw {
                     values.bytes.push(HEX[(byte >> 4) as usize]);
                     values.bytes.push(HEX[(byte & 15) as usize]);
                 }
-                values.bytes.push(b'"');
+                if quoted {
+                    values.bytes.push(b'"');
+                }
                 values.finish(start);
             }
         }

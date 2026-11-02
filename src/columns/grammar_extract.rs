@@ -35,7 +35,7 @@ fn grammar_from_block_mode_impl<'a>(
     let mut clean_flags = Vec::<bool>::with_capacity(8);
     let mut clean_nl_flags = Vec::<bool>::with_capacity(8);
     let mut delim_flags = Vec::<Option<u8>>::with_capacity(8);
-    let mut logfmt_flags = Vec::<bool>::with_capacity(8);
+    let mut space_flags = Vec::<u8>::with_capacity(8);
     let mut shared_segs = [[0u8; 16]; 16];
     let mut max_shared = [0u8; 16];
     let mut has_json_tpl = false;
@@ -108,11 +108,18 @@ fn grammar_from_block_mode_impl<'a>(
                 rows.resize(rows.len() + added, Row::Template(0));
                 continue;
             }
-        } else if templates.len() == 1 && (delim_flags[0].is_some() || logfmt_flags[0]) {
+        } else if templates.len() == 1 && (delim_flags[0].is_some() || space_flags[0] != 0) {
             let tpl = unsafe { templates.get_unchecked_mut(0) };
             let slots = tpl.values.len();
             let delim_opt = delim_flags[0];
-            let target_delim = delim_opt.unwrap_or(b' ');
+            let sk = space_flags[0];
+            let target_delim = if let Some(d) = delim_opt {
+                d
+            } else if sk == 2 {
+                0
+            } else {
+                b' '
+            };
             if delim_cache_for != Some(target_delim) {
                 delim_mask_cache = (usize::MAX, 0, 0);
                 delim_cache_for = Some(target_delim);
@@ -124,6 +131,7 @@ fn grammar_from_block_mode_impl<'a>(
                 data,
                 tpl,
                 delim_opt,
+                sk,
                 &mut line_start,
                 &mut row_idx,
                 &mut col_cap,
@@ -250,7 +258,7 @@ fn grammar_from_block_mode_impl<'a>(
                             clean_flags.clear();
                             clean_nl_flags.clear();
                             delim_flags.clear();
-                            logfmt_flags.clear();
+                            space_flags.clear();
                             max_shared = [0u8; 16];
                             has_json_tpl = false;
                         }
@@ -267,7 +275,15 @@ fn grammar_from_block_mode_impl<'a>(
                         let is_clean =
                             is_single_clean || template_is_clean_multiline_json(&segments);
                         let delim_opt = delimited_template_delim(&segments);
-                        let is_logfmt = delim_opt.is_none() && template_is_clean_logfmt(&segments);
+                        let space_kind = if delim_opt.is_some() {
+                            0
+                        } else if template_is_clean_logfmt(&segments) {
+                            1
+                        } else if template_is_clean_clf(&segments) {
+                            2
+                        } else {
+                            0
+                        };
                         if is_clean
                             || segments[0].first() == Some(&b'{')
                             || segments.iter().any(|s| s.contains(&b'['))
@@ -304,7 +320,7 @@ fn grammar_from_block_mode_impl<'a>(
                         clean_flags.push(is_clean);
                         clean_nl_flags.push(is_clean_nl);
                         delim_flags.push(delim_opt);
-                        logfmt_flags.push(is_logfmt);
+                        space_flags.push(space_kind);
                         templates.push(Template {
                             values: (0..slot_count)
                                 .map(|_| take_col_vec(est_rows))
@@ -360,7 +376,7 @@ fn grammar_from_block_mode_impl<'a>(
                 clean_flags.push(false);
                 clean_nl_flags.push(true);
                 delim_flags.push(None);
-                logfmt_flags.push(false);
+                space_flags.push(0);
                 templates.push(Template {
                     values: Vec::new(),
                     segments: vec![record],

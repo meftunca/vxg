@@ -145,66 +145,90 @@ fn split_hex_suffix(value: &[u8]) -> Option<(&[u8], &[u8])> {
 
 #[inline(always)]
 fn pack_hex_suffix_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
+    pack_hex_suffix_model_mode(values, limit, true)
+}
+
+#[inline(always)]
+fn pack_hex_suffix_model_mode(values: &[&[u8]], limit: usize, quoted: bool) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 {
         return None;
     }
-    let (prefix, first_digits) = split_hex_suffix(values[0])?;
+    let (prefix, first_digits) = if quoted {
+        split_hex_suffix(values[0])?
+    } else {
+        let v0 = values[0];
+        if v0.len() < 8 || v0.first() == Some(&b'"') || v0.last() == Some(&b'"') {
+            return None;
+        }
+        let mut start = v0.len();
+        while start != 0 && hex_nibble(v0[start - 1]).is_some() {
+            start -= 1;
+        }
+        let digits = &v0[start..];
+        if digits.len() < 8 || digits.len() % 2 != 0 {
+            return None;
+        }
+        (&v0[..start], digits)
+    };
     let raw_len = first_digits.len() / 2;
     if raw_len == 0 || raw_len > 64 {
         return None;
     }
-    let size = 1 + uleb_len(prefix.len()) + prefix.len() + uleb_len(raw_len) + n * raw_len;
+    let width_hdr = if quoted { raw_len } else { 64 + raw_len };
+    let size = 1 + uleb_len(prefix.len()) + prefix.len() + uleb_len(width_hdr) + n * raw_len;
     if size >= limit {
         return None;
     }
-    let expected_val_len = 2 + prefix.len() + first_digits.len();
+    let qpad = usize::from(quoted);
+    let expected_val_len = 2 * qpad + prefix.len() + first_digits.len();
     let mut out = Vec::with_capacity(size);
     out.push(MODEL_HEX_SUFFIX);
     put_bytes(&mut out, prefix);
-    put_uleb(&mut out, raw_len);
-    let prefix_end = 1 + prefix.len();
+    put_uleb(&mut out, width_hdr);
+    let prefix_end = qpad + prefix.len();
     let qprefix = &values[0][..prefix_end];
+    let digits_end = expected_val_len - qpad;
     if raw_len == 4 {
         for &value in values {
             if value.len() != expected_val_len
-                || value[expected_val_len - 1] != b'"'
+                || (quoted && value[expected_val_len - 1] != b'"')
                 || !slice_eq_fast(&value[..prefix_end], qprefix)
             {
                 return None;
             }
-            if prefix_end > 1 && hex_nibble(value[prefix_end - 1]).is_some() {
+            if prefix_end > qpad && hex_nibble(value[prefix_end - 1]).is_some() {
                 return None;
             }
-            let word = parse_hex_u32_le(&value[prefix_end..expected_val_len - 1])?;
+            let word = parse_hex_u32_le(&value[prefix_end..digits_end])?;
             out.extend_from_slice(&word.to_le_bytes());
         }
     } else if raw_len == 8 {
         for &value in values {
             if value.len() != expected_val_len
-                || value[expected_val_len - 1] != b'"'
+                || (quoted && value[expected_val_len - 1] != b'"')
                 || !slice_eq_fast(&value[..prefix_end], qprefix)
             {
                 return None;
             }
-            if prefix_end > 1 && hex_nibble(value[prefix_end - 1]).is_some() {
+            if prefix_end > qpad && hex_nibble(value[prefix_end - 1]).is_some() {
                 return None;
             }
-            let word = parse_hex_u64_le(&value[prefix_end..expected_val_len - 1])?;
+            let word = parse_hex_u64_le(&value[prefix_end..digits_end])?;
             out.extend_from_slice(&word.to_le_bytes());
         }
     } else {
         for &value in values {
             if value.len() != expected_val_len
-                || value[expected_val_len - 1] != b'"'
+                || (quoted && value[expected_val_len - 1] != b'"')
                 || !slice_eq_fast(&value[..prefix_end], qprefix)
             {
                 return None;
             }
-            if prefix_end > 1 && hex_nibble(value[prefix_end - 1]).is_some() {
+            if prefix_end > qpad && hex_nibble(value[prefix_end - 1]).is_some() {
                 return None;
             }
-            let digits = &value[prefix_end..expected_val_len - 1];
+            let digits = &value[prefix_end..digits_end];
             for pair in digits.chunks_exact(2) {
                 let hi = hex_nibble(pair[0])?;
                 let lo = hex_nibble(pair[1])?;

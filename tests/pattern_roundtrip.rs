@@ -168,3 +168,52 @@ fn pattern_decode_tiers_and_prefilter() {
     assert_eq!(filter_rows(&enc_huge, b"2025", usize::MAX, &dec).unwrap().len(), 0);
     assert_eq!(filter_rows(&enc_huge, b"-000142\"", usize::MAX, &dec).unwrap().len(), 1);
 }
+
+#[test]
+fn clf_stream_matcher_and_unquoted_hex_suffix_roundtrip() {
+    let dec = DecodeOptions::default();
+
+    // 1. CLF / bracketed log with `[...]`, `"..."`, `key=val`, CRLF, and irregular fallback rows.
+    let mut clf = String::new();
+    for i in 0..1200u64 {
+        if i == 333 {
+            clf += "10.0.0.1 malformed line without structured tokens\r\n";
+            continue;
+        }
+        clf += &format!(
+            "10.{}.{}.{} - u{:06} [21/Sep/2026:14:{:02}:{:02} +0000] \"GET /item/{} HTTP/1.1\" status=200 bytes={} [edge-{}]\r\n",
+            i % 250,
+            (i * 7) % 250,
+            (i * 13) % 250,
+            i % 900,
+            (i / 60) % 60,
+            i % 60,
+            i % 16,
+            1000 + i,
+            i % 4
+        );
+    }
+    let raw_clf = clf.into_bytes();
+    let enc_clf = compress(&raw_clf, &Options::default()).unwrap();
+    assert_eq!(decompress(&enc_clf, &dec).unwrap(), raw_clf);
+    assert_eq!(filter_rows(&enc_clf, b"malformed line", usize::MAX, &dec).unwrap().len(), 1);
+
+    // 2. CSV with unquoted 8-char (`raw_len=4`), 16-char (`raw_len=8`), and prefixed 24-char (`raw_len=12`) hex columns.
+    let mut csv = String::new();
+    let mut rng = Rng(0x55aa_1234_9876_fedc);
+    for i in 0..1000u64 {
+        let h4 = rng.next() as u32;
+        let h8 = rng.next();
+        let h12_a = rng.next();
+        let h12_b = rng.next() as u32;
+        csv += &format!(
+            "{},{h4:08x},{h8:016x},tr_{h12_a:016x}{h12_b:08x},ok\n",
+            1_790_000_000 + i
+        );
+    }
+    let raw_csv = csv.into_bytes();
+    let enc_csv = compress(&raw_csv, &Options::default()).unwrap();
+    assert!(enc_csv.len() * 100 < raw_csv.len() * 58, "expected unquoted HexSuffix compression");
+    assert_eq!(decompress(&enc_csv, &dec).unwrap(), raw_csv);
+    assert_eq!(filter_rows(&enc_csv, b"\"tr_", usize::MAX, &dec).unwrap().len(), 0);
+}
