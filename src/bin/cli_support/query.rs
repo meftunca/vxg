@@ -6,7 +6,7 @@ fn run_query_cmd(args: &[String]) -> R<()> {
         );
     }
     let frame = read_input(&args[1])?;
-    let opts = DecodeOptions::default();
+    let mut opts = DecodeOptions::default();
     let mut count_only = false;
     let mut row_idx: Option<usize> = None;
     let mut range: Option<(usize, usize)> = None;
@@ -31,6 +31,7 @@ fn run_query_cmd(args: &[String]) -> R<()> {
             "--filter" | "--contains" => filter_str = Some(val(args, &mut i)?.to_owned()),
             "--where" => where_spec = Some(val(args, &mut i)?.to_owned()),
             "--limit" => limit = val(args, &mut i)?.parse()?,
+            "--threads" | "-t" => opts.threads = parse_threads(val(args, &mut i)?)?,
             x => return Err(format!("unknown query option {x}").into()),
         }
         i += 1;

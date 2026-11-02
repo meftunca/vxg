@@ -669,3 +669,20 @@ Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`,
 | `update_column` `WHERE csv:6 >= 250 SET CRITICAL` | 144.94 ms | **14.02 ms** | **10.3×** | **2.18 GB/s** | `0.182` |
 | `map_column` `csv:2 -> uppercase` (`O(|D|)` dict splice) | 163.99 ms | **17.79 ms** | **9.2×** | **1.72 GB/s** | `0.182` |
 | `map_column` `csv:7 -> bytes + 100` (1-col numeric splice) | 160.04 ms | **29.83 ms** | **5.4×** | **1.02 GB/s** | `0.182` |
+
+### 3. Multi-Threaded Scaling (`threads = 8`, `ndjson_varied.ndjson`, 56.5 MB, 300,000 rows, 863 blocks)
+
+Deterministic work-stealing across independent blocks (`Options { threads: 8, .. }`, `DecodeOptions { threads: 8, .. }`), compared against 8-thread `vxg::decompress` + raw transform + 8-thread `vxg::compress`:
+
+| Operation (`threads = 8`) | Naive 8T (`ms`) | VXG 8T (`ms`) | Speedup | VXG 8T Throughput |
+| :--- | ---: | ---: | ---: | ---: |
+| `filter_column` `level == "NOPE"` (0 hits) | 73.39 ms | **1.48 ms** | **49.7×** | **38.29 GB/s** |
+| `filter_column` `bytes >= 50000` (6 hits, zone-map) | 84.39 ms | **1.54 ms** | **54.9×** | **36.75 GB/s** |
+| `filter_column` `latency_ms >= 200` (563 hits) | 82.44 ms | **1.88 ms** | **43.8×** | **30.04 GB/s** |
+| `filter_column` `service == "fraud-engine"` (37,539 hits) | 79.94 ms | **5.49 ms** | **14.6×** | **10.30 GB/s** |
+| `filter_frame` `status == 500` (~5% rows -> `VXG1`) | 81.12 ms | **4.24 ms** | **19.1×** | **13.32 GB/s** |
+| `update_column` `WHERE level == "NOPE" SET CRITICAL` | 88.83 ms | **2.03 ms** | **43.8×** | **27.84 GB/s** |
+| `update_column` `WHERE latency_ms >= 250 SET CRITICAL` | 96.52 ms | **3.54 ms** | **27.3×** | **15.96 GB/s** |
+| `update_column` `WHERE status == 500 SET CRITICAL` | 110.40 ms | **3.20 ms** | **34.5×** | **17.66 GB/s** |
+| `map_column` `service -> uppercase` (`O(|D|)` dict splice) | 103.17 ms | **3.27 ms** | **31.5×** | **17.27 GB/s** |
+| `map_column` `bytes -> bytes + 100` (1-col numeric splice) | 107.75 ms | **5.51 ms** | **19.5×** | **10.25 GB/s** |

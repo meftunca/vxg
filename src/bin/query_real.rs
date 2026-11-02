@@ -157,7 +157,8 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
     use vxg::{ColOp, ColPred, ColTarget, StrCmp};
     let gb = raw.len() as f64 / 1e9;
     println!(
-        "\n=== Stage 2 Compressed-Domain Ops ({kind}) — single thread, median of 5 samples ==="
+        "\n=== Stage 2 Compressed-Domain Ops ({kind}) — threads={}, median of 5 samples ===",
+        opts.threads
     );
     println!(
         "{:<44} {:>11} {:>11} {:>9} {:>11}",
@@ -404,7 +405,12 @@ fn main() {
 
     if args.get(1).map(String::as_str) == Some("--ops-suite") {
         let kind = args.get(2).map(String::as_str).unwrap_or("ndjson");
-        run_ops_suite(&raw, &frame, kind, &opts, &dec);
+        let threads: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let mut opts_t = opts;
+        opts_t.threads = threads;
+        let mut dec_t = dec;
+        dec_t.threads = threads;
+        run_ops_suite(&raw, &frame, kind, &opts_t, &dec_t);
         return;
     }
 

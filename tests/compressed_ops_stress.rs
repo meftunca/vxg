@@ -407,7 +407,16 @@ fn randomized_differential_compressed_ops_stress() {
             checksum: rng.bool(),
             ..Options::default()
         };
+        let threads = [1usize, 2, 4][rng.usize(3)];
+        let mut enc_mt = enc.clone();
+        enc_mt.threads = threads;
         let dec = DecodeOptions {
+            threads,
+            verify_checksum: true,
+            ..DecodeOptions::default()
+        };
+        let dec_1t = DecodeOptions {
+            threads: 1,
             verify_checksum: true,
             ..DecodeOptions::default()
         };
@@ -449,6 +458,8 @@ fn randomized_differential_compressed_ops_stress() {
         let exp_all = naive_filter(&raw, &pred, usize::MAX);
         for lim in [1usize, 5, usize::MAX] {
             let got = filter_column(&frame, &pred, lim, &dec).unwrap();
+            let got_1t = filter_column(&frame, &pred, lim, &dec_1t).unwrap();
+            assert_eq!(got, got_1t, "mt vs 1t filter_column mismatch iter={iter} lim={lim}");
             let exp_slice = &exp_all[..exp_all.len().min(lim)];
             assert_eq!(got.len(), exp_slice.len(), "iter={iter} lim={lim}");
             for (g, (ei, eb)) in got.iter().zip(exp_slice.iter()) {
@@ -456,7 +467,7 @@ fn randomized_differential_compressed_ops_stress() {
                 assert_eq!(&g.bytes, eb, "iter={iter}");
             }
         }
-        let ff = filter_frame(&frame, &pred, &enc, &dec).unwrap();
+        let ff = filter_frame(&frame, &pred, &enc_mt, &dec).unwrap();
         let exp_ff_bytes: Vec<u8> = exp_all.iter().flat_map(|(_, b)| b.iter().copied()).collect();
         assert_eq!(decompress(&ff, &dec).unwrap(), exp_ff_bytes, "iter={iter}");
 
@@ -476,7 +487,15 @@ fn randomized_differential_compressed_ops_stress() {
             _ => ColOp::MapU64(&num_fn),
         };
 
-        let upd_frame = update_column(&frame, &pred, t_col, op, &enc, &dec).unwrap();
+        let upd_frame = update_column(&frame, &pred, t_col, op, &enc_mt, &dec).unwrap();
+        let op_1t = match op_choice {
+            0 => ColOp::SetStr(set_val),
+            1 => ColOp::SetRaw(if is_json { b"\"raw_ok\"" } else { b"raw_ok" }),
+            2 => ColOp::MapStr(&upper_fn),
+            _ => ColOp::MapU64(&num_fn),
+        };
+        let upd_frame_1t = update_column(&frame, &pred, t_col, op_1t, &enc, &dec_1t).unwrap();
+        assert_eq!(upd_frame, upd_frame_1t, "mt vs 1t update_column frame bytes mismatch iter={iter}");
         let op_ref = match op_choice {
             0 => ColOp::SetStr(set_val),
             1 => ColOp::SetRaw(if is_json { b"\"raw_ok\"" } else { b"raw_ok" }),
@@ -508,7 +527,7 @@ fn randomized_differential_compressed_ops_stress() {
             _ => ColOp::MapU64(&num_fn),
         };
         // Chain map_column directly ON TOP of upd_frame!
-        let chained_frame = map_column(&upd_frame, w_col, map_op, &enc, &dec).unwrap();
+        let chained_frame = map_column(&upd_frame, w_col, map_op, &enc_mt, &dec).unwrap();
         let exp_chained = naive_transform(&exp_upd, None, w_col, &map_op_ref);
         assert_eq!(
             decompress(&chained_frame, &dec).unwrap(),

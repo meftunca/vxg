@@ -103,9 +103,9 @@ pub enum ColOp<'a> {
     /// Set the column's raw wire token directly (e.g. `b"0"`, `b"null"`, `b"true"`, `b"\"ok\""`).
     SetRaw(&'a [u8]),
     /// Transform logical string values `s -> f(s)`; non-string tokens (e.g. JSON `null`/`123`) are left unchanged.
-    MapStr(&'a dyn Fn(&[u8]) -> Vec<u8>),
+    MapStr(&'a (dyn Fn(&[u8]) -> Vec<u8> + Sync)),
     /// Transform canonical unsigned integer values `v -> f(v)`; non-integer tokens are left unchanged.
-    MapU64(&'a dyn Fn(u64) -> u64),
+    MapU64(&'a (dyn Fn(u64) -> u64 + Sync)),
 }
 
 #[inline]

@@ -143,6 +143,11 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
             "--redact" => action = Some(CliColAction::Redact),
             "--add" => action = Some(CliColAction::Add(val(args, &mut i)?.parse()?)),
             "--block-size" => enc.block_size = val(args, &mut i)?.parse()?,
+            "--threads" | "-t" => {
+                let th = parse_threads(val(args, &mut i)?)?;
+                enc.threads = th;
+                dec.threads = th;
+            }
             "--no-checksum" | "--no-verify-checksum" => {
                 enc.checksum = false;
                 dec.verify_checksum = false;

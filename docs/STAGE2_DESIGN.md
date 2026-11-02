@@ -107,5 +107,12 @@ Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`,
   - `update_column` (`WHERE status == 500 SET CRITICAL`, ~5% rows): **11.55 ms** (`4.89 GB/s`, **22.6×**)
   - `map_column` (`service -> uppercase`, `O(|D|)` dictionary): **8.44 ms** (`6.70 GB/s`, **30.5×**)
   - `map_column` (`bytes -> bytes + 100`, 1-col numeric): **28.74 ms** (`1.97 GB/s`, **8.4×**)
+- **8-Thread Deterministic Work-Stealing (`threads = 8`, `ndjson_varied.ndjson`, `56.5 MB`)**:
+  - `filter_column` (`latency_ms >= 200`): **1.88 ms** (`30.04 GB/s`, **43.8×**)
+  - `filter_frame` (`status == 500` -> `VXG1`): **4.24 ms** (`13.32 GB/s`, **19.1×**)
+  - `update_column` (`WHERE status == 500 SET CRITICAL`): **3.20 ms** (`17.66 GB/s`, **34.5×**)
+  - `map_column` (`service -> uppercase`): **3.27 ms** (`17.27 GB/s`, **31.5×**)
+  - `map_column` (`bytes -> bytes + 100`): **5.51 ms** (`10.25 GB/s`, **19.5×**)
+  - Produces **100% byte-for-byte identical** `RowMatch` vectors and `VXG1` frame bytes across `threads = 1..=256`.
 - **Differential Stress Suite (`tests/compressed_ops_stress.rs`)**:
   - Verified with `VXG_STRESS_ITERS=1500 MallocPreScribble=1 MallocScribble=1 cargo nextest run --release` across multi-template NDJSON, CSV, TSV, PSV, split column-0 boundaries, multi-block (`> 2` blocks) long lines, EOF without trailing newline, JSON escapes, CSV quotes, and `FAST_LZ`/`RAW` fallbacks.
