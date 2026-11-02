@@ -6,7 +6,7 @@ use crate::{
     BLOCK_COLUMN,
 };
 
-use super::emit::{emit_ready_blocks, BytesRef, ReadyBlock};
+use super::emit::{emit_ready_blocks, encode_raw_chunks, BytesRef, ReadyBlock};
 use super::line::{apply_line_col_op, ColOp, ColPred, ColTarget};
 use super::SyncCell;
 
@@ -82,43 +82,6 @@ fn transform_raw_block_lines(
         }
     }
     any_changed.then_some(out)
-}
-
-fn encode_raw_chunks<'a>(
-    raw: &[u8],
-    chunk_size: usize,
-    enc_options: &Options,
-    engine: simd::Engine,
-    scratch: &mut block::Scratch,
-    out: &mut Vec<ReadyBlock<'a>>,
-) -> Result<()> {
-    for chunk in raw.chunks(chunk_size.max(1)) {
-        scratch.payloads_mut().clear();
-        let (kind, off, len) = match crate::columns::encode_grammar_block_into(
-            chunk,
-            scratch.payloads_mut(),
-        )? {
-            Some((po, pl)) => (block::COLUMN, po, pl),
-            None if (512..=65536).contains(&chunk.len()) => {
-                let p = scratch.payloads_mut();
-                let o = p.len();
-                p.extend_from_slice(chunk);
-                (block::RAW, o, chunk.len())
-            }
-            None => {
-                let enc = block::encode::<false>(chunk, scratch, engine, enc_options.acceleration);
-                (enc.kind, enc.offset, enc.len)
-            }
-        };
-        let bytes = scratch.payloads_mut()[off..off + len].to_vec();
-        out.push(ReadyBlock {
-            payload: BytesRef::Owned(bytes),
-            kind,
-            raw_size: chunk.len(),
-            checksum: if enc_options.checksum { crc32c(chunk) } else { 0 },
-        });
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

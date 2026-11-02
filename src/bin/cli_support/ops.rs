@@ -48,23 +48,67 @@ fn parse_col_target(s: &str) -> R<vxg::ColTarget<'_>> {
     }
 }
 
+fn parse_canonical_cli_u64(s: &str) -> Option<u64> {
+    if s.is_empty() || s.len() > 20 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if s.len() > 1 && s.starts_with('0') {
+        return None;
+    }
+    s.parse().ok()
+}
+
+fn parse_auto_eq_pred(rhs: &str, is_eq: bool) -> OwnedPred {
+    let t = rhs.trim();
+    let is_quoted = t.len() >= 2
+        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')));
+    if !is_quoted {
+        if let Some(n) = parse_canonical_cli_u64(t) {
+            return OwnedPred::Num(if is_eq {
+                vxg::NumCmp::Eq(n)
+            } else {
+                vxg::NumCmp::Ne(n)
+            });
+        }
+    }
+    let bytes = unquote_opt(rhs).to_vec();
+    if is_eq {
+        OwnedPred::StrEq(bytes)
+    } else {
+        OwnedPred::StrNe(bytes)
+    }
+}
+
 fn parse_where_spec(spec: &str) -> R<(vxg::ColTarget<'_>, OwnedPred)> {
     for (op_tok, ctor) in [
         (">=", (|n| vxg::NumCmp::Ge(n)) as fn(u64) -> vxg::NumCmp),
         ("<=", |n| vxg::NumCmp::Le(n)),
     ] {
         if let Some((lhs, rhs)) = spec.split_once(op_tok) {
-            return Ok((parse_col_target(lhs)?, OwnedPred::Num(ctor(rhs.parse()?))));
+            return Ok((
+                parse_col_target(lhs.trim())?,
+                OwnedPred::Num(ctor(rhs.trim().parse()?)),
+            ));
         }
     }
     if let Some((lhs, rhs)) = spec.split_once("!=") {
-        return Ok((parse_col_target(lhs)?, OwnedPred::StrNe(rhs.as_bytes().to_vec())));
+        let rhs_eff = if lhs.ends_with(' ') || lhs.ends_with('\t') {
+            rhs.trim_start()
+        } else {
+            rhs
+        };
+        return Ok((parse_col_target(lhs.trim())?, parse_auto_eq_pred(rhs_eff, false)));
     }
     if let Some((lhs, rhs)) = spec.split_once("==") {
-        return Ok((parse_col_target(lhs)?, OwnedPred::StrEq(rhs.as_bytes().to_vec())));
+        let rhs_eff = if lhs.ends_with(' ') || lhs.ends_with('\t') {
+            rhs.trim_start()
+        } else {
+            rhs
+        };
+        return Ok((parse_col_target(lhs.trim())?, parse_auto_eq_pred(rhs_eff, true)));
     }
     if let Some((lhs, rhs)) = spec.split_once('=') {
-        let col = parse_col_target(lhs)?;
+        let col = parse_col_target(lhs.trim())?;
         let pred = if let Some(v) = rhs.strip_prefix("eq:") {
             OwnedPred::StrEq(v.as_bytes().to_vec())
         } else if let Some(v) = rhs.strip_prefix("ne:") {
@@ -76,19 +120,19 @@ fn parse_where_spec(spec: &str) -> R<(vxg::ColTarget<'_>, OwnedPred)> {
         } else if let Some(v) = rhs.strip_prefix("contains:") {
             OwnedPred::StrContains(v.as_bytes().to_vec())
         } else if let Some(v) = rhs.strip_prefix("num:").or_else(|| rhs.strip_prefix("num-eq:")) {
-            OwnedPred::Num(vxg::NumCmp::Eq(v.parse()?))
+            OwnedPred::Num(vxg::NumCmp::Eq(v.trim().parse()?))
         } else if let Some(v) = rhs.strip_prefix("num-ne:") {
-            OwnedPred::Num(vxg::NumCmp::Ne(v.parse()?))
+            OwnedPred::Num(vxg::NumCmp::Ne(v.trim().parse()?))
         } else if let Some(v) = rhs.strip_prefix("gt:") {
-            OwnedPred::Num(vxg::NumCmp::Gt(v.parse()?))
+            OwnedPred::Num(vxg::NumCmp::Gt(v.trim().parse()?))
         } else if let Some(v) = rhs.strip_prefix("ge:") {
-            OwnedPred::Num(vxg::NumCmp::Ge(v.parse()?))
+            OwnedPred::Num(vxg::NumCmp::Ge(v.trim().parse()?))
         } else if let Some(v) = rhs.strip_prefix("lt:") {
-            OwnedPred::Num(vxg::NumCmp::Lt(v.parse()?))
+            OwnedPred::Num(vxg::NumCmp::Lt(v.trim().parse()?))
         } else if let Some(v) = rhs.strip_prefix("le:") {
-            OwnedPred::Num(vxg::NumCmp::Le(v.parse()?))
+            OwnedPred::Num(vxg::NumCmp::Le(v.trim().parse()?))
         } else {
-            OwnedPred::StrEq(rhs.as_bytes().to_vec())
+            parse_auto_eq_pred(rhs, true)
         };
         return Ok((col, pred));
     }
@@ -97,10 +141,16 @@ fn parse_where_spec(spec: &str) -> R<(vxg::ColTarget<'_>, OwnedPred)> {
         ('<', |n| vxg::NumCmp::Lt(n)),
     ] {
         if let Some((lhs, rhs)) = spec.split_once(op_ch) {
-            return Ok((parse_col_target(lhs)?, OwnedPred::Num(ctor(rhs.parse()?))));
+            return Ok((
+                parse_col_target(lhs.trim())?,
+                OwnedPred::Num(ctor(rhs.trim().parse()?)),
+            ));
         }
     }
-    Err("invalid --where SPEC (examples: json:level=ERROR, json:bytes>=10000, csv:1=prefix:ERR)".into())
+    Err(
+        "invalid --where EXPR (examples: json:level=ERROR, status==500 && bytes>=10000, csv:1=prefix:ERR)"
+            .into(),
+    )
 }
 
 enum CliColAction {
@@ -126,6 +176,7 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
     let mut dec = DecodeOptions::default();
     let mut where_spec: Option<String> = None;
     let mut col_spec: Option<String> = None;
+    let mut cols_spec: Option<String> = None;
     let mut action: Option<CliColAction> = None;
     let mut force = false;
     let mut quiet = false;
@@ -134,6 +185,7 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
         match args[i].as_str() {
             "--where" => where_spec = Some(val(args, &mut i)?.to_owned()),
             "--col" => col_spec = Some(val(args, &mut i)?.to_owned()),
+            "--cols" | "--select" => cols_spec = Some(val(args, &mut i)?.to_owned()),
             "--set" => action = Some(CliColAction::SetStr(val(args, &mut i)?.as_bytes().to_vec())),
             "--set-raw" => {
                 action = Some(CliColAction::SetRaw(val(args, &mut i)?.as_bytes().to_vec()))
@@ -143,6 +195,7 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
             "--redact" => action = Some(CliColAction::Redact),
             "--add" => action = Some(CliColAction::Add(val(args, &mut i)?.parse()?)),
             "--block-size" => enc.block_size = val(args, &mut i)?.parse()?,
+            "--legacy" => enc.legacy_v2 = true,
             "--threads" | "-t" => {
                 let th = parse_threads(val(args, &mut i)?)?;
                 enc.threads = th;
@@ -167,13 +220,24 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
 
     let result = match cmd {
         "filter-frame" => {
-            let ws = where_spec.as_deref().ok_or("--where SPEC is required for filter-frame")?;
-            let (w_col, w_pred) = parse_where_spec(ws)?;
-            let pred = vxg::ColPred {
-                col: w_col,
-                pred: w_pred.as_value_pred(),
-            };
-            vxg::filter_frame(&frame_bytes, &pred, &enc, &dec)?
+            let ws = where_spec
+                .as_deref()
+                .ok_or("--where EXPR is required for filter-frame")?;
+            let owned = parse_where_expr(ws)?;
+            let arena = PredArena::new();
+            let expr = arena.build(&owned);
+            vxg::filter_frame_where(&frame_bytes, &expr, &enc, &dec)?
+        }
+        "project" => {
+            let cs = cols_spec
+                .as_deref()
+                .or(col_spec.as_deref())
+                .ok_or("--cols COL1,COL2,... is required for project")?;
+            let cols = parse_col_list(cs)?;
+            let owned = where_spec.as_deref().map(parse_where_expr).transpose()?;
+            let arena = PredArena::new();
+            let expr_opt = owned.as_ref().map(|e| arena.build(e));
+            vxg::project_frame(&frame_bytes, expr_opt.as_ref(), &cols, &enc, &dec)?
         }
         "update" | "map" => {
             let cs = col_spec.as_deref().ok_or("--col COL is required")?;

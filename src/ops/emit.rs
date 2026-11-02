@@ -1,4 +1,4 @@
-use crate::{frame, Error, Options, Result};
+use crate::{block, checksum::crc32c, frame, simd, Error, Options, Result};
 
 pub(super) enum BytesRef<'a> {
     Borrowed(&'a [u8]),
@@ -89,7 +89,11 @@ fn append_v4_frame(
 }
 
 pub(super) fn emit_ready_blocks(ready: &[ReadyBlock<'_>], enc_options: &Options) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
+    let est_cap: usize = ready
+        .iter()
+        .map(|rb| 40 + rb.payload.as_slice().len())
+        .sum();
+    let mut out = Vec::with_capacity(est_cap);
     if ready.len() == 1 {
         let bs = single_block_bs(ready[0].raw_size, enc_options.block_size);
         append_v4_frame(&mut out, ready, bs, enc_options.checksum)?;
@@ -135,4 +139,41 @@ pub(super) fn emit_ready_blocks(ready: &[ReadyBlock<'_>], enc_options: &Options)
         }
     }
     Ok(out)
+}
+
+pub(super) fn encode_raw_chunks<'a>(
+    raw: &[u8],
+    chunk_size: usize,
+    enc_options: &Options,
+    engine: simd::Engine,
+    scratch: &mut block::Scratch,
+    out: &mut Vec<ReadyBlock<'a>>,
+) -> Result<()> {
+    for chunk in raw.chunks(chunk_size.max(1)) {
+        scratch.payloads_mut().clear();
+        let (kind, off, len) = match crate::columns::encode_grammar_block_into(
+            chunk,
+            scratch.payloads_mut(),
+        )? {
+            Some((po, pl)) => (block::COLUMN, po, pl),
+            None if (512..=65536).contains(&chunk.len()) => {
+                let p = scratch.payloads_mut();
+                let o = p.len();
+                p.extend_from_slice(chunk);
+                (block::RAW, o, chunk.len())
+            }
+            None => {
+                let enc = block::encode::<false>(chunk, scratch, engine, enc_options.acceleration);
+                (enc.kind, enc.offset, enc.len)
+            }
+        };
+        let bytes = scratch.payloads_mut()[off..off + len].to_vec();
+        out.push(ReadyBlock {
+            payload: BytesRef::Owned(bytes),
+            kind,
+            raw_size: chunk.len(),
+            checksum: if enc_options.checksum { crc32c(chunk) } else { 0 },
+        });
+    }
+    Ok(())
 }

@@ -32,8 +32,12 @@ Usage:
   vxg block        FRAME INDEX [OUTPUT] [--simd MODE] [--max-output BYTES]
                                 [--no-checksum|--no-verify-checksum] [--force|-f]
   vxg q|query      FRAME        [--count | --row IDX | --range START:END |
-                                 --find-first STR | --filter STR | --where SPEC] [--limit N]
-  vxg filter-frame INPUT OUTPUT --where SPEC [--block-size BYTES] [--no-checksum] [-f] [-q]
+                                 --find-first STR | --filter STR | --where EXPR |
+                                 --select COL1,COL2,...] [--limit N] [-t N|auto]
+  vxg agg          FRAME        [--group-by GCOL] [--col ACOL] [--where EXPR]
+                                [--limit N] [--json] [-t N|auto]
+  vxg project      INPUT OUTPUT --cols COL1,COL2,... [--where EXPR] [-t N|auto] [-f] [-q]
+  vxg filter-frame INPUT OUTPUT --where EXPR [--block-size BYTES] [--no-checksum] [-f] [-q]
   vxg update       INPUT OUTPUT --where SPEC --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [-f] [-q]
   vxg map          INPUT OUTPUT --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [-f] [-q]
   vxg info|list    FRAME        [--summary]
@@ -225,7 +229,7 @@ fn run_args(args: &[String]) -> R<()> {
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--threads" => dec.threads = parse_threads(val(args, &mut i)?)?,
+                    "--threads" | "-t" => dec.threads = parse_threads(val(args, &mut i)?)?,
                     "--simd" => dec.simd = val(args, &mut i)?.parse()?,
                     "--max-output" => dec.max_output = val(args, &mut i)?.parse()?,
                     "--no-checksum" | "--no-verify-checksum" => dec.verify_checksum = false,
@@ -296,7 +300,8 @@ fn run_args(args: &[String]) -> R<()> {
             return gpu_check(args[1].parse()?);
         }
         "q" | "query" => return run_query_cmd(args),
-        "filter-frame" | "update" | "map" => return run_ops_cmd(args),
+        "agg" | "group-by" => return run_agg_cmd(args),
+        "filter-frame" | "project" | "update" | "map" => return run_ops_cmd(args),
         "c" | "compress" | "d" | "decompress" => {}
         _ => return Err(format!("unknown command: {cmd}\n{HELP}").into()),
     }
@@ -321,7 +326,7 @@ fn run_args(args: &[String]) -> R<()> {
         match args[i].as_str() {
             "--backend" => backend = val(args, &mut i)?.into(),
             "--stream" => stream_mode = true,
-            "--threads" => {
+            "--threads" | "-t" => {
                 let n = parse_threads(val(args, &mut i)?)?;
                 enc.threads = n;
                 dec.threads = n;
@@ -487,5 +492,7 @@ fn gpu_check(backend: Backend) -> R<()> {
 }
 
 include!("cli_support/ops.rs");
+include!("cli_support/expr_parser.rs");
 include!("cli_support/query.rs");
+include!("cli_support/agg.rs");
 include!("cli_support/tests.rs");

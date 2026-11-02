@@ -1,5 +1,4 @@
-//! Stage 2 compressed-domain structured operations (`filter_column`, `filter_frame`,
-//! `update_column`, `map_column`) on VXG frames without full-frame decode/re-encode.
+//! Compressed-domain structured operations, boolean predicates, aggregations, and projection.
 
 use std::borrow::Cow;
 use std::cell::UnsafeCell;
@@ -12,11 +11,14 @@ mod emit;
 pub(crate) mod expr;
 mod filter_frame;
 pub(crate) mod line;
+pub(crate) mod project;
+pub(crate) mod project_line;
 mod transform;
 
 pub(crate) use line::parse_canonical_u64;
 pub use agg::{agg_line, decode_group_token_ref, AggStats, GroupKey, GroupRow};
 pub use expr::{line_matches_expr, PredExpr};
+pub use project_line::project_line;
 pub use line::{
     apply_line_col_op, apply_token_op, decode_delim_str, encode_delim_str, encode_json_str,
     eval_token_pred, find_delimited_col_span, find_json_key_span, find_line_col_span,
@@ -365,11 +367,8 @@ fn filter_column_parallel(
     Ok(out)
 }
 
-/// Find up to `limit` records in `frame_bytes` satisfying column predicate `pred`.
-///
-/// On `GRAMMAR_PACKET` (`BLOCK_COLUMN`) blocks, only the addressed column is inspected
-/// (with header-only 256-bit alphabet and numeric zone-map rejection), and non-target
-/// columns are materialized only when at least one row in the block matches.
+/// Find up to `limit` records in `frame_bytes` satisfying column predicate `pred`
+/// directly in the compressed domain.
 pub fn filter_column(
     frame_bytes: &[u8],
     pred: &ColPred<'_>,
@@ -573,4 +572,26 @@ pub fn group_by(
     dec_options: &DecodeOptions,
 ) -> Result<Vec<GroupRow>> {
     agg::group_by_impl(frame_bytes, where_expr, group_col, agg_col, dec_options)
+}
+
+/// Project `cols` across up to `limit` records matching `where_expr` in the compressed domain.
+pub fn select_columns(
+    frame_bytes: &[u8],
+    where_expr: Option<&PredExpr<'_>>,
+    cols: &[ColTarget<'_>],
+    limit: usize,
+    dec_options: &DecodeOptions,
+) -> Result<Vec<u8>> {
+    project::select_columns_impl(frame_bytes, where_expr, cols, limit, dec_options)
+}
+
+/// Produce a canonical VXG frame containing only projected `cols` matching `where_expr`.
+pub fn project_frame(
+    frame_bytes: &[u8],
+    where_expr: Option<&PredExpr<'_>>,
+    cols: &[ColTarget<'_>],
+    enc_options: &Options,
+    dec_options: &DecodeOptions,
+) -> Result<Vec<u8>> {
+    project::project_frame_impl(frame_bytes, where_expr, cols, enc_options, dec_options)
 }

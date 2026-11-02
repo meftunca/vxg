@@ -1,7 +1,7 @@
-fn run_query_cmd(args: &[String]) -> R<()> {
+fn execute_query_to_vec(args: &[String]) -> R<Vec<u8>> {
     if args.len() < 3 {
         return Err(
-            "usage: vxg query FRAME [--count | --row IDX | --range START:END | --find-first STR | --filter STR | --where SPEC [--limit N]]"
+            "usage: vxg query FRAME [--count | --row IDX | --range START:END | --find-first STR | --filter STR | --where EXPR | --select COLS] [--limit N]"
                 .into(),
         );
     }
@@ -13,6 +13,7 @@ fn run_query_cmd(args: &[String]) -> R<()> {
     let mut find_first_str: Option<String> = None;
     let mut filter_str: Option<String> = None;
     let mut where_spec: Option<String> = None;
+    let mut select_spec: Option<String> = None;
     let mut limit: usize = usize::MAX;
     let mut i = 2;
     while i < args.len() {
@@ -30,62 +31,85 @@ fn run_query_cmd(args: &[String]) -> R<()> {
             "--find-first" => find_first_str = Some(val(args, &mut i)?.to_owned()),
             "--filter" | "--contains" => filter_str = Some(val(args, &mut i)?.to_owned()),
             "--where" => where_spec = Some(val(args, &mut i)?.to_owned()),
+            "--select" | "--cols" => select_spec = Some(val(args, &mut i)?.to_owned()),
             "--limit" => limit = val(args, &mut i)?.parse()?,
             "--threads" | "-t" => opts.threads = parse_threads(val(args, &mut i)?)?,
+            "--no-checksum" | "--no-verify-checksum" => opts.verify_checksum = false,
+            "--max-output" => opts.max_output = val(args, &mut i)?.parse()?,
             x => return Err(format!("unknown query option {x}").into()),
         }
         i += 1;
     }
 
-    if count_only {
-        if let Some(ws) = where_spec.as_deref() {
-            let (col, pred_val) = parse_where_spec(ws)?;
-            let pred = vxg::ColPred {
-                col,
-                pred: pred_val.as_value_pred(),
-            };
-            println!("{}", vxg::filter_column(&frame, &pred, limit, &opts)?.len());
-        } else {
-            println!("{}", vxg::frame_row_count(&frame)?);
+    if let Some(cs) = select_spec.as_deref() {
+        if count_only {
+            return Err("cannot combine --count and --select".into());
         }
-        return Ok(());
+        let cols = parse_col_list(cs)?;
+        let owned = where_spec.as_deref().map(parse_where_expr).transpose()?;
+        let arena = PredArena::new();
+        let expr_opt = owned.as_ref().map(|e| arena.build(e));
+        return Ok(vxg::select_columns(
+            &frame,
+            expr_opt.as_ref(),
+            &cols,
+            limit,
+            &opts,
+        )?);
+    }
+
+    if count_only {
+        let cnt: u64 = if let Some(ws) = where_spec.as_deref() {
+            let owned = parse_where_expr(ws)?;
+            let arena = PredArena::new();
+            let expr = arena.build(&owned);
+            vxg::count_where(&frame, &expr, &opts)?.min(limit as u64)
+        } else {
+            (vxg::frame_row_count(&frame)? as u64).min(limit as u64)
+        };
+        return Ok(format!("{cnt}\n").into_bytes());
     }
     if let Some(idx) = row_idx {
-        let bytes = vxg::extract_row(&frame, idx, &opts)?;
-        io::stdout().lock().write_all(&bytes)?;
-        return Ok(());
+        return Ok(vxg::extract_row(&frame, idx, &opts)?);
     }
     if let Some((start, end)) = range {
-        let bytes = vxg::extract_row_range(&frame, start, end, &opts)?;
-        io::stdout().lock().write_all(&bytes)?;
-        return Ok(());
+        return Ok(vxg::extract_row_range(&frame, start, end, &opts)?);
     }
     if let Some(ws) = where_spec.as_deref() {
-        let (col, pred_val) = parse_where_spec(ws)?;
-        let pred = vxg::ColPred {
-            col,
-            pred: pred_val.as_value_pred(),
-        };
-        let matches = vxg::filter_column(&frame, &pred, limit, &opts)?;
-        let mut out = io::stdout().lock();
+        let owned = parse_where_expr(ws)?;
+        let arena = PredArena::new();
+        let expr = arena.build(&owned);
+        let matches = vxg::filter_where(&frame, &expr, limit, &opts)?;
+        let total: usize = matches.iter().map(|m| m.bytes.len()).sum();
+        let mut out = Vec::with_capacity(total);
         for m in matches {
-            out.write_all(&m.bytes)?;
+            out.extend_from_slice(&m.bytes);
         }
-        return Ok(());
+        return Ok(out);
     }
     if let Some(needle) = find_first_str {
         if let Some(m) = vxg::find_first(&frame, needle.as_bytes(), &opts)? {
-            io::stdout().lock().write_all(&m.bytes)?;
+            return Ok(m.bytes);
         }
-        return Ok(());
+        return Ok(Vec::new());
     }
     if let Some(needle) = filter_str {
         let matches = vxg::filter_rows(&frame, needle.as_bytes(), limit, &opts)?;
-        let mut out = io::stdout().lock();
+        let total: usize = matches.iter().map(|m| m.bytes.len()).sum();
+        let mut out = Vec::with_capacity(total);
         for m in matches {
-            out.write_all(&m.bytes)?;
+            out.extend_from_slice(&m.bytes);
         }
-        return Ok(());
+        return Ok(out);
     }
-    Err("specify one of --count, --row, --range, --find-first, --filter, or --where".into())
+    Err(
+        "specify one of --count, --row, --range, --find-first, --filter, --where, or --select"
+            .into(),
+    )
+}
+
+fn run_query_cmd(args: &[String]) -> R<()> {
+    let bytes = execute_query_to_vec(args)?;
+    io::stdout().lock().write_all(&bytes)?;
+    Ok(())
 }

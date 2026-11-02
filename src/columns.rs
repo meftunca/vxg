@@ -266,7 +266,7 @@ fn reserve_raw_arena_for_block(
         let cap = if raw_len <= 65536 && lz_dict_cols == 0 && !has_lz_raw {
             98_304
         } else {
-            raw_len.saturating_mul(2 + lz_dict_cols) + 16384
+            raw_len.max(65536).saturating_mul(2 + lz_dict_cols) + 16384
         };
         raw_arena.reserve(cap);
     }
@@ -559,5 +559,7 @@ include!("columns/ops_expr.rs");
 include!("columns/ops_expr_filter.rs");
 include!("columns/ops_agg.rs");
 include!("columns/ops_group.rs");
+include!("columns/ops_project_plan.rs");
+include!("columns/ops_project.rs");
 include!("columns/tests_models.rs");
 include!("columns/tests_packets.rs");
