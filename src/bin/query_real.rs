@@ -374,6 +374,8 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
     }
 }
 
+include!("query_real_support/agg.rs");
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
@@ -411,6 +413,14 @@ fn main() {
         let mut dec_t = dec;
         dec_t.threads = threads;
         run_ops_suite(&raw, &frame, kind, &opts_t, &dec_t);
+        return;
+    }
+
+    if args.get(1).map(String::as_str) == Some("--agg-suite") {
+        let threads: usize = args.get(3).or(args.get(2)).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let mut dec_t = dec;
+        dec_t.threads = threads;
+        run_agg_suite(&raw, &frame, &dec_t);
         return;
     }
 

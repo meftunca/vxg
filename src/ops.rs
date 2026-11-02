@@ -7,12 +7,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::{frame, query, DecodeOptions, Frame, Options, Result, RowMatch, BLOCK_COLUMN};
 
+pub(crate) mod agg;
 mod emit;
+pub(crate) mod expr;
 mod filter_frame;
-mod line;
+pub(crate) mod line;
 mod transform;
 
 pub(crate) use line::parse_canonical_u64;
+pub use agg::{agg_line, decode_group_token_ref, AggStats, GroupKey, GroupRow};
+pub use expr::{line_matches_expr, PredExpr};
 pub use line::{
     apply_line_col_op, apply_token_op, decode_delim_str, encode_delim_str, encode_json_str,
     eval_token_pred, find_delimited_col_span, find_json_key_span, find_line_col_span,
@@ -43,30 +47,53 @@ impl<T> SyncCell<T> {
     }
 }
 
-struct ParInBlock<'a> {
-    f_bytes: &'a [u8],
-    local_blk: usize,
-    info: frame::BlockInfo,
-    payload: &'a [u8],
+pub(super) struct ParInBlock<'a> {
+    pub(super) f_bytes: &'a [u8],
+    pub(super) local_blk: usize,
+    pub(super) info: frame::BlockInfo,
+    pub(super) payload: &'a [u8],
 }
 
-struct ParMeta<'a> {
-    decoded_raw: Option<Vec<u8>>,
-    row_count: usize,
-    had_in_carry: bool,
-    cur_global: usize,
-    first_frag: Option<Cow<'a, [u8]>>,
-    last_unterm_frag: Option<Cow<'a, [u8]>>,
+pub(super) struct ParMeta<'a> {
+    pub(super) decoded_raw: Option<Vec<u8>>,
+    pub(super) row_count: usize,
+    pub(super) had_in_carry: bool,
+    pub(super) cur_global: usize,
+    pub(super) first_frag: Option<Cow<'a, [u8]>>,
+    pub(super) last_unterm_frag: Option<Cow<'a, [u8]>>,
 }
 
-fn filter_column_parallel(
-    in_blocks: &[ParInBlock<'_>],
-    pred: &ColPred<'_>,
-    limit: usize,
+pub(super) struct BoundaryLine {
+    pub(super) block_index: usize,
+    pub(super) row_index: usize,
+    pub(super) global_row_index: usize,
+    pub(super) bytes: Vec<u8>,
+}
+
+pub(super) fn collect_par_blocks<'a>(
+    frame_bytes: &'a [u8],
+    frames: &[Frame<'a>],
+) -> Vec<ParInBlock<'a>> {
+    let mut in_blocks = Vec::new();
+    for (f_bytes, parsed) in query::frame_slices(frame_bytes, frames) {
+        for (local_blk, info) in parsed.blocks().enumerate() {
+            in_blocks.push(ParInBlock {
+                f_bytes,
+                local_blk,
+                info,
+                payload: &f_bytes[info.payload_offset..info.payload_offset + info.payload_size],
+            });
+        }
+    }
+    in_blocks
+}
+
+pub(super) fn build_par_meta_and_boundary<'a>(
+    in_blocks: &[ParInBlock<'a>],
     options: &DecodeOptions,
-) -> Result<Vec<RowMatch>> {
+) -> Result<(Vec<ParMeta<'a>>, Vec<BoundaryLine>)> {
     let nb = in_blocks.len();
-    let mut meta: Vec<ParMeta<'_>> = Vec::with_capacity(nb);
+    let mut meta: Vec<ParMeta<'a>> = Vec::with_capacity(nb);
     let mut non_empty = Vec::with_capacity(nb);
     let mut incoming = false;
     let mut any_unterm = false;
@@ -138,7 +165,7 @@ fn filter_column_parallel(
         });
     }
 
-    let mut boundary_matches = Vec::new();
+    let mut boundary_lines = Vec::new();
     if any_unterm {
         let mut k_idx = 0usize;
         while k_idx < non_empty.len() {
@@ -164,15 +191,35 @@ fn filter_column_parallel(
                     break;
                 }
             }
-            if line_matches_col_pred(&full, pred) {
-                boundary_matches.push(RowMatch {
-                    block_index: b0,
-                    row_index: start_row,
-                    global_row_index: start_glob,
-                    bytes: full,
-                });
-            }
+            boundary_lines.push(BoundaryLine {
+                block_index: b0,
+                row_index: start_row,
+                global_row_index: start_glob,
+                bytes: full,
+            });
             k_idx = m.max(k_idx + 1);
+        }
+    }
+    Ok((meta, boundary_lines))
+}
+
+fn filter_column_parallel(
+    in_blocks: &[ParInBlock<'_>],
+    pred: &ColPred<'_>,
+    limit: usize,
+    options: &DecodeOptions,
+) -> Result<Vec<RowMatch>> {
+    let nb = in_blocks.len();
+    let (meta, boundary_lines) = build_par_meta_and_boundary(in_blocks, options)?;
+    let mut boundary_matches = Vec::new();
+    for bl in boundary_lines {
+        if line_matches_col_pred(&bl.bytes, pred) {
+            boundary_matches.push(RowMatch {
+                block_index: bl.block_index,
+                row_index: bl.row_index,
+                global_row_index: bl.global_row_index,
+                bytes: bl.bytes,
+            });
         }
     }
 
@@ -335,17 +382,7 @@ pub fn filter_column(
     }
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if options.threads > 1 {
-        let mut in_blocks = Vec::new();
-        for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
-            for (local_blk, info) in parsed.blocks().enumerate() {
-                in_blocks.push(ParInBlock {
-                    f_bytes,
-                    local_blk,
-                    info,
-                    payload: &f_bytes[info.payload_offset..info.payload_offset + info.payload_size],
-                });
-            }
-        }
+        let in_blocks = collect_par_blocks(frame_bytes, &frames);
         if in_blocks.len() > 1 {
             return filter_column_parallel(&in_blocks, pred, limit, options);
         }
@@ -481,4 +518,59 @@ pub fn map_column(
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
     transform::transform_frame(frame_bytes, None, target_col, &op, enc_options, dec_options)
+}
+
+/// Count records in `frame_bytes` matching compound boolean `expr` directly in the
+/// compressed domain without materializing record bytes.
+pub fn count_where(
+    frame_bytes: &[u8],
+    expr: &PredExpr<'_>,
+    dec_options: &DecodeOptions,
+) -> Result<u64> {
+    expr::count_where_impl(frame_bytes, expr, dec_options)
+}
+
+/// Find up to `limit` records in `frame_bytes` matching compound boolean `expr`,
+/// pruning blocks and columns in the compressed domain via short-circuit bitset evaluation.
+pub fn filter_where(
+    frame_bytes: &[u8],
+    expr: &PredExpr<'_>,
+    limit: usize,
+    dec_options: &DecodeOptions,
+) -> Result<Vec<RowMatch>> {
+    expr::filter_where_impl(frame_bytes, expr, limit, dec_options)
+}
+
+/// Produce a new canonical VXG frame containing only records satisfying compound `expr`,
+/// passing 100%-matching compressed blocks through zero-copy and skipping 0%-matching blocks.
+pub fn filter_frame_where(
+    frame_bytes: &[u8],
+    expr: &PredExpr<'_>,
+    enc_options: &Options,
+    dec_options: &DecodeOptions,
+) -> Result<Vec<u8>> {
+    filter_frame::filter_frame_expr_impl(frame_bytes, expr, enc_options, dec_options)
+}
+
+/// Compute `COUNT(*)`, `COUNT(agg_col)`, `SUM(agg_col)`, `MIN(agg_col)`, and `MAX(agg_col)`
+/// over records satisfying `where_expr` directly on compressed binary/dictionary columns.
+pub fn aggregate_column(
+    frame_bytes: &[u8],
+    where_expr: Option<&PredExpr<'_>>,
+    agg_col: ColTarget<'_>,
+    dec_options: &DecodeOptions,
+) -> Result<AggStats> {
+    agg::aggregate_column_impl(frame_bytes, where_expr, agg_col, dec_options)
+}
+
+/// Group records satisfying `where_expr` by `group_col` and optionally aggregate `agg_col`
+/// directly in the compressed domain, returning deterministically sorted [`GroupRow`]s.
+pub fn group_by(
+    frame_bytes: &[u8],
+    where_expr: Option<&PredExpr<'_>>,
+    group_col: ColTarget<'_>,
+    agg_col: Option<ColTarget<'_>>,
+    dec_options: &DecodeOptions,
+) -> Result<Vec<GroupRow>> {
+    agg::group_by_impl(frame_bytes, where_expr, group_col, agg_col, dec_options)
 }

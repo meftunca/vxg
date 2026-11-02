@@ -515,3 +515,77 @@ pub(crate) fn peek_grammar_boundary_fast<'a>(
         }))
     })
 }
+
+struct TplColSlices<'a> {
+    inline: [&'a [u8]; 64],
+    overflow: Vec<&'a [u8]>,
+    starts: [u16; 17],
+}
+
+impl<'a> TplColSlices<'a> {
+    #[inline(always)]
+    fn get(&self, t: usize) -> &[&'a [u8]] {
+        let s = self.starts[t] as usize;
+        let e = self.starts[t + 1] as usize;
+        if self.overflow.is_empty() {
+            &self.inline[s..e]
+        } else {
+            &self.overflow[s..e]
+        }
+    }
+}
+
+fn read_all_template_col_slices<'a>(hdr: &mut OpsGrammarHeader<'a>) -> Result<TplColSlices<'a>> {
+    let total_slots: usize = hdr.slot_counts[..hdr.template_count].iter().sum();
+    let mut out = TplColSlices {
+        inline: [&[]; 64],
+        overflow: if total_slots > 64 { Vec::with_capacity(total_slots) } else { Vec::new() },
+        starts: [0u16; 17],
+    };
+    let mut pos = 0usize;
+    for t in 0..hdr.template_count {
+        out.starts[t] = pos as u16;
+        for _ in 0..hdr.slot_counts[t] {
+            let len = hdr.cursor.uleb()?;
+            let s = hdr.cursor.take(len)?;
+            if total_slots <= 64 { out.inline[pos] = s; } else { out.overflow.push(s); }
+            pos += 1;
+        }
+    }
+    out.starts[hdr.template_count] = pos as u16;
+    if !hdr.cursor.done() {
+        return Err(invalid("column packet trailing bytes"));
+    }
+    Ok(out)
+}
+
+#[inline(always)]
+fn ensure_raw_rows_arena(hdr: &OpsGrammarHeader<'_>, raw_arena: &mut Vec<u8>) {
+    if hdr.raw_count > 0 && hdr.cursor.bytes.get(hdr.cursor.pos) == Some(&0) {
+        ensure_full_raw_arena(hdr.raw_len, raw_arena);
+    }
+}
+
+#[inline(always)]
+fn ensure_full_raw_arena(raw_len: usize, raw_arena: &mut Vec<u8>) {
+    let need = raw_len.saturating_mul(2) + 81_920;
+    if raw_arena.capacity() - raw_arena.len() < need {
+        raw_arena.reserve(need);
+    }
+}
+
+#[inline(always)]
+fn ensure_col_raw_arena(col_bytes: &[u8], raw_len: usize, raw_arena: &mut Vec<u8>) {
+    let needs = match col_bytes.first().copied() {
+        Some(MODEL_LZ_RAW | MODEL_PATTERN) => true,
+        Some(MODEL_FRONT_DICT) => {
+            !(col_bytes.get(1).is_some_and(|&e| e < 0x80)
+                && col_bytes.get(2).is_some_and(|&m| (m & 0x03) == 0))
+        }
+        Some(MODEL_DICTIONARY) => col_bytes.get(1).is_none_or(|&e| e >= 0x80),
+        _ => false,
+    };
+    if needs {
+        ensure_full_raw_arena(raw_len, raw_arena);
+    }
+}

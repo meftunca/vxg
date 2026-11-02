@@ -33,8 +33,9 @@ pub use block::{WorkStats, COLUMN as BLOCK_COLUMN, LZ as BLOCK_LZ, RAW as BLOCK_
 pub use error::{Error, Result};
 pub use frame::{max_compressed_size, BlockInfo, Frame, ValidatedFrame};
 pub use ops::{
-    filter_column, filter_frame, map_column, update_column, ColOp, ColPred, ColTarget, StrCmp,
-    ValuePred,
+    aggregate_column, count_where, filter_column, filter_frame, filter_frame_where, filter_where,
+    group_by, map_column, update_column, AggStats, ColOp, ColPred, ColTarget, GroupKey, GroupRow,
+    PredExpr, StrCmp, ValuePred,
 };
 pub use query::{
     block_row_count, extract_block_row, extract_block_row_range, extract_row, extract_row_range,

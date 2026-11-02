@@ -6,7 +6,8 @@ use crate::{
 };
 
 use super::emit::{emit_ready_blocks, BytesRef, ReadyBlock};
-use super::line::{line_matches_col_pred, ColPred};
+use super::expr::{line_matches_expr, PredExpr};
+use super::line::ColPred;
 use super::SyncCell;
 
 struct FilterBlock<'a> {
@@ -34,7 +35,7 @@ enum BlockFilterOut {
 fn eval_one_filter_block(
     ib: &FilterBlock<'_>,
     meta: &FilterMeta<'_>,
-    pred: &ColPred<'_>,
+    expr: &PredExpr<'_>,
     dec_options: &DecodeOptions,
     dec_buf: &mut Vec<u8>,
 ) -> Result<BlockFilterOut> {
@@ -43,12 +44,21 @@ fn eval_one_filter_block(
     }
     if meta.decoded_raw.is_none() {
         let mut out_bytes = Vec::new();
-        match crate::columns::filter_grammar_block_into_bytes(
-            ib.payload,
-            meta.had_in_carry,
-            pred,
-            &mut out_bytes,
-        )? {
+        let g_res = match *expr {
+            PredExpr::Col(ref pred) => crate::columns::filter_grammar_block_into_bytes(
+                ib.payload,
+                meta.had_in_carry,
+                pred,
+                &mut out_bytes,
+            )?,
+            _ => crate::columns::filter_grammar_block_expr_into_bytes(
+                ib.payload,
+                meta.had_in_carry,
+                expr,
+                &mut out_bytes,
+            )?,
+        };
+        match g_res {
             crate::columns::GrammarFilterBytesResult::Empty => return Ok(BlockFilterOut::Empty),
             crate::columns::GrammarFilterBytesResult::AllCompleteMatch => {
                 return Ok(BlockFilterOut::AllComplete);
@@ -89,7 +99,7 @@ fn eval_one_filter_block(
     let mut out_bytes = Vec::new();
     let mut matched = 0usize;
     for &lb in &lines[start_i..end_i] {
-        if line_matches_col_pred(lb, pred) {
+        if line_matches_expr(lb, expr) {
             out_bytes.extend_from_slice(lb);
             matched += 1;
         }
@@ -106,6 +116,15 @@ fn eval_one_filter_block(
 pub(super) fn filter_frame_impl(
     frame_bytes: &[u8],
     pred: &ColPred<'_>,
+    enc_options: &Options,
+    dec_options: &DecodeOptions,
+) -> Result<Vec<u8>> {
+    filter_frame_expr_impl(frame_bytes, &PredExpr::Col(*pred), enc_options, dec_options)
+}
+
+pub(super) fn filter_frame_expr_impl(
+    frame_bytes: &[u8],
+    expr: &PredExpr<'_>,
     enc_options: &Options,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
@@ -227,7 +246,7 @@ pub(super) fn filter_frame_impl(
                     break;
                 }
             }
-            if line_matches_col_pred(&full, pred) {
+            if line_matches_expr(&full, expr) {
                 boundary_after[b0] = Some(full);
                 any_boundary_match = true;
             }
@@ -243,7 +262,7 @@ pub(super) fn filter_frame_impl(
             results.push(eval_one_filter_block(
                 &in_blocks[b],
                 &meta[b],
-                pred,
+                expr,
                 &dec_eff,
                 &mut dec_buf,
             )?);
@@ -267,7 +286,7 @@ pub(super) fn filter_frame_impl(
                 let end = (base + step).min(nb);
                 for b in base..end {
                     let r =
-                        eval_one_filter_block(&in_blocks[b], &meta[b], pred, &dec_eff, &mut dec_buf);
+                        eval_one_filter_block(&in_blocks[b], &meta[b], expr, &dec_eff, &mut dec_buf);
                     let is_err = r.is_err();
                     unsafe {
                         *slots[b].get() = Some(r);
