@@ -353,3 +353,18 @@ Earlier development logs are archived in:
   - Updated `grammar_from_block_mode` (`allow_early_abort == true`) so blocks exceeding `MAX_TEMPLATES` (`64`) or records exceeding `MAX_SLOTS` (`32`) gracefully fall back to `Row::Raw` (`FAST_LZ`-compressed raw stream) instead of returning `Err`.
   - Added `src/stream.rs` (`StreamEncoder<W: Write>`, `StreamDecoder<R: Read>`, `compress_stream`, `decompress_stream`), concatenated multi-frame `VXG1` support in `vxg::decompress` / `vxg::decompress_into`, `vxg_frame_compressed_size` in C FFI (`src/ffi.rs`, `include/vxg.h`), and `--stream` bounded-memory mode in `src/bin/vxg.rs`.
   - Upgraded `GpuCodec::compress` and `GpuCodec::decompress` (`src/gpu/mod.rs`, `src/frame/assemble.rs`) to emit and decode Format v4 frames including hybrid `BLOCK_COLUMN` + `BLOCK_LZ` / `BLOCK_RAW` blocks.
+
+## 2026-11-02 — VXG v0.4.2 Release: Wave 1–3 Codec Speedups & Compressed-Domain Query, Analytics, Mutation & Zero-Reencode Projection
+
+- **Core Codec Models & Wave 1–3 Throughput (`src/columns/`, `src/frame/`, `src/lib.rs`):**
+  - Added `MODEL_PATTERN` (`tag 15`) with SWAR digit/literal shape verification and `Copy16` constant-affix decode (`2.5x–7x` smaller on CLF/non-ISO timestamps/IPv4), relaxed CSV/TSV free-text matching, single-pass CLF stream matcher (`try_match_clf_stream`), and unquoted `MODEL_HEX_SUFFIX`.
+  - Delivered `x86_64` SSE2/SSSE3/SSE4.1/AVX2 parity across grammar, stride, palette, and timestamp kernels, plus Wave 1–3 model-gate pruning, short-raw decode fusion, zero-realloc model pools, and lock-free frame assembly (`ndjson_varied.ndjson` `56.5 MB`: `5,167,201 B` / `9.14%` ratio, `4.08 GB/s` multi-thread encode).
+  - Fixed five edge-case round-trip/memory-safety bugs uncovered by randomized multi-seed stress (`tests/roundtrip_stress.rs`, `docs/TESTING.md`).
+- **Stage 2 — Compressed-Domain Pushdown & Mutations (`src/query/`, `src/ops/`, `src/columns/ops_*.rs`):**
+  - Added row random access (`frame_row_count`, `extract_row`, `extract_row_range`), substring/numeric pushdown (`find_first`, `filter_rows`, `filter_json_u64`), zero-wire-byte 256-entry bigram precheck (`query_bigram.rs`), and SIMD hex-nibble scanning (`query_nibble.rs`).
+  - Added `filter_column`, `filter_frame`, `update_column`, and `map_column` with 256-bit alphabet & numeric zone-map block rejection, single-slot binary column rewrites (`O(|D|)` dictionary splice), exact cross-block split-line stitching, and deterministic multi-threaded work-stealing (`up to 39.5 GB/s`, `72.5x` speedup).
+- **Stage 3 — Compound Boolean `PredExpr`, Scalar Aggregations & 2-Tier `GROUP BY` (`src/ops/expr.rs`, `src/ops/agg.rs`):**
+  - Added zero-heap `Copy` `PredExpr` (`True`, `Col`, `RowContains`, `All`, `Any`, `Not`), `count_where`, `filter_where`, `filter_frame_where`, `aggregate_column` (`AggStats`), and `group_by` (`GroupRow`, `GroupKey`, L1 per-dictionary-ID `[AggStats; |D|]` buckets + parallel merge, reaching `15.1 GB/s` `1T` / `49.4x` speedup).
+- **Stage 4 — Column Projection, Zero-Reencode Column Splicing & Full CLI (`src/ops/project.rs`, `src/bin/vxg.rs`):**
+  - Added `select_columns` (miniature `PreparedTemplate` SIMD emission skipping unselected columns, up to `20.7 GB/s` / `37.3x` on `12T`) and `project_frame` (`GrammarProjectOut::Spliced` zero-reencode `VXG -> VXG` column splicing with `64 KiB` boundary-tail absorption, `10.7 GB/s` / `32.6x` on `12T`).
+  - Upgraded `vxg` CLI with a recursive-descent compound `--where EXPR` parser, `vxg query --select`, `vxg agg`, `vxg project`, `vxg filter-frame`, `vxg update`, `vxg map`, and `-t N|auto` across commands; verified by 96/96 release + differential fuzz tests (`<= 600` lines across every `.rs` file).

@@ -1,11 +1,11 @@
-# VXG 0.4.1 — Unified Adaptive Multi-Format Lossless Block Codec (Format v4)
+# VXG 0.4.2 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
 
 [![CI — Source Validation](https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/ci.yml)
 [![CI — Cross-Platform Benchmarks](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml)
-[![Release v0.4.1](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.1)
+[![Release v0.4.2](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.2)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**High-throughput Rust CPU (SIMD/SWAR) codec combining an adaptive structured-column engine (NDJSON / CSV / TSV / Logfmt), a 2D/Stride pixel engine (24-bpp & 32-bpp BMP), and a const-generic Fast-LZ + 4-stream canonical Huffman engine — with zero-overhead C ABI (`staticlib` / `cdylib`) and native Metal / CUDA / Vulkan sources.**
+**High-throughput Rust CPU (SIMD/SWAR) codec & compressed-domain execution engine combining an adaptive structured-column engine (NDJSON / CSV / TSV / PSV / Logfmt / CLF), a 2D/Stride pixel engine (24-bpp & 32-bpp BMP), and a const-generic Fast-LZ + 4-stream canonical Huffman engine — with SQL-grade compressed-domain `SELECT` / `WHERE` / `GROUP BY` / `UPDATE` / zero-reencode column splicing, zero-overhead C ABI (`staticlib` / `cdylib`), and native Metal / CUDA / Vulkan sources.**
 
 VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the optimal lossless representation (`BLOCK_COLUMN`, `BLOCK_LZ`, or `BLOCK_RAW`). Every block is self-contained, enabling **$O(1)$ random-access block extraction** and **linear multi-core scaling** without cross-block decompression dependencies.
 
@@ -16,7 +16,8 @@ VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the 
 | Area | Highlights |
 | :--- | :--- |
 | **Format v4 Wire Layout** | Compact 8-byte per-block directory (`payload_size \| kind << 30`, `crc32c`); full backward read compatibility with `v1`–`v3` frames |
-| **Structured Column Engine** | Automatic schema & delimiter discovery for **NDJSON, Pretty-Printed JSON, CSV, TSV, CLF/Bracketed Logs, and Logfmt**; specialized models for `Dictionary`, `DecimalDelta`, `DecimalSuffix`, `Timestamp` (SWAR+SIMD), `EpochCounter` (SIMD hex), `SegmentDictionary`, and `FrontCodedDict` (with 4-bit/5-bit nibble palettes and Fast-LZ dictionary streams) |
+| **Structured Column Engine** | Automatic schema & delimiter discovery for **NDJSON, Pretty-Printed JSON, CSV, TSV, PSV, CLF/Bracketed Logs, and Logfmt**; 11 specialized models including `Dictionary`, `DecimalDelta`, `DecimalSuffix`, `Timestamp` (SWAR+SIMD), `HexSuffix` (quoted & unquoted SIMD hex), `EpochCounter`, `SegmentDictionary`, `FrontCodedDict`, and `Pattern` (`MODEL_PATTERN` SWAR + `Copy16`) |
+| **Compressed-Domain SQL & Splicing** | Execute compound boolean `WHERE` (`&&` / `\|\|` / `!`), `SELECT` column projection, `SUM`/`MIN`/`MAX`/`AVG` + `GROUP BY` analytics, `UPDATE`/`MAP` mutations, and **zero-reencode `VXG -> VXG` column splicing** directly on compressed blocks (`10–39 GB/s`, `15x–72x` faster than naive decode + scan) |
 | **Image & Stride Engine** | 24-bpp / 32-bpp BMP and multi-stride (`1, 2, 3, 4, 8`) byte-plane transpose + `Subtract-Green` (`R-G`, `B-G`) color decorrelation + 2-level 64-bit hierarchical zero-mask & per-plane `Fast-LZ` |
 | **Prose & Source Code** | Const-generic `Fast-LZ` matcher paired with a 4-stream interleaved canonical Huffman coder |
 | **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning, 64-byte `FastPiece` unaligned `u128` row assembly, and SIMD prefix-sum plane interleaving |
@@ -105,6 +106,24 @@ All benchmarks below are executed automatically on GitHub Actions via [`.github/
 
 ---
 
+## Compressed-Domain Query, Analytics, Mutation & Projection (`v0.4.2`)
+
+Measured on real multi-template **`ndjson_varied.ndjson`** (`56.50 MB` raw -> `5.17 MB` / `9.14%` VXG `v4`, `300,000` rows, `863` independent `64 KiB` blocks, Apple Silicon `aarch64` NEON, median of 5 runs via `vxg-query-real`). Every output is asserted 100% byte-for-byte identical to `decompress + raw op (+ compress)`:
+
+| Workload | `1T` VXG | `1T` Speedup (`GB/s`) | Multi-Thread VXG | Multi-Thread Speedup (`GB/s`) |
+| :--- | :---: | :---: | :---: | :---: |
+| **`filter_column` (`bytes >= 50000`, zone-map skip)** | `2.11 ms` | **`59.0x`** (`26.8 GB/s`) | `1.54 ms` (`8T`) | **`54.9x`** (**`36.8 GB/s`**) |
+| **`agg SUM/MIN/MAX(bytes)` (all `300k` rows)** | `3.74 ms` | **`49.4x`** (`15.1 GB/s`) | `6.13 ms` (`8T`) | **`21.6x`** (`9.2 GB/s`) |
+| **`group_by(service) COUNT(*)` (`8` groups)** | `4.07 ms` | **`41.2x`** (`13.9 GB/s`) | `5.39 ms` (`8T`) | **`28.3x`** (`10.5 GB/s`) |
+| **`group_by(service) SUM/MIN/MAX(bytes)`** | `8.45 ms` | **`31.2x`** (`6.7 GB/s`) | `5.22 ms` (`8T`) | **`48.5x`** (**`10.8 GB/s`**) |
+| **`select [ts,req_id]` (all `300k` rows -> `13.8 MB`)** | `8.58 ms` | **`17.3x`** (`6.6 GB/s`) | `4.53 ms` (`12T`) | **`29.0x`** (**`12.5 GB/s`**) |
+| **`select [ts,req_id,lat] WHERE fraud & 500 & lat>=150`** | `3.75 ms` | **`27.8x`** (`15.1 GB/s`) | `2.73 ms` (`12T`) | **`37.3x`** (**`20.7 GB/s`**) |
+| **`project_frame [service,status,bytes,lat]` (zero-reencode splice)** | `7.09 ms` | **`23.3x`** (`8.0 GB/s`) | `5.26 ms` (`12T`) | **`32.6x`** (**`10.7 GB/s`**) |
+| **`update_column WHERE status==500 SET CRITICAL`** | `11.55 ms` | **`22.6x`** (`4.9 GB/s`) | `3.20 ms` (`8T`) | **`34.5x`** (**`17.7 GB/s`**) |
+| **`map_column service -> uppercase` (`O(\|D\|)` dict splice)** | `8.44 ms` | **`30.5x`** (`6.7 GB/s`) | `3.27 ms` (`8T`) | **`31.5x`** (**`17.3 GB/s`**) |
+
+---
+
 ## Quick Start & CLI Usage (`vxg`)
 
 Requires **Rust 1.89+**.
@@ -129,15 +148,24 @@ cargo build --release
 # O(1) random-access single-block extraction (extracts block #0 without decoding other blocks):
 ./target/release/vxg block input.vxg 0 block0.bin --force
 
-# Compressed-domain structured record random access & predicate pushdown search:
+# Compressed-domain structured record random access, compound WHERE & SELECT projection:
 ./target/release/vxg query input.vxg --count
 ./target/release/vxg query input.vxg --row 42
 ./target/release/vxg query input.vxg --range 100:150
-./target/release/vxg query input.vxg --find-first '"level":"ERROR"'
-./target/release/vxg query input.vxg --filter '"service":"auth"' --limit 20
+./target/release/vxg query input.vxg --select ts,service,status,latency_ms \
+  --where 'status==500 && (service==fraud-engine || service==auth-gateway) && latency_ms>=150' \
+  --limit 20 -t auto
+
+# Compressed-domain GROUP BY / SUM / AVG analytics & zero-reencode VXG -> VXG column splicing:
+./target/release/vxg agg input.vxg --group-by service --col bytes --where 'status==500' -t auto
+./target/release/vxg project input.vxg slim.vxg --cols service,status,bytes,latency_ms -t auto -f
+
+# Compressed-domain single-column mutations without full decode/re-encode:
+./target/release/vxg update input.vxg patched.vxg --where status==500 --col level --set CRITICAL -f
+./target/release/vxg map input.vxg upper.vxg --col service --upper -f
 
 # Unix streaming pipeline via stdin / stdout ('-'):
-cat input.ndjson | ./target/release/vxg c - - -q | ./target/release/vxg d - - -q > restored.ndjson
+cat input.ndjson | ./target/release/vxg c - - --stream -t auto -q | ./target/release/vxg d - - --stream -t auto -q > restored.ndjson
 ```
 
 ### Running the Multi-Format Benchmark Suite Locally
@@ -174,12 +202,14 @@ let mut out_buf = vec![0u8; vxg::frame_raw_size(&comp_buf[..c_len])?];
 let d_len = vxg::decompress_into(&comp_buf[..c_len], &mut out_buf, &dec_opts)?;
 assert_eq!(&out_buf[..d_len], input);
 
-// Compressed-domain structured record random access & pushdown search:
+// Compressed-domain structured record random access, analytics & projection:
 let total_rows = vxg::frame_row_count(&frame)?;
 let row0 = vxg::extract_row(&frame, 0, &dec_opts)?;
-let slice = vxg::extract_row_range(&frame, 0, 1, &dec_opts)?;
-let first_hit = vxg::find_first(&frame, b"\"status\":\"ok\"", &dec_opts)?;
-let matches = vxg::filter_rows(&frame, b"\"status\":\"ok\"", 10, &dec_opts)?;
+let where_ok = vxg::PredExpr::col(vxg::ColPred::json_str("status", vxg::StrCmp::Eq(b"ok")));
+let stats = vxg::aggregate_column(&frame, Some(&where_ok), vxg::ColTarget::JsonKey("seq"), &dec_opts)?;
+let cols = [vxg::ColTarget::JsonKey("ts"), vxg::ColTarget::JsonKey("status")];
+let projected = vxg::select_columns(&frame, Some(&where_ok), &cols, 10, &dec_opts)?;
+let slim_frame = vxg::project_frame(&frame, None, &cols, &opts, &dec_opts)?;
 ```
 
 ### C / C++ Static or Dynamic Linking ([`examples/ffi/c_example.c`](examples/ffi/c_example.c))
@@ -245,20 +275,22 @@ CPU hash probes <= N
 ## Repository Layout
 
 ```text
-src/                     Rust codec core (lib.rs, ffi.rs, simd.rs, crc32c.rs, gpu.rs, analysis.rs)
-src/columns/             Modular structured-column, stride/BMP, Fast-LZ, and canonical Huffman submodules
+src/                     Rust codec core (lib.rs, ffi.rs, stream.rs, simd.rs, crc32c.rs, gpu.rs)
+src/columns/             Modular structured-column, query/analytics/splice kernels, stride/BMP & Fast-LZ
+src/query/               Compressed-domain row seek, bigram/nibble search, and parallel pushdown
+src/ops/                 Compressed-domain compound WHERE, agg/group_by, filter/map/update & column projection
 src/frame/               Format v1–v4 frame encoder, parser, and zero-allocation parallel decoder
 src/block/               Block LZ encoder and SIMD/SWAR decoder submodules
 src/packing/             Command-metadata & entropy research submodules (--features bench)
 src/groups/              Fixed-group command-layout evaluator submodules (--features bench)
-src/bin/                 Production CLI (`vxg`) and multi-format benchmark harness (`vxg-bench`)
+src/bin/                 Production CLI (`vxg`) and benchmark harnesses (`vxg-bench`, `vxg-query-real`)
 include/vxg.h            Official C99 / C++11 header for static & dynamic linking
 examples/ffi/            Zero-copy integration examples for C, Python, Go, Bun/JS, C#, and WebAssembly
 native/shaders/core.gpu  Shared GPU kernel source (Metal, Vulkan GLSL, CUDA)
 native/                  Metal, Vulkan, and CUDA host bridges
 verification/            Independent Python reference model and C++ SIMT emulator
-tests/                   Property tests, v3/v4 frame tests, and golden wire vectors
-reports/ci-v0.4.0/       Cross-platform GitHub Actions benchmark outputs (macOS, Linux, Windows)
+tests/                   Property, stress, differential analytics/projection, and golden wire tests
+reports/ci-v0.4.1/       Cross-platform GitHub Actions benchmark outputs (macOS, Linux, Windows)
 docs/                    Wire format, FFI guide, proofs, benchmarks, GPU architecture, and safety
 ```
 

@@ -37,17 +37,18 @@ When a block contains newline-delimited records (JSON objects, CSV/TSV rows, `ke
 2. **Template & Slot Extraction (`≤ 64` templates, `≤ 64` slots):**
    - Separates invariant structural literals (`{"ts":"`, `","level":"`, `","latency":`, `}\n`) from variable column slots.
    - Handles schema drift and optional fields via multi-template dictionary indexing, and seamlessly falls back to chunked sub-records when rows exceed 64 columns.
-3. **10 Specialized Column Models:**
+3. **11 Specialized Column Models:**
    - `MODEL_CONST` (`0`): Constant column across all rows of a template
    - `MODEL_DICT` (`1`): Dictionary + bit-packed or sparse-mode indices (`1..=16` bits)
    - `MODEL_INT_DELTA` (`2`): ZigZag / affine / frame-of-reference integer progressions
    - `MODEL_TIMESTAMP` (`3`): Branchless 64-bit SWAR ISO-8601 timestamp parser & bit-packer
-   - `MODEL_HEX_SUFFIX` (`4`): SIMD hex-nibble packer (`vqtbl1q_u8` / `_mm_shuffle_epi8`)
+   - `MODEL_HEX_SUFFIX` (`4`): Quoted & unquoted SIMD hex-nibble packer (`vqtbl1q_u8` / `_mm_shuffle_epi8`)
    - `MODEL_PERIODIC_STRING` (`5`): Cyclic string period detector (`1..=64`)
    - `MODEL_EPOCH_COUNTER_ID` (`6`): Composite `prefix-epoch-counter-suffix` decomposer
    - `MODEL_SEGMENT_DICT` (`7`): Semi-colon/phrase dictionary + `DEC_10K` lookup table
    - `MODEL_DECIMAL_DELTA` (`8`): Fixed-point decimal (`1..=3` fractional digits) delta coder
    - `MODEL_FRONT_DICT` (`9`): Front/back-coded (`LCP` + `LCS` + 4-bit/5-bit SIMD nibble palette) string dictionary
+   - `MODEL_PATTERN` (`15`): Digit/literal patterned columns (non-ISO timestamps, IPv4, versions, prefixed IDs) with SWAR shape verification and `Copy16` constant-affix decode
 4. **Fused Single-Pass Replay (`BoundStream` & `FastPiece`):**
    - During decode, all columns are unpacked into a contiguous thread-local arena (`DecodeScratch`), and rows are reconstructed via branchless 16-byte SIMD unaligned vector copies (`vst1q_u8` on `aarch64`, `_mm_storeu_si128` on `x86_64`).
 
@@ -78,3 +79,19 @@ Every hot path in VXG has matched vector implementations for both **ARM64 (`NEON
 | **RGBA (`stride=4`) Prefix Sum & Interleave** | `vextq_u8` Hillis-Steele scan + `vst4q_u8` | `_mm_slli_si128` Hillis-Steele scan + `_mm_unpacklo/hi_epi8/16` |
 | **4/5/6-Bit Palette & Front-Dict Unpack** | `vqtbl1q_u8` / `vqtbl2q_u8` / `vqtbl4q_u8` | `SSSE3`/`SSE4.1` `_mm_shuffle_epi8` + `_mm_blendv_epi8` |
 | **CRC32C Checksum** | Hardware ` __crc32cd` (`crc` target feature) | Hardware `_mm_crc32_u64` (`sse4.2` target feature) |
+
+---
+
+## 4. Compressed-Domain Execution Engine (`query` & `ops`)
+
+Because every `GRAMMAR_PACKET` separates invariant structural segments from typed per-slot column streams inside self-contained `64 KiB` blocks, VXG executes analytical and transformational workloads directly on compressed blocks:
+
+1. **Zero-Unpack Block & Column Pruning:**
+   - **256-Bit Alphabet & Zero-Wire-Byte Bigram Prechecks:** Extracts exact per-column byte alphabets and 256-entry bigram presence tables from dictionary/pattern/template headers in $O(\text{header})$ time without adding a single wire byte, skipping non-matching blocks before unpacking any row.
+   - **Numeric Zone-Map Rejection:** Reads `[min..=max]` directly from bit-packed and affine decimal headers to prune range/equality predicates in $O(1)$.
+2. **Compound Boolean Bitmasks & 2-Tier `GROUP BY`:**
+   - Evaluates arbitrary `PredExpr` trees (`AND` / `OR` / `NOT`) as 64-bit `TplMask` word arrays with short-circuit leaf pruning so untouched columns are never decoded.
+   - Aggregates `SUM` / `MIN` / `MAX` / `COUNT` directly over integer and dictionary streams, accumulating per-dictionary-entry `[AggStats; |D|]` arrays in L1 cache before mapping to global group keys (**40+ GB/s** effective throughput).
+3. **Single-Slot Mutation & Zero-Reencode Column Splicing:**
+   - `update_column` and `map_column` splice untouched blocks and untouched columns byte-for-byte, rewriting only the target slot (`O(|D|)` for dictionaries).
+   - `select_columns` constructs a miniature `PreparedTemplate` over only the projected slots, while `project_frame` splices the selected compressed column payloads directly into a new `GRAMMAR_PACKET` (`GrammarProjectOut::Spliced`, absorbing `64 KiB` boundary carry lines as 1-row raw tails) at **10+ GB/s** without re-encoding.

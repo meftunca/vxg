@@ -686,3 +686,30 @@ Deterministic work-stealing across independent blocks (`Options { threads: 8, ..
 | `update_column` `WHERE status == 500 SET CRITICAL` | 110.40 ms | **3.20 ms** | **34.5×** | **17.66 GB/s** |
 | `map_column` `service -> uppercase` (`O(|D|)` dict splice) | 103.17 ms | **3.27 ms** | **31.5×** | **17.27 GB/s** |
 | `map_column` `bytes -> bytes + 100` (1-col numeric splice) | 107.75 ms | **5.51 ms** | **19.5×** | **10.25 GB/s** |
+
+## Stage 3 & Stage 4: Compound `WHERE`, `GROUP BY` Analytics & Zero-Reencode Column Projection (`v0.4.2`)
+
+Measured on **`ndjson_varied.ndjson`** (`56,503,837 B` raw -> `5,167,201 B` / `9.14%` VXG `v4`, `300,000` rows, `863` independent `64 KiB` blocks, Apple Silicon `aarch64` NEON, median of 5 timed runs via `vxg-query-real --agg-suite` and `--project-suite`). Every run asserts exact equality against naive `vxg::decompress` + raw scan/projection (+ `vxg::compress` for `project_frame`):
+
+### 1. Stage 3 — Compound `PredExpr`, Scalar Aggregations & 2-Tier Dictionary `GROUP BY`
+
+| Query | Naive `1T` | VXG `1T` | `1T` Speedup (`GB/s`) | VXG `8T` | `8T` Speedup (`GB/s`) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| `count_where` `service==fraud & status==500 & lat>=150` (`12` hits) | 166.88 ms | **6.44 ms** | **25.9×** (**8.77 GB/s**) | **6.26 ms** | **22.3×** (**9.03 GB/s**) |
+| `filter_where` `(status==500 & lat>=220) \| bytes>=50000` (`30` hits) | 300.06 ms | **9.45 ms** | **31.7×** (**5.98 GB/s**) | **5.99 ms** | **39.9×** (**9.44 GB/s**) |
+| `aggregate_column` `SUM/MIN/MAX(bytes)` (all `300k` rows) | 184.61 ms | **3.74 ms** | **49.4×** (**15.12 GB/s**) | **6.13 ms** | **21.6×** (**9.22 GB/s**) |
+| `aggregate_column` `SUM/MIN/MAX(bytes) WHERE status==500` | 153.59 ms | **4.36 ms** | **35.2×** (**12.95 GB/s**) | **4.97 ms** | **29.4×** (**11.36 GB/s**) |
+| `group_by(service)` `COUNT(*)` (`8` groups) | 167.55 ms | **4.07 ms** | **41.2×** (**13.89 GB/s**) | **5.39 ms** | **28.3×** (**10.49 GB/s**) |
+| `group_by(service)` `SUM/MIN/MAX(bytes)` (`8` groups) | 263.26 ms | **8.45 ms** | **31.2×** (**6.69 GB/s**) | **5.22 ms** | **48.5×** (**10.82 GB/s**) |
+| `group_by(service)` `SUM(latency_ms) WHERE status==500` | 182.87 ms | **6.68 ms** | **27.4×** (**8.46 GB/s**) | **7.84 ms** | **18.4×** (**7.21 GB/s**) |
+
+### 2. Stage 4 — `select_columns` & Zero-Reencode `project_frame` Column Splicing
+
+| Projection | Naive `1T` | VXG `1T` | `1T` Speedup (`GB/s`) | VXG `12T` | `12T` Speedup (`GB/s`) | Output |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `select [service,status,bytes]` (all `300k`) | 150.91 ms | **9.18 ms** | **16.4×** (**6.15 GB/s**) | **5.49 ms** | **22.4×** (**10.30 GB/s**) | `16.25 MB` NDJSON |
+| `select [ts,req_id]` (all `300k`) | 148.22 ms | **8.58 ms** | **17.3×** (**6.58 GB/s**) | **4.53 ms** | **29.0×** (**12.47 GB/s**) | `13.80 MB` NDJSON |
+| `select [service,lat,bytes] WHERE status==500` | 124.92 ms | **3.39 ms** | **36.9×** (**16.68 GB/s**) | **3.57 ms** | **30.8×** (**15.83 GB/s**) | `851 KB` NDJSON |
+| `select [ts,req_id,lat] WHERE fraud&500&lat>=150` | 104.44 ms | **3.75 ms** | **27.8×** (**15.06 GB/s**) | **2.73 ms** | **37.3×** (**20.71 GB/s**) | `756 B` NDJSON |
+| `project_frame [service,status,bytes,lat]` (**splice**) | 165.26 ms | **7.09 ms** | **23.3×** (**7.97 GB/s**) | **5.26 ms** | **32.6×** (**10.73 GB/s**) | `1.42 MB` VXG (`6.78%`) |
+| `project_frame [service,lat,bytes] WHERE status==500` | 110.38 ms | **8.07 ms** | **13.7×** (**7.00 GB/s**) | **7.73 ms** | **14.3×** (**7.31 GB/s**) | `57 KB` VXG (`6.70%`) |

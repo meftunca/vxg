@@ -1,12 +1,12 @@
 # Getting Started & CLI Reference
 
-VXG (`vxg`) is a zero-dependency Rust library, C/C++ static/shared library (`libvxg`), WebAssembly module (`vxg.wasm`), and standalone command-line tool (`vxg`).
+VXG (`vxg`) is a zero-dependency Rust library, C/C++ static/shared library (`libvxg`), WebAssembly module (`vxg.wasm`), and standalone command-line tool (`vxg`) with built-in compressed-domain query, analytics, mutation, and column projection.
 
 ---
 
 ## 1. Building from Source
 
-Requirements: Rust `1.85+` (Edition 2024). No external C libraries are needed for normal builds.
+Requirements: Rust `1.89+` (Edition 2021). No external C libraries are needed for normal builds.
 
 ```sh
 git clone https://github.com/meftunca/vxg.git
@@ -15,7 +15,7 @@ cd vxg
 # Build the CLI binary and libraries (rlib + staticlib + cdylib)
 cargo build --release
 
-# Run the complete release test suite (unit, golden, property, v3/v4, CLI)
+# Run the complete release test suite (unit, golden, property, v3/v4, analytics, projection, CLI)
 cargo test --release
 ```
 
@@ -28,57 +28,76 @@ Build outputs in `target/release/`:
 
 ## 2. CLI Reference (`vxg`)
 
-`vxg` supports both explicit subcommands (`compress`, `decompress`, `verify`, `info`, `block`, `hardware`, `bench`) and familiar `zstd`/`lz4`-style short flags (`-c`, `-d`, `-t`, `-T0`, `-f`, `-k`).
+`vxg` operates on positional `INPUT` / `OUTPUT` paths (use `-` for `stdin` or `stdout`) and supports multi-threaded execution via `--threads N|auto` or `-t N|auto`.
 
-### 2.1 Subcommands & Short Flags
+### 2.1 Subcommands
 
-| Command / Flag | Description |
+| Command | Description |
 | :--- | :--- |
-| `vxg compress [FLAGS] [INPUT] [-o OUTPUT]` | Compress input file or `stdin` (`-`) to `.vxg` frame. Alias: `vxg -z` or default when flags are given. |
-| `vxg decompress [FLAGS] [INPUT] [-o OUTPUT]` | Decompress `.vxg` frame to output file or `stdout` (`-`). Alias: `vxg -d`. |
-| `vxg verify [FLAGS] <INPUT>` | Verify frame header, compact directory, block boundaries, and CRC32C without writing output. Alias: `vxg -t`. |
-| `vxg info [--blocks] <INPUT>` | Print frame version (`v1`–`v4`), raw/compressed byte sizes, ratio, and optional per-block breakdown (`RAW`, `LZ`, `COLUMN`). |
-| `vxg block <INPUT> <INDEX> [-o OUTPUT]` | $O(1)$ random-access extraction of a single block (`0..block_count`) without decoding other blocks. |
-| `vxg query <INPUT> [QUERY_FLAGS]` | Compressed-domain structured record random access (`--count`, `--row`, `--range`) and predicate pushdown search (`--find`, `--filter`). Alias: `vxg q`. |
-| `vxg hardware` | Print detected CPU architecture (`aarch64` / `x86_64`), active SIMD ISA (`Neon`, `Sse2`, `Avx2`, `Avx512`), and logical core count. |
-| `vxg bench [SIZE_MIB]` | Run a quick built-in synthetic throughput check (`default: 64 MiB`). |
+| `vxg compress` (`c`) `INPUT OUTPUT [FLAGS]` | Compress `INPUT` file or `stdin` (`-`) into a Format v4 `.vxg` frame. |
+| `vxg decompress` (`d`) `INPUT OUTPUT [FLAGS]` | Decompress `.vxg` frame (single or concatenated stream) to `OUTPUT` or `stdout` (`-`). |
+| `vxg verify` (`t`) `FRAME [FLAGS]` | Verify frame header, compact directory, block boundaries, and CRC32C checksums without writing output. |
+| `vxg info` (`list`) `FRAME [--summary]` | Print frame version (`v1`–`v4`), raw/encoded byte sizes, ratio, and block-type breakdown (`RAW`, `LZ`, `COLUMN`). |
+| `vxg block` `FRAME INDEX [OUTPUT] [-f]` | $O(1)$ random-access extraction of a single block (`0..block_count`) without decoding other blocks. |
+| `vxg query` (`q`) `FRAME [QUERY_FLAGS]` | Compressed-domain row count, row/range extraction, substring search, compound `--where` filter, and `--select` column projection. |
+| `vxg agg` `FRAME [AGG_FLAGS]` | Compressed-domain scalar aggregation (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) and `GROUP BY` (`--group-by COL`). |
+| `vxg project` `INPUT OUTPUT --cols C1,C2,...` | Compressed-domain column projection into a new `.vxg` frame (zero-reencode column splicing when unfiltered). |
+| `vxg filter-frame` `INPUT OUTPUT --where EXPR` | Produce a new `.vxg` frame containing only rows matching compound `--where EXPR` (splices 100%-matching blocks verbatim). |
+| `vxg update` `INPUT OUTPUT --where SPEC --col COL ...` | Conditional single-column mutation (`--set`, `--set-raw`, `--upper`, `--lower`, `--redact`, `--add`) without full decode/re-encode. |
+| `vxg map` `INPUT OUTPUT --col COL ...` | Whole-column transformation (`O(\|D\|)` dictionary splice or single-slot numeric rewrite) into a new `.vxg` frame. |
+| `vxg hardware` | Print detected OS/arch, active SIMD ISA (`Neon`, `Sse2`, `Avx2`, `Avx512`), logical core count, and compiled GPU backends. |
 
 ### 2.2 Common Options
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `-o <FILE>` | Derived / `-` | Output path (`-` writes to `stdout`). Defaults to `<INPUT>.vxg` on compress or strips `.vxg` on decompress. |
-| `-c`, `--stdout` | `false` | Write output directly to `stdout`. |
-| `-f`, `--force` | `false` | Overwrite existing output file. |
-| `-k`, `--keep` | `true` | Keep input file after compression/decompression (always preserved). |
-| `-T<N>`, `--threads <N>` | `1` | Number of worker threads (`-T0` or `--threads auto` uses all available logical CPU cores). |
+| `-` (as `INPUT` / `OUTPUT`) | — | Read from `stdin` or write to `stdout`. |
+| `-t <N\|auto>`, `--threads <N\|auto>` | `1` | Worker thread count (`auto` or `0` uses all available logical CPU cores). |
 | `-b <BYTES>`, `--block-size <BYTES>` | `65536` | Uncompressed block size in bytes (`4096..=1048576`, multiple of `64`). |
+| `--stream` | `false` | Bounded-memory streaming mode (`StreamEncoder` / `StreamDecoder`) for arbitrarily large pipes/files. |
 | `--no-checksum` | Checksum ON | Disable per-block CRC32C generation or verification. |
-| `--limit <BYTES>` | `1073741824` | Maximum allowed decompressed output size (`1 GiB` default safety guard). |
-| `--v3` / `--v2` | `v4` | Emit legacy VXG v3 or v2 wire format frames instead of default v4. |
+| `--max-output <BYTES>` | `1073741824` | Maximum allowed decompressed output size (`1 GiB` default safety guard). |
+| `-f`, `--force` | `false` | Overwrite existing output file (by default `vxg` refuses to clobber existing files). |
+| `-q`, `--quiet` | `false` | Suppress diagnostic timing/ratio output on `stderr`. |
 
-### 2.3 Practical CLI Examples
+### 2.3 Column Addressing & Compound `--where` Syntax
+
+- **Column targets (`COL`):**
+  - JSON keys: `service` or `json:service`
+  - Delimited columns (`0`-indexed): `csv:2`, `tsv:0`, `psv:4`
+- **Atomic predicates & compound boolean expressions (`--where EXPR`):**
+  - Numeric & string comparisons: `status==500`, `status!=200`, `latency_ms>=150`, `bytes=1000..5000`, `service=="auth-gateway"`
+  - String matchers: `service=prefix:auth`, `path=suffix:.json`, `msg=contains:timeout`, `contains:ERROR` (whole-row substring)
+  - Boolean combinators & grouping: `&&` / `AND`, `||` / `OR`, `!` / `NOT`, parentheses `(...)`
+
+### 2.4 Practical CLI Examples
 
 ```sh
-# 1. Compress a 1 GB NDJSON file using all CPU cores
-vxg compress -T0 events.ndjson -o events.ndjson.vxg
+# 1. Compress and verify using all CPU cores
+vxg compress events.ndjson events.vxg -t auto -f
+vxg verify events.vxg -t auto
+vxg info events.vxg --summary
 
-# 2. Inspect frame summary and block table
-vxg info --blocks events.ndjson.vxg
+# 2. O(1) random-access block & row extraction
+vxg block events.vxg 0 block0.ndjson -f
+vxg query events.vxg --count
+vxg query events.vxg --row 42
+vxg query events.vxg --range 100:110
 
-# 3. Verify archive integrity (CRC32C + canonical structure)
-vxg -t -T0 events.ndjson.vxg
+# 3. Compound boolean WHERE + SELECT column projection (skips unselected columns!)
+vxg query events.vxg \
+  --select ts,service,status,latency_ms \
+  --where 'status==500 && (service==fraud-engine || service==auth-gateway) && latency_ms>=150' \
+  --limit 20 -t auto
 
-# 4. Decompress to stdout and pipe to jq
-vxg -d -c -T0 events.ndjson.vxg | head -n 5
+# 4. Zero-reencode VXG -> VXG column splicing + chained GROUP BY analytics
+vxg project events.vxg slim.vxg --cols service,status,bytes,latency_ms -t auto -f
+vxg agg slim.vxg --group-by service --col bytes --where 'status==500' --json -t auto
 
-# 5. Extract only block #42 in O(1) time
-vxg block events.ndjson.vxg 42 -o block_42.ndjson
+# 5. Compressed-domain conditional column update & whole-column map
+vxg update events.vxg patched.vxg --where status==500 --col level --set CRITICAL -f
+vxg map events.vxg anonymized.vxg --col user --redact -f
 
-# 6. Compressed-domain structured record random access & pushdown search
-vxg query events.ndjson.vxg --count
-vxg query events.ndjson.vxg --row 50000
-vxg query events.ndjson.vxg --range 50000:50010
-vxg query events.ndjson.vxg --find "status=500"
-vxg query events.ndjson.vxg --filter "ERROR" --limit 25
+# 6. Unix streaming pipeline via stdin / stdout ('-')
+cat events.ndjson | vxg c - - --stream -t auto -q | vxg d - - --stream -t auto -q > restored.ndjson
 ```

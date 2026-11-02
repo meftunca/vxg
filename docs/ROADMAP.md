@@ -1,31 +1,20 @@
 # Roadmap
 
-VXG stays a codec library. GPU backends, VIMG (image format) and VVID (video format) are out of
-scope and not planned. The goal is to be the best general-purpose codec on structured and
-semi-structured data, measured against LZ4 and Zstd on real files.
+VXG is an adaptive block-independent lossless codec and compressed-domain execution engine. GPU backends, VIMG, and VVID are maintenance-only / out of scope for new feature work. The goal is to be the fastest and smallest codec on structured and semi-structured data while supporting direct SQL-grade queries, mutations, analytics, and column projections without full decompression.
 
 | Stage | Goal | Status |
 | :--- | :--- | :--- |
-| 1 | Core speed and ratio on real-world data | In progress |
-| 2 | Compressed-domain data ops: `map`, `filter`, `update` without a full decode | `filter`, row access and numeric `filter_json_u64` exist |
-| 3 | Correctness hardening (randomized stress, sanitizers, x86_64 coverage) | Ongoing; see [Testing](./TESTING.md) |
+| **1** | Core `v4` speed & ratio on real-world structured + free-text workloads (`MODEL_PATTERN`, CLF matcher, Wave 1–3 SIMD pools) | **Completed in `v0.4.2`** |
+| **2** | Compressed-domain data ops: `filter`, `map`, `update`, zero-wire-byte bigram & nibble pushdown | **Completed in `v0.4.2`** ([Design & Benchmarks](./STAGE2_DESIGN.md)) |
+| **3** | Compound boolean `PredExpr` (`AND`/`OR`/`NOT`), scalar aggregations (`SUM`/`MIN`/`MAX`/`AVG`), and 2-tier dictionary `GROUP BY` | **Completed in `v0.4.2`** |
+| **4** | Compressed-domain `SELECT` column projection & zero-reencode `VXG -> VXG` column splicing (`project_frame`) + full CLI (`query`, `agg`, `project`) | **Completed in `v0.4.2`** |
+| **5** | Zero-copy `mmap` & bounded-memory multi-GB streaming execution for `query`, `agg`, `project`, `filter-frame`, `update`, and `map` | **Next (`v0.5.x`)** |
+| **6** | Continuous correctness hardening (randomized differential fuzzing, sanitizers, `x86_64` / `aarch64` parity) | Ongoing ([Testing](./TESTING.md)) |
 
-## Where VXG stands today (single thread, aarch64)
+## Engineering Rules
 
-See [Benchmarks](./BENCHMARKS.md) for the numbers. In short:
-
-- Structured data (NDJSON, CSV, logfmt): the clear winner on ratio, with decode faster than Zstd.
-- Free text (logs, path lists): in Zstd-1's class on speed, 8-17% worse ratio than Zstd-1, and
-  about half LZ4's decode speed.
-
-"Unrivaled" means closing those two gaps without giving up the structured-data lead.
-
-## Rules
-
-- Benchmark on real files, not only synthetic data; synthetic wins did not carry over to free text.
-- Compare against LZ4 and Zstd at equal block budget; keep rows where a competitor wins.
-- Report ratio and speed together, single-thread and multi-thread separately.
-- Interleaved A/B runs for any claim under about 10%; single runs are noise at that level.
-- No optimization without a profile; no format change without a compatibility decision.
-
-Stage 2 proposal: [Stage 2 design sketch](./STAGE2_DESIGN.md).
+- Benchmark on real multi-MB files (`ndjson_varied`, `data.csv`, `data.clf`, `install.log`), not only synthetic data.
+- Compare against native C `liblz4` and `libzstd` at equal block budget; keep rows where a competitor wins.
+- Report compression ratio and single-thread / multi-thread throughput together.
+- Assert 100% byte-for-byte differential equivalence against naive `decompress + op (+ compress)` for every compressed-domain operation.
+- Every `.rs` file in `src/` and `tests/` stays `<= 600` lines; no wire-format break without an explicit version bump.

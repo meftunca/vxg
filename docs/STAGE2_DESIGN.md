@@ -1,6 +1,6 @@
-# Stage 2 Architecture: Compressed-Domain `filter`, `map`, and `update` Without Full Decode
+# Compressed-Domain Engine (Stages 2–4): `filter`, `map`, `update`, `agg`, `group_by`, and Zero-Reencode `project`
 
-Status: **Implemented & Verified (`vxg` v0.4.1, wire format `v4` — zero wire-format changes)**.
+Status: **Implemented & Verified (`vxg` v0.4.2, wire format `v4` — zero wire-format changes)**.
 
 ## Overview
 
@@ -114,5 +114,16 @@ Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`,
   - `map_column` (`service -> uppercase`): **3.27 ms** (`17.27 GB/s`, **31.5×**)
   - `map_column` (`bytes -> bytes + 100`): **5.51 ms** (`10.25 GB/s`, **19.5×**)
   - Produces **100% byte-for-byte identical** `RowMatch` vectors and `VXG1` frame bytes across `threads = 1..=256`.
-- **Differential Stress Suite (`tests/compressed_ops_stress.rs`)**:
-  - Verified with `VXG_STRESS_ITERS=1500 MallocPreScribble=1 MallocScribble=1 cargo nextest run --release` across multi-template NDJSON, CSV, TSV, PSV, split column-0 boundaries, multi-block (`> 2` blocks) long lines, EOF without trailing newline, JSON escapes, CSV quotes, and `FAST_LZ`/`RAW` fallbacks.
+- **Differential Stress Suites (`tests/compressed_ops_stress.rs`, `tests/stage3_analytics.rs`, `tests/stage4_projection_cli.rs`)**:
+  - Verified across multi-template NDJSON, CSV, TSV, PSV, split column-0 boundaries, multi-block (`> 2` blocks) long lines, EOF without trailing newline, JSON escapes, CSV quotes, column reordering/duplication, and `FAST_LZ`/`RAW` fallbacks.
+
+## Stage 3 & Stage 4 Extensions (`v0.4.2`)
+
+1. **Compound Boolean Expressions (`PredExpr`, `src/ops/expr.rs`, `src/columns/ops_expr.rs`)**:
+   - Zero-heap `Copy` `PredExpr` (`True`, `Col`, `RowContains`, `All`, `Any`, `Not`) evaluated over 64-bit `TplMask` word arrays with short-circuit leaf pruning (`count_where`, `filter_where`, `filter_frame_where`).
+2. **Compressed-Domain Scalar Aggregations & 2-Tier `GROUP BY` (`src/ops/agg.rs`, `src/columns/ops_agg.rs`, `src/columns/ops_group.rs`)**:
+   - `aggregate_column` computes `AggStats` (`row_count`, `count`, `sum`, `min`, `max`, `avg`) directly on packed numeric/dictionary arenas (**15.1 GB/s** `1T`, **49.4×** faster than naive decode + scan).
+   - `group_by` accumulates per-dictionary-ID `[AggStats; |D|]` buckets in L1 cache before mapping unique dictionary entries to global `GroupKey`s (**13.9 GB/s** `1T`, **48.5×** speedup on `8T` `SUM(bytes) GROUP BY service`).
+3. **Column Projection & Zero-Reencode Column Splicing (`src/ops/project.rs`, `src/columns/ops_project.rs`)**:
+   - `select_columns` constructs a miniature `PreparedTemplate` over only the requested `ColTarget` slots, skipping unselected columns completely (up to **20.7 GB/s** / **37.3×** speedup).
+   - `project_frame` splices compressed column payloads byte-for-byte into a new `GRAMMAR_PACKET` (`GrammarProjectOut::Spliced`, absorbing `64 KiB` split boundary lines as 1-row raw tails) at **10.7 GB/s** (**32.6×** faster than `decompress + project + compress`).

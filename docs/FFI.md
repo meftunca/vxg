@@ -45,7 +45,7 @@ To achieve multi-GB/s throughput across language boundaries without heap-allocat
 
 | Function | Signature | Description |
 | :--- | :--- | :--- |
-| `vxg_version_string` | `const char* vxg_version_string(void)` | Returns null-terminated version string (`"0.4.1"`). |
+| `vxg_version_string` | `const char* vxg_version_string(void)` | Returns null-terminated version string (`"0.4.2"`). |
 | `vxg_error_message` | `const char* vxg_error_message(vxg_ssize_t code)` | Returns static human-readable message for `< 0` error codes. |
 | `vxg_compress_bound` | `vxg_ssize_t vxg_compress_bound(size_t raw_len, size_t block_size)` | Worst-case compressed byte size (`block_size = 0` uses default `65536`). |
 | `vxg_frame_raw_size` | `vxg_ssize_t vxg_frame_raw_size(const uint8_t* src, size_t src_len)` | $O(1)$ header inspection (or multi-frame sum) returning exact uncompressed size in bytes. |
@@ -55,7 +55,11 @@ To achieve multi-GB/s throughput across language boundaries without heap-allocat
 | `vxg_compress_into` | `vxg_ssize_t vxg_compress_into(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_cap, size_t threads, size_t block_size, int32_t checksum)` | Compresses `src` into `dst`. `threads = 0` uses all CPU cores. Returns bytes written (`>= 0`) or `VXG_ERR_*` (`< 0`). |
 | `vxg_decompress_into` | `vxg_ssize_t vxg_decompress_into(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_cap, size_t threads, int32_t verify_checksum)` | Zero-allocation decode of `src` directly into `dst`. Returns bytes written (`>= 0`) or `VXG_ERR_*` (`< 0`). |
 | `vxg_extract_block_into` | `vxg_ssize_t vxg_extract_block_into(const uint8_t* src, size_t src_len, size_t idx, uint8_t* dst, size_t dst_cap, int32_t verify_checksum)` | Zero-allocation $O(1)$ random-access decode of block `idx` into `dst`. |
-| `vxg_compress_alloc` / `vxg_decompress_alloc` / `vxg_free` | `uint8_t* ...` | Convenience heap-allocated wrappers when caller-side buffer management is not desired. |
+| `vxg_frame_row_count` | `vxg_ssize_t vxg_frame_row_count(const uint8_t* frame_ptr, size_t frame_len)` | Compressed-domain structured record count across all blocks ($O(1)$ per grammar block). |
+| `vxg_extract_row_into` | `vxg_ssize_t vxg_extract_row_into(const uint8_t* frame_ptr, size_t frame_len, size_t global_row_index, uint8_t* dst, size_t dst_cap)` | Compressed-domain random-access extraction of a single record `global_row_index` into `dst`. |
+| `vxg_extract_row_range_into` | `vxg_ssize_t vxg_extract_row_range_into(const uint8_t* frame_ptr, size_t frame_len, size_t start_row, size_t end_row, uint8_t* dst, size_t dst_cap)` | Compressed-domain range extraction of `[start_row .. end_row)` into `dst`. |
+| `vxg_find_first_into` | `vxg_ssize_t vxg_find_first_into(const uint8_t* frame_ptr, size_t frame_len, const uint8_t* needle, size_t needle_len, uint8_t* dst, size_t dst_cap, size_t* out_row_index)` | Compressed-domain predicate pushdown search for the first record containing `needle`. |
+| `vxg_alloc` / `vxg_compress_alloc` / `vxg_decompress_alloc` / `vxg_free` | `uint8_t* ...` | Convenience heap-allocated wrappers and WebAssembly linear-memory helpers. |
 
 ---
 

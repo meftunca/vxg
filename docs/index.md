@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "VXG Codec"
   text: "Vectorized Execution Grammar"
-  tagline: "5.1x smaller than LZ4, 2.4x smaller than Zstd, up to 54 GB/s parallel decode, and O(1) random block access across ARM64 NEON, x86_64 AVX2/AVX-512, and WebAssembly."
+  tagline: "5.1x smaller than LZ4, 2.4x smaller than Zstd, up to 54 GB/s parallel decode, and 10–45 GB/s compressed-domain SQL queries, analytics & zero-reencode column splicing."
   actions:
     - theme: brand
       text: Get Started →
@@ -21,8 +21,8 @@ features:
     details: "Automatically discovers repeating record templates in CSV, TSV, logfmt, NDJSON, pretty JSON, and CLF logs while seamlessly handling prose/code (4-stream canonical Huffman + Fast-LZ) and 2D/strided media frames (SubGreen + sparse bitmask)."
   - title: "5.27x Higher VPI & 8.59x Higher Green Codec Index"
     details: "Across the 10-dataset v4 qualification suite (16 MiB), VXG achieves a 0.0250 geometric-mean compression ratio (40:1) at 2.09 GB/s encode and 8.21 GB/s decode (1T) — scaling to 11.75 GB/s encode and 41.55 GB/s decode on 8 threads."
-  - title: "Zero-Allocation Caller Buffers & O(1) Random Access"
-    details: "Every 64 KiB block is 100% self-contained with an 8-byte compact v4 directory entry. Inspect uncompressed sizes or extract any single block in O(1) time directly into caller-owned slices with zero per-block heap allocation."
+  - title: "Compressed-Domain SQL Analytics & Splicing"
+    details: "Execute compound WHERE filters, GROUP BY / SUM / AVG aggregations (40+ GB/s), single-column updates, and zero-reencode VXG->VXG column projections directly on compressed frames without full decode."
   - title: "Universal Zero-Dependency Footprint"
     details: "Zero external runtime dependencies in default builds. Compiles simultaneously as a Rust library (rlib), static C archive (libvxg.a / vxg.lib), shared library (.so / .dylib / .dll), and dependency-free WebAssembly (vxg.wasm)."
 ---
@@ -82,18 +82,20 @@ fn main() -> vxg::Result<()> {
 ### 2. Command-Line Interface (`vxg`)
 
 ```sh
-# Install or build from source
+# Build from source
 cargo build --release --bin vxg
 
-# Compress with auto-detected CPU threads (-T0)
-./target/release/vxg compress -T0 telemetry.ndjson -o telemetry.ndjson.vxg
+# Compress using all CPU cores (-t auto)
+./target/release/vxg compress telemetry.ndjson telemetry.vxg -t auto -f
 
-# Inspect frame header, compression ratio, and per-block kinds
-./target/release/vxg info --blocks telemetry.ndjson.vxg
+# Inspect frame header, compression ratio, and block-type summary
+./target/release/vxg info telemetry.vxg --summary
 
-# Extract only block #0 in O(1) time without decoding the rest of the file
-./target/release/vxg block telemetry.ndjson.vxg 0 -o block0.ndjson
+# Compressed-domain SELECT + compound WHERE + GROUP BY without full decode
+./target/release/vxg query telemetry.vxg --select ts,service,latency_ms --where 'status==500 && latency_ms>=150' -t auto
+./target/release/vxg agg telemetry.vxg --group-by service --col bytes --where 'status==500' -t auto
 
-# Stream via stdin/stdout in Unix pipelines
-cat access.log | ./target/release/vxg -c -T0 | ./target/release/vxg -d > access.restored.log
+# Zero-reencode VXG -> VXG column splicing & Unix stdin/stdout streaming
+./target/release/vxg project telemetry.vxg slim.vxg --cols service,status,bytes -t auto -f
+cat access.log | ./target/release/vxg c - - --stream -t auto -q | ./target/release/vxg d - - --stream -t auto -q > access.restored.log
 ```
