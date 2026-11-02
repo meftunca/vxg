@@ -9,7 +9,8 @@ VXG is an adaptive block-independent lossless codec and compressed-domain execut
 | **3** | Compound boolean `PredExpr` (`AND`/`OR`/`NOT`), scalar aggregations (`SUM`/`MIN`/`MAX`/`AVG`), and 2-tier dictionary `GROUP BY` | **Completed in `v0.4.2`** |
 | **4** | Compressed-domain `SELECT` column projection & zero-reencode `VXG -> VXG` column splicing (`project_frame`) + full CLI (`query`, `agg`, `project`) | **Completed in `v0.4.2`** |
 | **5** | Zero-copy `mmap` & bounded-memory multi-GB streaming execution for `query`, `agg`, `project`, `filter-frame`, `update`, and `map` | **Completed in `v0.4.3`** |
-| **6** | Continuous correctness hardening (randomized differential fuzzing, sanitizers, `x86_64` / `aarch64` parity) | Ongoing ([Testing](./TESTING.md)) |
+| **6** | Compressed-domain `ORDER BY` / `Top-K` heap queries (`top_k_by`, `select_top_k_by`, `*_stream`), expanded zero-overhead C/FFI analytics ABI, and interactive VitePress benchmark charts | **Completed in `v0.4.4`** |
+| **7** | Continuous correctness hardening (randomized differential fuzzing, sanitizers, `x86_64` / `aarch64` parity) | Ongoing ([Testing](./TESTING.md)) |
 
 ## Engineering Rules
 

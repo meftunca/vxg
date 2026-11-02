@@ -1,0 +1,299 @@
+:root {
+  --vxg-c-emerald: #10b981;
+  --vxg-c-emerald-soft: rgba(16, 185, 129, 0.14);
+  --vxg-c-indigo: #6366f1;
+  --vxg-c-amber: #f59e0b;
+  --vxg-c-slate: #64748b;
+}
+
+.vxg-chart-card {
+  margin: 1.5rem 0 2rem;
+  padding: 1.25rem 1.35rem;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  background: var(--vp-c-bg-soft);
+}
+
+.vxg-chart-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.vxg-chart-title {
+  margin: 0 !important;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--vp-c-text-1);
+}
+
+.vxg-chart-subtitle {
+  margin: 0.2rem 0 0 !important;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--vp-c-text-2);
+}
+
+.vxg-controls-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem 0.9rem;
+  padding-bottom: 0.9rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.vxg-pill-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  background: var(--vp-c-bg);
+  padding: 0.22rem;
+  border-radius: 8px;
+  border: 1px solid var(--vp-c-divider);
+}
+
+.vxg-pill {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--vp-c-text-2);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.32rem 0.68rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.16s ease, color 0.16s ease;
+  line-height: 1.25;
+}
+
+.vxg-pill:hover {
+  color: var(--vp-c-text-1);
+  background: var(--vp-c-bg-soft);
+}
+
+.vxg-pill.is-active {
+  background: var(--vxg-c-emerald);
+  color: #ffffff;
+}
+
+.vxg-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.1rem;
+}
+
+.vxg-kpi-box {
+  padding: 0.75rem 0.9rem;
+  border-radius: 9px;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+}
+
+.vxg-kpi-label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--vp-c-text-2);
+}
+
+.vxg-kpi-value {
+  margin-top: 0.2rem;
+  font-size: 1.3rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--vp-c-text-1);
+}
+
+.vxg-kpi-delta {
+  margin-top: 0.18rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--vxg-c-emerald);
+}
+
+.vxg-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.9rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--vp-c-text-2);
+  margin-bottom: 0.85rem;
+}
+
+.vxg-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+}
+
+.vxg-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.vxg-swatch.is-vxg { background: var(--vxg-c-emerald); }
+.vxg-swatch.is-zstd { background: var(--vxg-c-indigo); }
+.vxg-swatch.is-lz4 { background: var(--vxg-c-amber); }
+.vxg-swatch.is-naive { background: var(--vxg-c-slate); }
+
+.vxg-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.72rem;
+}
+
+.vxg-row-card {
+  padding: 0.65rem 0.8rem;
+  border-radius: 8px;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+}
+
+.vxg-row-card.is-highlight {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.06), transparent 65%), var(--vp-c-bg);
+}
+
+.vxg-row-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-bottom: 0.45rem;
+}
+
+.vxg-row-name {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+  font-family: var(--vp-font-family-mono);
+}
+
+.vxg-row-name.is-sans {
+  font-family: var(--vp-font-family-base);
+}
+
+.vxg-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.14rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.73rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  background: var(--vxg-c-emerald-soft);
+  color: var(--vxg-c-emerald);
+}
+
+.vxg-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.42rem;
+  margin-right: 0.4rem;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-2);
+  border: 1px solid var(--vp-c-divider);
+  font-family: var(--vp-font-family-base);
+}
+
+.vxg-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.vxg-bar-line {
+  display: grid;
+  grid-template-columns: 62px 1fr 112px;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.vxg-bar-line.is-wide-label {
+  grid-template-columns: 82px 1fr 118px;
+}
+
+.vxg-bar-codec {
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--vp-c-text-2);
+  white-space: nowrap;
+}
+
+.vxg-bar-codec.is-vxg {
+  color: var(--vp-c-text-1);
+  font-weight: 700;
+}
+
+.vxg-bar-track {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--vp-c-bg-soft);
+  overflow: hidden;
+}
+
+.vxg-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  min-width: 3px;
+  transition: width 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.vxg-bar-fill.is-vxg { background: var(--vxg-c-emerald); }
+.vxg-bar-fill.is-zstd { background: var(--vxg-c-indigo); }
+.vxg-bar-fill.is-lz4 { background: var(--vxg-c-amber); }
+.vxg-bar-fill.is-naive { background: var(--vxg-c-slate); }
+
+.vxg-bar-val {
+  font-size: 0.76rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--vp-c-text-2);
+  white-space: nowrap;
+}
+
+.vxg-bar-val.is-vxg {
+  color: var(--vp-c-text-1);
+  font-weight: 700;
+}
+
+.vxg-chart-footnote {
+  margin: 0.85rem 0 0 !important;
+  font-size: 0.75rem;
+  color: var(--vp-c-text-2);
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .vxg-chart-card {
+    padding: 0.95rem;
+  }
+  .vxg-bar-line,
+  .vxg-bar-line.is-wide-label {
+    grid-template-columns: 58px 1fr 96px;
+    gap: 0.4rem;
+  }
+  .vxg-bar-val {
+    font-size: 0.72rem;
+  }
+}

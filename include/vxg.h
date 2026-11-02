@@ -209,6 +209,131 @@ vxg_ssize_t vxg_find_first_into(
     size_t *out_row_index
 );
 
+/**
+ * Scalar aggregation statistics populated by `vxg_aggregate_col` (64 bytes, 8-byte aligned).
+ */
+typedef struct vxg_agg_stats_t {
+    uint64_t row_count;   /* Total matching records (COUNT(*)) */
+    uint64_t num_count;   /* Matching records with canonical u64 column value (COUNT(col)) */
+    double   sum;         /* SUM(col) as IEEE-754 double (exact up to 2^53) */
+    uint64_t sum_lo;      /* Low 64 bits of exact 128-bit integer SUM(col) */
+    uint64_t sum_hi;      /* High 64 bits of exact 128-bit integer SUM(col) */
+    uint64_t min_val;     /* MIN(col) when has_minmax != 0, else 0 */
+    uint64_t max_val;     /* MAX(col) when has_minmax != 0, else 0 */
+    int32_t  has_minmax;  /* 1 when num_count > 0, else 0 */
+    int32_t  _reserved;   /* Zeroed padding */
+} vxg_agg_stats_t;
+
+/**
+ * Zero-output-allocation integrity and CRC32C verification across single or concatenated
+ * VXG frames using bounded ~512 KiB L2 scratch per worker thread.
+ * Returns total verified uncompressed byte count (`>= 0`), or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_verify_frame(
+    const uint8_t *src,
+    size_t src_len,
+    size_t threads,
+    int32_t verify_checksum
+);
+
+/**
+ * File-to-file compression using VXG's hybrid kernel I/O & mmap pipeline.
+ * Pass `force != 0` to overwrite `output_path` if it already exists.
+ * Returns compressed byte count written (`>= 0`), or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_compress_file(
+    const char *input_path,
+    const char *output_path,
+    size_t threads,
+    size_t block_size,
+    int32_t checksum,
+    int32_t force
+);
+
+/**
+ * File-to-file decompression using zero-copy read-only `mmap` on `.vxg` inputs.
+ * Returns uncompressed byte count written (`>= 0`), or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_decompress_file(
+    const char *input_path,
+    const char *output_path,
+    size_t threads,
+    int32_t verify_checksum,
+    int32_t force
+);
+
+/**
+ * Zero-copy `mmap` file verification with ~512 KiB L2 scratch and zero output allocation.
+ * Returns verified uncompressed byte count (`>= 0`), or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_verify_file(
+    const char *input_path,
+    size_t threads,
+    int32_t verify_checksum
+);
+
+/**
+ * Compressed-domain `COUNT(*)` over compound boolean predicate `where_cstr`
+ * (e.g. `"status>=500 && service==\"auth-gateway\""`, or `NULL`/`""` for all records).
+ * Returns matching record count (`>= 0`), or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_count_where_str(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *where_cstr,
+    size_t threads
+);
+
+/**
+ * Compressed-domain scalar aggregation (`COUNT(*)`, `COUNT(col)`, `SUM`, `MIN`, `MAX`)
+ * on `col_cstr` (`"latency_ms"`, `"csv:2"`, etc.) with optional `where_cstr`.
+ * Returns `VXG_OK` (`0`) on success, or negative `VXG_ERR_*`.
+ */
+vxg_ssize_t vxg_aggregate_col(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *col_cstr,
+    const char *where_cstr,
+    size_t threads,
+    vxg_agg_stats_t *out_stats
+);
+
+/**
+ * Compressed-domain `SELECT` / `WHERE` / `ORDER BY` Top-K query returning a newly allocated
+ * UTF-8/byte buffer of matching (or projected) records.
+ * - `cols_cstr`: `"ts,service,latency_ms"` or `NULL` for full records.
+ * - `where_cstr`: `"status>=500 && !contains:healthz"` or `NULL` for all records.
+ * - `order_by_cstr`: `"latency_ms"` or `NULL` for storage order (`order_by_cstr` need not be in `cols_cstr`).
+ * - `desc`: non-zero for `DESC`, `0` for `ASC` (`NULLS LAST`, stable row-index tie-breaking).
+ * - `limit`: max records (`SIZE_MAX` for all matching records).
+ * Free the returned buffer with `vxg_free(ptr, *out_len)`. Returns `NULL` on error.
+ */
+uint8_t *vxg_select_alloc(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *cols_cstr,
+    const char *where_cstr,
+    const char *order_by_cstr,
+    int32_t desc,
+    size_t limit,
+    size_t threads,
+    size_t *out_len
+);
+
+/**
+ * Produces a new compressed `VXG1` frame directly in the compressed domain by projecting
+ * `cols_cstr` (zero-reencode stream splicing when unfiltered) and/or filtering by `where_cstr`.
+ * Free the returned buffer with `vxg_free(ptr, *out_len)`. Returns `NULL` on error.
+ */
+uint8_t *vxg_project_frame_alloc(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *cols_cstr,
+    const char *where_cstr,
+    size_t threads,
+    size_t *out_len
+);
+
 #ifdef __cplusplus
 }
 #endif

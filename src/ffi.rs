@@ -13,6 +13,9 @@ use crate::{
     DecodeOptions, Error, Options, Simd,
 };
 
+mod analytics;
+pub use analytics::*;
+
 pub const VXG_OK: isize = 0;
 pub const VXG_ERR_NULL_PTR: isize = -1;
 pub const VXG_ERR_INVALID_OPTION: isize = -2;
@@ -24,7 +27,7 @@ pub const VXG_ERR_INTERNAL: isize = -7;
 
 const VERSION_CSTR: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
-fn map_error(err: Error) -> isize {
+pub(super) fn map_error(err: Error) -> isize {
     match err {
         Error::InvalidOption(_) => VXG_ERR_INVALID_OPTION,
         Error::SizeOverflow | Error::OutputLimit { .. } | Error::OutputSize { .. } => {
@@ -37,7 +40,7 @@ fn map_error(err: Error) -> isize {
     }
 }
 
-fn resolve_threads(threads: usize) -> usize {
+pub(super) fn resolve_threads(threads: usize) -> usize {
     if threads == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -48,7 +51,7 @@ fn resolve_threads(threads: usize) -> usize {
     }
 }
 
-fn resolve_block_size(block_size: usize) -> usize {
+pub(super) fn resolve_block_size(block_size: usize) -> usize {
     if block_size == 0 {
         65536
     } else {
@@ -56,7 +59,7 @@ fn resolve_block_size(block_size: usize) -> usize {
     }
 }
 
-unsafe fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+pub(super) unsafe fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     if len == 0 {
         Some(&[])
     } else if ptr.is_null() {
@@ -477,8 +480,7 @@ mod tests {
         let blocks = unsafe { vxg_frame_block_count(compressed.as_ptr(), compressed.len()) };
         assert_eq!(blocks, 1);
 
-        let b0_size =
-            unsafe { vxg_frame_block_raw_size(compressed.as_ptr(), compressed.len(), 0) };
+        let b0_size = unsafe { vxg_frame_block_raw_size(compressed.as_ptr(), compressed.len(), 0) };
         assert_eq!(b0_size as usize, raw.len());
 
         let mut restored = vec![0u8; reported_raw as usize];
@@ -511,9 +513,8 @@ mod tests {
 
         // Alloc API roundtrip:
         let mut alloc_c_len = 0usize;
-        let c_ptr = unsafe {
-            vxg_compress_alloc(raw.as_ptr(), raw.len(), 1, 65536, 1, &mut alloc_c_len)
-        };
+        let c_ptr =
+            unsafe { vxg_compress_alloc(raw.as_ptr(), raw.len(), 1, 65536, 1, &mut alloc_c_len) };
         assert!(!c_ptr.is_null());
         let mut alloc_d_len = 0usize;
         let d_ptr = unsafe { vxg_decompress_alloc(c_ptr, alloc_c_len, 1, 1, &mut alloc_d_len) };

@@ -92,7 +92,10 @@ mod tests {
         let updated_str = updated_path.to_str().unwrap();
         let filtered_str = filtered_path.to_str().unwrap();
 
-        run_args(&s(&["map", vxg_str, mapped_str, "--col", "csv:3", "--upper", "-q"])).unwrap();
+        run_args(&s(&[
+            "map", vxg_str, mapped_str, "--col", "csv:3", "--upper", "-q",
+        ]))
+        .unwrap();
         run_args(&s(&["verify", mapped_str, "-q"])).unwrap();
         run_args(&s(&[
             "update",
@@ -118,7 +121,10 @@ mod tests {
         ]))
         .unwrap();
         run_args(&s(&["verify", filtered_str, "-q"])).unwrap();
-        assert_eq!(vxg::frame_row_count(&fs::read(&filtered_path).unwrap()).unwrap(), 24);
+        assert_eq!(
+            vxg::frame_row_count(&fs::read(&filtered_path).unwrap()).unwrap(),
+            24
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -314,11 +320,23 @@ mod tests {
 
         // Compress both as multi-frame `--stream` and single-frame `--no-mmap`:
         run_args(&s(&[
-            "compress", raw_s, stream_s, "--block-size", "4096", "--stream", "-q",
+            "compress",
+            raw_s,
+            stream_s,
+            "--block-size",
+            "4096",
+            "--stream",
+            "-q",
         ]))
         .unwrap();
         run_args(&s(&[
-            "compress", raw_s, nommap_s, "--block-size", "4096", "--no-mmap", "-q",
+            "compress",
+            raw_s,
+            nommap_s,
+            "--block-size",
+            "4096",
+            "--no-mmap",
+            "-q",
         ]))
         .unwrap();
         run_args(&s(&["verify", stream_s, "--stream", "-q"])).unwrap();
@@ -339,7 +357,14 @@ mod tests {
             );
 
             let mut q_sel = s(&[
-                "query", stream_s, "--select", "seq,service", "--where", "status==500", "--limit", "2",
+                "query",
+                stream_s,
+                "--select",
+                "seq,service",
+                "--where",
+                "status==500",
+                "--limit",
+                "2",
             ]);
             q_sel.extend(extra.iter().map(|x| (*x).to_owned()));
             assert_eq!(
@@ -350,22 +375,51 @@ mod tests {
 
         // `agg --stream` parity vs whole-file `agg`:
         let agg_ref = execute_agg_to_string(&s(&[
-            "agg", nommap_s, "--group-by", "service", "--col", "bytes", "--json",
+            "agg",
+            nommap_s,
+            "--group-by",
+            "service",
+            "--col",
+            "bytes",
+            "--json",
         ]))
         .unwrap();
         let agg_stm = execute_agg_to_string(&s(&[
-            "agg", stream_s, "--group-by", "service", "--col", "bytes", "--json", "--stream",
+            "agg",
+            stream_s,
+            "--group-by",
+            "service",
+            "--col",
+            "bytes",
+            "--json",
+            "--stream",
         ]))
         .unwrap();
         assert_eq!(agg_stm, agg_ref);
 
         // Chained `--stream` frame transforms (`project` -> `update` -> `map` -> `filter-frame`):
         run_args(&s(&[
-            "project", stream_s, proj_s, "--cols", "seq,service,status,bytes", "--stream", "-q",
+            "project",
+            stream_s,
+            proj_s,
+            "--cols",
+            "seq,service,status,bytes",
+            "--stream",
+            "-q",
         ]))
         .unwrap();
         run_args(&s(&[
-            "update", proj_s, upd_s, "--where", "status==500", "--col", "service", "--set", "alert-svc", "--stream", "-q",
+            "update",
+            proj_s,
+            upd_s,
+            "--where",
+            "status==500",
+            "--col",
+            "service",
+            "--set",
+            "alert-svc",
+            "--stream",
+            "-q",
         ]))
         .unwrap();
         run_args(&s(&[
@@ -373,7 +427,13 @@ mod tests {
         ]))
         .unwrap();
         run_args(&s(&[
-            "filter-frame", map_s, flt_s, "--where", "service==ALERT-SVC", "--stream", "-q",
+            "filter-frame",
+            map_s,
+            flt_s,
+            "--where",
+            "service==ALERT-SVC",
+            "--stream",
+            "-q",
         ]))
         .unwrap();
         run_args(&s(&["verify", flt_s, "--stream", "-q"])).unwrap();
@@ -384,6 +444,116 @@ mod tests {
             .unwrap(),
             "350\n"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_query_order_by_and_agg_order_by_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("vxg_cli_stage6_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let raw_path = dir.join("lat.ndjson");
+        let stream_vxg = dir.join("lat_stream.vxg");
+        let single_vxg = dir.join("lat_single.vxg");
+
+        let svcs = ["edge", "auth", "db"];
+        let mut raw = Vec::new();
+        for i in 0..3000usize {
+            let svc = svcs[i % svcs.len()];
+            let lat = (i * 17) % 1000 + if svc == "db" { 500 } else { 0 };
+            raw.extend_from_slice(
+                format!("{{\"seq\":{i},\"svc\":\"{svc}\",\"lat\":{lat}}}\n").as_bytes(),
+            );
+        }
+        fs::write(&raw_path, &raw).unwrap();
+        let raw_s = raw_path.to_str().unwrap();
+        let stm_s = stream_vxg.to_str().unwrap();
+        let sgl_s = single_vxg.to_str().unwrap();
+
+        run_args(&s(&[
+            "compress",
+            raw_s,
+            stm_s,
+            "--block-size",
+            "4096",
+            "--stream",
+            "-q",
+        ]))
+        .unwrap();
+        run_args(&s(&[
+            "compress",
+            raw_s,
+            sgl_s,
+            "--block-size",
+            "4096",
+            "-t",
+            "2",
+            "-q",
+        ]))
+        .unwrap();
+
+        let q_single = String::from_utf8(
+            execute_query_to_vec(&s(&[
+                "query",
+                sgl_s,
+                "--select",
+                "seq,svc",
+                "--where",
+                "svc==db",
+                "--order-by",
+                "lat",
+                "--desc",
+                "--limit",
+                "4",
+                "-t",
+                "2",
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let q_stream = String::from_utf8(
+            execute_query_to_vec(&s(&[
+                "query",
+                stm_s,
+                "--select",
+                "seq,svc",
+                "--where",
+                "svc==db",
+                "--order-by",
+                "lat",
+                "--desc",
+                "--limit",
+                "4",
+                "--stream",
+                "-t",
+                "2",
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(q_stream, q_single);
+        assert_eq!(q_single.lines().count(), 4);
+
+        let agg_desc = execute_agg_to_string(&s(&[
+            "agg",
+            sgl_s,
+            "--group-by",
+            "svc",
+            "--col",
+            "lat",
+            "--order-by",
+            "sum",
+            "--desc",
+            "--limit",
+            "2",
+            "--json",
+        ]))
+        .unwrap();
+        let agg_lines: Vec<&str> = agg_desc.lines().collect();
+        assert_eq!(agg_lines.len(), 2);
+        // "db" has +500 latency offset on every row, so "db" MUST rank #1 by sum DESC!
+        assert!(agg_lines[0].starts_with("{\"key\":\"db\","));
 
         let _ = fs::remove_dir_all(&dir);
     }

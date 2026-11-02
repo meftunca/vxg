@@ -380,3 +380,15 @@ Earlier development logs are archived in:
   - Scaled `StreamEncoder::new` default chunk sizes (`4..16 MiB` by thread count) and removed `8 KiB` `io::copy` double-buffering in `compress_stream` / `decompress_stream` (`1.8x–4.0x` faster multi-threaded streaming).
 - **CLI Default `mmap` & Universal `--stream` (`src/bin/vxg.rs`, `src/bin/cli_support/`):**
   - Enabled `mmap` by default on regular files (`--no-mmap` opt-out) and added `--stream` + `stdin` (`-`) across `verify`, `query`, `agg`, `project`, `filter-frame`, `update`, and `map`; verified by `101/101` release tests (`tests/stage5_mmap.rs`, `tests/stage5_stream_ops.rs`).
+
+## 2026-11-02 — VXG v0.4.4 (Stage 6): Compressed-Domain `ORDER BY` / `Top-K`, Expanded C/FFI Analytics ABI & Interactive VitePress Charts
+
+- **Compressed-Domain `ORDER BY` / `Top-K` Heap Engine (`src/ops/top_k.rs`, `src/columns/ops_topk.rs`, `src/stream_ops/top_k.rs`):**
+  - Added `SortDir`, `SortKey`, `top_k_by`, `select_top_k_by`, `top_k_by_stream`, and `select_top_k_by_stream` with deterministic `NULLS LAST` + `global_row_index` tie-breaking across threads and multi-frame streams.
+  - Added $O(1)$ `MODEL_DECIMAL_PACKED` / `MODEL_DECIMAL_AFFINE` numeric zone-map block skipping, `AtomicU64` cross-worker monotonic threshold pruning, pre-pruned dictionary `alive` bitmaps, `TplRowMap::Offset` $O(1)$ row indexing on boundary-split 1-template blocks, and bounded per-template `CandTracker` ($\le K$ candidate rows materialized per template).
+  - On `ndjson_varied.ndjson` (`56.5 MB`, `300,000` rows, `863` blocks), `top_k_by` and `select_top_k_by` run in **`1.38–1.90 ms` (`29.7–40.9 GB/s`, `55×–68×` vs naive `decompress + select_nth_unstable`)** on `1T` and **`1.33–1.64 ms` (`34.5–42.3 GB/s`, `54×–72×`)** on `8T`.
+  - Added `--order-by COL [--desc|--asc]` to `vxg query` and `--order-by key|rows|count|sum|avg|min|max [--desc|--asc] [--limit K]` to `vxg agg`.
+- **Shared Expression Parser & Expanded Zero-Overhead C/FFI ABI (`src/ops/parse_expr.rs`, `src/ffi/analytics.rs`, `include/vxg.h`):**
+  - Promoted the recursive-descent compound `WHERE` and column-target parser into `vxg::ops` (`ParsedWhere`, `ParsedColPred`, `parse_col_target`, `parse_col_list`) and exported 8 new panic-safe C ABI functions (`vxg_verify_frame`, `vxg_compress_file`, `vxg_decompress_file`, `vxg_verify_file`, `vxg_count_where_str`, `vxg_aggregate_col` + `vxg_agg_stats_t`, `vxg_select_alloc`, `vxg_project_frame_alloc`).
+- **Interactive Zero-Dependency VitePress Charts (`docs/.vitepress/theme/`):**
+  - Added `CodecBenchmarkChart.vue`, `CompressedOpsChart.vue`, and `EnergyBenchmarkChart.vue` using native Vue 3 + VitePress CSS theme variables (`0` extra npm packages), embedded in `docs/index.md`, `docs/BENCHMARKS.md`, `docs/ENERGY_BENCHMARKS.md`, and `docs/STAGE2_DESIGN.md`.

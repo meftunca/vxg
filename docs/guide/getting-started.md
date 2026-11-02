@@ -39,8 +39,8 @@ Build outputs in `target/release/`:
 | `vxg verify` (`t`) `FRAME [FLAGS]` | Verify frame header, compact directory, block boundaries, and CRC32C checksums without writing output. |
 | `vxg info` (`list`) `FRAME [--summary]` | Print frame version (`v1`–`v4`), raw/encoded byte sizes, ratio, and block-type breakdown (`RAW`, `LZ`, `COLUMN`). |
 | `vxg block` `FRAME INDEX [OUTPUT] [-f]` | $O(1)$ random-access extraction of a single block (`0..block_count`) without decoding other blocks. |
-| `vxg query` (`q`) `FRAME [QUERY_FLAGS]` | Compressed-domain row count, row/range extraction, substring search, compound `--where` filter, and `--select` column projection. |
-| `vxg agg` `FRAME [AGG_FLAGS]` | Compressed-domain scalar aggregation (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) and `GROUP BY` (`--group-by COL`). |
+| `vxg query` (`q`) `FRAME [QUERY_FLAGS]` | Compressed-domain row count, row/range extraction, substring search, compound `--where` filter, `--select` column projection, and `--order-by COL [--desc\|--asc]` Top-K heap query. |
+| `vxg agg` `FRAME [AGG_FLAGS]` | Compressed-domain scalar aggregation (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) and `GROUP BY` (`--group-by COL`) with `--order-by key\|rows\|count\|sum\|avg\|min\|max [--desc\|--asc] [--limit K]`. |
 | `vxg project` `INPUT OUTPUT --cols C1,C2,...` | Compressed-domain column projection into a new `.vxg` frame (zero-reencode column splicing when unfiltered). |
 | `vxg filter-frame` `INPUT OUTPUT --where EXPR` | Produce a new `.vxg` frame containing only rows matching compound `--where EXPR` (splices 100%-matching blocks verbatim). |
 | `vxg update` `INPUT OUTPUT --where SPEC --col COL ...` | Conditional single-column mutation (`--set`, `--set-raw`, `--upper`, `--lower`, `--redact`, `--add`) without full decode/re-encode. |
@@ -85,15 +85,15 @@ vxg query events.vxg --count
 vxg query events.vxg --row 42
 vxg query events.vxg --range 100:110
 
-# 3. Compound boolean WHERE + SELECT column projection (skips unselected columns!)
+# 3. Compound boolean WHERE + SELECT + ORDER BY Top-K (zone-map skip + bounded K-heap!)
 vxg query events.vxg \
   --select ts,service,status,latency_ms \
-  --where 'status==500 && (service==fraud-engine || service==auth-gateway) && latency_ms>=150' \
-  --limit 20 -t auto
+  --where 'status==500 && (service==fraud-engine || service==auth-gateway)' \
+  --order-by latency_ms --desc --limit 10 -t auto
 
-# 4. Zero-reencode VXG -> VXG column splicing + chained GROUP BY analytics
+# 4. Zero-reencode VXG -> VXG column splicing + sorted GROUP BY analytics
 vxg project events.vxg slim.vxg --cols service,status,bytes,latency_ms -t auto -f
-vxg agg slim.vxg --group-by service --col bytes --where 'status==500' --json -t auto
+vxg agg slim.vxg --group-by service --col bytes --where 'status==500' --order-by sum --desc --limit 5 --json -t auto
 
 # 5. Compressed-domain conditional column update & whole-column map
 vxg update events.vxg patched.vxg --where status==500 --col level --set CRITICAL -f

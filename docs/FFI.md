@@ -59,7 +59,43 @@ To achieve multi-GB/s throughput across language boundaries without heap-allocat
 | `vxg_extract_row_into` | `vxg_ssize_t vxg_extract_row_into(const uint8_t* frame_ptr, size_t frame_len, size_t global_row_index, uint8_t* dst, size_t dst_cap)` | Compressed-domain random-access extraction of a single record `global_row_index` into `dst`. |
 | `vxg_extract_row_range_into` | `vxg_ssize_t vxg_extract_row_range_into(const uint8_t* frame_ptr, size_t frame_len, size_t start_row, size_t end_row, uint8_t* dst, size_t dst_cap)` | Compressed-domain range extraction of `[start_row .. end_row)` into `dst`. |
 | `vxg_find_first_into` | `vxg_ssize_t vxg_find_first_into(const uint8_t* frame_ptr, size_t frame_len, const uint8_t* needle, size_t needle_len, uint8_t* dst, size_t dst_cap, size_t* out_row_index)` | Compressed-domain predicate pushdown search for the first record containing `needle`. |
+| `vxg_verify_frame` | `vxg_ssize_t vxg_verify_frame(const uint8_t* src, size_t src_len, size_t threads, int32_t verify_checksum)` | Zero-output-allocation parallel frame/stream verification (`~64 KiB` L2 scratch per thread). Returns total verified raw bytes (`>= 0`) or `VXG_ERR_*`. |
+| `vxg_compress_file` | `vxg_ssize_t vxg_compress_file(const char* in_path, const char* out_path, size_t threads, size_t block_size, int32_t checksum, int32_t overwrite)` | Zero-copy `mmap` file-to-file compression. Returns compressed bytes written (`>= 0`) or `VXG_ERR_*`. |
+| `vxg_decompress_file` | `vxg_ssize_t vxg_decompress_file(const char* in_path, const char* out_path, size_t threads, int32_t verify_checksum, int32_t overwrite)` | Bounded-batch (`16 MiB`) `mmap` file-to-file decompression with automatic partial-output cleanup on failure. |
+| `vxg_verify_file` | `vxg_ssize_t vxg_verify_file(const char* in_path, size_t threads, int32_t verify_checksum)` | Zero-copy `mmap` + zero-output-alloc file integrity verification. |
+| `vxg_count_where_str` | `vxg_ssize_t vxg_count_where_str(const uint8_t* src, size_t src_len, const char* where_expr, size_t threads)` | Compressed-domain row count matching compound `where_expr` (`NULL`/`""` counts all rows). |
+| `vxg_aggregate_col` | `int32_t vxg_aggregate_col(const uint8_t* src, size_t src_len, const char* col_spec, const char* where_expr, size_t threads, vxg_agg_stats_t* out_stats)` | Compressed-domain `COUNT` / `SUM` (`u128` via `sum_lo`/`sum_hi`) / `MIN` / `MAX` into 64-byte `vxg_agg_stats_t`. |
+| `vxg_select_alloc` | `uint8_t* vxg_select_alloc(const uint8_t* src, size_t src_len, const char* cols_csv, const char* where_expr, const char* order_by_col, int32_t order_desc, size_t limit, size_t threads, size_t* out_len)` | Compressed-domain `SELECT` (`cols_csv` or `NULL` for full rows) + optional `WHERE` + optional `ORDER BY` Top-K (`limit = 0` means unlimited). Free with `vxg_free(ptr, out_len)`. |
+| `vxg_project_frame_alloc` | `uint8_t* vxg_project_frame_alloc(const uint8_t* src, size_t src_len, const char* cols_csv, const char* where_expr, size_t threads, int32_t checksum, size_t* out_len)` | Zero-reencode `VXG -> VXG` column splicing (`project_frame`) with optional `WHERE`. Free with `vxg_free(ptr, out_len)`. |
 | `vxg_alloc` / `vxg_compress_alloc` / `vxg_decompress_alloc` / `vxg_free` | `uint8_t* ...` | Convenience heap-allocated wrappers and WebAssembly linear-memory helpers. |
+
+### Compressed-Domain SQL Analytics & `Top-K` from C (`vxg_agg_stats_t` & `vxg_select_alloc`)
+
+```c
+#include "vxg.h"
+#include <stdio.h>
+
+void query_telemetry(const uint8_t* frame, size_t frame_len) {
+    vxg_agg_stats_t st;
+    if (vxg_aggregate_col(frame, frame_len, "latency_ms", "status==500", 0, &st) == VXG_OK) {
+        printf("500 errors: %llu rows (max latency=%llu ms)\n",
+               (unsigned long long)st.row_count, (unsigned long long)st.max_val);
+    }
+
+    size_t out_len = 0;
+    uint8_t* top10 = vxg_select_alloc(
+        frame, frame_len,
+        "ts,service,latency_ms",          /* projected columns (or NULL for full rows) */
+        "status==500 && latency_ms>=100", /* compound WHERE filter (or NULL) */
+        "latency_ms", 1, 10, 0,           /* ORDER BY latency_ms DESC LIMIT 10, auto threads */
+        &out_len
+    );
+    if (top10 != NULL) {
+        fwrite(top10, 1, out_len, stdout);
+        vxg_free(top10, out_len);
+    }
+}
+```
 
 ---
 

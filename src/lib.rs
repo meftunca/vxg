@@ -40,8 +40,9 @@ pub use mmap::{
 };
 pub use ops::{
     aggregate_column, count_where, filter_column, filter_frame, filter_frame_where, filter_where,
-    group_by, map_column, project_frame, select_columns, update_column, AggStats, ColOp, ColPred,
-    ColTarget, GroupKey, GroupRow, PredExpr, StrCmp, ValuePred,
+    group_by, map_column, parse_col_list, parse_col_target, project_frame, select_columns,
+    select_top_k_by, top_k_by, update_column, with_opt_where, AggStats, ColOp, ColPred, ColTarget,
+    GroupKey, GroupRow, ParsedColPred, ParsedWhere, PredExpr, SortDir, SortKey, StrCmp, ValuePred,
 };
 pub use query::{
     block_row_count, extract_block_row, extract_block_row_range, extract_row, extract_row_range,
@@ -52,7 +53,8 @@ pub use stream::{compress_stream, decompress_stream, StreamDecoder, StreamEncode
 pub use stream_ops::{
     aggregate_column_stream, count_where_stream, filter_frame_where_stream, filter_where_stream,
     frame_row_count_stream, group_by_stream, map_column_stream, project_frame_stream,
-    select_columns_stream, update_column_stream, verify_frame, verify_stream, FrameReader,
+    select_columns_stream, select_top_k_by_stream, top_k_by_stream, update_column_stream,
+    verify_frame, verify_stream, FrameReader,
 };
 
 #[derive(Clone, Debug)]

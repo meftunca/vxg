@@ -15,9 +15,11 @@ use crate::{
     query, DecodeOptions, Error, Frame, Options, Result, BLOCK_COLUMN,
 };
 
+mod top_k;
 mod transform;
 mod verify;
 
+pub use top_k::{select_top_k_by_stream, top_k_by_stream};
 pub use transform::{
     filter_frame_where_stream, map_column_stream, project_frame_stream, update_column_stream,
 };

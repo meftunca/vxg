@@ -11,6 +11,8 @@ Measured on Apple Silicon (`aarch64`, SIMD=`Neon`, `liblz4 1.10.0`, `libzstd 1.5
 - **Balanced 3-Axis Cube Index (`BCI`):** $\text{BCI} = \left(\frac{\text{Encode}_{\text{GB/s}} \cdot \text{Decode}_{\text{GB/s}}}{\text{Ratio}}\right)^{1/3}$ (higher is better).
 - **Green Codec Index (`GCI`):** $\text{GCI} = \frac{\text{VPI}}{\sqrt{J_{\text{enc}} \cdot J_{\text{dec}}}}$ using per-process hardware energy (`proc_pid_rusage` `RUSAGE_INFO_V6` `ri_energy_nj` in `J/GB`).
 
+<CodecBenchmarkChart />
+
 ### 1-Thread (`threads = 1`, `block = 65536`, `16 MiB`)
 
 | Dataset | VXG Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG Enc / Dec (`GB/s`) | LZ4 Enc / Dec (`GB/s`) | Zstd-1 Enc / Dec (`GB/s`) | VXG `VPI` (`vs LZ4` / `Zstd-1`) | VXG Enc / Dec (`J/GB`) | VXG `GCI` (`vs LZ4` / `Zstd-1`) |
@@ -640,6 +642,8 @@ Single-thread comparison vs LZ4 (`1.10.0`) and Zstd-1 (`1.5.7`) (`vxg-bench --sa
 
 ## Stage 2: Compressed-domain `filter`, `map`, and `update` without full decode
 
+<CompressedOpsChart />
+
 Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`, checksums off, median of 5 timed samples after warmup via `vxg-query-real --ops-suite`).
 - `filter_column` is compared against `vxg::decompress` + single-pass raw column scan; exact `(global_row_index, bytes)` equality is asserted on every run.
 - Frame-producing operations (`filter_frame`, `update_column`, `map_column`) are compared against `vxg::decompress` + single-buffer raw line transform + `vxg::compress`; byte-for-byte equality of `vxg::decompress(output_frame)` is asserted on every run.
@@ -722,3 +726,16 @@ Measured on **`ndjson_varied.ndjson`** (`56,503,837 B` raw -> `5,167,201 B` / `9
 | `vxg verify --stream -t 8` (`FrameReader` + `verify_stream`) | **10.37 ms** | **5.45 GB/s** | `8 MiB` single-frame buffer |
 | `vxg compress --stream -t 8` (`5,167,393 B`, `9.15%`, `7` frames) | **25.97 ms** | **2.18 GB/s** | `8 MiB` bounded chunk |
 | `vxg project --cols ts,service,status,latency_ms` (`mmap` / `--stream`) | **4.73 ms** / **12.02 ms** | **11.95 GB/s** / **4.70 GB/s** | Byte-exact decoded output |
+
+### 4. Stage 6 — Compressed-Domain `ORDER BY` / `Top-K` Heap Queries (`top_k_by`, `select_top_k_by`)
+
+Measured on **`ndjson_varied.ndjson`** (`56.50 MB` raw, `300,000` rows, `863` blocks, median of 5 timed samples via `vxg-query-real --topk-suite`). Every run compares against `vxg::decompress` + $O(N)$ `select_nth_unstable_by` partial sort (`naive`) and asserts exact `(global_row_index, bytes)` equality:
+
+| Top-K Query (`ndjson_varied.ndjson`, `56.50 MB`, `300k` rows) | Naive `1T` | VXG `1T` | `1T` Speedup (`GB/s`) | VXG `8T` | `8T` Speedup (`GB/s`) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| `top_k_by` `ORDER BY bytes DESC LIMIT 10` (zone-map skip) | 101.68 ms | **1.82 ms** | **55.9×** (**31.04 GB/s**) | **1.43 ms** | **63.8×** (**39.60 GB/s**) |
+| `top_k_by` `ORDER BY latency_ms DESC LIMIT 10` (all `300k`) | 98.13 ms | **1.78 ms** | **55.0×** (**31.65 GB/s**) | **1.59 ms** | **57.5×** (**35.63 GB/s**) |
+| `top_k_by` `ORDER BY latency_ms ASC LIMIT 10` (all `300k`) | 94.89 ms | **1.38 ms** | **68.6×** (**40.85 GB/s**) | **1.33 ms** | **72.5×** (**42.33 GB/s**) |
+| `top_k_by` `WHERE status==500 ORDER BY latency_ms DESC K=20` | 93.32 ms | **2.63 ms** | **35.5×** (**21.52 GB/s**) | **1.56 ms** | **55.9×** (**36.33 GB/s**) |
+| `select_top_k_by` `[ts,svc,lat] WHERE fraud&500 ORDER BY lat DESC K=10` | 108.15 ms | **3.94 ms** | **27.4×** (**14.32 GB/s**) | **1.64 ms** | **54.3×** (**34.52 GB/s**) |
+| `top_k_by` `ORDER BY service ASC LIMIT 10` (`O(\|D\|)` alive bitmap) | 107.05 ms | **1.90 ms** | **56.2×** (**29.67 GB/s**) | **1.44 ms** | **63.7×** (**39.22 GB/s**) |

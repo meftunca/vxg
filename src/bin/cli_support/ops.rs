@@ -34,161 +34,6 @@ fn open_stream_writer(path: &str, force: bool) -> R<Box<dyn Write>> {
     )))
 }
 
-enum OwnedPred {
-    StrEq(Vec<u8>),
-    StrNe(Vec<u8>),
-    StrPrefix(Vec<u8>),
-    StrSuffix(Vec<u8>),
-    StrContains(Vec<u8>),
-    Num(vxg::NumCmp),
-}
-
-impl OwnedPred {
-    fn as_value_pred(&self) -> vxg::ValuePred<'_> {
-        match self {
-            Self::StrEq(b) => vxg::ValuePred::Str(vxg::StrCmp::Eq(b)),
-            Self::StrNe(b) => vxg::ValuePred::Str(vxg::StrCmp::Ne(b)),
-            Self::StrPrefix(b) => vxg::ValuePred::Str(vxg::StrCmp::Prefix(b)),
-            Self::StrSuffix(b) => vxg::ValuePred::Str(vxg::StrCmp::Suffix(b)),
-            Self::StrContains(b) => vxg::ValuePred::Str(vxg::StrCmp::Contains(b)),
-            Self::Num(c) => vxg::ValuePred::Num(*c),
-        }
-    }
-}
-
-fn parse_col_target(s: &str) -> R<vxg::ColTarget<'_>> {
-    if let Some(rest) = s.strip_prefix("json:") {
-        if rest.is_empty() {
-            return Err("empty json column key".into());
-        }
-        Ok(vxg::ColTarget::JsonKey(rest))
-    } else if let Some(rest) = s.strip_prefix("csv:") {
-        Ok(vxg::ColTarget::Delimited {
-            delim: b',',
-            index: rest.parse()?,
-        })
-    } else if let Some(rest) = s.strip_prefix("tsv:") {
-        Ok(vxg::ColTarget::Delimited {
-            delim: b'\t',
-            index: rest.parse()?,
-        })
-    } else if let Some(rest) = s.strip_prefix("psv:") {
-        Ok(vxg::ColTarget::Delimited {
-            delim: b'|',
-            index: rest.parse()?,
-        })
-    } else if !s.is_empty() {
-        Ok(vxg::ColTarget::JsonKey(s))
-    } else {
-        Err("empty column target".into())
-    }
-}
-
-fn parse_canonical_cli_u64(s: &str) -> Option<u64> {
-    if s.is_empty() || s.len() > 20 || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    if s.len() > 1 && s.starts_with('0') {
-        return None;
-    }
-    s.parse().ok()
-}
-
-fn parse_auto_eq_pred(rhs: &str, is_eq: bool) -> OwnedPred {
-    let t = rhs.trim();
-    let is_quoted = t.len() >= 2
-        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')));
-    if !is_quoted {
-        if let Some(n) = parse_canonical_cli_u64(t) {
-            return OwnedPred::Num(if is_eq {
-                vxg::NumCmp::Eq(n)
-            } else {
-                vxg::NumCmp::Ne(n)
-            });
-        }
-    }
-    let bytes = unquote_opt(rhs).to_vec();
-    if is_eq {
-        OwnedPred::StrEq(bytes)
-    } else {
-        OwnedPred::StrNe(bytes)
-    }
-}
-
-fn parse_where_spec(spec: &str) -> R<(vxg::ColTarget<'_>, OwnedPred)> {
-    for (op_tok, ctor) in [
-        (">=", (|n| vxg::NumCmp::Ge(n)) as fn(u64) -> vxg::NumCmp),
-        ("<=", |n| vxg::NumCmp::Le(n)),
-    ] {
-        if let Some((lhs, rhs)) = spec.split_once(op_tok) {
-            return Ok((
-                parse_col_target(lhs.trim())?,
-                OwnedPred::Num(ctor(rhs.trim().parse()?)),
-            ));
-        }
-    }
-    if let Some((lhs, rhs)) = spec.split_once("!=") {
-        let rhs_eff = if lhs.ends_with(' ') || lhs.ends_with('\t') {
-            rhs.trim_start()
-        } else {
-            rhs
-        };
-        return Ok((parse_col_target(lhs.trim())?, parse_auto_eq_pred(rhs_eff, false)));
-    }
-    if let Some((lhs, rhs)) = spec.split_once("==") {
-        let rhs_eff = if lhs.ends_with(' ') || lhs.ends_with('\t') {
-            rhs.trim_start()
-        } else {
-            rhs
-        };
-        return Ok((parse_col_target(lhs.trim())?, parse_auto_eq_pred(rhs_eff, true)));
-    }
-    if let Some((lhs, rhs)) = spec.split_once('=') {
-        let col = parse_col_target(lhs.trim())?;
-        let pred = if let Some(v) = rhs.strip_prefix("eq:") {
-            OwnedPred::StrEq(v.as_bytes().to_vec())
-        } else if let Some(v) = rhs.strip_prefix("ne:") {
-            OwnedPred::StrNe(v.as_bytes().to_vec())
-        } else if let Some(v) = rhs.strip_prefix("prefix:") {
-            OwnedPred::StrPrefix(v.as_bytes().to_vec())
-        } else if let Some(v) = rhs.strip_prefix("suffix:") {
-            OwnedPred::StrSuffix(v.as_bytes().to_vec())
-        } else if let Some(v) = rhs.strip_prefix("contains:") {
-            OwnedPred::StrContains(v.as_bytes().to_vec())
-        } else if let Some(v) = rhs.strip_prefix("num:").or_else(|| rhs.strip_prefix("num-eq:")) {
-            OwnedPred::Num(vxg::NumCmp::Eq(v.trim().parse()?))
-        } else if let Some(v) = rhs.strip_prefix("num-ne:") {
-            OwnedPred::Num(vxg::NumCmp::Ne(v.trim().parse()?))
-        } else if let Some(v) = rhs.strip_prefix("gt:") {
-            OwnedPred::Num(vxg::NumCmp::Gt(v.trim().parse()?))
-        } else if let Some(v) = rhs.strip_prefix("ge:") {
-            OwnedPred::Num(vxg::NumCmp::Ge(v.trim().parse()?))
-        } else if let Some(v) = rhs.strip_prefix("lt:") {
-            OwnedPred::Num(vxg::NumCmp::Lt(v.trim().parse()?))
-        } else if let Some(v) = rhs.strip_prefix("le:") {
-            OwnedPred::Num(vxg::NumCmp::Le(v.trim().parse()?))
-        } else {
-            parse_auto_eq_pred(rhs, true)
-        };
-        return Ok((col, pred));
-    }
-    for (op_ch, ctor) in [
-        ('>', (|n| vxg::NumCmp::Gt(n)) as fn(u64) -> vxg::NumCmp),
-        ('<', |n| vxg::NumCmp::Lt(n)),
-    ] {
-        if let Some((lhs, rhs)) = spec.split_once(op_ch) {
-            return Ok((
-                parse_col_target(lhs.trim())?,
-                OwnedPred::Num(ctor(rhs.trim().parse()?)),
-            ));
-        }
-    }
-    Err(
-        "invalid --where EXPR (examples: json:level=ERROR, status==500 && bytes>=10000, csv:1=prefix:ERR)"
-            .into(),
-    )
-}
-
 enum CliColAction {
     SetStr(Vec<u8>),
     SetRaw(Vec<u8>),
@@ -274,32 +119,28 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
                     let ws = where_spec
                         .as_deref()
                         .ok_or("--where EXPR is required for filter-frame")?;
-                    let owned = parse_where_expr(ws)?;
-                    let arena = PredArena::new();
-                    let expr = arena.build(&owned);
-                    vxg::filter_frame_where_stream(&mut rdr, &mut wtr, &expr, &enc, &dec)?
+                    let pw = vxg::ParsedWhere::parse(ws)?;
+                    pw.with_expr(|expr| {
+                        vxg::filter_frame_where_stream(&mut rdr, &mut wtr, expr, &enc, &dec)
+                    })?
                 }
                 "project" => {
                     let cs = cols_spec
                         .as_deref()
                         .or(col_spec.as_deref())
                         .ok_or("--cols COL1,COL2,... is required for project")?;
-                    let cols = parse_col_list(cs)?;
-                    let owned = where_spec.as_deref().map(parse_where_expr).transpose()?;
-                    let arena = PredArena::new();
-                    let expr_opt = owned.as_ref().map(|e| arena.build(e));
-                    vxg::project_frame_stream(
-                        &mut rdr,
-                        &mut wtr,
-                        expr_opt.as_ref(),
-                        &cols,
-                        &enc,
-                        &dec,
-                    )?
+                    let cols = vxg::parse_col_list(cs)?;
+                    let pw = where_spec
+                        .as_deref()
+                        .map(vxg::ParsedWhere::parse)
+                        .transpose()?;
+                    vxg::with_opt_where(pw.as_ref(), |expr_opt| {
+                        vxg::project_frame_stream(&mut rdr, &mut wtr, expr_opt, &cols, &enc, &dec)
+                    })?
                 }
                 "update" | "map" => {
                     let cs = col_spec.as_deref().ok_or("--col COL is required")?;
-                    let target_col = parse_col_target(cs)?;
+                    let target_col = vxg::parse_col_target(cs)?;
                     let act = action.as_ref().ok_or(
                         "specify one column action: --set VAL | --set-raw RAW | --upper | --lower | --redact | --add N",
                     )?;
@@ -325,21 +166,13 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
                         CliColAction::Add(_) => vxg::ColOp::MapU64(&add_fn),
                     };
                     if cmd == "update" {
-                        let ws =
-                            where_spec.as_deref().ok_or("--where SPEC is required for update")?;
-                        let (w_col, w_pred) = parse_where_spec(ws)?;
-                        let pred = vxg::ColPred {
-                            col: w_col,
-                            pred: w_pred.as_value_pred(),
-                        };
+                        let ws = where_spec
+                            .as_deref()
+                            .ok_or("--where SPEC is required for update")?;
+                        let pcp = vxg::ParsedColPred::parse(ws)?;
+                        let pred = pcp.as_col_pred();
                         vxg::update_column_stream(
-                            &mut rdr,
-                            &mut wtr,
-                            &pred,
-                            target_col,
-                            col_op,
-                            &enc,
-                            &dec,
+                            &mut rdr, &mut wtr, &pred, target_col, col_op, &enc, &dec,
                         )?
                     } else {
                         if where_spec.is_some() {
@@ -385,25 +218,26 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
             let ws = where_spec
                 .as_deref()
                 .ok_or("--where EXPR is required for filter-frame")?;
-            let owned = parse_where_expr(ws)?;
-            let arena = PredArena::new();
-            let expr = arena.build(&owned);
-            vxg::filter_frame_where(&frame_bytes, &expr, &enc, &dec)?
+            let pw = vxg::ParsedWhere::parse(ws)?;
+            pw.with_expr(|expr| vxg::filter_frame_where(&frame_bytes, expr, &enc, &dec))?
         }
         "project" => {
             let cs = cols_spec
                 .as_deref()
                 .or(col_spec.as_deref())
                 .ok_or("--cols COL1,COL2,... is required for project")?;
-            let cols = parse_col_list(cs)?;
-            let owned = where_spec.as_deref().map(parse_where_expr).transpose()?;
-            let arena = PredArena::new();
-            let expr_opt = owned.as_ref().map(|e| arena.build(e));
-            vxg::project_frame(&frame_bytes, expr_opt.as_ref(), &cols, &enc, &dec)?
+            let cols = vxg::parse_col_list(cs)?;
+            let pw = where_spec
+                .as_deref()
+                .map(vxg::ParsedWhere::parse)
+                .transpose()?;
+            vxg::with_opt_where(pw.as_ref(), |expr_opt| {
+                vxg::project_frame(&frame_bytes, expr_opt, &cols, &enc, &dec)
+            })?
         }
         "update" | "map" => {
             let cs = col_spec.as_deref().ok_or("--col COL is required")?;
-            let target_col = parse_col_target(cs)?;
+            let target_col = vxg::parse_col_target(cs)?;
             let act = action.as_ref().ok_or(
                 "specify one column action: --set VAL | --set-raw RAW | --upper | --lower | --redact | --add N",
             )?;
@@ -429,12 +263,11 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
                 CliColAction::Add(_) => vxg::ColOp::MapU64(&add_fn),
             };
             if cmd == "update" {
-                let ws = where_spec.as_deref().ok_or("--where SPEC is required for update")?;
-                let (w_col, w_pred) = parse_where_spec(ws)?;
-                let pred = vxg::ColPred {
-                    col: w_col,
-                    pred: w_pred.as_value_pred(),
-                };
+                let ws = where_spec
+                    .as_deref()
+                    .ok_or("--where SPEC is required for update")?;
+                let pcp = vxg::ParsedColPred::parse(ws)?;
+                let pred = pcp.as_col_pred();
                 vxg::update_column(&frame_bytes, &pred, target_col, col_op, &enc, &dec)?
             } else {
                 if where_spec.is_some() {

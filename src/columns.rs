@@ -297,7 +297,9 @@ impl<'a> Drop for Template<'a> {
                 if let Ok(mut pool) = cell.try_borrow_mut() {
                     if pool.len() < 16 {
                         let o_static = unsafe {
-                            core::mem::transmute::<Vec<Vec<&'a [u8]>>, Vec<Vec<&'static [u8]>>>(outer)
+                            core::mem::transmute::<Vec<Vec<&'a [u8]>>, Vec<Vec<&'static [u8]>>>(
+                                outer,
+                            )
                         };
                         pool.push(o_static);
                     }
@@ -498,7 +500,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-
 include!("columns/bit_io.rs");
 include!("columns/lut_num.rs");
 include!("columns/scan_spans.rs");
@@ -561,5 +562,7 @@ include!("columns/ops_agg.rs");
 include!("columns/ops_group.rs");
 include!("columns/ops_project_plan.rs");
 include!("columns/ops_project.rs");
+include!("columns/ops_topk.rs");
+include!("columns/ops_topk_exec.rs");
 include!("columns/tests_models.rs");
 include!("columns/tests_packets.rs");

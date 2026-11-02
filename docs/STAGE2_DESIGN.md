@@ -1,6 +1,8 @@
-# Compressed-Domain Engine (Stages 2–5): `filter`, `map`, `update`, `agg`, `group_by`, Zero-Reencode `project`, and Bounded-Memory Streaming
+# Compressed-Domain Engine (Stages 2–6): `filter`, `Top-K`, `map`, `update`, `agg`, `group_by`, Zero-Reencode `project`, and Bounded-Memory Streaming
 
-Status: **Implemented & Verified (`vxg` v0.4.3, wire format `v4` — zero wire-format changes)**.
+Status: **Implemented & Verified (`vxg` v0.4.4, wire format `v4` — zero wire-format changes)**.
+
+<CompressedOpsChart />
 
 ## Overview
 
@@ -135,4 +137,12 @@ Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`,
 2. **Zero-Output-Allocation Verification (`verify_frame`, `verify_stream`, `src/stream_ops/verify.rs`)**:
    - Validates all directory invariants, command/grammar streams, and `CRC32C` checksums into a thread-local `64 KiB` L2-resident scratch buffer (`12.0+ GB/s` on `8T` without allocating `raw_size`).
 3. **Cross-Frame Split-Line Boundary Stitcher (`FramePeeler`, `src/stream_ops.rs`)**:
-   - Peels any unterminated tail record from frame $k$ and prepends it as a 1-block `BLOCK_RAW` prefix ahead of frame $k+1$'s borrowed `GRAMMAR_PACKET` blocks, enabling `O(single_frame)` bounded-memory execution across all 10 `*_stream` compressed-domain operations while keeping interior blocks 100% compressed.
+   - Peels any unterminated tail record from frame $k$ and prepends it as a 1-block `BLOCK_RAW` prefix ahead of frame $k+1$'s borrowed `GRAMMAR_PACKET` blocks, enabling `O(single_frame)` bounded-memory execution across all 12 `*_stream` compressed-domain operations while keeping interior blocks 100% compressed.
+
+## Stage 6 Extensions: Compressed-Domain `ORDER BY` / `Top-K` & Expanded C/FFI ABI (`v0.4.4`)
+
+1. **Bounded `Top-K` Heap & Numeric Zone-Map Pruning (`src/ops/top_k.rs`, `src/columns/ops_topk.rs`, `src/stream_ops/top_k.rs`)**:
+   - `top_k_by`, `select_top_k_by`, `top_k_by_stream`, and `select_top_k_by_stream` maintain a bounded $K$-entry `TopKHeap` (`NULLS LAST`, deterministic `global_row_index` tie-breaking across threads).
+   - Inspects `MODEL_DECIMAL_PACKED` / `MODEL_DECIMAL_AFFINE` headers in $O(1)$ to skip entire blocks whose `[min..=max]` cannot beat the running `AtomicU64` cross-worker threshold, scans dictionary columns via a pre-pruned `alive` entry bitmap, and bounds per-template candidate tracking (`CandTracker`) to $\le K$ rows before materializing only winning rows (**35.6–42.3 GB/s**, **54×–72×** faster than `decompress` + `select_nth_unstable_by` on `8T`).
+2. **Shared Expression Parser & Expanded Zero-Overhead C ABI (`src/ops/parse_expr.rs`, `src/ffi/analytics.rs`, `include/vxg.h`)**:
+   - Exposes `vxg_verify_frame`, `vxg_compress_file`, `vxg_decompress_file`, `vxg_verify_file`, `vxg_count_where_str`, `vxg_aggregate_col` (`vxg_agg_stats_t`), `vxg_select_alloc` (`SELECT` + `WHERE` + `ORDER BY` Top-K), and `vxg_project_frame_alloc` across C/C++, Python, Go, Bun/Node.js, C#, and WebAssembly.

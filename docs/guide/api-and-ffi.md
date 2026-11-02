@@ -88,6 +88,25 @@ let projected_ndjson = vxg::select_columns(&frame, Some(&where_expr), &cols, 1_0
 
 // 2. Zero-reencode VXG -> VXG column splicing (splices compressed column payloads directly!)
 let slim_vxg = vxg::project_frame(&frame, None, &cols, &opts, &dec_opts)?;
+
+// 3. Compressed-domain ORDER BY / Top-K heap query (zone-map skip + bounded K-heap):
+let slowest_10 = vxg::top_k_by(
+    &frame,
+    Some(&where_expr),
+    ColTarget::JsonKey("latency_ms"),
+    vxg::SortDir::Desc,
+    10,
+    &dec_opts,
+)?;
+let slowest_10_ndjson = vxg::select_top_k_by(
+    &frame,
+    Some(&where_expr),
+    &cols,
+    ColTarget::JsonKey("latency_ms"),
+    vxg::SortDir::Desc,
+    10,
+    &dec_opts,
+)?;
 ```
 
 ### 2.4 Single-Slot Column Update & Map (`filter_frame_where`, `update_column`, `map_column`)

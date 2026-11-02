@@ -26,6 +26,8 @@ VXG supports two complementary hardware energy measurement modes on macOS / Appl
 
 ## 2. 10-Dataset Energy & Composite Index Results (`macos` / `aarch64` NEON, 16 MiB, 64 KiB Blocks)
 
+<EnergyBenchmarkChart />
+
 ### 2.1 Single-Thread (`threads = 1`) — Per-Process Energy (`J/GB`) & Green Codec Index (`GCI`)
 
 | Dataset | VXG Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG Enc `J/GB` | LZ4 Enc `J/GB` | Zstd-1 Enc `J/GB` | VXG Dec `J/GB` | LZ4 Dec `J/GB` | Zstd-1 Dec `J/GB` | VXG `VPI` | LZ4 `VPI` | Zstd-1 `VPI` | VXG `GCI` | LZ4 `GCI` | Zstd-1 `GCI` |

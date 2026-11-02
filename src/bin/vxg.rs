@@ -33,8 +33,10 @@ Usage:
                                 [--no-checksum|--no-verify-checksum] [--no-mmap] [--force|-f]
   vxg q|query      FRAME        [--count | --row IDX | --range START:END |
                                  --find-first STR | --filter STR | --where EXPR |
-                                 --select COL1,COL2,...] [--limit N] [--stream] [--no-mmap] [-t N|auto]
+                                 --select COL1,COL2,...] [--order-by COL [--desc|--asc]]
+                                [--limit N] [--stream] [--no-mmap] [-t N|auto]
   vxg agg          FRAME        [--group-by GCOL] [--col ACOL] [--where EXPR]
+                                [--order-by key|rows|count|sum|avg|min|max [--desc|--asc]]
                                 [--limit N] [--json] [--stream] [--no-mmap] [-t N|auto]
   vxg project      INPUT OUTPUT --cols COL1,COL2,... [--where EXPR] [--stream] [--no-mmap] [-t N|auto] [-f] [-q]
   vxg filter-frame INPUT OUTPUT --where EXPR [--block-size BYTES] [--no-checksum] [--stream] [--no-mmap] [-f] [-q]
@@ -575,7 +577,6 @@ fn gpu_check(backend: Backend) -> R<()> {
 }
 
 include!("cli_support/ops.rs");
-include!("cli_support/expr_parser.rs");
 include!("cli_support/query.rs");
 include!("cli_support/agg.rs");
 include!("cli_support/tests.rs");

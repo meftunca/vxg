@@ -1,7 +1,7 @@
 fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
     if args.len() < 3 {
         return Err(
-            "usage: vxg query FRAME [--count | --row IDX | --range START:END | --find-first STR | --filter STR | --where EXPR | --select COLS] [--limit N] [--stream] [--no-mmap]"
+            "usage: vxg query FRAME [--count | --row IDX | --range START:END | --find-first STR | --filter STR | --where EXPR | --select COLS] [--order-by COL [--desc|--asc]] [--limit N] [--stream] [--no-mmap]"
                 .into(),
         );
     }
@@ -17,6 +17,8 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
     let mut filter_str: Option<String> = None;
     let mut where_spec: Option<String> = None;
     let mut select_spec: Option<String> = None;
+    let mut order_spec: Option<String> = None;
+    let mut sort_dir = vxg::SortDir::Asc;
     let mut limit: usize = usize::MAX;
     let mut i = 2;
     while i < args.len() {
@@ -35,6 +37,9 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
             "--filter" | "--contains" => filter_str = Some(val(args, &mut i)?.to_owned()),
             "--where" => where_spec = Some(val(args, &mut i)?.to_owned()),
             "--select" | "--cols" => select_spec = Some(val(args, &mut i)?.to_owned()),
+            "--order-by" | "--sort-by" => order_spec = Some(val(args, &mut i)?.to_owned()),
+            "--desc" => sort_dir = vxg::SortDir::Desc,
+            "--asc" => sort_dir = vxg::SortDir::Asc,
             "--limit" => limit = val(args, &mut i)?.parse()?,
             "--threads" | "-t" => opts.threads = parse_threads(val(args, &mut i)?)?,
             "--no-checksum" | "--no-verify-checksum" => opts.verify_checksum = false,
@@ -51,7 +56,9 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
     if !explicit_max_out {
         opts.max_output = usize::MAX;
     }
-
+    if count_only && order_spec.is_some() {
+        return Err("cannot combine --count and --order-by".into());
+    }
     if stream_mode && (row_idx.is_some() || range.is_some()) {
         return Err(
             "--row and --range require random-access frame directory (omit --stream)".into(),
@@ -60,30 +67,55 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
 
     if stream_mode || (input == "-" && row_idx.is_none() && range.is_none()) {
         let mut rdr = open_stream_reader(input)?;
+        if let Some(os) = order_spec.as_deref() {
+            let order_col = vxg::parse_col_target(os)?;
+            let pw = where_spec
+                .as_deref()
+                .map(vxg::ParsedWhere::parse)
+                .transpose()?;
+            if let Some(cs) = select_spec.as_deref() {
+                let cols = vxg::parse_col_list(cs)?;
+                vxg::with_opt_where(pw.as_ref(), |expr_opt| {
+                    vxg::select_top_k_by_stream(
+                        &mut rdr,
+                        &mut *writer,
+                        expr_opt,
+                        &cols,
+                        order_col,
+                        sort_dir,
+                        limit,
+                        &opts,
+                    )
+                })?;
+            } else {
+                let matches = vxg::with_opt_where(pw.as_ref(), |expr_opt| {
+                    vxg::top_k_by_stream(&mut rdr, expr_opt, order_col, sort_dir, limit, &opts)
+                })?;
+                for m in matches {
+                    writer.write_all(&m.bytes)?;
+                }
+            }
+            return Ok(());
+        }
         if let Some(cs) = select_spec.as_deref() {
             if count_only {
                 return Err("cannot combine --count and --select".into());
             }
-            let cols = parse_col_list(cs)?;
-            let owned = where_spec.as_deref().map(parse_where_expr).transpose()?;
-            let arena = PredArena::new();
-            let expr_opt = owned.as_ref().map(|e| arena.build(e));
-            vxg::select_columns_stream(
-                &mut rdr,
-                &mut *writer,
-                expr_opt.as_ref(),
-                &cols,
-                limit,
-                &opts,
-            )?;
+            let cols = vxg::parse_col_list(cs)?;
+            let pw = where_spec
+                .as_deref()
+                .map(vxg::ParsedWhere::parse)
+                .transpose()?;
+            vxg::with_opt_where(pw.as_ref(), |expr_opt| {
+                vxg::select_columns_stream(&mut rdr, &mut *writer, expr_opt, &cols, limit, &opts)
+            })?;
             return Ok(());
         }
         if count_only {
             let cnt: u64 = if let Some(ws) = where_spec.as_deref() {
-                let owned = parse_where_expr(ws)?;
-                let arena = PredArena::new();
-                let expr = arena.build(&owned);
-                vxg::count_where_stream(&mut rdr, &expr, &opts)?.min(limit as u64)
+                let pw = vxg::ParsedWhere::parse(ws)?;
+                pw.with_expr(|expr| vxg::count_where_stream(&mut rdr, expr, &opts))?
+                    .min(limit as u64)
             } else {
                 vxg::frame_row_count_stream(&mut rdr, &opts)?.min(limit as u64)
             };
@@ -91,10 +123,10 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
             return Ok(());
         }
         if let Some(ws) = where_spec.as_deref() {
-            let owned = parse_where_expr(ws)?;
-            let arena = PredArena::new();
-            let expr = arena.build(&owned);
-            vxg::filter_where_stream(&mut rdr, &mut *writer, &expr, limit, &opts)?;
+            let pw = vxg::ParsedWhere::parse(ws)?;
+            pw.with_expr(|expr| {
+                vxg::filter_where_stream(&mut rdr, &mut *writer, expr, limit, &opts)
+            })?;
             return Ok(());
         }
         if let Some(needle) = find_first_str {
@@ -108,7 +140,7 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
             return Ok(());
         }
         return Err(
-            "specify one of --count, --row, --range, --find-first, --filter, --where, or --select"
+            "specify one of --count, --row, --range, --find-first, --filter, --where, --select, or --order-by"
                 .into(),
         );
     }
@@ -122,24 +154,48 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
         }
     }
 
+    if let Some(os) = order_spec.as_deref() {
+        let order_col = vxg::parse_col_target(os)?;
+        let pw = where_spec
+            .as_deref()
+            .map(vxg::ParsedWhere::parse)
+            .transpose()?;
+        if let Some(cs) = select_spec.as_deref() {
+            let cols = vxg::parse_col_list(cs)?;
+            let out = vxg::with_opt_where(pw.as_ref(), |expr_opt| {
+                vxg::select_top_k_by(&frame, expr_opt, &cols, order_col, sort_dir, limit, &opts)
+            })?;
+            writer.write_all(&out)?;
+        } else {
+            let matches = vxg::with_opt_where(pw.as_ref(), |expr_opt| {
+                vxg::top_k_by(&frame, expr_opt, order_col, sort_dir, limit, &opts)
+            })?;
+            for m in matches {
+                writer.write_all(&m.bytes)?;
+            }
+        }
+        return Ok(());
+    }
     if let Some(cs) = select_spec.as_deref() {
         if count_only {
             return Err("cannot combine --count and --select".into());
         }
-        let cols = parse_col_list(cs)?;
-        let owned = where_spec.as_deref().map(parse_where_expr).transpose()?;
-        let arena = PredArena::new();
-        let expr_opt = owned.as_ref().map(|e| arena.build(e));
-        let out = vxg::select_columns(&frame, expr_opt.as_ref(), &cols, limit, &opts)?;
+        let cols = vxg::parse_col_list(cs)?;
+        let pw = where_spec
+            .as_deref()
+            .map(vxg::ParsedWhere::parse)
+            .transpose()?;
+        let out = vxg::with_opt_where(pw.as_ref(), |expr_opt| {
+            vxg::select_columns(&frame, expr_opt, &cols, limit, &opts)
+        })?;
         writer.write_all(&out)?;
         return Ok(());
     }
     if count_only {
         let cnt: u64 = if let Some(ws) = where_spec.as_deref() {
-            let owned = parse_where_expr(ws)?;
-            let arena = PredArena::new();
-            let expr = arena.build(&owned);
-            vxg::count_where(&frame, &expr, &opts)?.min(limit as u64)
+            let pw = vxg::ParsedWhere::parse(ws)?;
+            pw.with_expr(|expr| vxg::count_where(&frame, expr, &opts))?
+                .min(limit as u64)
         } else {
             (vxg::frame_row_count(&frame)? as u64).min(limit as u64)
         };
@@ -157,10 +213,9 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
         return Ok(());
     }
     if let Some(ws) = where_spec.as_deref() {
-        let owned = parse_where_expr(ws)?;
-        let arena = PredArena::new();
-        let expr = arena.build(&owned);
-        for m in vxg::filter_where(&frame, &expr, limit, &opts)? {
+        let pw = vxg::ParsedWhere::parse(ws)?;
+        let matches = pw.with_expr(|expr| vxg::filter_where(&frame, expr, limit, &opts))?;
+        for m in matches {
             writer.write_all(&m.bytes)?;
         }
         return Ok(());
@@ -178,7 +233,7 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
         return Ok(());
     }
     Err(
-        "specify one of --count, --row, --range, --find-first, --filter, --where, or --select"
+        "specify one of --count, --row, --range, --find-first, --filter, --where, --select, or --order-by"
             .into(),
     )
 }

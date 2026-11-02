@@ -35,12 +35,19 @@ fn raw_num_filter(raw: &[u8], key: &str, cmp: NumCmp, limit: usize) -> Vec<(usiz
     let marker = format!("\"{key}\":").into_bytes();
     let mut out = Vec::new();
     for (i, line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
-        let Some(p) = line.windows(marker.len()).position(|w| w == marker.as_slice()) else {
+        let Some(p) = line
+            .windows(marker.len())
+            .position(|w| w == marker.as_slice())
+        else {
             continue;
         };
         let rest = &line[p + marker.len()..];
         let n = rest.iter().take_while(|b| b.is_ascii_digit()).count();
-        if n == 0 || n > 19 || (n > 1 && rest[0] == b'0') || matches!(rest.get(n), Some(b'.' | b'e' | b'E')) {
+        if n == 0
+            || n > 19
+            || (n > 1 && rest[0] == b'0')
+            || matches!(rest.get(n), Some(b'.' | b'e' | b'E'))
+        {
             continue;
         }
         let v: u64 = std::str::from_utf8(&rest[..n]).unwrap().parse().unwrap();
@@ -167,8 +174,9 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
 
     let bench_filter = |label: &str, pred: ColPred<'_>| {
         let (t_naive, exp) = median_secs(5, || naive_filter_from_frame(frame, &pred, dec));
-        let (t_vxg, got) =
-            median_secs(5, || vxg::filter_column(frame, &pred, usize::MAX, dec).unwrap());
+        let (t_vxg, got) = median_secs(5, || {
+            vxg::filter_column(frame, &pred, usize::MAX, dec).unwrap()
+        });
         assert_eq!(exp.len(), got.len(), "{label}: hit count mismatch");
         for ((ri, rb), b) in exp.iter().zip(got.iter()) {
             assert_eq!(*ri, b.global_row_index);
@@ -253,8 +261,15 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
                 )
             },
             &mut || {
-                vxg::update_column(frame, &p_nope, col_lvl, ColOp::SetStr(b"CRITICAL"), opts, dec)
-                    .unwrap()
+                vxg::update_column(
+                    frame,
+                    &p_nope,
+                    col_lvl,
+                    ColOp::SetStr(b"CRITICAL"),
+                    opts,
+                    dec,
+                )
+                .unwrap()
             },
         );
 
@@ -272,8 +287,15 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
                 )
             },
             &mut || {
-                vxg::update_column(frame, &p_lat, col_lvl, ColOp::SetStr(b"CRITICAL"), opts, dec)
-                    .unwrap()
+                vxg::update_column(
+                    frame,
+                    &p_lat,
+                    col_lvl,
+                    ColOp::SetStr(b"CRITICAL"),
+                    opts,
+                    dec,
+                )
+                .unwrap()
             },
         );
 
@@ -290,8 +312,15 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
                 )
             },
             &mut || {
-                vxg::update_column(frame, &p_500, col_lvl, ColOp::SetStr(b"CRITICAL"), opts, dec)
-                    .unwrap()
+                vxg::update_column(
+                    frame,
+                    &p_500,
+                    col_lvl,
+                    ColOp::SetStr(b"CRITICAL"),
+                    opts,
+                    dec,
+                )
+                .unwrap()
             },
         );
 
@@ -345,8 +374,15 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
                 )
             },
             &mut || {
-                vxg::update_column(frame, &p_lat, col_lvl, ColOp::SetStr(b"CRITICAL"), opts, dec)
-                    .unwrap()
+                vxg::update_column(
+                    frame,
+                    &p_lat,
+                    col_lvl,
+                    ColOp::SetStr(b"CRITICAL"),
+                    opts,
+                    dec,
+                )
+                .unwrap()
             },
         );
 
@@ -376,6 +412,7 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
 
 include!("query_real_support/agg.rs");
 include!("query_real_support/project.rs");
+include!("query_real_support/topk.rs");
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -418,7 +455,11 @@ fn main() {
     }
 
     if args.get(1).map(String::as_str) == Some("--agg-suite") {
-        let threads: usize = args.get(3).or(args.get(2)).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let threads: usize = args
+            .get(3)
+            .or(args.get(2))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
         let mut dec_t = dec;
         dec_t.threads = threads;
         run_agg_suite(&raw, &frame, &dec_t);
@@ -426,12 +467,28 @@ fn main() {
     }
 
     if args.get(1).map(String::as_str) == Some("--project-suite") {
-        let threads: usize = args.get(3).or(args.get(2)).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let threads: usize = args
+            .get(3)
+            .or(args.get(2))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
         let mut opts_t = opts;
         opts_t.threads = threads;
         let mut dec_t = dec;
         dec_t.threads = threads;
         run_project_suite(&raw, &frame, &opts_t, &dec_t);
+        return;
+    }
+
+    if args.get(1).map(String::as_str) == Some("--topk-suite") {
+        let threads: usize = args
+            .get(3)
+            .or(args.get(2))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let mut dec_t = dec;
+        dec_t.threads = threads;
+        run_topk_suite(&raw, &frame, &dec_t);
         return;
     }
 
@@ -444,15 +501,26 @@ fn main() {
         if let Some((key, cmp)) = parse_num_spec(needle) {
             let limit = 1_000_000;
             let (t_raw, expected) = time(5, || raw_num_filter(&raw, &key, cmp, limit));
-            let (t_vxg, got) = time(5, || vxg::filter_json_u64(&frame, &key, cmp, limit, &dec).unwrap());
-            assert_eq!(expected.len(), got.len(), "hit count mismatch for {needle:?}");
+            let (t_vxg, got) = time(5, || {
+                vxg::filter_json_u64(&frame, &key, cmp, limit, &dec).unwrap()
+            });
+            assert_eq!(
+                expected.len(),
+                got.len(),
+                "hit count mismatch for {needle:?}"
+            );
             for ((ri, rb), m) in expected.iter().zip(got.iter()) {
                 assert_eq!(*ri, m.global_row_index, "row index mismatch for {needle:?}");
                 assert_eq!(rb, &m.bytes, "row bytes mismatch for {needle:?}");
             }
             println!(
                 "{:<28} {:>8} {:>12.3} {:>12.3} {:>7.1}x  [{:.1} GB/s]",
-                needle, got.len(), t_raw * 1e3, t_vxg * 1e3, t_raw / t_vxg, gb / t_vxg
+                needle,
+                got.len(),
+                t_raw * 1e3,
+                t_vxg * 1e3,
+                t_raw / t_vxg,
+                gb / t_vxg
             );
             continue;
         }
@@ -460,13 +528,20 @@ fn main() {
         let limit = 100_000;
         let (t_raw, expected) = time(5, || raw_filter(&raw, n, limit));
         let (t_vxg, got) = time(5, || vxg::filter_rows(&frame, n, limit, &dec).unwrap());
-        assert_eq!(expected.len(), got.len(), "hit count mismatch for {needle:?}");
+        assert_eq!(
+            expected.len(),
+            got.len(),
+            "hit count mismatch for {needle:?}"
+        );
         for ((ri, rb), m) in expected.iter().zip(got.iter()) {
             assert_eq!(*ri, m.global_row_index, "row index mismatch for {needle:?}");
             assert_eq!(rb, &m.bytes, "row bytes mismatch for {needle:?}");
         }
         let first = vxg::find_first(&frame, n, &dec).unwrap();
-        assert_eq!(first.as_ref().map(|m| m.global_row_index), expected.first().map(|e| e.0));
+        assert_eq!(
+            first.as_ref().map(|m| m.global_row_index),
+            expected.first().map(|e| e.0)
+        );
         println!(
             "{:<28} {:>8} {:>12.3} {:>12.3} {:>7.1}x  [{:.1} GB/s]",
             format!("{:?}", needle),
