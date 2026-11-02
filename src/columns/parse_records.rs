@@ -369,10 +369,7 @@ unsafe fn delimited_masks64(p: *const u8, delim: u8) -> (u64, u64) {
             let in_range = _mm_cmpeq_epi8(_mm_min_epu8(x, v_5d), x);
             let stop = _mm_or_si128(is_q, _mm_cmpeq_epi8(c, v_delim));
             let u_bits = if relaxed {
-                let ctrl_or_del = _mm_or_si128(
-                    _mm_cmplt_epi8(c, _mm_set1_epi8(0x20)),
-                    _mm_cmpeq_epi8(c, _mm_set1_epi8(0x7f)),
-                );
+                let ctrl_or_del = _mm_or_si128(ctrl, _mm_cmpeq_epi8(c, _mm_set1_epi8(0x7f)));
                 (_mm_movemask_epi8(_mm_or_si128(stop, ctrl_or_del)) as u32) & 0xffff
             } else {
                 (_mm_movemask_epi8(stop) as u32 | !(_mm_movemask_epi8(in_range) as u32)) & 0xffff

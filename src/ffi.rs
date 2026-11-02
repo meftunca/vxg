@@ -360,7 +360,7 @@ pub unsafe extern "C" fn vxg_compress_alloc(
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);
         unsafe {
-            *out_len = len;
+            out_len.write_unaligned(len);
         }
         ptr
     }));
@@ -399,7 +399,7 @@ pub unsafe extern "C" fn vxg_decompress_alloc(
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);
         unsafe {
-            *out_len = len;
+            out_len.write_unaligned(len);
         }
         ptr
     }));

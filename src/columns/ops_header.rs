@@ -562,7 +562,10 @@ fn read_all_template_col_slices<'a>(hdr: &mut OpsGrammarHeader<'a>) -> Result<Tp
 #[inline(always)]
 fn ensure_raw_rows_arena(hdr: &OpsGrammarHeader<'_>, raw_arena: &mut Vec<u8>) {
     if hdr.raw_count > 0 && hdr.cursor.bytes.get(hdr.cursor.pos) == Some(&0) {
-        ensure_full_raw_arena(hdr.raw_len, raw_arena);
+        let need = hdr.raw_len.saturating_mul(4) + 163_840;
+        if raw_arena.capacity() - raw_arena.len() < need {
+            raw_arena.reserve(need);
+        }
     }
 }
 

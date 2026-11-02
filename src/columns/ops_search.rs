@@ -22,7 +22,7 @@ pub(crate) fn search_grammar_block_col_pred(
     DECODE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
         scratch.clear();
-        scratch.raw_arena.reserve(hdr.raw_len.saturating_mul(2) + 16384);
+        scratch.raw_arena.reserve(hdr.raw_len.saturating_mul(4) + 163_840);
 
         let raw_slice_offset = {
             let DecodeScratch {
@@ -342,7 +342,7 @@ pub(crate) fn filter_grammar_block_into_bytes(
     DECODE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
         scratch.clear();
-        scratch.raw_arena.reserve(hdr.raw_len.saturating_mul(2) + 16384);
+        scratch.raw_arena.reserve(hdr.raw_len.saturating_mul(4) + 163_840);
 
         let raw_slice_offset = {
             let DecodeScratch {

@@ -74,7 +74,7 @@ fn into_ffi_buf(bytes: Vec<u8>, out_len: *mut usize) -> *mut u8 {
     let ptr = boxed.as_mut_ptr();
     std::mem::forget(boxed);
     unsafe {
-        *out_len = len;
+        out_len.write_unaligned(len);
     }
     ptr
 }
@@ -306,7 +306,7 @@ pub unsafe extern "C" fn vxg_aggregate_col(
             _reserved: 0,
         };
         unsafe {
-            *out_stats = c_st;
+            out_stats.write_unaligned(c_st);
         }
         VXG_OK
     }));

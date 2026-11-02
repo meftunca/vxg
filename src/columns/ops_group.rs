@@ -291,7 +291,6 @@ fn group_by_template_resolved<'a>(
     }
 
     // 4. Generic single-slot group column: emit only `g_slot` (and `a_slot` if present), skipping all other columns!
-    ensure_full_raw_arena(hdr_raw_len, &mut scratch.raw_arena);
     let unbound = UnboundTemplate::build(&[b"", b""], &[g_col], scratch);
     let n_exec = scratch.unbound_col_arena.len();
     scratch.exec_col_arena.reserve(n_exec);

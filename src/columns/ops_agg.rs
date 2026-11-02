@@ -232,7 +232,6 @@ fn build_slot_num_view(
         }
     }
 
-    ensure_full_raw_arena(hdr_raw_len, &mut scratch.raw_arena);
     let unbound = UnboundTemplate::build(&[b"", b""], &[col], scratch);
     let n_exec = scratch.unbound_col_arena.len();
     scratch.exec_col_arena.reserve(n_exec);

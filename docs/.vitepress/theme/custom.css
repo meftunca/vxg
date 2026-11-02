@@ -297,3 +297,211 @@
     font-size: 0.72rem;
   }
 }
+
+/* Interactive WASM Playground Styles */
+.vxg-pg-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  margin: 1.25rem 0 2rem;
+}
+
+.vxg-pg-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  font-size: 0.82rem;
+}
+
+.vxg-pg-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 0.45rem;
+  background: var(--vxg-c-amber);
+}
+
+.vxg-pg-status-dot.is-ready {
+  background: var(--vxg-c-emerald);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.22);
+}
+
+.vxg-pg-status-dot.is-error {
+  background: #ef4444;
+}
+
+.vxg-pg-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+  gap: 1rem;
+}
+
+.vxg-pg-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 1rem 1.1rem;
+  border-radius: 12px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+}
+
+.vxg-pg-panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.vxg-pg-panel-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--vp-c-text-1);
+}
+
+.vxg-pg-textarea,
+.vxg-pg-pre {
+  width: 100%;
+  min-height: 230px;
+  max-height: 340px;
+  padding: 0.75rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  resize: vertical;
+  overflow: auto;
+  box-sizing: border-box;
+  margin: 0 !important;
+}
+
+.vxg-pg-textarea:focus,
+.vxg-pg-input:focus {
+  outline: none;
+  border-color: var(--vxg-c-emerald);
+}
+
+.vxg-pg-dropzone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.65rem 0.9rem;
+  border-radius: 9px;
+  border: 1.5px dashed var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  font-size: 0.8rem;
+  color: var(--vp-c-text-2);
+  transition: border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.vxg-pg-dropzone.is-drag {
+  border-color: var(--vxg-c-emerald);
+  background: var(--vxg-c-emerald-soft);
+  color: var(--vp-c-text-1);
+}
+
+.vxg-pg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.38rem 0.8rem;
+  border-radius: 7px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.vxg-pg-btn:hover:not(:disabled) {
+  border-color: var(--vxg-c-emerald);
+}
+
+.vxg-pg-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.vxg-pg-btn.is-primary {
+  background: var(--vxg-c-emerald);
+  border-color: var(--vxg-c-emerald);
+  color: #ffffff;
+}
+
+.vxg-pg-btn.is-primary:hover:not(:disabled) {
+  opacity: 0.92;
+}
+
+.vxg-pg-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 0.65rem;
+}
+
+.vxg-pg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.vxg-pg-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--vp-c-text-2);
+}
+
+.vxg-pg-input {
+  width: 100%;
+  padding: 0.42rem 0.62rem;
+  border-radius: 7px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.78rem;
+  box-sizing: border-box;
+}
+
+.vxg-pg-block-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 0.6rem;
+}
+
+.vxg-pg-block-item {
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+  font-size: 0.76rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.vxg-pg-error {
+  padding: 0.65rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.09);
+  color: #ef4444;
+  font-size: 0.8rem;
+  font-family: var(--vp-font-family-mono);
+}

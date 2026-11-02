@@ -5,6 +5,7 @@
   "type": "module",
   "description": "VXG — Vectorized Execution Grammar Codec Documentation",
   "scripts": {
+    "build:wasm": "mkdir -p public && RUSTFLAGS='-C strip=symbols' cargo build --release --lib --target wasm32-unknown-unknown --manifest-path ../Cargo.toml && cp \"${CARGO_TARGET_DIR:-../target}/wasm32-unknown-unknown/release/vxg.wasm\" public/vxg.wasm",
     "docs:dev": "vitepress dev .",
     "docs:build": "vitepress build .",
     "docs:preview": "vitepress preview ."

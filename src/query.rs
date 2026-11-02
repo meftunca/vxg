@@ -433,7 +433,7 @@ pub unsafe extern "C" fn vxg_find_first_into(
             unsafe {
                 std::ptr::copy_nonoverlapping(m.bytes.as_ptr(), dst_ptr, m.bytes.len());
                 if !out_row_index.is_null() {
-                    *out_row_index = m.global_row_index;
+                    out_row_index.write_unaligned(m.global_row_index);
                 }
             }
             m.bytes.len() as isize
@@ -441,7 +441,7 @@ pub unsafe extern "C" fn vxg_find_first_into(
         Ok(None) => {
             unsafe {
                 if !out_row_index.is_null() {
-                    *out_row_index = usize::MAX;
+                    out_row_index.write_unaligned(usize::MAX);
                 }
             }
             0

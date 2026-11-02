@@ -7,7 +7,10 @@ hero:
   tagline: "5.1x smaller than LZ4, 2.4x smaller than Zstd, up to 54 GB/s parallel decode, and 10–45 GB/s compressed-domain SQL queries, analytics & zero-reencode column splicing."
   actions:
     - theme: brand
-      text: Get Started →
+      text: Try Live WASM Playground →
+      link: /playground
+    - theme: alt
+      text: Get Started
       link: /guide/getting-started
     - theme: alt
       text: Cross-Platform Benchmarks

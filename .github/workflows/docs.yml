@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "src/**"
+      - "Cargo.toml"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -24,6 +26,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Setup Rust & wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build zero-dependency vxg.wasm for Playground
+        env:
+          RUSTFLAGS: "-C strip=symbols"
+        run: |
+          mkdir -p docs/public
+          cargo build --release --lib --target wasm32-unknown-unknown
+          cp target/wasm32-unknown-unknown/release/vxg.wasm docs/public/vxg.wasm
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
