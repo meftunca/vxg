@@ -192,6 +192,40 @@ fn can_col_match_pred_fast(
     if ones == 0 {
         return Ok(false);
     }
+    let mut hc = Cursor::new(col_bytes);
+    if let Ok(tag) = hc.byte() {
+        match tag {
+            MODEL_RAW => {
+                while !hc.done() {
+                    let len = hc.uleb()?;
+                    if crate::ops::eval_token_pred(pred.col, hc.take(len)?, pred.pred) {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+            MODEL_DICTIONARY => {
+                let entries_len = hc.uleb()?;
+                for _ in 0..entries_len {
+                    let len = hc.uleb()?;
+                    if crate::ops::eval_token_pred(pred.col, hc.take(len)?, pred.pred) {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+            MODEL_FRONT_DICT => {
+                let entries_len = hc.uleb()?;
+                let dict_mode = hc.byte()? & 0x03;
+                if let Some(found) = front_dict_visit_entries(&mut hc, entries_len, dict_mode, |e| {
+                    crate::ops::eval_token_pred(pred.col, e, pred.pred)
+                })? {
+                    return Ok(found);
+                }
+            }
+            _ => {}
+        }
+    }
     match pred.pred {
         crate::ops::ValuePred::Num(cmp) => {
             if !can_numeric_col_match_fast(col_bytes, ones, cmp) {
@@ -217,6 +251,9 @@ fn can_col_match_pred_fast(
                     if !mask_has_byte(&m, b) {
                         return Ok(false);
                     }
+                }
+                if !col_can_contain_isolated(col_bytes, ones, req)? {
+                    return Ok(false);
                 }
             }
             Ok(true)
@@ -401,199 +438,4 @@ fn eval_col_pred_on_slot<'a>(
     scratch.exec_col_arena.truncate(exec_base);
     scratch.piece_arena.truncate(piece_base);
     Ok((Some(col), hits))
-}
-
-/// Search a `GRAMMAR_PACKET` block for `pred`, materializing non-target columns ONLY if at least
-/// one template row matches. Returns `Ok(None)` to request per-line fallback.
-pub(crate) fn search_grammar_block_col_pred(
-    payload: &[u8],
-    block_index: usize,
-    global_row_base: usize,
-    carry: &mut Option<(usize, usize, usize, Vec<u8>)>,
-    pred: &crate::ops::ColPred<'_>,
-    limit: usize,
-    out: &mut Vec<crate::query::RowMatch>,
-) -> Result<Option<usize>> {
-    let Some(mut hdr) = parse_grammar_for_ops(payload)? else {
-        return Ok(None);
-    };
-    if out.len() >= limit || hdr.row_count == 0 {
-        return Ok(Some(hdr.row_count));
-    }
-    if carry.is_some() && !hdr.first_is_raw {
-        return Ok(None);
-    }
-
-    DECODE_SCRATCH.with(|cell| {
-        let mut scratch = cell.borrow_mut();
-        scratch.clear();
-        scratch.raw_arena.reserve(hdr.raw_len.saturating_mul(2) + 16384);
-
-        let raw_slice_offset = {
-            let DecodeScratch {
-                ref mut raw_arena,
-                ref mut slice_arena,
-                ..
-            } = *scratch;
-            read_grammar_raw_rows(&mut hdr.cursor, hdr.raw_count, raw_arena, slice_arena)?
-        };
-
-        if hdr.template_count > 1 {
-            let mut multi_cols: Vec<Vec<&[u8]>> = Vec::with_capacity(hdr.template_count);
-            for t in 0..hdr.template_count {
-                let slots = hdr.slot_counts[t];
-                let mut tc = Vec::with_capacity(slots);
-                for _ in 0..slots {
-                    let len = hdr.cursor.uleb()?;
-                    tc.push(hdr.cursor.take(len)?);
-                }
-                multi_cols.push(tc);
-            }
-            if !hdr.cursor.done() {
-                return Err(invalid("column packet trailing bytes"));
-            }
-            for t in 0..hdr.template_count {
-                let cnt = hdr.tpl_row_counts[t];
-                if cnt == 0 {
-                    continue;
-                }
-                match resolve_template_slot(hdr.segs(t), &multi_cols[t], pred.col)? {
-                    SlotLookup::Fallback => return Ok(None),
-                    SlotLookup::Absent => {}
-                    SlotLookup::Slot(s) => {
-                        let (_, h) =
-                            eval_col_pred_on_slot(multi_cols[t][s], cnt, 1, pred, &mut scratch)?;
-                        if !h.is_empty() {
-                            return Ok(None);
-                        }
-                    }
-                }
-            }
-            // All templates proved 0 hits! Handle only carry + raw rows without column unpack.
-            return finish_raw_only_search(
-                &hdr,
-                raw_slice_offset,
-                block_index,
-                global_row_base,
-                carry,
-                pred,
-                limit,
-                out,
-                &scratch,
-            );
-        }
-
-        let slots = hdr.slot_counts[0];
-        let ones = hdr.tpl_row_counts[0];
-        let mut col_slices = [&[][..]; MAX_SLOTS];
-        for col_slot in col_slices.iter_mut().take(slots) {
-            let len = hdr.cursor.uleb()?;
-            *col_slot = hdr.cursor.take(len)?;
-        }
-        if !hdr.cursor.done() {
-            return Err(invalid("column packet trailing bytes"));
-        }
-
-        let t0_segs = hdr.segs(0);
-        let lookup = if ones > 0 {
-            resolve_template_slot(t0_segs, &col_slices[..slots], pred.col)?
-        } else {
-            SlotLookup::Absent
-        };
-        if lookup == SlotLookup::Fallback {
-            return Ok(None);
-        }
-
-        let had_incoming_carry = carry.is_some();
-        let base_row = global_row_base - usize::from(had_incoming_carry);
-        let (raw_start, raw_end, next_carry, early_ret) = advance_search_carry(
-            &hdr,
-            raw_slice_offset,
-            block_index,
-            base_row,
-            carry,
-            pred,
-            limit,
-            out,
-            &scratch,
-        );
-        if let Some(ret) = early_ret {
-            return Ok(Some(ret));
-        }
-        let new_rows = hdr.row_count - usize::from(had_incoming_carry);
-        if out.len() >= limit {
-            *carry = next_carry;
-            return Ok(Some(new_rows));
-        }
-
-        let rem_limit = limit - out.len();
-        let (target_col_opt, hits) = match lookup {
-            SlotLookup::Slot(s) => {
-                let (c_opt, h) =
-                    eval_col_pred_on_slot(col_slices[s], ones, rem_limit, pred, &mut scratch)?;
-                (c_opt.map(|c| (s, c)), h)
-            }
-            SlotLookup::Absent => (None, Vec::new()),
-            SlotLookup::Fallback => unreachable!(),
-        };
-
-        let mut local_matches = Vec::<(usize, Vec<u8>)>::new();
-        for r_idx in raw_start..raw_end {
-            let (ptr, len) = scratch.slice_arena[raw_slice_offset + r_idx];
-            let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-            if crate::ops::line_matches_col_pred(slice, pred) {
-                let row_idx = nth_selector_bit(hdr.selector_slice, hdr.row_count, false, r_idx);
-                local_matches.push((row_idx, slice.to_vec()));
-                if local_matches.len() >= rem_limit && hits.is_empty() {
-                    break;
-                }
-            }
-        }
-
-        if !hits.is_empty() {
-            let mut cols_uninit = core::mem::MaybeUninit::<[PreparedColumn; MAX_SLOTS]>::uninit();
-            let cols: &mut [PreparedColumn; MAX_SLOTS] = unsafe { cols_uninit.assume_init_mut() };
-            for s in 0..slots {
-                cols[s] = match target_col_opt {
-                    Some((ts, tc)) if ts == s => tc,
-                    _ => PreparedColumn::parse_and_validate(col_slices[s], ones, &mut scratch)?,
-                };
-            }
-            let unbound = UnboundTemplate::build(t0_segs, &cols[..slots], &mut scratch);
-            let n_exec = scratch.unbound_col_arena.len();
-            scratch.exec_col_arena.reserve(n_exec);
-            let mut tpl = unbound.bind(&mut scratch);
-            let mut row_buf = vec![0u8; tpl.row_budget.max(4096) + 64];
-            let mut cur_t = 0usize;
-            for &t_idx in &hits {
-                unsafe {
-                    tpl.skip_rows(t_idx - cur_t);
-                    let sp = row_buf.as_mut_ptr();
-                    let ep = tpl.emit_row(sp);
-                    let written = ep.offset_from(sp) as usize;
-                    cur_t = t_idx + 1;
-                    let row_idx = if hdr.raw_count == 0 {
-                        t_idx
-                    } else {
-                        nth_selector_bit(hdr.selector_slice, hdr.row_count, true, t_idx)
-                    };
-                    local_matches.push((row_idx, row_buf[..written].to_vec()));
-                }
-            }
-        }
-
-        if hdr.raw_count > 0 && local_matches.len() > 1 {
-            local_matches.sort_unstable_by_key(|&(r, _)| r);
-        }
-        for (row_idx, bytes) in local_matches.into_iter().take(rem_limit) {
-            out.push(crate::query::RowMatch {
-                block_index,
-                row_index: row_idx,
-                global_row_index: base_row + row_idx,
-                bytes,
-            });
-        }
-        *carry = next_carry;
-        Ok(Some(new_rows))
-    })
 }

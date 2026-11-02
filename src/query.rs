@@ -10,8 +10,10 @@
 use crate::{DecodeOptions, Error, Frame, Result, BLOCK_COLUMN};
 
 mod numeric;
+mod parallel;
 pub use numeric::NumCmp;
 pub(crate) use numeric::{line_numeric_match, NumFilter};
+use parallel::{filter_impl, Pred};
 
 /// A single matching structured record returned by [`find_first`] or [`filter_rows`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -311,141 +313,6 @@ pub fn filter_json_u64(
 ) -> Result<Vec<RowMatch>> {
     let nf = NumFilter::new(key, cmp);
     filter_impl(frame_bytes, &Pred::Num(&nf), limit, options)
-}
-
-enum Pred<'a> {
-    Substr(&'a [u8]),
-    Num(&'a NumFilter),
-}
-
-impl Pred<'_> {
-    fn matches(&self, line: &[u8]) -> bool {
-        match self {
-            Pred::Substr(n) => contains_bytes(line, n),
-            Pred::Num(f) => numeric::line_numeric_match(line, f),
-        }
-    }
-    /// Whole-block rejection test usable only for substring predicates.
-    fn block_misses(&self, raw: &[u8]) -> bool {
-        matches!(self, Pred::Substr(n) if !contains_bytes(raw, n))
-    }
-}
-
-fn filter_impl(
-    frame_bytes: &[u8],
-    pred: &Pred,
-    limit: usize,
-    options: &DecodeOptions,
-) -> Result<Vec<RowMatch>> {
-    options.validate()?;
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let frames = Frame::parse_all(frame_bytes, options.max_output)?;
-    let mut out = Vec::new();
-    let mut cur_global = 0usize;
-    let mut carry: Option<(usize, usize, usize, Vec<u8>)> = None;
-    let mut buf: Vec<u8> = Vec::new();
-    let mut global_blk = 0usize;
-
-    for (f_bytes, parsed) in frame_slices(frame_bytes, &frames) {
-        for (local_blk, info) in parsed.blocks().enumerate() {
-            let blk_idx = global_blk;
-            global_blk += 1;
-            if out.len() >= limit && carry.is_none() {
-                return Ok(out);
-            }
-            if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
-                if let Some(new_rows) = crate::columns::search_grammar_block(
-                    payload,
-                    blk_idx,
-                    cur_global,
-                    &mut carry,
-                    match pred {
-                        Pred::Substr(n) => n,
-                        Pred::Num(_) => &[],
-                    },
-                    limit,
-                    &mut out,
-                    match pred {
-                        Pred::Num(f) => Some(*f),
-                        Pred::Substr(_) => None,
-                    },
-                )? {
-                    cur_global += new_rows;
-                    if out.len() >= limit && carry.is_none() {
-                        return Ok(out);
-                    }
-                    continue;
-                }
-            }
-            decode_block_into(f_bytes, local_blk, info.raw_size, options, &mut buf)?;
-            let raw: &[u8] = &buf;
-            if raw.is_empty() {
-                continue;
-            }
-            if carry.is_none() && pred.block_misses(raw) {
-                let nl = raw.iter().filter(|&&b| b == b'\n').count();
-                if raw[raw.len() - 1] == b'\n' {
-                    cur_global += nl;
-                } else {
-                    let tail_start = raw.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
-                    carry = Some((blk_idx, nl, cur_global + nl, raw[tail_start..].to_vec()));
-                    cur_global += nl + 1;
-                }
-                continue;
-            }
-            let had_carry = carry.is_some();
-            let base_row = if had_carry { cur_global - 1 } else { cur_global };
-            let lines: Vec<&[u8]> = raw.split_inclusive(|&b| b == b'\n').collect();
-            let blk_rows = lines.len();
-            for (row_idx, &line) in lines.iter().enumerate() {
-                if row_idx == 0 {
-                    if let Some((c_blk, c_row, c_glob, mut c_bytes)) = carry.take() {
-                        c_bytes.extend_from_slice(line);
-                        if !c_bytes.ends_with(b"\n") && blk_rows == 1 {
-                            carry = Some((c_blk, c_row, c_glob, c_bytes));
-                            break;
-                        }
-                        if pred.matches(&c_bytes) && out.len() < limit {
-                            out.push(RowMatch {
-                                block_index: c_blk,
-                                row_index: c_row,
-                                global_row_index: c_glob,
-                                bytes: c_bytes,
-                            });
-                        }
-                        continue;
-                    }
-                }
-                if row_idx == blk_rows - 1 && !line.ends_with(b"\n") {
-                    carry = Some((blk_idx, row_idx, base_row + row_idx, line.to_vec()));
-                    break;
-                }
-                if pred.matches(line) && out.len() < limit {
-                    out.push(RowMatch {
-                        block_index: blk_idx,
-                        row_index: row_idx,
-                        global_row_index: base_row + row_idx,
-                        bytes: line.to_vec(),
-                    });
-                }
-            }
-            cur_global = base_row + blk_rows;
-        }
-    }
-    if let Some((c_blk, c_row, c_glob, c_bytes)) = carry.take() {
-        if pred.matches(&c_bytes) && out.len() < limit {
-            out.push(RowMatch {
-                block_index: c_blk,
-                row_index: c_row,
-                global_row_index: c_glob,
-                bytes: c_bytes,
-            });
-        }
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

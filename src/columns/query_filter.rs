@@ -42,12 +42,14 @@ fn classify_template_filter(
         contains_subslice(needle, seg)
     };
     let mut overlaps_any_seg = seg_overlaps(head_slice);
-    for ucol in active_cols {
+    for (idx, ucol) in active_cols.iter().enumerate() {
         let after_slice = &scratch.str_arena[ucol.after_range.0..ucol.after_range.1];
         if contains_subslice(after_slice, needle) {
             return TplFilter::Always;
         }
-        if !overlaps_any_seg && seg_overlaps(after_slice) {
+        if !overlaps_any_seg
+            && ((idx + 1 < active_cols.len() && after_slice.is_empty()) || seg_overlaps(after_slice))
+        {
             overlaps_any_seg = true;
         }
         add_bytes_to_mask(&mut static_mask, after_slice);
@@ -327,23 +329,29 @@ fn fast_lz_alphabet_mask(mut cursor: Cursor<'_>, mask: &mut [u64; 4]) -> bool {
     }
 }
 
-/// Fast pre-unpack check on `tpl_segs` and raw column headers (`col_slices`) that rejects
-/// blocks in $O(1)$ time without unpacking column streams when `needle` cannot match.
-fn can_template_match_fast(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TemplatePreCheck {
+    Never,
+    Always,
+    SingleSlot(usize),
+    CheckTemplate,
+}
+
+fn precheck_template_substr(
     tpl_segs: &[&[u8]],
     col_slices: &[&[u8]],
+    ones: usize,
     needle: &[u8],
-) -> Result<bool> {
+) -> Result<TemplatePreCheck> {
     if needle.is_empty() {
-        return Ok(true);
+        return Ok(TemplatePreCheck::Always);
     }
-    let mut block_mask = [0u64; 4];
-    let mut overlaps_any_seg = false;
+    let slots = col_slices.len();
+    let mut overlaps_any_seg = (1..slots).any(|s| tpl_segs[s].is_empty());
     for &seg in tpl_segs {
         if contains_subslice(seg, needle) {
-            return Ok(true);
+            return Ok(TemplatePreCheck::Always);
         }
-        add_bytes_to_mask(&mut block_mask, seg);
         if !overlaps_any_seg && !seg.is_empty() {
             let max_p = (needle.len() - 1).min(seg.len());
             for p in 1..=max_p {
@@ -357,218 +365,54 @@ fn can_template_match_fast(
             }
         }
     }
-    let mut any_col_can_contain = false;
-    for &bytes in col_slices {
-        let mut c = Cursor::new(bytes);
-        let tag = c.byte()?;
-        match tag {
-            MODEL_RAW => {
-                let mut m = [0u64; 4];
-                while !c.done() {
-                    let len = c.uleb()?;
-                    let entry = c.take(len)?;
-                    add_bytes_to_mask(&mut m, entry);
-                    if !overlaps_any_seg && !any_col_can_contain && contains_subslice(entry, needle)
-                    {
-                        any_col_can_contain = true;
-                    }
-                }
-                for i in 0..4 {
-                    block_mask[i] |= m[i];
-                }
-            }
-            MODEL_DICTIONARY => {
-                let entries_len = c.uleb()?;
-                for _ in 0..entries_len {
-                    let len = c.uleb()?;
-                    let entry = c.take(len)?;
-                    add_bytes_to_mask(&mut block_mask, entry);
-                    if !overlaps_any_seg && !any_col_can_contain && contains_subslice(entry, needle)
-                    {
-                        any_col_can_contain = true;
-                    }
-                }
-            }
-            MODEL_FRONT_DICT => {
-                let entries_len = c.uleb()?;
-                let mode_byte = c.byte()?;
-                let dict_mode = mode_byte & 0x03;
-                if dict_mode == 0 {
-                    for _ in 0..entries_len {
-                        let len = c.uleb()?;
-                        let entry = c.take(len)?;
-                        add_bytes_to_mask(&mut block_mask, entry);
-                        if !overlaps_any_seg
-                            && !any_col_can_contain
-                            && contains_subslice(entry, needle)
-                        {
-                            any_col_can_contain = true;
-                        }
-                    }
-                } else if dict_mode == 1 {
-                    let len0 = c.uleb()?;
-                    let raw_first = c.take(len0)?;
-                    let mut m = [0u64; 4];
-                    add_bytes_to_mask(&mut m, raw_first);
-                    for _ in 1..entries_len {
-                        let _lcp = c.uleb()?;
-                        let _lcs = c.uleb()?;
-                        let mid_len = c.uleb()?;
-                        let mid = c.take(mid_len)?;
-                        add_bytes_to_mask(&mut m, mid);
-                    }
-                    for i in 0..4 {
-                        block_mask[i] |= m[i];
-                    }
-                    if !overlaps_any_seg
-                        && !any_col_can_contain
-                        && needle.iter().all(|&b| mask_has_byte(&m, b))
-                    {
-                        any_col_can_contain = true;
-                    }
-                } else if dict_mode == 2 {
-                    let lz_len = c.uleb()?;
-                    let lz_bytes = c.take(lz_len)?;
-                    if lz_bytes.first() != Some(&FAST_LZ_PACKET) {
-                        return Ok(true);
-                    }
-                    let mut m = [0u64; 4];
-                    if !fast_lz_alphabet_mask(Cursor::new(&lz_bytes[1..]), &mut m) {
-                        return Ok(true);
-                    }
-                    for i in 0..4 {
-                        block_mask[i] |= m[i];
-                    }
-                    if !overlaps_any_seg
-                        && !any_col_can_contain
-                        && needle.iter().all(|&b| mask_has_byte(&m, b))
-                    {
-                        any_col_can_contain = true;
-                    }
-                } else if dict_mode == 3 {
-                    let (pal, pal_len, _pal_mixed) = read_front_dict_palette(&mut c)?;
-                    let len0 = c.uleb()?;
-                    let raw_first = c.take(len0)?;
-                    let mut m = [0u64; 4];
-                    add_bytes_to_mask(&mut m, &pal[..pal_len as usize]);
-                    add_bytes_to_mask(&mut m, raw_first);
-                    for i in 0..4 {
-                        block_mask[i] |= m[i];
-                    }
-                    if !overlaps_any_seg
-                        && !any_col_can_contain
-                        && needle.iter().all(|&b| mask_has_byte(&m, b))
-                    {
-                        any_col_can_contain = true;
-                    }
+
+    if !overlaps_any_seg {
+        let mut match_count = 0usize;
+        let mut first_slot = 0usize;
+        for (s, &cb) in col_slices.iter().enumerate() {
+            if col_can_contain_isolated(cb, ones, needle)? {
+                match_count += 1;
+                if match_count == 1 {
+                    first_slot = s;
                 } else {
-                    return Ok(true);
+                    return Ok(TemplatePreCheck::CheckTemplate);
                 }
             }
-            MODEL_LZ_RAW => {
-                let mut m = [0u64; 4];
-                if !fast_lz_alphabet_mask(c, &mut m) {
-                    return Ok(true);
-                }
-                for i in 0..4 {
-                    block_mask[i] |= m[i];
-                }
-                if !overlaps_any_seg
-                    && !any_col_can_contain
-                    && needle.iter().all(|&b| mask_has_byte(&m, b))
-                {
-                    any_col_can_contain = true;
-                }
-            }
-            MODEL_DECIMAL_AFFINE | MODEL_DECIMAL_PACKED | MODEL_DECIMAL_DELTA => {
-                let mut m = [0u64; 4];
-                add_bytes_to_mask(&mut m, b"-0123456789");
-                for i in 0..4 {
-                    block_mask[i] |= m[i];
-                }
-                if !overlaps_any_seg
-                    && !any_col_can_contain
-                    && needle.iter().all(|&b| mask_has_byte(&m, b))
-                {
-                    any_col_can_contain = true;
-                }
-            }
-            MODEL_DECIMAL_SUFFIX => {
-                let plen = c.uleb()?;
-                let prefix = c.take(plen)?;
-                let mut m = [0u64; 4];
-                add_bytes_to_mask(&mut m, prefix);
-                add_bytes_to_mask(&mut m, b"\"-0123456789");
-                for i in 0..4 {
-                    block_mask[i] |= m[i];
-                }
-                if !overlaps_any_seg
-                    && !any_col_can_contain
-                    && needle.iter().all(|&b| mask_has_byte(&m, b))
-                {
-                    any_col_can_contain = true;
-                }
-            }
-            MODEL_HEX_SUFFIX | MODEL_EPOCH_COUNTER | MODEL_GF2_AFFINE => {
-                let plen = c.uleb()?;
-                let prefix = c.take(plen)?;
-                let is_quoted = if tag == MODEL_HEX_SUFFIX {
-                    c.uleb()? <= 64
-                } else {
-                    true
-                };
-                let mut m = [0u64; 4];
-                add_bytes_to_mask(&mut m, prefix);
-                add_bytes_to_mask(&mut m, b"0123456789abcdefABCDEF");
-                if is_quoted {
-                    add_bytes_to_mask(&mut m, b"\"");
-                }
-                for i in 0..4 {
-                    block_mask[i] |= m[i];
-                }
-                if !overlaps_any_seg
-                    && !any_col_can_contain
-                    && needle.iter().all(|&b| mask_has_byte(&m, b))
-                {
-                    any_col_can_contain = true;
-                }
-            }
-            MODEL_TIMESTAMP => {
-                let mut m = [0u64; 4];
-                add_bytes_to_mask(&mut m, b"\"0123456789-:TZ");
-                for i in 0..4 {
-                    block_mask[i] |= m[i];
-                }
-                if !overlaps_any_seg
-                    && !any_col_can_contain
-                    && needle.iter().all(|&b| mask_has_byte(&m, b))
-                {
-                    any_col_can_contain = true;
-                }
-            }
-            MODEL_PATTERN => {
-                let mut m = [0u64; 4];
-                pattern_col_alphabet(&mut c, &mut m)?;
-                for i in 0..4 {
-                    block_mask[i] |= m[i];
-                }
-                if !overlaps_any_seg
-                    && !any_col_can_contain
-                    && needle.iter().all(|&b| mask_has_byte(&m, b))
-                {
-                    any_col_can_contain = true;
-                }
-            }
-            _ => return Ok(true),
+        }
+        return Ok(match match_count {
+            0 => TemplatePreCheck::Never,
+            1 => TemplatePreCheck::SingleSlot(first_slot),
+            _ => TemplatePreCheck::CheckTemplate,
+        });
+    }
+
+    let mut st = BigramState::new();
+    for s in 0..slots {
+        st.feed_static(tpl_segs[s]);
+        feed_col_into_bigram_state(col_slices[s], &mut st)?;
+        if !st.exact && st.byte_mask == [u64::MAX; 4] {
+            return Ok(TemplatePreCheck::CheckTemplate);
         }
     }
-    if !needle.iter().all(|&b| mask_has_byte(&block_mask, b)) {
-        return Ok(false);
+    st.feed_static(tpl_segs[slots]);
+    if !st.matches_needle(needle) {
+        return Ok(TemplatePreCheck::Never);
     }
-    if !overlaps_any_seg && !any_col_can_contain {
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(TemplatePreCheck::CheckTemplate)
+}
+
+/// Fast pre-unpack check on `tpl_segs` and raw column headers (`col_slices`) that rejects
+/// blocks in $O(1)$ time without unpacking column streams when `needle` cannot match.
+#[inline]
+fn can_template_match_fast(
+    tpl_segs: &[&[u8]],
+    col_slices: &[&[u8]],
+    needle: &[u8],
+) -> Result<bool> {
+    Ok(!matches!(
+        precheck_template_substr(tpl_segs, col_slices, usize::MAX, needle)?,
+        TemplatePreCheck::Never
+    ))
 }
 
 /// Find the row index (`0..row_count`) of the `nth` occurrence of `target_bit` (`true` = 1, `false` = 0)

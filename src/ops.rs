@@ -1,18 +1,47 @@
 //! Stage 2 compressed-domain structured operations (`filter_column`, `filter_frame`,
 //! `update_column`, `map_column`) on VXG frames without full-frame decode/re-encode.
 
+use std::borrow::Cow;
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use crate::{frame, query, DecodeOptions, Frame, Options, Result, RowMatch, BLOCK_COLUMN};
 
 mod emit;
+mod filter_frame;
 mod line;
 mod transform;
 
+pub(crate) use line::parse_canonical_u64;
 pub use line::{
     apply_line_col_op, apply_token_op, decode_delim_str, encode_delim_str, encode_json_str,
     eval_token_pred, find_delimited_col_span, find_json_key_span, find_line_col_span,
     format_col_str, line_matches_col_pred, unescape_json_str, ColOp, ColPred, ColTarget, StrCmp,
     ValuePred,
 };
+
+pub(super) struct SyncCell<T>(UnsafeCell<T>);
+
+// SAFETY: Each index in a `Vec<SyncCell<T>>` is written at most once by the unique worker
+// thread that claims block `b` via atomic `fetch_add`, and read only after `std::thread::scope` joins.
+unsafe impl<T: Send> Sync for SyncCell<T> {}
+
+impl<T> SyncCell<T> {
+    #[inline]
+    pub(super) const fn new(val: T) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+
+    #[inline]
+    pub(super) fn get(&self) -> *mut T {
+        self.0.get()
+    }
+
+    #[inline]
+    pub(super) fn into_inner(self) -> T {
+        self.0.into_inner()
+    }
+}
 
 struct ParInBlock<'a> {
     f_bytes: &'a [u8],
@@ -21,11 +50,13 @@ struct ParInBlock<'a> {
     payload: &'a [u8],
 }
 
-struct ParMeta {
+struct ParMeta<'a> {
     decoded_raw: Option<Vec<u8>>,
     row_count: usize,
-    first_frag: Option<Vec<u8>>,
-    last_unterm_frag: Option<Vec<u8>>,
+    had_in_carry: bool,
+    cur_global: usize,
+    first_frag: Option<Cow<'a, [u8]>>,
+    last_unterm_frag: Option<Cow<'a, [u8]>>,
 }
 
 fn filter_column_parallel(
@@ -34,32 +65,29 @@ fn filter_column_parallel(
     limit: usize,
     options: &DecodeOptions,
 ) -> Result<Vec<RowMatch>> {
-    use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Mutex,
-    };
-
     let nb = in_blocks.len();
-    let mut meta = Vec::with_capacity(nb);
-    let mut had_in_carry = vec![false; nb];
-    let mut cur_global_at = vec![0usize; nb];
+    let mut meta: Vec<ParMeta<'_>> = Vec::with_capacity(nb);
     let mut non_empty = Vec::with_capacity(nb);
     let mut incoming = false;
+    let mut any_unterm = false;
     let mut cur_global = 0usize;
 
     for (b, ib) in in_blocks.iter().enumerate() {
-        had_in_carry[b] = incoming;
-        cur_global_at[b] = cur_global;
+        let had_in = incoming;
+        let cg = cur_global;
         if ib.info.kind == BLOCK_COLUMN {
-            if let Some(gb) = crate::columns::peek_grammar_boundary(ib.payload, incoming)? {
+            if let Some(gb) = crate::columns::peek_grammar_boundary_fast(ib.payload, had_in)? {
                 if gb.row_count > 0 {
-                    cur_global += gb.row_count - usize::from(incoming);
+                    cur_global += gb.row_count - usize::from(had_in);
                     incoming = gb.last_unterminated_raw.is_some();
+                    any_unterm |= incoming;
                     non_empty.push(b);
                 }
                 meta.push(ParMeta {
                     decoded_raw: None,
                     row_count: gb.row_count,
+                    had_in_carry: had_in,
+                    cur_global: cg,
                     first_frag: gb.first_raw,
                     last_unterm_frag: gb.last_unterminated_raw,
                 });
@@ -76,12 +104,12 @@ fn filter_column_parallel(
         )?;
         let rc = raw_vec.split_inclusive(|&c| c == b'\n').count();
         let ends_nl = raw_vec.last() == Some(&b'\n');
-        let first_frag = if incoming && !raw_vec.is_empty() {
+        let first_frag = if had_in && !raw_vec.is_empty() {
             let end = raw_vec
                 .iter()
                 .position(|&c| c == b'\n')
                 .map_or(raw_vec.len(), |i| i + 1);
-            Some(raw_vec[..end].to_vec())
+            Some(Cow::Owned(raw_vec[..end].to_vec()))
         } else {
             None
         };
@@ -90,149 +118,195 @@ fn filter_column_parallel(
                 .iter()
                 .rposition(|&c| c == b'\n')
                 .map_or(0, |i| i + 1);
-            Some(raw_vec[st..].to_vec())
+            Some(Cow::Owned(raw_vec[st..].to_vec()))
         } else {
             None
         };
         if rc > 0 {
-            cur_global += rc - usize::from(incoming);
+            cur_global += rc - usize::from(had_in);
             incoming = !ends_nl;
+            any_unterm |= incoming;
             non_empty.push(b);
         }
         meta.push(ParMeta {
             decoded_raw: Some(raw_vec),
             row_count: rc,
+            had_in_carry: had_in,
+            cur_global: cg,
             first_frag,
             last_unterm_frag,
         });
     }
 
     let mut boundary_matches = Vec::new();
-    let mut k_idx = 0usize;
-    while k_idx < non_empty.len() {
-        let b0 = non_empty[k_idx];
-        let Some(ref f0) = meta[b0].last_unterm_frag else {
-            k_idx += 1;
-            continue;
-        };
-        let base_b0 = cur_global_at[b0] - usize::from(had_in_carry[b0]);
-        let start_row = meta[b0].row_count - 1;
-        let start_glob = base_b0 + start_row;
-        let mut full = f0.clone();
-        let mut m = k_idx + 1;
-        while m < non_empty.len() {
-            let bm = non_empty[m];
-            let Some(ref fm) = meta[bm].first_frag else {
-                break;
+    if any_unterm {
+        let mut k_idx = 0usize;
+        while k_idx < non_empty.len() {
+            let b0 = non_empty[k_idx];
+            let Some(ref f0) = meta[b0].last_unterm_frag else {
+                k_idx += 1;
+                continue;
             };
-            full.extend_from_slice(fm);
-            if meta[bm].row_count == 1 && meta[bm].last_unterm_frag.is_some() {
-                m += 1;
-            } else {
-                break;
+            let base_b0 = meta[b0].cur_global - usize::from(meta[b0].had_in_carry);
+            let start_row = meta[b0].row_count - 1;
+            let start_glob = base_b0 + start_row;
+            let mut full = f0.as_ref().to_vec();
+            let mut m = k_idx + 1;
+            while m < non_empty.len() {
+                let bm = non_empty[m];
+                let Some(ref fm) = meta[bm].first_frag else {
+                    break;
+                };
+                full.extend_from_slice(fm);
+                if meta[bm].row_count == 1 && meta[bm].last_unterm_frag.is_some() {
+                    m += 1;
+                } else {
+                    break;
+                }
             }
+            if line_matches_col_pred(&full, pred) {
+                boundary_matches.push(RowMatch {
+                    block_index: b0,
+                    row_index: start_row,
+                    global_row_index: start_glob,
+                    bytes: full,
+                });
+            }
+            k_idx = m.max(k_idx + 1);
         }
-        if line_matches_col_pred(&full, pred) {
-            boundary_matches.push(RowMatch {
-                block_index: b0,
-                row_index: start_row,
-                global_row_index: start_glob,
-                bytes: full,
-            });
-        }
-        k_idx = m.max(k_idx + 1);
     }
 
     let workers = options.threads.min(nb.max(1));
     let next = AtomicUsize::new(0);
+    let cutoff = AtomicUsize::new(nb);
     let failed = AtomicBool::new(false);
-    let slots: Vec<Mutex<Result<Vec<RowMatch>>>> =
-        (0..nb).map(|_| Mutex::new(Ok(Vec::new()))).collect();
+    let slots: Vec<SyncCell<Option<Result<Vec<RowMatch>>>>> =
+        (0..nb).map(|_| SyncCell::new(None)).collect();
+    let step = if limit == usize::MAX && nb >= workers * 8 {
+        4
+    } else {
+        1
+    };
 
-    std::thread::scope(|s| {
-        for _ in 0..workers {
-            s.spawn(|| {
-                let mut dec_buf = Vec::new();
-                loop {
-                    if failed.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let b = next.fetch_add(1, Ordering::Relaxed);
-                    if b >= nb {
-                        break;
-                    }
-                    if meta[b].row_count == 0 {
-                        continue;
-                    }
-                    let ib = &in_blocks[b];
-                    let res: Result<Vec<RowMatch>> = (|| {
-                        let mut local_out = Vec::new();
-                        if meta[b].decoded_raw.is_none() {
-                            let mut dummy = if had_in_carry[b] {
-                                Some((usize::MAX, 0, 0, Vec::new()))
-                            } else {
-                                None
-                            };
-                            if crate::columns::search_grammar_block_col_pred(
-                                ib.payload,
-                                b,
-                                cur_global_at[b],
-                                &mut dummy,
-                                pred,
-                                usize::MAX,
-                                &mut local_out,
-                            )?
-                            .is_some()
-                            {
-                                local_out.retain(|rm| rm.block_index != usize::MAX);
-                                return Ok(local_out);
-                            }
-                        }
-                        let raw: &[u8] = if let Some(ref pre) = meta[b].decoded_raw {
-                            pre
+    let run_worker = || {
+        let mut dec_buf = Vec::new();
+        loop {
+            if failed.load(Ordering::Relaxed) {
+                break;
+            }
+            let base = next.fetch_add(step, Ordering::Relaxed);
+            if base >= nb || base > cutoff.load(Ordering::Relaxed) {
+                break;
+            }
+            let end = (base + step).min(nb);
+            for b in base..end {
+                if b > cutoff.load(Ordering::Relaxed) {
+                    break;
+                }
+                let mb = &meta[b];
+                if mb.row_count == 0 {
+                    continue;
+                }
+                let ib = &in_blocks[b];
+                let blk_lim = limit.saturating_add(usize::from(mb.had_in_carry));
+                let res: Result<Vec<RowMatch>> = (|| {
+                    let mut local_out = Vec::new();
+                    if mb.decoded_raw.is_none() {
+                        let mut dummy = if mb.had_in_carry {
+                            Some((usize::MAX, 0, 0, Vec::new()))
                         } else {
-                            query::decode_block_into(
-                                ib.f_bytes,
-                                ib.local_blk,
-                                ib.info.raw_size,
-                                options,
-                                &mut dec_buf,
-                            )?;
-                            &dec_buf
+                            None
                         };
-                        if raw.is_empty() {
+                        if crate::columns::search_grammar_block_col_pred(
+                            ib.payload,
+                            b,
+                            mb.cur_global,
+                            &mut dummy,
+                            pred,
+                            blk_lim,
+                            &mut local_out,
+                        )?
+                        .is_some()
+                        {
+                            local_out.retain(|rm| rm.block_index != usize::MAX);
                             return Ok(local_out);
                         }
-                        let base_row = cur_global_at[b] - usize::from(had_in_carry[b]);
-                        let lines: Vec<&[u8]> = raw.split_inclusive(|&c| c == b'\n').collect();
-                        let start_i = usize::from(had_in_carry[b]);
-                        let end_i = lines.len()
-                            - usize::from(lines.last().is_some_and(|l| !l.ends_with(b"\n")));
-                        for row_idx in start_i..end_i {
-                            let lb = lines[row_idx];
-                            if line_matches_col_pred(lb, pred) {
-                                local_out.push(RowMatch {
-                                    block_index: b,
-                                    row_index: row_idx,
-                                    global_row_index: base_row + row_idx,
-                                    bytes: lb.to_vec(),
-                                });
+                        local_out.clear();
+                    }
+                    let raw: &[u8] = if let Some(ref pre) = mb.decoded_raw {
+                        pre
+                    } else {
+                        query::decode_block_into(
+                            ib.f_bytes,
+                            ib.local_blk,
+                            ib.info.raw_size,
+                            options,
+                            &mut dec_buf,
+                        )?;
+                        &dec_buf
+                    };
+                    if raw.is_empty() {
+                        return Ok(local_out);
+                    }
+                    let base_row = mb.cur_global - usize::from(mb.had_in_carry);
+                    let lines: Vec<&[u8]> = raw.split_inclusive(|&c| c == b'\n').collect();
+                    let start_i = usize::from(mb.had_in_carry);
+                    let end_i = lines.len()
+                        - usize::from(lines.last().is_some_and(|l| !l.ends_with(b"\n")));
+                    for (row_idx, &lb) in lines.iter().enumerate().take(end_i).skip(start_i) {
+                        if line_matches_col_pred(lb, pred) {
+                            local_out.push(RowMatch {
+                                block_index: b,
+                                row_index: row_idx,
+                                global_row_index: base_row + row_idx,
+                                bytes: lb.to_vec(),
+                            });
+                            if local_out.len() >= limit {
+                                break;
                             }
                         }
-                        Ok(local_out)
-                    })();
-                    if res.is_err() {
-                        failed.store(true, Ordering::Relaxed);
                     }
-                    *slots[b].lock().unwrap() = res;
+                    Ok(local_out)
+                })();
+                match res {
+                    Ok(v) => {
+                        if limit < usize::MAX && v.len() >= limit {
+                            cutoff.fetch_min(b, Ordering::Relaxed);
+                        }
+                        if !v.is_empty() {
+                            unsafe {
+                                *slots[b].get() = Some(Ok(v));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        unsafe {
+                            *slots[b].get() = Some(Err(e));
+                        }
+                        failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
                 }
-            });
+            }
         }
+    };
+
+    std::thread::scope(|s| {
+        for _ in 1..workers {
+            s.spawn(run_worker);
+        }
+        run_worker();
     });
 
+    let cut = cutoff.load(Ordering::Relaxed);
     let mut out = Vec::new();
-    for m in slots {
-        out.extend(m.into_inner().unwrap()?);
+    for (b, slot) in slots.into_iter().enumerate() {
+        if let Some(res) = slot.into_inner() {
+            let v = res?;
+            if b <= cut {
+                out.extend(v);
+            }
+        }
     }
     if !boundary_matches.is_empty() {
         out.extend(boundary_matches);
@@ -373,16 +447,7 @@ pub fn filter_frame(
     enc_options: &Options,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
-    enc_options.validate()?;
-    let mut dec_eff = dec_options.clone();
-    dec_eff.threads = dec_options.threads.max(enc_options.threads);
-    let matches = filter_column(frame_bytes, pred, usize::MAX, &dec_eff)?;
-    let total_len: usize = matches.iter().map(|m| m.bytes.len()).sum();
-    let mut raw = Vec::with_capacity(total_len);
-    for m in matches {
-        raw.extend_from_slice(&m.bytes);
-    }
-    crate::compress(&raw, enc_options)
+    filter_frame::filter_frame_impl(frame_bytes, pred, enc_options, dec_options)
 }
 
 /// Conditionally transform `target_col` with `op` on every record matching `where_pred`,

@@ -88,56 +88,15 @@ fn rewrite_single_slot_column<'a>(
         });
     }
 
-    if hits_opt.is_none() {
-        if let ColumnStream::Dictionary { u8_offset, .. } = col.stream {
-            if let Some((slice_off, entries)) = col.dict_slices {
-                if entries <= 256 {
-                    let mut orig_entries = Vec::with_capacity(entries);
-                    let mut mapped_entries: Vec<Option<Vec<u8>>> = Vec::with_capacity(entries);
-                    let mut any_changed = false;
-                    for e in 0..entries {
-                        let (ptr, len) = scratch.slice_arena[slice_off + e];
-                        let eb = unsafe { std::slice::from_raw_parts(ptr, len) };
-                        orig_entries.push(eb);
-                        let m = crate::ops::apply_token_op(target_col, eb, op);
-                        if let Some(ref nt) = m {
-                            if !is_valid_slot_token(target_col, nt) {
-                                return Ok(SlotColRewrite::Fallback);
-                            }
-                            any_changed = true;
-                        }
-                        mapped_entries.push(m);
-                    }
-                    if !any_changed {
-                        return Ok(SlotColRewrite::Untouched);
-                    }
-                    let mut entry_refs = Vec::with_capacity(entries);
-                    let mut entry_deltas = Vec::with_capacity(entries);
-                    for e in 0..entries {
-                        if let Some(ref nt) = mapped_entries[e] {
-                            entry_refs.push(nt.as_slice());
-                            entry_deltas.push(nt.len() as isize - orig_entries[e].len() as isize);
-                        } else {
-                            entry_refs.push(orig_entries[e]);
-                            entry_deltas.push(0);
-                        }
-                    }
-                    let ids = &scratch.u8_arena[u8_offset..u8_offset + ones];
-                    let mut refs = Vec::with_capacity(ones);
-                    let mut delta = 0isize;
-                    for &id in ids {
-                        let idx = id as usize;
-                        refs.push(entry_refs[idx]);
-                        delta += entry_deltas[idx];
-                    }
-                    let (model_bytes, _) = pack_model_v3(&refs);
-                    return Ok(SlotColRewrite::Rewritten {
-                        model_bytes,
-                        byte_delta: delta,
-                    });
-                }
-            }
-        }
+    if let Some(res) =
+        try_rewrite_numeric_slot(&col, ones, hits_opt, target_col, op, scratch)?
+    {
+        return Ok(res);
+    }
+    if let Some(res) =
+        try_rewrite_dict_slot(&col, ones, hits_opt, target_col, op, scratch)?
+    {
+        return Ok(res);
     }
 
     let unbound = UnboundTemplate::build(&[b"", b""], &[col], scratch);

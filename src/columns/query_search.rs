@@ -209,32 +209,56 @@ pub(crate) fn search_grammar_block(
             }
 
             let t0_segs = &tpl0_segs_inline[..=slots];
-            let mut num_plan = None;
-            let can_tpl_match = if let Some(nf) = num {
-                if ones > 0 {
-                    num_plan = numeric_hits(
-                        nf,
-                        t0_segs,
-                        &col_slices[..slots],
-                        ones,
-                        limit - out.len(),
-                        &mut scratch,
-                    )?;
-                }
-                match &num_plan {
+            if !last_is_raw && !t0_segs[slots].ends_with(b"\n") {
+                return Ok(None);
+            }
+            let rem_limit = limit - out.len();
+            let mut slot_plan: Option<(usize, Option<PreparedColumn<'_>>, Vec<usize>)> = None;
+            let mut force_always = false;
+            let can_tpl_match = if ones == 0 {
+                false
+            } else if let Some(nf) = num {
+                slot_plan = numeric_hits(
+                    nf,
+                    t0_segs,
+                    &col_slices[..slots],
+                    ones,
+                    rem_limit,
+                    &mut scratch,
+                )?;
+                match &slot_plan {
                     Some((_, _, hits)) => !hits.is_empty(),
-                    None => ones > 0,
+                    None => true,
                 }
             } else {
-                ones > 0 && can_template_match_fast(t0_segs, &col_slices[..slots], needle)?
+                match precheck_template_substr(t0_segs, &col_slices[..slots], ones, needle)? {
+                    TemplatePreCheck::Never => false,
+                    TemplatePreCheck::Always => {
+                        force_always = true;
+                        true
+                    }
+                    TemplatePreCheck::SingleSlot(s) => {
+                        let (c_opt, hits) = eval_substr_on_single_slot(
+                            col_slices[s],
+                            ones,
+                            rem_limit,
+                            needle,
+                            &mut scratch,
+                        )?;
+                        let has_hits = !hits.is_empty();
+                        slot_plan = Some((s, c_opt, hits));
+                        has_hits
+                    }
+                    TemplatePreCheck::CheckTemplate => true,
+                }
             };
-            let rem_limit = limit - out.len();
             let mut local_matches = Vec::<(usize, Vec<u8>)>::new();
+            let mut raw_sel_cur = SelectorBitCursor::new(selector_slice, row_count, false);
             for r_idx in raw_start..raw_end {
                 let (ptr, len) = scratch.slice_arena[raw_slice_offset + r_idx];
                 let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
                 if row_hit(slice) {
-                    let row_idx = nth_selector_bit(selector_slice, row_count, false, r_idx);
+                    let row_idx = raw_sel_cur.advance_to(r_idx);
                     local_matches.push((row_idx, slice.to_vec()));
                     if local_matches.len() >= rem_limit && !can_tpl_match {
                         break;
@@ -250,7 +274,7 @@ pub(crate) fn search_grammar_block(
                 let mut active_dict_lens = [0usize; MAX_SLOTS];
                 let mut act_idx = 0usize;
                 for s in 0..slots {
-                    cols[s] = match &num_plan {
+                    cols[s] = match &slot_plan {
                         Some((t, Some(col), _)) if *t == s => *col,
                         _ => PreparedColumn::parse_and_validate(col_slices[s], ones, &mut scratch)?,
                     };
@@ -260,8 +284,10 @@ pub(crate) fn search_grammar_block(
                     }
                 }
                 let unbound = UnboundTemplate::build(t0_segs, &cols[..slots], &mut scratch);
-                let filter = if let Some((_, _, hits)) = num_plan.take() {
+                let filter = if let Some((_, _, hits)) = slot_plan.take() {
                     TplFilter::Hits(hits)
+                } else if force_always {
+                    TplFilter::Always
                 } else if num.is_some() {
                     TplFilter::CheckAll
                 } else {
@@ -278,6 +304,7 @@ pub(crate) fn search_grammar_block(
                     let mut tpl = unbound.bind(&mut scratch);
                     let mut row_buf = vec![0u8; tpl.row_budget.max(4096) + 64];
                     let mut cur_t = 0usize;
+                    let mut tpl_sel_cur = SelectorBitCursor::new(selector_slice, row_count, true);
 
                     let mut emit_and_check = |t_idx: usize, verify: bool| -> bool {
                         unsafe {
@@ -291,7 +318,7 @@ pub(crate) fn search_grammar_block(
                                 let row_idx = if raw_count == 0 {
                                     t_idx
                                 } else {
-                                    nth_selector_bit(selector_slice, row_count, true, t_idx)
+                                    tpl_sel_cur.advance_to(t_idx)
                                 };
                                 local_matches.push((row_idx, row_slice.to_vec()));
                                 return true;
@@ -381,7 +408,10 @@ pub(crate) fn search_grammar_block(
             return Ok(Some(new_rows));
         }
 
-        // Multi-template or 0-template blocks: iterate row-by-row and stop at `limit`.
+        // Multi-template or 0-template blocks: pre-filter per template and skip non-matching ones.
+        if selector_width > 7 {
+            return Ok(None);
+        }
         let sel_u8_offset = unpack_and_validate_u8(
             selector_slice,
             row_count,
@@ -394,6 +424,8 @@ pub(crate) fn search_grammar_block(
         for &sel in &scratch.u8_arena[sel_u8_offset..sel_u8_offset + row_count] {
             sel_counts[sel as usize] += 1;
         }
+        let first_sel = scratch.u8_arena[sel_u8_offset] as usize;
+        let last_sel = scratch.u8_arena[sel_u8_offset + row_count - 1] as usize;
         let raw_total = sel_counts[0];
         let DecodeScratch {
             ref mut raw_arena,
@@ -402,30 +434,52 @@ pub(crate) fn search_grammar_block(
         } = *scratch;
         let raw_slice_offset =
             read_grammar_raw_rows(&mut cursor, raw_total, raw_arena, slice_arena)?;
+        let had_incoming_carry = carry.is_some();
         let mut cols_uninit = core::mem::MaybeUninit::<[PreparedColumn; MAX_SLOTS]>::uninit();
         let cols: &mut [PreparedColumn; MAX_SLOTS] = unsafe { cols_uninit.assume_init_mut() };
-        let mut unbound_templates = vec![UnboundTemplate::default(); template_count];
+        let mut unbound_templates: Vec<Option<UnboundTemplate>> = vec![None; template_count];
+        let mut col_slices_tmp = [&[][..]; MAX_SLOTS];
         for tpl_idx in 0..template_count {
             let slots = slot_counts[tpl_idx];
             let count = sel_counts[tpl_idx + 1];
-            for s in 0..slots {
+            for col_out in col_slices_tmp.iter_mut().take(slots) {
                 let len = cursor.uleb()?;
-                let bytes = cursor.take(len)?;
-                cols[s] = PreparedColumn::parse_and_validate(bytes, count, &mut scratch)?;
+                *col_out = cursor.take(len)?;
+            }
+            if count == 0 {
+                continue;
+            }
+            let touches_carry = (had_incoming_carry && first_sel == tpl_idx + 1)
+                || (last_sel == tpl_idx + 1 && !tpl_segs[tpl_idx][slots].ends_with(b"\n"));
+            if !touches_carry
+                && matches!(
+                    precheck_template_substr(
+                        &tpl_segs[tpl_idx],
+                        &col_slices_tmp[..slots],
+                        count,
+                        needle,
+                    )?,
+                    TemplatePreCheck::Never
+                )
+            {
+                continue;
+            }
+            for s in 0..slots {
+                cols[s] = PreparedColumn::parse_and_validate(col_slices_tmp[s], count, &mut scratch)?;
             }
             unbound_templates[tpl_idx] =
-                UnboundTemplate::build(&tpl_segs[tpl_idx], &cols[..slots], &mut scratch);
+                Some(UnboundTemplate::build(&tpl_segs[tpl_idx], &cols[..slots], &mut scratch));
         }
         if !cursor.done() {
             return Err(invalid("column packet trailing bytes"));
         }
         let total_unbound_cols = scratch.unbound_col_arena.len();
         scratch.exec_col_arena.reserve(total_unbound_cols);
-        let mut prepared_templates = Vec::with_capacity(template_count);
-        for unbound in unbound_templates {
-            prepared_templates.push(unbound.bind(&mut scratch));
+        let mut prepared_templates: Vec<Option<PreparedTemplate>> =
+            Vec::with_capacity(template_count);
+        for unbound_opt in unbound_templates {
+            prepared_templates.push(unbound_opt.map(|u| u.bind(&mut scratch)));
         }
-        let had_incoming_carry = carry.is_some();
         let base_row = if had_incoming_carry {
             global_row_base - 1
         } else {
@@ -437,7 +491,9 @@ pub(crate) fn search_grammar_block(
         for r in 0..row_count {
             let sel = scratch.u8_arena[sel_u8_offset + r] as usize;
             let row_slice: &[u8] = if sel != 0 {
-                let tpl = &mut prepared_templates[sel - 1];
+                let Some(ref mut tpl) = prepared_templates[sel - 1] else {
+                    continue;
+                };
                 if tpl.row_budget > row_buf.len() {
                     row_buf.resize(tpl.row_budget + 64, 0);
                 }
