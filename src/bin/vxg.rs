@@ -32,7 +32,10 @@ Usage:
   vxg block        FRAME INDEX [OUTPUT] [--simd MODE] [--max-output BYTES]
                                 [--no-checksum|--no-verify-checksum] [--force|-f]
   vxg q|query      FRAME        [--count | --row IDX | --range START:END |
-                                 --find-first STR | --filter STR [--limit N]]
+                                 --find-first STR | --filter STR | --where SPEC] [--limit N]
+  vxg filter-frame INPUT OUTPUT --where SPEC [--block-size BYTES] [--no-checksum] [-f] [-q]
+  vxg update       INPUT OUTPUT --where SPEC --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [-f] [-q]
+  vxg map          INPUT OUTPUT --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [-f] [-q]
   vxg info|list    FRAME        [--summary]
   vxg hardware
   vxg gpu-check    metal|vulkan|cuda
@@ -152,41 +155,49 @@ fn run_args(args: &[String]) -> R<()> {
                 return Err(format!("unknown option {}", args[2]).into());
             }
             let bytes = read_input(&args[1])?;
-            let f = Frame::parse(&bytes, usize::MAX)?;
-            if f.blocks().all(|b| b.kind != 2) {
-                f.validate_commands()?;
-            }
+            let frames = Frame::parse_all(&bytes, usize::MAX)?;
             let mut raw_blocks = 0usize;
             let mut lz_blocks = 0usize;
             let mut col_blocks = 0usize;
-            for b in f.blocks() {
-                match b.kind {
-                    0 => raw_blocks += 1,
-                    1 => lz_blocks += 1,
-                    2 => col_blocks += 1,
-                    _ => {}
+            let mut total_raw = 0usize;
+            let mut total_blocks = 0usize;
+            for f in &frames {
+                if f.blocks().all(|b| b.kind != 2) {
+                    f.validate_commands()?;
+                }
+                total_raw += f.raw_size();
+                total_blocks += f.block_count();
+                for b in f.blocks() {
+                    match b.kind {
+                        0 => raw_blocks += 1,
+                        1 => lz_blocks += 1,
+                        2 => col_blocks += 1,
+                        _ => {}
+                    }
                 }
             }
-            let ratio = if f.raw_size() == 0 {
+            let f0 = &frames[0];
+            let ratio = if total_raw == 0 {
                 1.0
             } else {
-                bytes.len() as f64 / f.raw_size() as f64
+                bytes.len() as f64 / total_raw as f64
             };
             println!(
-                "version={} raw={} encoded={} ratio={:.4} blocks={} block_size={} checksum={} kinds=RAW:{},LZ:{},COLUMN:{}",
-                f.version(),
-                f.raw_size(),
+                "version={} raw={} encoded={} ratio={:.4} blocks={} block_size={} checksum={} frames={} kinds=RAW:{},LZ:{},COLUMN:{}",
+                f0.version(),
+                total_raw,
                 bytes.len(),
                 ratio,
-                f.block_count(),
-                f.block_size(),
-                f.checksummed(),
+                total_blocks,
+                f0.block_size(),
+                f0.checksummed(),
+                frames.len(),
                 raw_blocks,
                 lz_blocks,
                 col_blocks
             );
-            if !summary_only {
-                for (i, b) in f.blocks().enumerate() {
+            if !summary_only && frames.len() == 1 {
+                for (i, b) in f0.blocks().enumerate() {
                     println!(
                         "block={i} raw_offset={} raw={} payload_offset={} encoded={} kind={}",
                         b.raw_offset,
@@ -225,18 +236,20 @@ fn run_args(args: &[String]) -> R<()> {
             }
             let bytes = read_input(input)?;
             let start = std::time::Instant::now();
-            let f = Frame::parse(&bytes, dec.max_output)?;
+            let frames = Frame::parse_all(&bytes, dec.max_output)?;
             let decoded = vxg::decompress(&bytes, &dec)?;
             let elapsed = start.elapsed().as_secs_f64();
             if !quiet {
                 let gbps = decoded.len() as f64 / elapsed.max(1e-9) / 1e9;
+                let total_blocks: usize = frames.iter().map(Frame::block_count).sum();
+                let all_csum = frames.iter().all(Frame::checksummed);
                 eprintln!(
                     "OK: version={} raw={} encoded={} blocks={} checksum_verified={} ({:.3} ms, {:.3} GB/s)",
-                    f.version(),
+                    frames[0].version(),
                     decoded.len(),
                     bytes.len(),
-                    f.block_count(),
-                    f.checksummed() && dec.verify_checksum,
+                    total_blocks,
+                    all_csum && dec.verify_checksum,
                     elapsed * 1000.0,
                     gbps
                 );
@@ -283,6 +296,7 @@ fn run_args(args: &[String]) -> R<()> {
             return gpu_check(args[1].parse()?);
         }
         "q" | "query" => return run_query_cmd(args),
+        "filter-frame" | "update" | "map" => return run_ops_cmd(args),
         "c" | "compress" | "d" | "decompress" => {}
         _ => return Err(format!("unknown command: {cmd}\n{HELP}").into()),
     }
@@ -472,94 +486,6 @@ fn gpu_check(backend: Backend) -> R<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn s(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_owned()).collect()
-    }
-
-    #[test]
-    fn cli_version_help_and_auto_threads_work() {
-        assert!(run_args(&s(&["--version"])).is_ok());
-        assert!(run_args(&s(&["--help"])).is_ok());
-        assert!(parse_threads("auto").unwrap() >= 1);
-        assert!(parse_threads("0").unwrap() >= 1);
-        assert_eq!(parse_threads("4").unwrap(), 4);
-    }
-
-    #[test]
-    fn cli_compress_verify_info_block_and_decompress_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("vxg_cli_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let raw_path = dir.join("input.csv");
-        let vxg_path = dir.join("output.vxg");
-        let dec_path = dir.join("decoded.csv");
-        let blk_path = dir.join("block0.bin");
-
-        let mut data = Vec::new();
-        for i in 0..1024 {
-            data.extend_from_slice(
-                format!(
-                    "\"2026-01-01T00:00:00Z\",{i},\"session.open\",\"eu-central-1\",\"worker-{}\"\n",
-                    i % 8
-                )
-                .as_bytes(),
-            );
-        }
-        fs::write(&raw_path, &data).unwrap();
-
-        let raw_str = raw_path.to_str().unwrap();
-        let vxg_str = vxg_path.to_str().unwrap();
-        let dec_str = dec_path.to_str().unwrap();
-        let blk_str = blk_path.to_str().unwrap();
-
-        run_args(&s(&[
-            "compress",
-            raw_str,
-            vxg_str,
-            "--block-size",
-            "4096",
-            "--threads",
-            "auto",
-            "-q",
-        ]))
-        .unwrap();
-        run_args(&s(&["verify", vxg_str, "--threads", "auto", "-q"])).unwrap();
-        run_args(&s(&["info", vxg_str, "--summary"])).unwrap();
-        run_args(&s(&["block", vxg_str, "0", blk_str, "-f"])).unwrap();
-        assert_eq!(fs::read(&blk_path).unwrap(), &data[..4096]);
-
-        run_args(&s(&["decompress", vxg_str, dec_str, "-f", "-q"])).unwrap();
-        assert_eq!(fs::read(&dec_path).unwrap(), data);
-
-        // Also test --stream bounded-memory CLI path:
-        run_args(&s(&[
-            "compress",
-            raw_str,
-            vxg_str,
-            "--block-size",
-            "4096",
-            "--stream",
-            "-f",
-            "-q",
-        ]))
-        .unwrap();
-        run_args(&s(&[
-            "decompress",
-            vxg_str,
-            dec_str,
-            "--stream",
-            "-f",
-            "-q",
-        ]))
-        .unwrap();
-        assert_eq!(fs::read(&dec_path).unwrap(), data);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-}
-
+include!("cli_support/ops.rs");
 include!("cli_support/query.rs");
+include!("cli_support/tests.rs");

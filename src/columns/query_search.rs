@@ -155,6 +155,9 @@ pub(crate) fn search_grammar_block(
                 global_row_base
             };
             let first_is_raw = (selector_slice[0] & 1) == 0;
+            if had_incoming_carry && !first_is_raw {
+                return Ok(None);
+            }
             let last_is_raw =
                 ((selector_slice[(row_count - 1) >> 3] >> ((row_count - 1) & 7)) & 1) == 0;
 
@@ -248,7 +251,7 @@ pub(crate) fn search_grammar_block(
                 let mut act_idx = 0usize;
                 for s in 0..slots {
                     cols[s] = match &num_plan {
-                        Some((t, col, _)) if *t == s => *col,
+                        Some((t, Some(col), _)) if *t == s => *col,
                         _ => PreparedColumn::parse_and_validate(col_slices[s], ones, &mut scratch)?,
                     };
                     if matches!(cols[s].const_full, ConstValue::None) {

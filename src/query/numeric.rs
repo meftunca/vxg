@@ -8,7 +8,10 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NumCmp {
     Eq(u64),
+    Ne(u64),
+    Gt(u64),
     Ge(u64),
+    Lt(u64),
     Le(u64),
     Range(u64, u64),
 }
@@ -18,7 +21,10 @@ impl NumCmp {
     pub fn test(self, v: u64) -> bool {
         match self {
             NumCmp::Eq(x) => v == x,
+            NumCmp::Ne(x) => v != x,
+            NumCmp::Gt(x) => v > x,
             NumCmp::Ge(x) => v >= x,
+            NumCmp::Lt(x) => v < x,
             NumCmp::Le(x) => v <= x,
             NumCmp::Range(lo, hi) => v >= lo && v <= hi,
         }

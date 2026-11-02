@@ -1,7 +1,7 @@
 fn run_query_cmd(args: &[String]) -> R<()> {
     if args.len() < 3 {
         return Err(
-            "usage: vxg query FRAME [--count | --row IDX | --range START:END | --find-first STR | --filter STR [--limit N]]"
+            "usage: vxg query FRAME [--count | --row IDX | --range START:END | --find-first STR | --filter STR | --where SPEC [--limit N]]"
                 .into(),
         );
     }
@@ -12,6 +12,7 @@ fn run_query_cmd(args: &[String]) -> R<()> {
     let mut range: Option<(usize, usize)> = None;
     let mut find_first_str: Option<String> = None;
     let mut filter_str: Option<String> = None;
+    let mut where_spec: Option<String> = None;
     let mut limit: usize = usize::MAX;
     let mut i = 2;
     while i < args.len() {
@@ -28,6 +29,7 @@ fn run_query_cmd(args: &[String]) -> R<()> {
             }
             "--find-first" => find_first_str = Some(val(args, &mut i)?.to_owned()),
             "--filter" | "--contains" => filter_str = Some(val(args, &mut i)?.to_owned()),
+            "--where" => where_spec = Some(val(args, &mut i)?.to_owned()),
             "--limit" => limit = val(args, &mut i)?.parse()?,
             x => return Err(format!("unknown query option {x}").into()),
         }
@@ -35,7 +37,16 @@ fn run_query_cmd(args: &[String]) -> R<()> {
     }
 
     if count_only {
-        println!("{}", vxg::frame_row_count(&frame)?);
+        if let Some(ws) = where_spec.as_deref() {
+            let (col, pred_val) = parse_where_spec(ws)?;
+            let pred = vxg::ColPred {
+                col,
+                pred: pred_val.as_value_pred(),
+            };
+            println!("{}", vxg::filter_column(&frame, &pred, limit, &opts)?.len());
+        } else {
+            println!("{}", vxg::frame_row_count(&frame)?);
+        }
         return Ok(());
     }
     if let Some(idx) = row_idx {
@@ -46,6 +57,19 @@ fn run_query_cmd(args: &[String]) -> R<()> {
     if let Some((start, end)) = range {
         let bytes = vxg::extract_row_range(&frame, start, end, &opts)?;
         io::stdout().lock().write_all(&bytes)?;
+        return Ok(());
+    }
+    if let Some(ws) = where_spec.as_deref() {
+        let (col, pred_val) = parse_where_spec(ws)?;
+        let pred = vxg::ColPred {
+            col,
+            pred: pred_val.as_value_pred(),
+        };
+        let matches = vxg::filter_column(&frame, &pred, limit, &opts)?;
+        let mut out = io::stdout().lock();
+        for m in matches {
+            out.write_all(&m.bytes)?;
+        }
         return Ok(());
     }
     if let Some(needle) = find_first_str {
@@ -62,5 +86,5 @@ fn run_query_cmd(args: &[String]) -> R<()> {
         }
         return Ok(());
     }
-    Err("specify one of --count, --row, --range, --find-first, or --filter".into())
+    Err("specify one of --count, --row, --range, --find-first, --filter, or --where".into())
 }

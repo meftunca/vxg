@@ -335,5 +335,8 @@ include!("columns/query.rs");
 include!("columns/query_filter.rs");
 include!("columns/query_search.rs");
 include!("columns/query_numeric.rs");
+include!("columns/ops_header.rs");
+include!("columns/ops_pred.rs");
+include!("columns/ops_rewrite.rs");
 include!("columns/tests_models.rs");
 include!("columns/tests_packets.rs");

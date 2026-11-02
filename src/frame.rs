@@ -352,6 +352,21 @@ impl<'a> Frame<'a> {
             version,
         })
     }
+    /// Parses one `VXG1` frame or a concatenated sequence of `VXG1` frames.
+    pub fn parse_all(src: &'a [u8], max_output: usize) -> Result<Vec<Self>> {
+        match Self::parse(src, max_output) {
+            Ok(f) => Ok(vec![f]),
+            Err(Error::InvalidFrame("trailing bytes or incorrect total")) => {
+                let (_, spans) = crate::stream::scan_concatenated_frames(src, max_output)?;
+                let mut frames = Vec::with_capacity(spans.len());
+                for (start, end, raw_size) in spans {
+                    frames.push(Self::parse(&src[start..end], raw_size)?);
+                }
+                Ok(frames)
+            }
+            Err(e) => Err(e),
+        }
+    }
     pub fn raw_size(&self) -> usize {
         self.raw_size
     }

@@ -21,6 +21,7 @@ mod error;
 pub mod ffi;
 mod frame;
 pub mod gpu;
+pub mod ops;
 #[cfg(feature = "bench")]
 pub mod packing;
 #[cfg(kani)]
@@ -31,6 +32,10 @@ pub mod stream;
 pub use block::{WorkStats, COLUMN as BLOCK_COLUMN, LZ as BLOCK_LZ, RAW as BLOCK_RAW};
 pub use error::{Error, Result};
 pub use frame::{max_compressed_size, BlockInfo, Frame, ValidatedFrame};
+pub use ops::{
+    filter_column, filter_frame, map_column, update_column, ColOp, ColPred, ColTarget, StrCmp,
+    ValuePred,
+};
 pub use query::{
     block_row_count, extract_block_row, extract_block_row_range, extract_row, extract_row_range,
     filter_json_u64, filter_rows, find_first, frame_row_count, NumCmp, RowMatch,

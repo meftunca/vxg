@@ -637,3 +637,35 @@ Single-thread comparison vs LZ4 (`1.10.0`) and Zstd-1 (`1.5.7`) (`vxg-bench --sa
 | CSV (`data.csv`) | **.182** | .286 | .446 | **0.52 / 1.75** | 0.59 / 1.42 | 0.70 / 3.84 |
 | NDJSON `ts_clf` | **.030** | .077 | .147 | **0.82 / 5.26** | 0.81 / 1.40 | 1.71 / 4.92 |
 | `ndjson_varied` (56.5 MB) | **.091** | .166 | .290 | **0.74 / 3.10** | 0.56 / 0.95 | 1.13 / 4.11 |
+
+## Stage 2: Compressed-domain `filter`, `map`, and `update` without full decode
+
+Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`, checksums off, median of 5 timed samples after warmup via `vxg-query-real --ops-suite`).
+- `filter_column` is compared against `vxg::decompress` + single-pass raw column scan; exact `(global_row_index, bytes)` equality is asserted on every run.
+- Frame-producing operations (`filter_frame`, `update_column`, `map_column`) are compared against `vxg::decompress` + single-buffer raw line transform + `vxg::compress`; byte-for-byte equality of `vxg::decompress(output_frame)` is asserted on every run.
+
+### 1. Varied NDJSON (`ndjson_varied.ndjson`, 56.5 MB, 300,000 rows, 863 blocks, input ratio `0.091`)
+
+| Operation | Naive (`dec + op [+ enc]`) | VXG Compressed-Domain | Speedup | Effective Throughput | Output Ratio / Hits |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| `filter_column` `level == "NOPE"` (0-hit alphabet) | 103.68 ms | **1.43 ms** | **72.5×** | **39.51 GB/s** | 0 hits |
+| `filter_column` `bytes >= 50000` (zone-map skip) | 124.59 ms | **2.11 ms** | **59.0×** | **26.77 GB/s** | 6 hits |
+| `filter_column` `latency_ms >= 200` (numeric pushdown) | 130.25 ms | **4.54 ms** | **28.7×** | **12.43 GB/s** | 563 hits |
+| `filter_column` `service == "fraud-engine"` (dict pushdown) | 124.67 ms | **16.02 ms** | **7.8×** | **3.53 GB/s** | 37,539 hits |
+| `filter_frame` `status == 500` (~5% rows -> `VXG1`) | 134.51 ms | **13.21 ms** | **10.2×** | **4.28 GB/s** | `0.093` |
+| `update_column` `WHERE level == "NOPE" SET CRITICAL` | 213.09 ms | **4.08 ms** | **52.2×** | **13.84 GB/s** | `0.091` (0 hits) |
+| `update_column` `WHERE latency_ms >= 250 SET CRITICAL` | 228.70 ms | **6.51 ms** | **35.2×** | **8.69 GB/s** | `0.092` |
+| `update_column` `WHERE status == 500 SET CRITICAL` | 260.37 ms | **11.55 ms** | **22.6×** | **4.89 GB/s** | `0.092` (14,937 hits) |
+| `map_column` `service -> uppercase` (`O(|D|)` dict splice) | 257.66 ms | **8.44 ms** | **30.5×** | **6.70 GB/s** | `0.092` (all 300k rows) |
+| `map_column` `bytes -> bytes + 100` (1-col numeric splice) | 241.71 ms | **28.74 ms** | **8.4×** | **1.97 GB/s** | `0.092` (all 300k rows) |
+
+### 2. Multi-Column CSV (`data.csv`, 30.5 MB, 250,001 lines, 11 columns, input ratio `0.182`)
+
+| Operation | Naive (`dec + op [+ enc]`) | VXG Compressed-Domain | Speedup | Effective Throughput | Output Ratio / Hits |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| `filter_column` `csv:1 == "NOPE"` (0-hit alphabet) | 68.77 ms | **5.01 ms** | **13.7×** | **6.09 GB/s** | 0 hits |
+| `filter_column` `csv:6 >= 200` (`latency_ms`) | 81.30 ms | **14.14 ms** | **5.8×** | **2.16 GB/s** | 492 hits |
+| `filter_frame` `csv:5 == 500` (`status == 500`) | 77.45 ms | **20.56 ms** | **3.8×** | **1.49 GB/s** | `0.185` |
+| `update_column` `WHERE csv:6 >= 250 SET CRITICAL` | 144.94 ms | **14.02 ms** | **10.3×** | **2.18 GB/s** | `0.182` |
+| `map_column` `csv:2 -> uppercase` (`O(|D|)` dict splice) | 163.99 ms | **17.79 ms** | **9.2×** | **1.72 GB/s** | `0.182` |
+| `map_column` `csv:7 -> bytes + 100` (1-col numeric splice) | 160.04 ms | **29.83 ms** | **5.4×** | **1.02 GB/s** | `0.182` |

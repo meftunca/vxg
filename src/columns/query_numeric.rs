@@ -14,6 +14,57 @@ fn parse_u64_digits(b: &[u8]) -> Option<u64> {
     Some(v)
 }
 
+#[inline(always)]
+fn num_cmp_overlaps_bounds(cmp: crate::query::NumCmp, lo: u64, hi: u64) -> bool {
+    match cmp {
+        crate::query::NumCmp::Eq(x) => x >= lo && x <= hi,
+        crate::query::NumCmp::Ne(x) => !(lo == x && hi == x),
+        crate::query::NumCmp::Gt(x) => hi > x,
+        crate::query::NumCmp::Ge(x) => hi >= x,
+        crate::query::NumCmp::Lt(x) => lo < x,
+        crate::query::NumCmp::Le(x) => lo <= x,
+        crate::query::NumCmp::Range(a, b) => a <= b && hi >= a && lo <= b,
+    }
+}
+
+/// Header-only zone-map check on a compressed numeric column slice (`MODEL_DECIMAL_PACKED` /
+/// `MODEL_DECIMAL_AFFINE`). Returns `false` when the column's `[min..=max]` bound proves 0 hits.
+#[inline(always)]
+fn can_numeric_col_match_fast(col_bytes: &[u8], ones: usize, cmp: crate::query::NumCmp) -> bool {
+    if ones == 0 {
+        return false;
+    }
+    let mut c = Cursor::new(col_bytes);
+    let Ok(tag) = c.byte() else { return true };
+    match tag {
+        MODEL_DECIMAL_PACKED => {
+            let Ok(min) = c.u64() else { return true };
+            let Ok(width) = c.byte() else { return true };
+            if width > 64 {
+                return true;
+            }
+            let span = if width == 0 {
+                0
+            } else if width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
+            num_cmp_overlaps_bounds(cmp, min, min.saturating_add(span))
+        }
+        MODEL_DECIMAL_AFFINE => {
+            let Ok(first) = c.u64() else { return true };
+            let Ok(step) = c.i64() else { return true };
+            let last_i128 = first as i128 + (step as i128) * ((ones - 1) as i128);
+            let Ok(last) = u64::try_from(last_i128) else {
+                return true;
+            };
+            num_cmp_overlaps_bounds(cmp, first.min(last), first.max(last))
+        }
+        _ => true,
+    }
+}
+
 /// Column-aware numeric predicate for the template rows of a single-template block.
 ///
 /// Only the target column is decoded to evaluate the predicate. Returns the target slot, its
@@ -26,11 +77,14 @@ fn numeric_hits<'a>(
     ones: usize,
     rem: usize,
     scratch: &mut DecodeScratch,
-) -> Result<Option<(usize, PreparedColumn<'a>, Vec<usize>)>> {
+) -> Result<Option<(usize, Option<PreparedColumn<'a>>, Vec<usize>)>> {
     let slots = col_slices.len();
     let Some(target) = (0..slots).find(|&i| segs[i].ends_with(&nf.marker)) else {
         return Ok(None);
     };
+    if !can_numeric_col_match_fast(col_slices[target], ones, nf.cmp) {
+        return Ok(Some((target, None, Vec::new())));
+    }
     let col = PreparedColumn::parse_and_validate(col_slices[target], ones, scratch)?;
     if !matches!(col.const_lead, LeadValue::Empty) {
         return Ok(None);
@@ -121,5 +175,5 @@ fn numeric_hits<'a>(
             _ => return Ok(None),
         },
     }
-    Ok(Some((target, col, hits)))
+    Ok(Some((target, Some(col), hits)))
 }

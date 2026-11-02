@@ -1,55 +1,111 @@
-# Stage 2 design sketch: map / filter / update without a full decode
+# Stage 2 Architecture: Compressed-Domain `filter`, `map`, and `update` Without Full Decode
 
-Status: proposal for discussion. Nothing here is implemented except where marked.
+Status: **Implemented & Verified (`vxg` v0.4.1, wire format `v4` — zero wire-format changes)**.
 
-## What exists today
+## Overview
 
-- Row access and search on structured (`GRAMMAR_PACKET`) blocks: `frame_row_count`,
-  `extract_row`, `extract_row_range`, `find_first`, `filter_rows` (implemented, tested).
-- Free-text blocks fall back to a decode plus one SIMD scan per block (implemented).
+VXG v4 encodes structured blocks (`BLOCK_COLUMN` / `GRAMMAR_PACKET`, 64 KiB independent blocks by default) as `1..=16` static segment templates plus independent per-slot column streams (`MODEL_DICTIONARY`, `MODEL_FRONT_DICT`, `MODEL_DECIMAL_*`, `MODEL_TIMESTAMP_ISO_Z`, `MODEL_HEX_SUFFIX`, `MODEL_EPOCH_COUNTER`, `MODEL_PERIODIC_PLAIN`, `MODEL_SEGMENT_DICT`, `MODEL_AFFINE_GF2`, `MODEL_PATTERN`, and raw/Huffman/LZ streams) alongside an explicit `Row::Raw` bitmap for irregular or block-boundary-split lines.
 
-## Constraints that shape the design
+Stage 2 executes column-addressed `filter`, `map`, and `update` directly on `VXG1` frames without full-frame decompression or full-block re-encoding:
 
-- Blocks are independent and 64 KiB by default. Any operation is naturally per block, so it
-  parallelizes across blocks and an `update` only needs to rewrite the blocks it touches.
-- Inside a `GRAMMAR_PACKET` block, data is columnar: a template plus per-column models
-  (dictionary, decimal, timestamp, hex, ...). Operations are cheap only where the model lets
-  them be cheap.
-- The wire format must stay valid and canonical (the decoder rejects non-canonical packets,
-  for example unsorted dictionaries). Edited blocks must be re-emitted canonically.
+1. **Zero-unpack header rejection** (`src/columns/ops_pred.rs`, `src/columns/query_numeric.rs`):
+   - **256-bit column alphabet mask (`col_bytes_alphabet_mask`)**: extracts exact per-column byte alphabets from `MODEL_DICTIONARY`, `MODEL_FRONT_DICT` (modes `0..=3`), `MODEL_PATTERN`, Huffman headers, and raw/palette tables in `O(header)`, skipping non-matching blocks before unpacking a single row.
+   - **Numeric zone-map bounds (`can_numeric_col_match_fast`)**: derives `[min..=max]` directly from `MODEL_DECIMAL_PACKED` (`min`, `bit_width`) and `MODEL_DECIMAL_AFFINE` (`first`, `step`, `ones`), rejecting out-of-range `Eq` / `Ne` / `Lt` / `Le` / `Gt` / `Ge` / `Range` predicates in `O(1)`.
+2. **Single-column predicate evaluation (`eval_col_pred_on_slot`)**:
+   - Resolves `ColTarget::JsonKey(key)` and `ColTarget::Delimited { delim, index }` to an exact template slot across all `1..=16` templates (`resolve_template_slot`).
+   - Evaluates `ConstValue` in `O(1)`, `Dictionary` in `O(|D|) + O(ones)` (scanning compact dictionary IDs after testing each unique dictionary entry once), numeric streams directly on integer arenas without formatting ASCII digits, and general columns by materializing only the addressed slot.
+   - Other columns in a `GRAMMAR_PACKET` block are decoded **only** for blocks with `>= 1` matching row.
+3. **Single-slot splice & `O(|D|)` dictionary rewrite (`src/columns/ops_rewrite.rs`)**:
+   - **0-hit blocks**: copied byte-for-byte (`BytesRef::Borrowed`) from the input frame into the output frame, preserving existing `CRC-32C` checksums when present.
+   - **Modified `GRAMMAR_PACKET` blocks (`1..=16` templates)**: only the target slot in affected templates is rewritten (`rewrite_single_slot_column`) and re-packed via `pack_best_model_into` (emitting canonical sorted dictionaries, bit-packed decimals, pattern streams, etc.); all other column payloads, template headers, row bitmaps, and `Row::Raw` streams are spliced byte-for-byte.
+   - **Unconditional `map_column` fast paths**: `ConstValue` transforms in `O(1)` and `MODEL_DICTIONARY` transforms in `O(|D|)` unique entries before re-canonicalizing.
+   - **Token-validity guard (`is_valid_slot_token`)**: if a new token introduces bytes that alter template delimiter/quote boundaries (e.g. unquoted commas in CSV or newlines), that block cleanly falls back to raw block re-encode so decoded bytes remain 100% identical to a line-by-line raw transform.
+4. **Exact multi-block split-line & CSV column-0 cut handling (`src/ops/transform.rs`, `src/columns/ops_header.rs`)**:
+   - Pre-scans `Row::Raw` block boundaries (`peek_grammar_boundary`) without unpacking columnar data, joining lines split across 2 or more 64 KiB block boundaries (`carry` chains) and evaluating predicates/mutations on the complete logical line.
+   - **CSV/TSV column-0 cut invariant**: if a 64 KiB block boundary cuts inside column 0 of a delimited record, the suffix in block `b + 1` still has the same delimiter count and may be encoded as `Row::Template` (`first_is_raw == false`). Whenever `had_incoming_carry && !first_is_raw`, all compressed-domain paths (`query_search`, `ops_pred`, `ops_header`, `ops_rewrite`) detect this and route that block through raw carry-join so suffix fragments are never mistaken for column 0.
+5. **Canonical `VXG1` v4 frame emission (`src/ops/transform.rs`, `Frame::parse_all`)**:
+   - When non-final blocks preserve `raw_size == block_size` (all 0-hit updates, fixed-width updates, or single-block outputs), a single `VXG1` v4 frame is emitted.
+   - When variable-length mutations change an interior block's uncompressed byte size without re-chunking neighboring untouched blocks, contiguous valid block runs are emitted as minimal concatenated canonical `VXG1` v4 frames, supported natively across `decompress`, `decompress_into`, `decompress_stream`, `Frame::parse_all`, `frame_row_count`, `extract_row`, `extract_row_range`, `find_first`, `filter_rows`, `filter_column`, `filter_frame`, `update_column`, `map_column`, `vxg verify`, and `vxg info`.
 
-## Hypotheses to validate by measurement (not yet tested)
+## Rust API (`vxg` / `vxg::ops`)
 
-| Operation | Where it should be cheap | Where it falls back |
-| :--- | :--- | :--- |
-| `filter` on a dictionary column | Evaluate the predicate once per dictionary entry, then scan the id array (the existing `DictSingle` path generalizes this) | Non-dictionary columns: decode that column only |
-| `map` on a dictionary column | Transform the dictionary entries (cost proportional to the number of entries, not rows), then re-canonicalize (entries may collapse or reorder) | Numeric/timestamp columns: decode the column, apply, re-encode that column only |
-| `update` of a value | Block-level copy-on-write: rewrite only matching blocks; for a dictionary column, edit entries when the predicate applies to a whole value | Value changes that need a different template: re-encode the block |
+```rust
+use vxg::{
+    filter_column, filter_frame, map_column, update_column,
+    ColOp, ColPred, ColTarget, DecodeOptions, NumCmp, Options, StrCmp,
+};
 
-The expected win is per column, not per frame: untouched columns are copied byte for byte.
+let enc = Options::default();
+let dec = DecodeOptions::default();
 
-## Open questions for the owner
+// 1. Column-addressed row query (returns Vec<RowMatch> without full decode)
+let hits = filter_column(
+    &frame,
+    &ColPred::json_num("latency_ms", NumCmp::Ge(200)),
+    usize::MAX,
+    &dec,
+)?;
 
-1. Is `update` required to be in place, or is producing a new frame with only the changed blocks
-   rewritten acceptable? (The second is much simpler and keeps frames immutable.)
-2. Should predicates be a small fixed set (equals, contains, range on a column) or a general
-   expression? A fixed set is easier to push down.
-3. Column addressing: by template slot index, or by JSON key name? Names need a per-template key
-   table that is derived from the static segments (feasible, not implemented).
-4. Per-block metadata (bigram signature, min/max per numeric column) would speed up skipping but
-   changes the wire format. Decide this once, together with the bigram question.
+// 2. Compressed-domain frame filter (returns a new canonical VXG1 frame)
+let err_frame = filter_frame(
+    &frame,
+    &ColPred::json_num("status", NumCmp::Eq(500)),
+    &enc,
+    &dec,
+)?;
 
-## Suggested first slice
+// 3. Conditional compressed-domain column update (untouched blocks copied byte-for-byte)
+let updated = update_column(
+    &frame,
+    &ColPred::json_num("status", NumCmp::Eq(500)),
+    ColTarget::JsonKey("level"),
+    ColOp::SetStr(b"CRITICAL"),
+    &enc,
+    &dec,
+)?;
 
-`filter` with an equality/contains predicate on one named column, returning matching rows,
-benchmarked against the existing `filter_rows` on the varied NDJSON file and on a real log.
-That reuses existing machinery and tells us whether column-aware pushdown beats whole-row search
-before any `map`/`update` work starts.
+// 4. Unconditional compressed-domain column map (O(|D|) on dictionary columns)
+let upper_fn = |b: &[u8]| b.to_ascii_uppercase();
+let mapped = map_column(
+    &frame,
+    ColTarget::JsonKey("service"),
+    ColOp::MapStr(&upper_fn),
+    &enc,
+    &dec,
+)?;
+```
 
-## Progress
+## CLI Usage (`vxg`)
 
-- Implemented: `filter_json_u64` (numeric `Eq`/`Ge`/`Le`/`Range` on one JSON key, column pushdown
-  on single-template blocks, per-line fallback elsewhere). Results: see Benchmarks. It returns the
-  matching rows as a new `Vec`; the frame is not modified (so `update` as "new frame" remains open).
-- Not implemented: `map`, `update`, string/multi-key predicates, multi-template blocks, per-block
-  metadata. The wire format is unchanged.
+```sh
+# Column-addressed query & count (--where supports json:<key>, csv:<idx>, tsv:<idx>, psv:<idx>)
+vxg query logs.vxg --where json:latency_ms>=200 --limit 50
+vxg query logs.vxg --where csv:2=prefix:fraud --count
+
+# Produce a new filtered VXG frame
+vxg filter-frame logs.vxg errors.vxg --where json:status=num:500
+
+# Conditional column update without full decode/re-encode
+vxg update logs.vxg patched.vxg --where json:status=num:500 --col json:level --set CRITICAL
+
+# Whole-column map (--upper, --lower, --redact, --set, --set-raw, --add)
+vxg map logs.vxg upper.vxg --col json:service --upper
+vxg map logs.vxg bumped.vxg --col json:bytes --add 100
+```
+
+## Measured Performance & Differential Verification
+
+Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`, checksums off, median of 5 timed runs after warmup via `vxg-query-real --ops-suite`). Every run asserts exact byte-for-byte equality against `decompress + raw transform (+ compress)`:
+
+- **Varied NDJSON (`56.5 MB`, `300,000` rows, `863` blocks, ratio `0.091`)**:
+  - `filter_column` (`level == "NOPE"`, 0 hits): **1.43 ms** (`39.51 GB/s`, **72.5×** vs `decompress + scan`)
+  - `filter_column` (`bytes >= 50000`, 6 hits, zone-map): **2.11 ms** (`26.77 GB/s`, **59.0×**)
+  - `filter_column` (`latency_ms >= 200`, 563 hits): **4.54 ms** (`12.43 GB/s`, **28.7×**)
+  - `filter_frame` (`status == 500` -> new `VXG1` frame): **13.21 ms** (`4.28 GB/s`, **10.2×** vs `decompress + filter + compress`)
+  - `update_column` (`WHERE level == "NOPE" SET CRITICAL`, 0 hits): **4.08 ms** (`13.84 GB/s`, **52.2×**)
+  - `update_column` (`WHERE latency_ms >= 250 SET CRITICAL`): **6.51 ms** (`8.69 GB/s`, **35.2×**)
+  - `update_column` (`WHERE status == 500 SET CRITICAL`, ~5% rows): **11.55 ms** (`4.89 GB/s`, **22.6×**)
+  - `map_column` (`service -> uppercase`, `O(|D|)` dictionary): **8.44 ms** (`6.70 GB/s`, **30.5×**)
+  - `map_column` (`bytes -> bytes + 100`, 1-col numeric): **28.74 ms** (`1.97 GB/s`, **8.4×**)
+- **Differential Stress Suite (`tests/compressed_ops_stress.rs`)**:
+  - Verified with `VXG_STRESS_ITERS=1500 MallocPreScribble=1 MallocScribble=1 cargo nextest run --release` across multi-template NDJSON, CSV, TSV, PSV, split column-0 boundaries, multi-block (`> 2` blocks) long lines, EOF without trailing newline, JSON escapes, CSV quotes, and `FAST_LZ`/`RAW` fallbacks.
