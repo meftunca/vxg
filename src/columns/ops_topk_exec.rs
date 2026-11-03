@@ -26,7 +26,7 @@ pub(crate) fn topk_grammar_block(
     DECODE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
         scratch.clear();
-        ensure_raw_rows_arena(&hdr, &mut scratch.raw_arena);
+        ensure_proj_raw_arena(&hdr, project_cols.map_or(0, |c| c.len()), &mut scratch.raw_arena);
         let raw_slice_offset = {
             let DecodeScratch {
                 ref mut raw_arena,

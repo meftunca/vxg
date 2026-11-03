@@ -512,3 +512,48 @@ fn differential_fuzz_select_columns_and_project_frame_multi_block_carry_and_temp
         );
     }
 }
+
+#[test]
+fn cold_thread_duplicate_front_dict_projection_preserves_arena_pointers() {
+    let svcs = ["api", "db", "auth", "edge", " worker \"q\" ", "gateway-east", "gateway-west"];
+    let mut raw = Vec::new();
+    for r in 0..320usize {
+        let s = svcs[r % svcs.len()];
+        let mut sj = Vec::new();
+        vxg::ops::encode_json_str(s.as_bytes(), &mut sj);
+        let ss = std::str::from_utf8(&sj).unwrap();
+        if r % 9 == 0 {
+            raw.extend_from_slice(
+                format!("{{\"svc\":{ss},\"extra\":true,\"bytes\":{},\"seq\":{r}}}\r\n", r * 37)
+                    .as_bytes(),
+            );
+        } else {
+            raw.extend_from_slice(
+                format!("{{\"seq\":{r},\"svc\":{ss},\"status\":200,\"bytes\":{}}}\r\n", r * 37)
+                    .as_bytes(),
+            );
+        }
+    }
+    let enc = Options {
+        block_size: 4096,
+        threads: 4,
+        checksum: true,
+        ..Options::default()
+    };
+    let dec = DecodeOptions {
+        threads: 4,
+        ..DecodeOptions::default()
+    };
+    let frame = compress(&raw, &enc).unwrap();
+    let cols = [ColTarget::JsonKey("svc"); 8];
+    let p_a = PredExpr::col(ColPred::json_num("bytes", NumCmp::Ge(1500)));
+    let exp = naive_select(&raw, Some(&p_a), &cols, usize::MAX);
+    let got = std::thread::spawn(move || {
+        let p = PredExpr::col(ColPred::json_num("bytes", NumCmp::Ge(1500)));
+        let pf = project_frame(&frame, Some(&p), &cols, &enc, &dec).unwrap();
+        decompress(&pf, &dec).unwrap()
+    })
+    .join()
+    .unwrap();
+    assert_eq!(got, exp);
+}

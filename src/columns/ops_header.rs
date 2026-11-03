@@ -561,34 +561,35 @@ fn read_all_template_col_slices<'a>(hdr: &mut OpsGrammarHeader<'a>) -> Result<Tp
 
 #[inline(always)]
 fn ensure_raw_rows_arena(hdr: &OpsGrammarHeader<'_>, raw_arena: &mut Vec<u8>) {
-    if hdr.raw_count > 0 && hdr.cursor.bytes.get(hdr.cursor.pos) == Some(&0) {
-        let need = hdr.raw_len.saturating_mul(4) + 163_840;
-        if raw_arena.capacity() - raw_arena.len() < need {
+    ensure_proj_raw_arena(hdr, 0, raw_arena);
+}
+
+#[inline(always)]
+fn ensure_proj_raw_arena(hdr: &OpsGrammarHeader<'_>, proj_cols: usize, raw_arena: &mut Vec<u8>) {
+    let need = hdr
+        .raw_len
+        .max(65_536)
+        .saturating_mul(6 + proj_cols.saturating_mul(2))
+        .saturating_add(262_144);
+    if raw_arena.capacity() < need {
+        debug_assert_eq!(raw_arena.len(), 0);
+        raw_arena.reserve(need.saturating_sub(raw_arena.len()));
+    }
+}
+
+#[inline(always)]
+fn ensure_full_raw_arena(raw_len: usize, raw_arena: &mut Vec<u8>) {
+    if raw_arena.is_empty() {
+        let need = raw_len.max(65_536).saturating_mul(6) + 262_144;
+        if raw_arena.capacity() < need {
             raw_arena.reserve(need);
         }
     }
 }
 
 #[inline(always)]
-fn ensure_full_raw_arena(raw_len: usize, raw_arena: &mut Vec<u8>) {
-    let need = raw_len.saturating_mul(2) + 81_920;
-    if raw_arena.capacity() - raw_arena.len() < need {
-        raw_arena.reserve(need);
-    }
-}
-
-#[inline(always)]
 fn ensure_col_raw_arena(col_bytes: &[u8], raw_len: usize, raw_arena: &mut Vec<u8>) {
-    let needs = match col_bytes.first().copied() {
-        Some(MODEL_LZ_RAW | MODEL_PATTERN) => true,
-        Some(MODEL_FRONT_DICT) => {
-            !(col_bytes.get(1).is_some_and(|&e| e < 0x80)
-                && col_bytes.get(2).is_some_and(|&m| (m & 0x03) == 0))
-        }
-        Some(MODEL_DICTIONARY) => col_bytes.get(1).is_none_or(|&e| e >= 0x80),
-        _ => false,
-    };
-    if needs {
+    if raw_arena.is_empty() && col_bytes.first().is_some() {
         ensure_full_raw_arena(raw_len, raw_arena);
     }
 }

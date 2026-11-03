@@ -42,7 +42,7 @@ fn select_grammar_block_inner(
     DECODE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
         scratch.clear();
-        ensure_raw_rows_arena(&hdr, &mut scratch.raw_arena);
+        ensure_proj_raw_arena(&hdr, cols.len(), &mut scratch.raw_arena);
         let raw_slice_offset = {
             let DecodeScratch {
                 ref mut raw_arena,
@@ -336,7 +336,7 @@ pub(crate) fn project_grammar_block(
             let splice_attempt: Result<Option<GrammarProjectOut>> = DECODE_SCRATCH.with(|cell| {
                 let mut scratch = cell.borrow_mut();
                 scratch.clear();
-                ensure_raw_rows_arena(&hdr, &mut scratch.raw_arena);
+                ensure_proj_raw_arena(&hdr, cols.len(), &mut scratch.raw_arena);
                 let raw_slice_offset = {
                     let DecodeScratch {
                         ref mut raw_arena,
