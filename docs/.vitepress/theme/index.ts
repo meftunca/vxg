@@ -3,6 +3,7 @@ import type { Theme } from 'vitepress'
 import CodecBenchmarkChart from './components/CodecBenchmarkChart.vue'
 import CompressedOpsChart from './components/CompressedOpsChart.vue'
 import EnergyBenchmarkChart from './components/EnergyBenchmarkChart.vue'
+import TensorBenchmarkChart from './components/TensorBenchmarkChart.vue'
 import WasmPlayground from './components/WasmPlayground.vue'
 import './custom.css'
 
@@ -12,6 +13,7 @@ export default {
     app.component('CodecBenchmarkChart', CodecBenchmarkChart)
     app.component('CompressedOpsChart', CompressedOpsChart)
     app.component('EnergyBenchmarkChart', EnergyBenchmarkChart)
+    app.component('TensorBenchmarkChart', TensorBenchmarkChart)
     app.component('WasmPlayground', WasmPlayground)
   }
 } satisfies Theme

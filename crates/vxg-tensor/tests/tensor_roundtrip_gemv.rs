@@ -1,10 +1,13 @@
 use vxg_tensor::bench::{generate_activation_vec, generate_realistic_llm_weights};
 use vxg_tensor::codebook::{CodebookMatrix, Q4_0Matrix};
-use vxg_tensor::format::{read_vxt_archive, write_vxt_archive, PackedTensor, VxtEntry};
+use vxg_tensor::format::{
+    read_vxt_archive, read_vxt_model, write_vxt_archive, write_vxt_model, PackedTensor, VxtEntry,
+};
 use vxg_tensor::fp16::{bf16_to_f32, f16_to_f32, ErrorMetrics};
 use vxg_tensor::lossless::{gemv_raw16_cpu, LosslessMatrix};
 use vxg_tensor::metal::MetalEngine;
 use vxg_tensor::safetensors::{write_safetensors_u16, SafeTensorsView};
+use vxg_tensor::wht2::Wht2Matrix;
 use vxg_tensor::{DType, Error};
 
 #[test]
@@ -124,6 +127,12 @@ fn cb4_outlier_beats_gguf_q4_0_on_both_bpw_and_sqnr() {
     let q4 = Q4_0Matrix::encode(rows, cols, &weights);
     let cb4 = CodebookMatrix::encode(4, rows, cols, &weights).unwrap();
     let cb3 = CodebookMatrix::encode(3, rows, cols, &weights).unwrap();
+    let wht2 = Wht2Matrix::encode(rows, cols, &weights).unwrap();
+    assert!(
+        wht2.bits_per_weight() < 2.55,
+        "expected WHT2 < 2.55 bpw on 256-aligned cols, got {:.3}",
+        wht2.bits_per_weight()
+    );
 
     let q4_err = ErrorMetrics::compute(&weights, &q4.decode_f32());
     let cb4_err = ErrorMetrics::compute(&weights, &cb4.decode_f32());
@@ -246,7 +255,10 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
             PackedTensor::Codebook(CodebookMatrix::encode(4, rows, cols, &bf_f32).unwrap()),
             PackedTensor::Codebook(CodebookMatrix::encode(3, rows, cols, &bf_f32).unwrap()),
             PackedTensor::Q4_0(Q4_0Matrix::encode(rows, cols, &bf_f32)),
+            PackedTensor::Wht2(Wht2Matrix::encode(rows, cols, &bf_f32).unwrap()),
         ];
+        let mut gpu_cases = Vec::new();
+        let mut cpu_refs = Vec::new();
         for packed in &cases {
             let mut y_cpu = vec![0.0f32; rows];
             let mut y_gpu = vec![0.0f32; rows];
@@ -260,6 +272,55 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
                 packed.mode_name(),
                 err.max_abs_err
             );
+            gpu_cases.push(gpu_p);
+            cpu_refs.push(y_cpu);
+        }
+
+        // Verify batched multi-matrix single-command-buffer execution (`run_multi_same_x`)
+        let (mut m0, mut m1, mut m2, mut m3) = (
+            vec![0.0f32; rows],
+            vec![0.0f32; rows],
+            vec![0.0f32; rows],
+            vec![0.0f32; rows],
+        );
+        eng.run_multi_same_x(
+            &x,
+            &mut [
+                (&gpu_cases[0], &mut m0),
+                (&gpu_cases[1], &mut m1),
+                (&gpu_cases[2], &mut m2),
+                (&gpu_cases[3], &mut m3),
+            ],
+        )
+        .unwrap();
+        for (got, want) in [&m0, &m1, &m2, &m3].into_iter().zip(&cpu_refs) {
+            assert!(ErrorMetrics::compute(want, got).max_abs_err < 2e-4);
         }
     }
+
+    // Also verify Wht2 + RawF32 + Metadata roundtrip in .vxt model container
+    let wht = Wht2Matrix::encode(rows, cols, &bf_f32).unwrap();
+    let meta = vec![("arch".to_owned(), b"qwen35".to_vec())];
+    let model_bytes = write_vxt_model(
+        &meta,
+        &[
+            VxtEntry {
+                name: "wht_proj".into(),
+                tensor: PackedTensor::Wht2(wht.clone()),
+            },
+            VxtEntry {
+                name: "norm".into(),
+                tensor: PackedTensor::RawF32 {
+                    rows: 1,
+                    cols: 16,
+                    data: vec![1.25f32; 16],
+                },
+            },
+        ],
+    )
+    .unwrap();
+    let (parsed_meta, parsed_entries) = read_vxt_model(&model_bytes).unwrap();
+    assert_eq!(parsed_meta, meta);
+    assert_eq!(parsed_entries[0].tensor.decode_f32(), wht.decode_f32());
+    assert_eq!(parsed_entries[1].tensor.decode_f32(), vec![1.25f32; 16]);
 }

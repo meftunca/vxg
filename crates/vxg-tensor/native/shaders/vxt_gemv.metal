@@ -493,3 +493,87 @@ kernel void vxt_gemv_q4_0(
         y[row] = sum;
     }
 }
+
+kernel void vxt_fwht32_vec(
+    device const float* x_pad      [[buffer(0)]],
+    device float* x_rot            [[buffer(1)]],
+    constant uint& padded_cols     [[buffer(2)]],
+    uint sg_id                     [[simdgroup_index_in_threadgroup]],
+    uint lane                      [[thread_index_in_simdgroup]],
+    uint3 tg_pos                   [[threadgroup_position_in_grid]]
+) {
+    uint blk = tg_pos.x * 2u + sg_id;
+    uint base = blk << 5u;
+    if (base >= padded_cols) return;
+
+    float v = x_pad[base + lane];
+    for (uint mask = 1u; mask < 32u; mask <<= 1u) {
+        float partner = simd_shuffle_xor(v, ushort(mask));
+        v = ((lane & mask) == 0u) ? (v + partner) : (partner - v);
+    }
+    x_rot[base + lane] = v * 0.17677669529663689f;
+}
+
+kernel void vxt_gemv_wht2(
+    device const ushort* scales_f16 [[buffer(0)]],
+    device const uint* packed_words [[buffer(1)]],
+    device const uint* out_row_ptr  [[buffer(2)]],
+    device const uint* outliers     [[buffer(3)]],
+    device const float* x_raw_pad   [[buffer(4)]],
+    device const float* x_rot_pad   [[buffer(5)]],
+    device float* y                 [[buffer(6)]],
+    constant CodebookParams& p      [[buffer(7)]],
+    uint sg_id                      [[simdgroup_index_in_threadgroup]],
+    uint lane                       [[thread_index_in_simdgroup]],
+    uint3 tg_pos                    [[threadgroup_position_in_grid]]
+) {
+    uint row = tg_pos.x * 2u + sg_id;
+    if (row >= p.rows) return;
+
+    uint groups_per_row = p.padded_cols >> 7u;
+    uint steps = groups_per_row >> 1u;
+    device const ushort* row_sc = scales_f16 + ulong(row) * ulong(groups_per_row);
+    device const uint* row_pw = packed_words + ulong(row) * ulong(steps) * 16ul;
+    uint grp_sub = lane >> 4u;
+
+    float a0 = p.poly[0];
+    float a1 = p.poly[1];
+    float a2 = p.poly[2];
+    float a3 = p.poly[3];
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+
+    for (uint step = 0u; step < steps; ++step) {
+        uint code16 = uint(((device const ushort*)(row_pw + (step << 4u)))[lane]);
+        float sc = float(as_type<half>(row_sc[(step << 1u) + grp_sub]));
+
+        device const float4* xp4 = (device const float4*)(x_rot_pad + (step << 8u) + (lane << 3u));
+        float4 x0 = xp4[0];
+        float4 x1 = xp4[1];
+
+        float4 u_lo = float4(uint4(code16 & 3u, (code16 >> 2u) & 3u,
+                                   (code16 >> 4u) & 3u, (code16 >> 6u) & 3u)) - 1.5f;
+        float4 u_hi = float4(uint4((code16 >> 8u) & 3u, (code16 >> 10u) & 3u,
+                                   (code16 >> 12u) & 3u, (code16 >> 14u) & 3u)) - 1.5f;
+
+        float4 w_lo = eval_cubic4(u_lo, a0, a1, a2, a3);
+        float4 w_hi = eval_cubic4(u_hi, a0, a1, a2, a3);
+
+        acc0 = fma(sc, dot(w_lo, x0), acc0);
+        acc1 = fma(sc, dot(w_hi, x1), acc1);
+    }
+
+    uint os = out_row_ptr[row];
+    uint oe = out_row_ptr[row + 1u];
+    for (uint k = os + lane; k < oe; k += 32u) {
+        uint pk = outliers[k];
+        float val = float(as_type<half>(ushort(pk >> 16u)));
+        acc0 = fma(val, x_raw_pad[pk & 0xffffu], acc0);
+    }
+
+    float sum = simd_sum(acc0 + acc1);
+    if (lane == 0u) {
+        y[row] = sum;
+    }
+}

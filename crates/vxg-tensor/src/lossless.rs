@@ -194,80 +194,100 @@ impl LosslessMatrix {
         (self.compressed_bytes() as f64 * 8.0) / ((self.rows * self.cols) as f64)
     }
 
-    /// Reconstructs exact original `u16` words (`100%` bit-for-bit identical to input).
-    pub fn decode_u16(&self) -> Vec<u16> {
-        let mut out = vec![0u16; self.rows * self.cols];
+    /// Reconstructs exact `u16` words for a single row `r` (`dst_row.len() == self.cols`).
+    pub fn decode_row_u16(&self, r: usize, dst_row: &mut [u16]) {
+        assert_eq!(dst_row.len(), self.cols);
         let sbs_per_row = self.padded_cols / 256;
         let wpsb = match self.dtype {
             DType::BF16 => 24,
             DType::F16 => 48,
         };
+        for sb in 0..sbs_per_row {
+            let sb_idx = r * sbs_per_row + sb;
+            let mut esc_pos = self.sb_esc_offsets[sb_idx] as usize;
+            let base_sb = &self.base_bytes[sb_idx * 256..(sb_idx + 1) * 256];
+            let sb_cw = &self.code_words[sb_idx * wpsb..(sb_idx + 1) * wpsb];
 
-        for r in 0..self.rows {
-            let dst_row = &mut out[r * self.cols..(r + 1) * self.cols];
-            for sb in 0..sbs_per_row {
-                let sb_idx = r * sbs_per_row + sb;
-                let mut esc_pos = self.sb_esc_offsets[sb_idx] as usize;
-                let base_sb = &self.base_bytes[sb_idx * 256..(sb_idx + 1) * 256];
-                let sb_cw = &self.code_words[sb_idx * wpsb..(sb_idx + 1) * wpsb];
-
-                for lane in 0..32 {
-                    let col_base = sb * 256 + lane * 8;
-                    if col_base >= self.cols {
-                        break;
-                    }
-                    let valid = (self.cols - col_base).min(8);
-                    match self.dtype {
-                        DType::BF16 => {
-                            let b0 = read_sb_plane_byte(sb_cw, 0, lane);
-                            let b1 = read_sb_plane_byte(sb_cw, 1, lane);
-                            let b2 = read_sb_plane_byte(sb_cw, 2, lane);
-                            for k in 0..valid {
-                                let code = (((b0 >> k) & 1)
-                                    | (((b1 >> k) & 1) << 1)
-                                    | (((b2 >> k) & 1) << 2))
+            for lane in 0..32 {
+                let col_base = sb * 256 + lane * 8;
+                if col_base >= self.cols {
+                    break;
+                }
+                let valid = (self.cols - col_base).min(8);
+                match self.dtype {
+                    DType::BF16 => {
+                        let b0 = read_sb_plane_byte(sb_cw, 0, lane);
+                        let b1 = read_sb_plane_byte(sb_cw, 1, lane);
+                        let b2 = read_sb_plane_byte(sb_cw, 2, lane);
+                        for k in 0..valid {
+                            let code =
+                                (((b0 >> k) & 1) | (((b1 >> k) & 1) << 1) | (((b2 >> k) & 1) << 2))
                                     as usize;
-                                let exp = if code == 7 {
-                                    let e = self.esc_bytes[esc_pos];
-                                    esc_pos += 1;
-                                    e
-                                } else {
-                                    self.lut[code]
-                                };
-                                let sm = base_sb[lane * 8 + k] as u16;
-                                dst_row[col_base + k] =
-                                    ((sm & 0x80) << 8) | ((exp as u16) << 7) | (sm & 0x7f);
-                            }
+                            let exp = if code == 7 {
+                                let e = self.esc_bytes[esc_pos];
+                                esc_pos += 1;
+                                e
+                            } else {
+                                self.lut[code]
+                            };
+                            let sm = base_sb[lane * 8 + k] as u16;
+                            dst_row[col_base + k] =
+                                ((sm & 0x80) << 8) | ((exp as u16) << 7) | (sm & 0x7f);
                         }
-                        DType::F16 => {
-                            let h0 = read_sb_plane_byte(sb_cw, 0, lane);
-                            let h1 = read_sb_plane_byte(sb_cw, 1, lane);
-                            let sm = read_sb_plane_byte(sb_cw, 2, lane);
-                            let c0 = read_sb_plane_byte(sb_cw, 3, lane);
-                            let c1 = read_sb_plane_byte(sb_cw, 4, lane);
-                            let c2 = read_sb_plane_byte(sb_cw, 5, lane);
-                            for k in 0..valid {
-                                let code = (((c0 >> k) & 1)
-                                    | (((c1 >> k) & 1) << 1)
-                                    | (((c2 >> k) & 1) << 2))
+                    }
+                    DType::F16 => {
+                        let h0 = read_sb_plane_byte(sb_cw, 0, lane);
+                        let h1 = read_sb_plane_byte(sb_cw, 1, lane);
+                        let sm = read_sb_plane_byte(sb_cw, 2, lane);
+                        let c0 = read_sb_plane_byte(sb_cw, 3, lane);
+                        let c1 = read_sb_plane_byte(sb_cw, 4, lane);
+                        let c2 = read_sb_plane_byte(sb_cw, 5, lane);
+                        for k in 0..valid {
+                            let code =
+                                (((c0 >> k) & 1) | (((c1 >> k) & 1) << 1) | (((c2 >> k) & 1) << 2))
                                     as usize;
-                                let exp = if code == 7 {
-                                    let e = self.esc_bytes[esc_pos];
-                                    esc_pos += 1;
-                                    e
-                                } else {
-                                    self.lut[code]
-                                };
-                                let hi = ((((sm >> k) & 1) as u16) << 15)
-                                    | ((exp as u16) << 10)
-                                    | ((((h1 >> k) & 1) as u16) << 9)
-                                    | ((((h0 >> k) & 1) as u16) << 8);
-                                dst_row[col_base + k] = hi | (base_sb[lane * 8 + k] as u16);
-                            }
+                            let exp = if code == 7 {
+                                let e = self.esc_bytes[esc_pos];
+                                esc_pos += 1;
+                                e
+                            } else {
+                                self.lut[code]
+                            };
+                            let hi = ((((sm >> k) & 1) as u16) << 15)
+                                | ((exp as u16) << 10)
+                                | ((((h1 >> k) & 1) as u16) << 9)
+                                | ((((h0 >> k) & 1) as u16) << 8);
+                            dst_row[col_base + k] = hi | (base_sb[lane * 8 + k] as u16);
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Reconstructs exact `f32` values for a single row `r` (`dst.len() == self.cols`).
+    pub fn decode_row(&self, r: usize, dst: &mut [f32]) {
+        let mut raw = vec![0u16; self.cols];
+        self.decode_row_u16(r, &mut raw);
+        match self.dtype {
+            DType::BF16 => {
+                for (d, &w) in dst.iter_mut().zip(&raw) {
+                    *d = bf16_to_f32(w);
+                }
+            }
+            DType::F16 => {
+                for (d, &w) in dst.iter_mut().zip(&raw) {
+                    *d = f16_to_f32(w);
+                }
+            }
+        }
+    }
+
+    /// Reconstructs exact original `u16` words (`100%` bit-for-bit identical to input).
+    pub fn decode_u16(&self) -> Vec<u16> {
+        let mut out = vec![0u16; self.rows * self.cols];
+        for r in 0..self.rows {
+            self.decode_row_u16(r, &mut out[r * self.cols..(r + 1) * self.cols]);
         }
         out
     }

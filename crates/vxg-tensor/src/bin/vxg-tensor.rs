@@ -5,24 +5,29 @@ use std::process;
 use std::time::Instant;
 
 use vxg_tensor::bench::{benchmark_matrix, generate_realistic_llm_weights, print_report};
+use vxg_tensor::cli_llm::{cmd_eval_llm, cmd_pack_model, cmd_run_llm};
 use vxg_tensor::codebook::{CodebookMatrix, Q4_0Matrix};
-use vxg_tensor::format::{read_vxt_archive, write_vxt_archive, PackedTensor, VxtEntry};
+use vxg_tensor::format::{read_vxt_model, write_vxt_archive, PackedTensor, VxtEntry};
 use vxg_tensor::fp16::f32_to_bf16;
 use vxg_tensor::gguf::GgufView;
 use vxg_tensor::lossless::LosslessMatrix;
 use vxg_tensor::mmap::TensorBytes;
 use vxg_tensor::safetensors::SafeTensorsView;
+use vxg_tensor::wht2::Wht2Matrix;
 use vxg_tensor::{DType, Error, Result};
 
 fn usage() -> ! {
     eprintln!(
-        "vxg-tensor — Compressed-Domain AI Model Weight Codec (.vxt) & Fused GPU/SIMD GEMV Engine
+        "vxg-tensor — Compressed-Domain AI Model Weight Codec (.vxt) & Fused GPU/SIMD LLM Engine
 
 Usage:
-  vxg-tensor info   <model.safetensors | model.gguf | model.vxt>
-  vxg-tensor pack   <in.safetensors | in.gguf> <out.vxt> [--mode lossless|cb4|cb3|q4_0] [--max-tensors N]
-  vxg-tensor verify <archive.vxt>
-  vxg-tensor bench  [--gguf <path> | --safetensors <path> | --rows R --cols C] [--dtype bf16|fp16] [--threads T] [--iters N] [--max-tensors K]"
+  vxg-tensor info       <model.safetensors | model.gguf | model.vxt>
+  vxg-tensor pack       <in.safetensors | in.gguf> <out.vxt> [--mode lossless|cb4|cb3|wht2|q4_0] [--max-tensors N]
+  vxg-tensor pack-model <in.gguf> <out.vxt> [--mode lossless|cb4|cb3|wht2|q4_0] [--threads T]
+  vxg-tensor verify     <archive.vxt>
+  vxg-tensor bench      [--gguf <path> | --safetensors <path> | --rows R --cols C] [--dtype bf16|fp16] [--threads T] [--iters N] [--max-tensors K]
+  vxg-tensor run        <model.vxt | model.gguf> --prompt \"...\" [--max-tokens N] [--temp T] [--cpu] [--raw] [--think]
+  vxg-tensor eval       <ref.gguf | ref.vxt> <test.vxt> [--prompt \"...\"] [--steps N] [--cpu]"
     );
     process::exit(2);
 }
@@ -35,8 +40,11 @@ fn main() {
     let res = match args[0].as_str() {
         "info" => cmd_info(&args[1..]),
         "pack" => cmd_pack(&args[1..]),
+        "pack-model" => cmd_pack_model(&args[1..]),
         "verify" => cmd_verify(&args[1..]),
         "bench" => cmd_bench(&args[1..]),
+        "run" => cmd_run_llm(&args[1..]),
+        "eval" => cmd_eval_llm(&args[1..]),
         _ => usage(),
     };
     if let Err(e) = res {
@@ -74,9 +82,13 @@ fn cmd_info(args: &[String]) -> Result<()> {
             println!("  ... ({} more tensors)", gg.tensors.len() - 40);
         }
     } else if bytes.starts_with(b"VXT1") {
-        let entries = read_vxt_archive(bytes)?;
-        println!("Format: VXT1 archive (tensors={})", entries.len());
-        for (i, e) in entries.iter().enumerate() {
+        let (meta, entries) = read_vxt_model(bytes)?;
+        println!(
+            "Format: VXT1 archive (metadata_keys={}, tensors={})",
+            meta.len(),
+            entries.len()
+        );
+        for (i, e) in entries.iter().take(40).enumerate() {
             println!(
                 "  [{:>3}] {:<44} [{} x {}] {:<18} {:.2} bpw ({:.2} KiB)",
                 i,
@@ -87,6 +99,9 @@ fn cmd_info(args: &[String]) -> Result<()> {
                 e.tensor.bits_per_weight(),
                 e.tensor.compressed_bytes() as f64 / 1024.0
             );
+        }
+        if entries.len() > 40 {
+            println!("  ... ({} more tensors)", entries.len() - 40);
         }
     } else {
         let st = SafeTensorsView::parse(bytes)?;
@@ -110,6 +125,7 @@ enum PackMode {
     Lossless,
     Cb4,
     Cb3,
+    Wht2,
     Q4_0,
 }
 
@@ -131,10 +147,11 @@ fn cmd_pack(args: &[String]) -> Result<()> {
                     Some("lossless") => PackMode::Lossless,
                     Some("cb4") => PackMode::Cb4,
                     Some("cb3") => PackMode::Cb3,
+                    Some("wht2") => PackMode::Wht2,
                     Some("q4_0") => PackMode::Q4_0,
                     _ => {
                         return Err(Error::Format(
-                            "expected --mode lossless|cb4|cb3|q4_0".into(),
+                            "expected --mode lossless|cb4|cb3|wht2|q4_0".into(),
                         ))
                     }
                 };
@@ -193,6 +210,10 @@ fn cmd_pack(args: &[String]) -> Result<()> {
                     let f32s = gg.extract_f32(meta)?;
                     PackedTensor::Codebook(CodebookMatrix::encode(3, rows, cols, &f32s)?)
                 }
+                PackMode::Wht2 => {
+                    let f32s = gg.extract_f32(meta)?;
+                    PackedTensor::Wht2(Wht2Matrix::encode(rows, cols, &f32s)?)
+                }
                 PackMode::Q4_0 => {
                     let f32s = gg.extract_f32(meta)?;
                     PackedTensor::Q4_0(Q4_0Matrix::encode(rows, cols, &f32s))
@@ -239,6 +260,10 @@ fn cmd_pack(args: &[String]) -> Result<()> {
                     let f32s = st.extract_f32(meta)?;
                     PackedTensor::Codebook(CodebookMatrix::encode(3, rows, cols, &f32s)?)
                 }
+                PackMode::Wht2 => {
+                    let f32s = st.extract_f32(meta)?;
+                    PackedTensor::Wht2(Wht2Matrix::encode(rows, cols, &f32s)?)
+                }
                 PackMode::Q4_0 => {
                     let f32s = st.extract_f32(meta)?;
                     PackedTensor::Q4_0(Q4_0Matrix::encode(rows, cols, &f32s))
@@ -274,10 +299,11 @@ fn cmd_verify(args: &[String]) -> Result<()> {
     let Some(path) = args.first() else { usage() };
     let t0 = Instant::now();
     let mapped = TensorBytes::open(path)?;
-    let entries = read_vxt_archive(&mapped)?;
+    let (meta, entries) = read_vxt_model(&mapped)?;
     println!(
-        "VERIFIED OK: {} ({} tensors, {:.2} MiB, FNV-1a64 integrity passed in {:.2} ms)",
+        "VERIFIED OK: {} ({} meta keys, {} tensors, {:.2} MiB, FNV-1a64 integrity passed in {:.2} ms)",
         path,
+        meta.len(),
         entries.len(),
         mapped.len() as f64 / (1024.0 * 1024.0),
         t0.elapsed().as_secs_f64() * 1000.0

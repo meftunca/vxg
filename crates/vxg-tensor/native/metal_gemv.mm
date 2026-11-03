@@ -1,11 +1,4 @@
-#import <Foundation/Foundation.h>
-#import <Metal/Metal.h>
-
-#include <algorithm>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-
+#include "metal_internal.h"
 #include "vxt_metal_source.h"
 
 namespace {
@@ -38,44 +31,14 @@ struct Q4_0Params {
     uint32_t padded_cols;
 };
 
-struct MetalGemvCtx {
-    id<MTLDevice> device = nil;
-    id<MTLCommandQueue> queue = nil;
-    id<MTLComputePipelineState> pso_raw16 = nil;
-    id<MTLComputePipelineState> pso_lossless_bf16 = nil;
-    id<MTLComputePipelineState> pso_lossless_fp16 = nil;
-    id<MTLComputePipelineState> pso_cb4 = nil;
-    id<MTLComputePipelineState> pso_cb3 = nil;
-    id<MTLComputePipelineState> pso_q4_0 = nil;
+} // namespace
 
-    id<MTLBuffer> x_buf = nil;
-    size_t x_cap = 0;
-    id<MTLBuffer> y_buf = nil;
-    size_t y_cap = 0;
-
-    bool ensure_io(size_t x_bytes, size_t y_bytes) {
-        size_t xb = std::max<size_t>(x_bytes, 64);
-        size_t yb = std::max<size_t>(y_bytes, 64);
-        if (!x_buf || x_cap < xb) {
-            x_buf = [device newBufferWithLength:xb options:MTLResourceStorageModeShared];
-            if (!x_buf) return false;
-            x_cap = xb;
-        }
-        if (!y_buf || y_cap < yb) {
-            y_buf = [device newBufferWithLength:yb options:MTLResourceStorageModeShared];
-            if (!y_buf) return false;
-            y_cap = yb;
-        }
-        return true;
-    }
-};
-
-void write_err(char* err_out, size_t err_cap, const char* msg) {
+void vxt_write_err(char* err_out, size_t err_cap, const char* msg) {
     if (!err_out || err_cap == 0) return;
     std::snprintf(err_out, err_cap, "%s", msg ? msg : "unknown Metal error");
 }
 
-id<MTLComputePipelineState> build_pso(
+id<MTLComputePipelineState> vxt_build_pso(
     id<MTLDevice> dev,
     id<MTLLibrary> lib,
     NSString* fn_name,
@@ -84,46 +47,144 @@ id<MTLComputePipelineState> build_pso(
 ) {
     id<MTLFunction> fn = [lib newFunctionWithName:fn_name];
     if (!fn) {
-        write_err(err_out, err_cap, [[NSString stringWithFormat:@"missing Metal kernel %@", fn_name] UTF8String]);
+        vxt_write_err(
+            err_out,
+            err_cap,
+            [[NSString stringWithFormat:@"missing Metal kernel %@", fn_name] UTF8String]
+        );
         return nil;
     }
     NSError* err = nil;
     id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];
     if (!pso) {
-        write_err(err_out, err_cap, err ? [[err localizedDescription] UTF8String] : "PSO build failed");
+        vxt_write_err(
+            err_out,
+            err_cap,
+            err ? [[err localizedDescription] UTF8String] : "PSO build failed"
+        );
         return nil;
     }
     return pso;
 }
 
-int finish_and_read_y(
-    id<MTLCommandBuffer> cmd,
-    id<MTLBuffer> y_buf,
-    float* y_out,
-    uint32_t rows,
-    double* out_gpu_ms,
-    char* err_out,
-    size_t err_cap
+void vxt_encode_fwht32_buf(
+    MetalGemvCtx* ctx,
+    id<MTLComputeCommandEncoder> enc,
+    id<MTLBuffer> x_in,
+    id<MTLBuffer> x_rot_out,
+    uint32_t padded_cols
 ) {
-    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    CFAbsoluteTime t1 = CFAbsoluteTimeGetCurrent();
-
-    if ([cmd status] != MTLCommandBufferStatusCompleted) {
-        NSError* e = [cmd error];
-        write_err(err_out, err_cap, e ? [[e localizedDescription] UTF8String] : "MTLCommandBuffer failed");
-        return -1;
-    }
-    double gpu_s = double([cmd GPUEndTime] - [cmd GPUStartTime]);
-    if (out_gpu_ms) {
-        *out_gpu_ms = (gpu_s > 0.0 ? gpu_s : double(t1 - t0)) * 1000.0;
-    }
-    std::memcpy(y_out, [y_buf contents], size_t(rows) * sizeof(float));
-    return 0;
+    uint32_t n_blks = padded_cols >> 5u;
+    MTLSize tg = MTLSizeMake(64, 1, 1);
+    MTLSize grid = MTLSizeMake((n_blks + 1u) / 2u, 1, 1);
+    [enc setComputePipelineState:ctx->pso_fwht32];
+    [enc setBuffer:x_in offset:0 atIndex:0];
+    [enc setBuffer:x_rot_out offset:0 atIndex:1];
+    [enc setBytes:&padded_cols length:sizeof(padded_cols) atIndex:2];
+    [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 }
 
-} // namespace
+void vxt_encode_gemv_op(
+    MetalGemvCtx* ctx,
+    id<MTLComputeCommandEncoder> enc,
+    const VxtMetalOp& op,
+    id<MTLBuffer> x_in,
+    id<MTLBuffer> x_rot_in,
+    id<MTLBuffer> y_out,
+    size_t y_byte_off
+) {
+    MTLSize tg = MTLSizeMake(64, 1, 1);
+    MTLSize grid = MTLSizeMake((op.rows + 1u) / 2u, 1, 1);
+
+    switch (op.kind) {
+        case 0: {
+            Raw16Params p{op.rows, op.cols, op.sub, 0u};
+            [enc setComputePipelineState:ctx->pso_raw16];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b0 offset:0 atIndex:0];
+            [enc setBuffer:x_in offset:0 atIndex:1];
+            [enc setBuffer:y_out offset:y_byte_off atIndex:2];
+            [enc setBytes:&p length:sizeof(p) atIndex:3];
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+            break;
+        }
+        case 1: {
+            LosslessParams p{};
+            p.rows = op.rows;
+            p.padded_cols = op.cols;
+            p.is_fp16 = op.sub;
+            for (int i = 0; i < 8; ++i) p.lut[i] = op.lut8[i];
+            [enc setComputePipelineState:(op.sub ? ctx->pso_lossless_fp16 : ctx->pso_lossless_bf16)];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b0 offset:0 atIndex:0];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b1 offset:0 atIndex:1];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b2 offset:0 atIndex:2];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b3 offset:0 atIndex:3];
+            [enc setBuffer:x_in offset:0 atIndex:4];
+            [enc setBuffer:y_out offset:y_byte_off atIndex:5];
+            [enc setBytes:&p length:sizeof(p) atIndex:6];
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+            break;
+        }
+        case 2: {
+            CodebookParams p{};
+            p.rows = op.rows;
+            p.padded_cols = op.cols;
+            p.bits = op.sub;
+            for (int i = 0; i < 16; ++i) p.centroids[i] = op.poly16[i];
+            [enc setComputePipelineState:((op.sub == 4u) ? ctx->pso_cb4 : ctx->pso_cb3)];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b0 offset:0 atIndex:0];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b1 offset:0 atIndex:1];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b2 offset:0 atIndex:2];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b3 offset:0 atIndex:3];
+            [enc setBuffer:x_in offset:0 atIndex:4];
+            [enc setBuffer:y_out offset:y_byte_off atIndex:5];
+            [enc setBytes:&p length:sizeof(p) atIndex:6];
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+            break;
+        }
+        case 3: {
+            Q4_0Params p{op.rows, op.cols};
+            [enc setComputePipelineState:ctx->pso_q4_0];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b0 offset:0 atIndex:0];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b1 offset:0 atIndex:1];
+            [enc setBuffer:x_in offset:0 atIndex:2];
+            [enc setBuffer:y_out offset:y_byte_off atIndex:3];
+            [enc setBytes:&p length:sizeof(p) atIndex:4];
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+            break;
+        }
+        case 4: {
+            CodebookParams p{};
+            p.rows = op.rows;
+            p.padded_cols = op.cols;
+            p.bits = 2u;
+            for (int i = 0; i < 16; ++i) p.centroids[i] = op.poly16[i];
+            [enc setComputePipelineState:ctx->pso_wht2];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b0 offset:0 atIndex:0];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b1 offset:0 atIndex:1];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b2 offset:0 atIndex:2];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b3 offset:0 atIndex:3];
+            [enc setBuffer:x_in offset:0 atIndex:4];
+            [enc setBuffer:x_rot_in offset:0 atIndex:5];
+            [enc setBuffer:y_out offset:y_byte_off atIndex:6];
+            [enc setBytes:&p length:sizeof(p) atIndex:7];
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+            break;
+        }
+        case 5: {
+            Q4_0Params p{op.rows, op.cols};
+            [enc setComputePipelineState:ctx->pso_raw32];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b0 offset:0 atIndex:0];
+            [enc setBuffer:x_in offset:0 atIndex:1];
+            [enc setBuffer:y_out offset:y_byte_off atIndex:2];
+            [enc setBytes:&p length:sizeof(p) atIndex:3];
+            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+            break;
+        }
+        default:
+            break;
+    }
+}
 
 extern "C" {
 
@@ -131,12 +192,12 @@ void* vxt_metal_create(char* dev_name_out, size_t dev_name_cap, char* err_out, s
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         if (!dev) {
-            write_err(err_out, err_cap, "no Metal GPU device available");
+            vxt_write_err(err_out, err_cap, "no Metal GPU device available");
             return nullptr;
         }
         id<MTLCommandQueue> queue = [dev newCommandQueue];
         if (!queue) {
-            write_err(err_out, err_cap, "failed to create MTLCommandQueue");
+            vxt_write_err(err_out, err_cap, "failed to create MTLCommandQueue");
             return nullptr;
         }
 
@@ -147,22 +208,27 @@ void* vxt_metal_create(char* dev_name_out, size_t dev_name_cap, char* err_out, s
         NSString* src = [NSString stringWithUTF8String:VXT_METAL_SOURCE];
         id<MTLLibrary> lib = [dev newLibraryWithSource:src options:opts error:&err];
         if (!lib) {
-            write_err(err_out, err_cap, err ? [[err localizedDescription] UTF8String] : "MSL compile failed");
+            vxt_write_err(err_out, err_cap, err ? [[err localizedDescription] UTF8String] : "MSL compile failed");
             return nullptr;
         }
 
         auto* ctx = new MetalGemvCtx();
         ctx->device = dev;
         ctx->queue = queue;
-        ctx->pso_raw16 = build_pso(dev, lib, @"vxt_gemv_raw16", err_out, err_cap);
-        ctx->pso_lossless_bf16 = build_pso(dev, lib, @"vxt_gemv_lossless_bf16", err_out, err_cap);
-        ctx->pso_lossless_fp16 = build_pso(dev, lib, @"vxt_gemv_lossless_fp16", err_out, err_cap);
-        ctx->pso_cb4 = build_pso(dev, lib, @"vxt_gemv_cb4", err_out, err_cap);
-        ctx->pso_cb3 = build_pso(dev, lib, @"vxt_gemv_cb3", err_out, err_cap);
-        ctx->pso_q4_0 = build_pso(dev, lib, @"vxt_gemv_q4_0", err_out, err_cap);
+        ctx->lib = lib;
+        ctx->pso_raw16 = vxt_build_pso(dev, lib, @"vxt_gemv_raw16", err_out, err_cap);
+        ctx->pso_raw32 = vxt_build_pso(dev, lib, @"vxt_gemv_raw32", err_out, err_cap);
+        ctx->pso_lossless_bf16 = vxt_build_pso(dev, lib, @"vxt_gemv_lossless_bf16", err_out, err_cap);
+        ctx->pso_lossless_fp16 = vxt_build_pso(dev, lib, @"vxt_gemv_lossless_fp16", err_out, err_cap);
+        ctx->pso_cb4 = vxt_build_pso(dev, lib, @"vxt_gemv_cb4", err_out, err_cap);
+        ctx->pso_cb3 = vxt_build_pso(dev, lib, @"vxt_gemv_cb3", err_out, err_cap);
+        ctx->pso_q4_0 = vxt_build_pso(dev, lib, @"vxt_gemv_q4_0", err_out, err_cap);
+        ctx->pso_fwht32 = vxt_build_pso(dev, lib, @"vxt_fwht32_vec", err_out, err_cap);
+        ctx->pso_wht2 = vxt_build_pso(dev, lib, @"vxt_gemv_wht2", err_out, err_cap);
 
-        if (!ctx->pso_raw16 || !ctx->pso_lossless_bf16 || !ctx->pso_lossless_fp16
-            || !ctx->pso_cb4 || !ctx->pso_cb3 || !ctx->pso_q4_0) {
+        if (!ctx->pso_raw16 || !ctx->pso_raw32 || !ctx->pso_lossless_bf16 || !ctx->pso_lossless_fp16
+            || !ctx->pso_cb4 || !ctx->pso_cb3 || !ctx->pso_q4_0
+            || !ctx->pso_fwht32 || !ctx->pso_wht2) {
             delete ctx;
             return nullptr;
         }
@@ -207,67 +273,12 @@ void vxt_metal_free_buffer(void* buf_handle) {
     }
 }
 
-int vxt_metal_run_raw16(
+int vxt_metal_run_multi(
     void* raw_ctx,
-    void* w_buf_h,
-    const float* x_ptr,
-    uint32_t cols,
-    float* y_ptr,
-    uint32_t rows,
-    uint32_t is_fp16,
-    uint32_t iters,
-    double* out_gpu_ms,
-    char* err_out,
-    size_t err_cap
-) {
-    @autoreleasepool {
-        auto* ctx = static_cast<MetalGemvCtx*>(raw_ctx);
-        if (!ctx || !w_buf_h || rows == 0 || cols == 0) {
-            write_err(err_out, err_cap, "invalid arguments to vxt_metal_run_raw16");
-            return -1;
-        }
-        size_t xb = size_t(cols) * sizeof(float);
-        size_t yb = size_t(rows) * sizeof(float);
-        if (!ctx->ensure_io(xb, yb)) {
-            write_err(err_out, err_cap, "failed to allocate Metal x/y buffers");
-            return -1;
-        }
-        std::memcpy([ctx->x_buf contents], x_ptr, xb);
-
-        id<MTLBuffer> w_buf = (__bridge id<MTLBuffer>)w_buf_h;
-        Raw16Params p{rows, cols, is_fp16, 0u};
-        MTLSize tg = MTLSizeMake(64, 1, 1);
-        MTLSize grid = MTLSizeMake((rows + 1u) / 2u, 1, 1);
-        uint32_t runs = std::max<uint32_t>(iters, 1u);
-
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        [enc setComputePipelineState:ctx->pso_raw16];
-        [enc setBuffer:w_buf offset:0 atIndex:0];
-        [enc setBuffer:ctx->x_buf offset:0 atIndex:1];
-        [enc setBuffer:ctx->y_buf offset:0 atIndex:2];
-        [enc setBytes:&p length:sizeof(p) atIndex:3];
-        for (uint32_t i = 0; i < runs; ++i) {
-            if (i > 0) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
-        }
-        [enc endEncoding];
-        return finish_and_read_y(cmd, ctx->y_buf, y_ptr, rows, out_gpu_ms, err_out, err_cap);
-    }
-}
-
-int vxt_metal_run_lossless(
-    void* raw_ctx,
-    void* base_h,
-    void* cw_h,
-    void* sb_h,
-    void* esc_h,
     const float* x_pad_ptr,
-    uint32_t padded_cols,
-    float* y_ptr,
-    uint32_t rows,
-    uint32_t is_fp16,
-    const uint32_t* lut8,
+    uint32_t x_pad_elems,
+    const VxtMetalOp* ops,
+    uint32_t n_ops,
     uint32_t iters,
     double* out_gpu_ms,
     char* err_out,
@@ -275,155 +286,87 @@ int vxt_metal_run_lossless(
 ) {
     @autoreleasepool {
         auto* ctx = static_cast<MetalGemvCtx*>(raw_ctx);
-        if (!ctx || !base_h || !cw_h || !sb_h || !esc_h) {
-            write_err(err_out, err_cap, "null buffer handle in vxt_metal_run_lossless");
+        if (!ctx || !x_pad_ptr || !ops || n_ops == 0) {
+            vxt_write_err(err_out, err_cap, "invalid arguments to vxt_metal_run_multi");
             return -1;
         }
-        size_t xb = size_t(padded_cols) * sizeof(float);
-        size_t yb = size_t(rows) * sizeof(float);
-        if (!ctx->ensure_io(xb, yb)) {
-            write_err(err_out, err_cap, "failed to allocate Metal x/y buffers");
+
+        bool need_rot = false;
+        uint32_t max_rot_cols = 0;
+        size_t total_y_aligned = 0;
+        for (uint32_t i = 0; i < n_ops; ++i) {
+            if (ops[i].kind == 4u) {
+                need_rot = true;
+                max_rot_cols = std::max(max_rot_cols, ops[i].cols);
+            }
+            size_t r_aligned = ((size_t(ops[i].rows) + 63u) & ~size_t(63u));
+            total_y_aligned += r_aligned;
+        }
+
+        size_t xb = size_t(std::max(x_pad_elems, max_rot_cols)) * sizeof(float);
+        size_t yb = total_y_aligned * sizeof(float);
+        if (!ctx->ensure_io(xb, yb, need_rot)) {
+            vxt_write_err(err_out, err_cap, "failed to allocate Metal x/y buffers");
             return -1;
         }
-        std::memcpy([ctx->x_buf contents], x_pad_ptr, xb);
+        std::memcpy([ctx->x_buf contents], x_pad_ptr, size_t(x_pad_elems) * sizeof(float));
+        if (xb > size_t(x_pad_elems) * sizeof(float)) {
+            std::memset(
+                static_cast<uint8_t*>([ctx->x_buf contents]) + size_t(x_pad_elems) * sizeof(float),
+                0,
+                xb - size_t(x_pad_elems) * sizeof(float)
+            );
+        }
 
-        LosslessParams p{};
-        p.rows = rows;
-        p.padded_cols = padded_cols;
-        p.is_fp16 = is_fp16;
-        for (int i = 0; i < 8; ++i) p.lut[i] = lut8[i];
-
-        id<MTLComputePipelineState> pso = is_fp16 ? ctx->pso_lossless_fp16 : ctx->pso_lossless_bf16;
-        MTLSize tg = MTLSizeMake(64, 1, 1);
-        MTLSize grid = MTLSizeMake((rows + 1u) / 2u, 1, 1);
         uint32_t runs = std::max<uint32_t>(iters, 1u);
-
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        [enc setComputePipelineState:pso];
-        [enc setBuffer:(__bridge id<MTLBuffer>)base_h offset:0 atIndex:0];
-        [enc setBuffer:(__bridge id<MTLBuffer>)cw_h offset:0 atIndex:1];
-        [enc setBuffer:(__bridge id<MTLBuffer>)sb_h offset:0 atIndex:2];
-        [enc setBuffer:(__bridge id<MTLBuffer>)esc_h offset:0 atIndex:3];
-        [enc setBuffer:ctx->x_buf offset:0 atIndex:4];
-        [enc setBuffer:ctx->y_buf offset:0 atIndex:5];
-        [enc setBytes:&p length:sizeof(p) atIndex:6];
-        for (uint32_t i = 0; i < runs; ++i) {
-            if (i > 0) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+
+        for (uint32_t r = 0; r < runs; ++r) {
+            if (r > 0) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            if (need_rot) {
+                vxt_encode_fwht32_buf(ctx, enc, ctx->x_buf, ctx->x_rot_buf, max_rot_cols);
+            }
+            size_t y_elem_off = 0;
+            for (uint32_t i = 0; i < n_ops; ++i) {
+                vxt_encode_gemv_op(
+                    ctx, enc, ops[i], ctx->x_buf, ctx->x_rot_buf, ctx->y_buf, y_elem_off * sizeof(float)
+                );
+                y_elem_off += ((size_t(ops[i].rows) + 63u) & ~size_t(63u));
+            }
         }
         [enc endEncoding];
-        return finish_and_read_y(cmd, ctx->y_buf, y_ptr, rows, out_gpu_ms, err_out, err_cap);
-    }
-}
 
-int vxt_metal_run_codebook(
-    void* raw_ctx,
-    void* sc_h,
-    void* pw_h,
-    void* row_ptr_h,
-    void* out_h,
-    const float* x_pad_ptr,
-    uint32_t padded_cols,
-    float* y_ptr,
-    uint32_t rows,
-    uint32_t bits,
-    const float* centroids16,
-    uint32_t iters,
-    double* out_gpu_ms,
-    char* err_out,
-    size_t err_cap
-) {
-    @autoreleasepool {
-        auto* ctx = static_cast<MetalGemvCtx*>(raw_ctx);
-        if (!ctx || !sc_h || !pw_h || !row_ptr_h || !out_h) {
-            write_err(err_out, err_cap, "null buffer handle in vxt_metal_run_codebook");
+        CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+        [cmd commit];
+        while ([cmd status] < MTLCommandBufferStatusCompleted) {
+            if (CFAbsoluteTimeGetCurrent() - t0 > 0.004) {
+                [cmd waitUntilCompleted];
+                break;
+            }
+#if defined(__aarch64__)
+            __builtin_arm_yield();
+#endif
+        }
+        CFAbsoluteTime t1 = CFAbsoluteTimeGetCurrent();
+
+        if ([cmd status] != MTLCommandBufferStatusCompleted) {
+            NSError* e = [cmd error];
+            vxt_write_err(err_out, err_cap, e ? [[e localizedDescription] UTF8String] : "MTLCommandBuffer failed");
             return -1;
         }
-        size_t xb = size_t(padded_cols) * sizeof(float);
-        size_t yb = size_t(rows) * sizeof(float);
-        if (!ctx->ensure_io(xb, yb)) {
-            write_err(err_out, err_cap, "failed to allocate Metal x/y buffers");
-            return -1;
+        double gpu_s = double([cmd GPUEndTime] - [cmd GPUStartTime]);
+        if (out_gpu_ms) {
+            *out_gpu_ms = (gpu_s > 0.0 ? gpu_s : double(t1 - t0)) * 1000.0;
         }
-        std::memcpy([ctx->x_buf contents], x_pad_ptr, xb);
 
-        CodebookParams p{};
-        p.rows = rows;
-        p.padded_cols = padded_cols;
-        p.bits = bits;
-        for (int i = 0; i < 16; ++i) p.centroids[i] = centroids16[i];
-
-        id<MTLComputePipelineState> pso = (bits == 4u) ? ctx->pso_cb4 : ctx->pso_cb3;
-        MTLSize tg = MTLSizeMake(64, 1, 1);
-        MTLSize grid = MTLSizeMake((rows + 1u) / 2u, 1, 1);
-        uint32_t runs = std::max<uint32_t>(iters, 1u);
-
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        [enc setComputePipelineState:pso];
-        [enc setBuffer:(__bridge id<MTLBuffer>)sc_h offset:0 atIndex:0];
-        [enc setBuffer:(__bridge id<MTLBuffer>)pw_h offset:0 atIndex:1];
-        [enc setBuffer:(__bridge id<MTLBuffer>)row_ptr_h offset:0 atIndex:2];
-        [enc setBuffer:(__bridge id<MTLBuffer>)out_h offset:0 atIndex:3];
-        [enc setBuffer:ctx->x_buf offset:0 atIndex:4];
-        [enc setBuffer:ctx->y_buf offset:0 atIndex:5];
-        [enc setBytes:&p length:sizeof(p) atIndex:6];
-        for (uint32_t i = 0; i < runs; ++i) {
-            if (i > 0) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+        const float* y_src = static_cast<const float*>([ctx->y_buf contents]);
+        size_t y_elem_off = 0;
+        for (uint32_t i = 0; i < n_ops; ++i) {
+            std::memcpy(ops[i].y_dst, y_src + y_elem_off, size_t(ops[i].rows) * sizeof(float));
+            y_elem_off += ((size_t(ops[i].rows) + 63u) & ~size_t(63u));
         }
-        [enc endEncoding];
-        return finish_and_read_y(cmd, ctx->y_buf, y_ptr, rows, out_gpu_ms, err_out, err_cap);
-    }
-}
-
-int vxt_metal_run_q4_0(
-    void* raw_ctx,
-    void* sc_h,
-    void* qs_h,
-    const float* x_pad_ptr,
-    uint32_t padded_cols,
-    float* y_ptr,
-    uint32_t rows,
-    uint32_t iters,
-    double* out_gpu_ms,
-    char* err_out,
-    size_t err_cap
-) {
-    @autoreleasepool {
-        auto* ctx = static_cast<MetalGemvCtx*>(raw_ctx);
-        if (!ctx || !sc_h || !qs_h) {
-            write_err(err_out, err_cap, "null buffer handle in vxt_metal_run_q4_0");
-            return -1;
-        }
-        size_t xb = size_t(padded_cols) * sizeof(float);
-        size_t yb = size_t(rows) * sizeof(float);
-        if (!ctx->ensure_io(xb, yb)) {
-            write_err(err_out, err_cap, "failed to allocate Metal x/y buffers");
-            return -1;
-        }
-        std::memcpy([ctx->x_buf contents], x_pad_ptr, xb);
-
-        Q4_0Params p{rows, padded_cols};
-        MTLSize tg = MTLSizeMake(64, 1, 1);
-        MTLSize grid = MTLSizeMake((rows + 1u) / 2u, 1, 1);
-        uint32_t runs = std::max<uint32_t>(iters, 1u);
-
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-        [enc setComputePipelineState:ctx->pso_q4_0];
-        [enc setBuffer:(__bridge id<MTLBuffer>)sc_h offset:0 atIndex:0];
-        [enc setBuffer:(__bridge id<MTLBuffer>)qs_h offset:0 atIndex:1];
-        [enc setBuffer:ctx->x_buf offset:0 atIndex:2];
-        [enc setBuffer:ctx->y_buf offset:0 atIndex:3];
-        [enc setBytes:&p length:sizeof(p) atIndex:4];
-        for (uint32_t i = 0; i < runs; ++i) {
-            if (i > 0) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-            [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
-        }
-        [enc endEncoding];
-        return finish_and_read_y(cmd, ctx->y_buf, y_ptr, rows, out_gpu_ms, err_out, err_cap);
+        return 0;
     }
 }
 

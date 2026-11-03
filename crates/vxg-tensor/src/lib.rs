@@ -10,15 +10,25 @@
 //!    compressed `GEMV`.
 
 pub mod bench;
+pub mod cli_llm;
 pub mod codebook;
 pub mod format;
 pub mod fp16;
 pub mod gguf;
+pub mod gguf_meta;
+pub mod llm;
+pub mod llm_ops;
+pub mod llm_pack;
 pub mod lossless;
 pub mod metal;
+#[cfg(vxt_has_metal)]
+mod metal_ffi;
+mod metal_llm;
 pub mod mmap;
 pub mod q4_0;
 pub mod safetensors;
+pub mod tokenizer;
+pub mod wht2;
 
 use std::fmt;
 

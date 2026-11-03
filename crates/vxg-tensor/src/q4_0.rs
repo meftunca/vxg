@@ -76,29 +76,32 @@ impl Q4_0Matrix {
         (self.compressed_bytes() as f64 * 8.0) / ((self.rows * self.cols) as f64)
     }
 
-    pub fn decode_f32(&self) -> Vec<f32> {
-        let mut out = vec![0.0f32; self.rows * self.cols];
+    pub fn decode_row(&self, r: usize, dst: &mut [f32]) {
+        assert_eq!(dst.len(), self.cols);
         let bpr = self.padded_cols / 32;
-        for r in 0..self.rows {
-            let dst = &mut out[r * self.cols..(r + 1) * self.cols];
-            for b in 0..bpr {
-                let bi = r * bpr + b;
-                let d = f16_to_f32(self.scales_f16[bi]);
-                let c0 = b * 32;
-                for w in 0..4 {
-                    let word = self.qs_words[bi * 4 + w];
-                    let bytes = word.to_le_bytes();
-                    for k in 0..4 {
-                        let j = w * 4 + k;
-                        if c0 + j < self.cols {
-                            dst[c0 + j] = (((bytes[k] & 0x0f) as i32) - 8) as f32 * d;
-                        }
-                        if c0 + j + 16 < self.cols {
-                            dst[c0 + j + 16] = (((bytes[k] >> 4) as i32) - 8) as f32 * d;
-                        }
+        for b in 0..bpr {
+            let bi = r * bpr + b;
+            let d = f16_to_f32(self.scales_f16[bi]);
+            let c0 = b * 32;
+            for w in 0..4 {
+                let bytes = self.qs_words[bi * 4 + w].to_le_bytes();
+                for k in 0..4 {
+                    let j = w * 4 + k;
+                    if c0 + j < self.cols {
+                        dst[c0 + j] = (((bytes[k] & 0x0f) as i32) - 8) as f32 * d;
+                    }
+                    if c0 + j + 16 < self.cols {
+                        dst[c0 + j + 16] = (((bytes[k] >> 4) as i32) - 8) as f32 * d;
                     }
                 }
             }
+        }
+    }
+
+    pub fn decode_f32(&self) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.rows * self.cols];
+        for r in 0..self.rows {
+            self.decode_row(r, &mut out[r * self.cols..(r + 1) * self.cols]);
         }
         out
     }

@@ -1,5 +1,5 @@
 //! Safe RAII Apple Metal GPU `GEMV` engine with persistent Unified Memory weight residency
-//! (`0` per-token host-to-GPU weight copy). Compiles cleanly on non-macOS targets as a stub.
+//! (`0` per-token host-to-GPU weight copy) and multi-matrix fused command-buffer execution.
 
 use crate::format::PackedTensor;
 #[cfg(not(vxt_has_metal))]
@@ -8,179 +8,15 @@ use crate::{DType, Result};
 
 #[cfg(vxt_has_metal)]
 mod imp {
-    use core::ffi::{c_char, c_void};
-    use std::ffi::CStr;
-    use std::ptr::NonNull;
+    use std::ptr::null_mut;
 
     use crate::codebook::{CodebookMatrix, Q4_0Matrix};
     use crate::format::PackedTensor;
     use crate::fp16::fit_cubic_codebook;
     use crate::lossless::LosslessMatrix;
+    pub use crate::metal_ffi::{GpuBuf, MetalEngineInner, VxtMetalOp};
+    use crate::wht2::Wht2Matrix;
     use crate::{DType, Error, Result};
-
-    extern "C" {
-        fn vxt_metal_create(
-            dev_name_out: *mut c_char,
-            dev_name_cap: usize,
-            err_out: *mut c_char,
-            err_cap: usize,
-        ) -> *mut c_void;
-        fn vxt_metal_destroy(ctx: *mut c_void);
-        fn vxt_metal_upload(ctx: *mut c_void, data: *const c_void, byte_len: usize) -> *mut c_void;
-        fn vxt_metal_free_buffer(buf_handle: *mut c_void);
-
-        fn vxt_metal_run_raw16(
-            ctx: *mut c_void,
-            w_buf: *mut c_void,
-            x_ptr: *const f32,
-            cols: u32,
-            y_ptr: *mut f32,
-            rows: u32,
-            is_fp16: u32,
-            iters: u32,
-            out_gpu_ms: *mut f64,
-            err_out: *mut c_char,
-            err_cap: usize,
-        ) -> i32;
-
-        fn vxt_metal_run_lossless(
-            ctx: *mut c_void,
-            base_h: *mut c_void,
-            cw_h: *mut c_void,
-            sb_h: *mut c_void,
-            esc_h: *mut c_void,
-            x_pad_ptr: *const f32,
-            padded_cols: u32,
-            y_ptr: *mut f32,
-            rows: u32,
-            is_fp16: u32,
-            lut8: *const u32,
-            iters: u32,
-            out_gpu_ms: *mut f64,
-            err_out: *mut c_char,
-            err_cap: usize,
-        ) -> i32;
-
-        fn vxt_metal_run_codebook(
-            ctx: *mut c_void,
-            sc_h: *mut c_void,
-            pw_h: *mut c_void,
-            row_ptr_h: *mut c_void,
-            out_h: *mut c_void,
-            x_pad_ptr: *const f32,
-            padded_cols: u32,
-            y_ptr: *mut f32,
-            rows: u32,
-            bits: u32,
-            centroids16: *const f32,
-            iters: u32,
-            out_gpu_ms: *mut f64,
-            err_out: *mut c_char,
-            err_cap: usize,
-        ) -> i32;
-
-        fn vxt_metal_run_q4_0(
-            ctx: *mut c_void,
-            sc_h: *mut c_void,
-            qs_h: *mut c_void,
-            x_pad_ptr: *const f32,
-            padded_cols: u32,
-            y_ptr: *mut f32,
-            rows: u32,
-            iters: u32,
-            out_gpu_ms: *mut f64,
-            err_out: *mut c_char,
-            err_cap: usize,
-        ) -> i32;
-    }
-
-    fn cbuf_to_str(buf: &[u8]) -> String {
-        let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        CStr::from_bytes_with_nul(&buf[..=(nul.min(buf.len().saturating_sub(1)))])
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| String::from_utf8_lossy(&buf[..nul]).into_owned())
-    }
-
-    pub struct GpuBuf(NonNull<c_void>);
-
-    unsafe impl Send for GpuBuf {}
-    unsafe impl Sync for GpuBuf {}
-
-    impl GpuBuf {
-        fn upload<T: Copy>(ctx: NonNull<c_void>, slice: &[T]) -> Result<Self> {
-            let byte_len = std::mem::size_of_val(slice);
-            let ptr = if byte_len == 0 {
-                std::ptr::null()
-            } else {
-                slice.as_ptr() as *const c_void
-            };
-            let raw = unsafe { vxt_metal_upload(ctx.as_ptr(), ptr, byte_len) };
-            NonNull::new(raw)
-                .map(Self)
-                .ok_or_else(|| Error::Backend("Metal unified memory buffer upload failed".into()))
-        }
-
-        #[inline]
-        fn as_ptr(&self) -> *mut c_void {
-            self.0.as_ptr()
-        }
-    }
-
-    impl Drop for GpuBuf {
-        fn drop(&mut self) {
-            unsafe { vxt_metal_free_buffer(self.0.as_ptr()) };
-        }
-    }
-
-    pub struct MetalEngineInner {
-        ctx: NonNull<c_void>,
-        device_name: String,
-        x_pad_scratch: Vec<f32>,
-    }
-
-    unsafe impl Send for MetalEngineInner {}
-
-    impl MetalEngineInner {
-        pub fn new() -> Result<Self> {
-            let mut dev_buf = [0u8; 256];
-            let mut err_buf = [0u8; 512];
-            let raw = unsafe {
-                vxt_metal_create(
-                    dev_buf.as_mut_ptr() as *mut c_char,
-                    dev_buf.len(),
-                    err_buf.as_mut_ptr() as *mut c_char,
-                    err_buf.len(),
-                )
-            };
-            let Some(ctx) = NonNull::new(raw) else {
-                return Err(Error::Backend(cbuf_to_str(&err_buf)));
-            };
-            Ok(Self {
-                ctx,
-                device_name: cbuf_to_str(&dev_buf),
-                x_pad_scratch: Vec::new(),
-            })
-        }
-
-        pub fn device_name(&self) -> &str {
-            &self.device_name
-        }
-
-        fn prepare_x_pad(&mut self, x: &[f32], padded_cols: usize) -> *const f32 {
-            if self.x_pad_scratch.len() < padded_cols {
-                self.x_pad_scratch.resize(padded_cols, 0.0);
-            }
-            self.x_pad_scratch[..x.len()].copy_from_slice(x);
-            self.x_pad_scratch[x.len()..padded_cols].fill(0.0);
-            self.x_pad_scratch.as_ptr()
-        }
-    }
-
-    impl Drop for MetalEngineInner {
-        fn drop(&mut self) {
-            unsafe { vxt_metal_destroy(self.ctx.as_ptr()) };
-        }
-    }
 
     pub struct GpuRaw16Inner {
         pub dtype: DType,
@@ -217,28 +53,21 @@ mod imp {
         ) -> Result<f64> {
             assert_eq!(x.len(), self.cols);
             assert_eq!(y.len(), self.rows);
-            let runs = iters.max(1);
-            let mut total_ms = 0.0f64;
-            let mut err_buf = [0u8; 512];
-            let rc = unsafe {
-                vxt_metal_run_raw16(
-                    eng.ctx.as_ptr(),
-                    self.w_buf.as_ptr(),
-                    x.as_ptr(),
-                    self.cols as u32,
-                    y.as_mut_ptr(),
-                    self.rows as u32,
-                    matches!(self.dtype, DType::F16) as u32,
-                    runs,
-                    &mut total_ms,
-                    err_buf.as_mut_ptr() as *mut c_char,
-                    err_buf.len(),
-                )
-            };
-            if rc != 0 {
-                return Err(Error::Backend(cbuf_to_str(&err_buf)));
-            }
-            Ok(total_ms / (runs as f64))
+            eng.ops_scratch.clear();
+            eng.ops_scratch.push(VxtMetalOp {
+                kind: 0,
+                sub: matches!(self.dtype, DType::F16) as u32,
+                rows: self.rows as u32,
+                cols: self.cols as u32,
+                lut8: [0; 8],
+                poly16: [0.0; 16],
+                b0: self.w_buf.as_ptr(),
+                b1: null_mut(),
+                b2: null_mut(),
+                b3: null_mut(),
+                y_dst: y.as_mut_ptr(),
+            });
+            eng.dispatch_ops(x, self.cols, iters)
         }
     }
 
@@ -259,7 +88,7 @@ mod imp {
             rows: usize,
             cols: usize,
             padded_cols: usize,
-            centroids: [f32; 16],
+            poly16: [f32; 16],
             sc: GpuBuf,
             pw: GpuBuf,
             row_ptr: GpuBuf,
@@ -272,6 +101,21 @@ mod imp {
             sc: GpuBuf,
             qs: GpuBuf,
         },
+        Wht2 {
+            rows: usize,
+            cols: usize,
+            padded_cols: usize,
+            poly16: [f32; 16],
+            sc: GpuBuf,
+            pw: GpuBuf,
+            row_ptr: GpuBuf,
+            out: GpuBuf,
+        },
+        RawF32 {
+            rows: usize,
+            cols: usize,
+            w_buf: GpuBuf,
+        },
     }
 
     impl GpuPackedInner {
@@ -280,6 +124,12 @@ mod imp {
                 PackedTensor::Lossless(m) => Self::upload_lossless(eng, m),
                 PackedTensor::Codebook(m) => Self::upload_codebook(eng, m),
                 PackedTensor::Q4_0(m) => Self::upload_q4_0(eng, m),
+                PackedTensor::Wht2(m) => Self::upload_wht2(eng, m),
+                PackedTensor::RawF32 { rows, cols, data } => Ok(Self::RawF32 {
+                    rows: *rows,
+                    cols: *cols,
+                    w_buf: GpuBuf::upload(eng.ctx, data)?,
+                }),
             }
         }
 
@@ -300,16 +150,15 @@ mod imp {
         }
 
         fn upload_codebook(eng: &MetalEngineInner, m: &CodebookMatrix) -> Result<Self> {
-            let k = 1usize << m.bits;
-            let (poly, _) = fit_cubic_codebook(&m.centroids[..k]);
-            let mut packed_params = [0.0f32; 16];
-            packed_params[..4].copy_from_slice(&poly);
+            let (poly, _) = fit_cubic_codebook(&m.centroids[..(1usize << m.bits)]);
+            let mut poly16 = [0.0f32; 16];
+            poly16[..4].copy_from_slice(&poly);
             Ok(Self::Codebook {
                 bits: m.bits,
                 rows: m.rows,
                 cols: m.cols,
                 padded_cols: m.padded_cols,
-                centroids: packed_params,
+                poly16,
                 sc: GpuBuf::upload(eng.ctx, &m.scales_f16)?,
                 pw: GpuBuf::upload(eng.ctx, &m.packed_words)?,
                 row_ptr: GpuBuf::upload(eng.ctx, &m.outlier_row_ptr)?,
@@ -327,18 +176,24 @@ mod imp {
             })
         }
 
-        pub fn run(
-            &self,
-            eng: &mut MetalEngineInner,
-            x: &[f32],
-            y: &mut [f32],
-            iters: u32,
-        ) -> Result<f64> {
-            let runs = iters.max(1);
-            let mut total_ms = 0.0f64;
-            let mut err_buf = [0u8; 512];
+        fn upload_wht2(eng: &MetalEngineInner, m: &Wht2Matrix) -> Result<Self> {
+            let (poly, _) = fit_cubic_codebook(&m.centroids[..4]);
+            let mut poly16 = [0.0f32; 16];
+            poly16[..4].copy_from_slice(&poly);
+            Ok(Self::Wht2 {
+                rows: m.rows,
+                cols: m.cols,
+                padded_cols: m.padded_cols,
+                poly16,
+                sc: GpuBuf::upload(eng.ctx, &m.scales_f16)?,
+                pw: GpuBuf::upload(eng.ctx, &m.packed_words)?,
+                row_ptr: GpuBuf::upload(eng.ctx, &m.outlier_row_ptr)?,
+                out: GpuBuf::upload(eng.ctx, &m.outliers_packed)?,
+            })
+        }
 
-            let rc = match self {
+        pub fn raw_op(&self, y_dst: *mut f32) -> (VxtMetalOp, usize, usize, usize) {
+            match self {
                 Self::Lossless {
                     dtype,
                     rows,
@@ -349,96 +204,141 @@ mod imp {
                     cw,
                     sb,
                     esc,
-                } => {
-                    assert_eq!(x.len(), *cols);
-                    assert_eq!(y.len(), *rows);
-                    let xp = eng.prepare_x_pad(x, *padded_cols);
-                    unsafe {
-                        vxt_metal_run_lossless(
-                            eng.ctx.as_ptr(),
-                            base.as_ptr(),
-                            cw.as_ptr(),
-                            sb.as_ptr(),
-                            esc.as_ptr(),
-                            xp,
-                            *padded_cols as u32,
-                            y.as_mut_ptr(),
-                            *rows as u32,
-                            matches!(dtype, DType::F16) as u32,
-                            lut8.as_ptr(),
-                            runs,
-                            &mut total_ms,
-                            err_buf.as_mut_ptr() as *mut c_char,
-                            err_buf.len(),
-                        )
-                    }
-                }
+                } => (
+                    VxtMetalOp {
+                        kind: 1,
+                        sub: matches!(dtype, DType::F16) as u32,
+                        rows: *rows as u32,
+                        cols: *padded_cols as u32,
+                        lut8: *lut8,
+                        poly16: [0.0; 16],
+                        b0: base.as_ptr(),
+                        b1: cw.as_ptr(),
+                        b2: sb.as_ptr(),
+                        b3: esc.as_ptr(),
+                        y_dst,
+                    },
+                    *rows,
+                    *cols,
+                    *padded_cols,
+                ),
                 Self::Codebook {
                     bits,
                     rows,
                     cols,
                     padded_cols,
-                    centroids,
+                    poly16,
                     sc,
                     pw,
                     row_ptr,
                     out,
-                } => {
-                    assert_eq!(x.len(), *cols);
-                    assert_eq!(y.len(), *rows);
-                    let xp = eng.prepare_x_pad(x, *padded_cols);
-                    unsafe {
-                        vxt_metal_run_codebook(
-                            eng.ctx.as_ptr(),
-                            sc.as_ptr(),
-                            pw.as_ptr(),
-                            row_ptr.as_ptr(),
-                            out.as_ptr(),
-                            xp,
-                            *padded_cols as u32,
-                            y.as_mut_ptr(),
-                            *rows as u32,
-                            *bits as u32,
-                            centroids.as_ptr(),
-                            runs,
-                            &mut total_ms,
-                            err_buf.as_mut_ptr() as *mut c_char,
-                            err_buf.len(),
-                        )
-                    }
-                }
+                } => (
+                    VxtMetalOp {
+                        kind: 2,
+                        sub: *bits as u32,
+                        rows: *rows as u32,
+                        cols: *padded_cols as u32,
+                        lut8: [0; 8],
+                        poly16: *poly16,
+                        b0: sc.as_ptr(),
+                        b1: pw.as_ptr(),
+                        b2: row_ptr.as_ptr(),
+                        b3: out.as_ptr(),
+                        y_dst,
+                    },
+                    *rows,
+                    *cols,
+                    *padded_cols,
+                ),
                 Self::Q4_0 {
                     rows,
                     cols,
                     padded_cols,
                     sc,
                     qs,
-                } => {
-                    assert_eq!(x.len(), *cols);
-                    assert_eq!(y.len(), *rows);
-                    let xp = eng.prepare_x_pad(x, *padded_cols);
-                    unsafe {
-                        vxt_metal_run_q4_0(
-                            eng.ctx.as_ptr(),
-                            sc.as_ptr(),
-                            qs.as_ptr(),
-                            xp,
-                            *padded_cols as u32,
-                            y.as_mut_ptr(),
-                            *rows as u32,
-                            runs,
-                            &mut total_ms,
-                            err_buf.as_mut_ptr() as *mut c_char,
-                            err_buf.len(),
-                        )
-                    }
-                }
-            };
-
-            if rc != 0 {
-                return Err(Error::Backend(cbuf_to_str(&err_buf)));
+                } => (
+                    VxtMetalOp {
+                        kind: 3,
+                        sub: 0,
+                        rows: *rows as u32,
+                        cols: *padded_cols as u32,
+                        lut8: [0; 8],
+                        poly16: [0.0; 16],
+                        b0: sc.as_ptr(),
+                        b1: qs.as_ptr(),
+                        b2: null_mut(),
+                        b3: null_mut(),
+                        y_dst,
+                    },
+                    *rows,
+                    *cols,
+                    *padded_cols,
+                ),
+                Self::Wht2 {
+                    rows,
+                    cols,
+                    padded_cols,
+                    poly16,
+                    sc,
+                    pw,
+                    row_ptr,
+                    out,
+                } => (
+                    VxtMetalOp {
+                        kind: 4,
+                        sub: 2,
+                        rows: *rows as u32,
+                        cols: *padded_cols as u32,
+                        lut8: [0; 8],
+                        poly16: *poly16,
+                        b0: sc.as_ptr(),
+                        b1: pw.as_ptr(),
+                        b2: row_ptr.as_ptr(),
+                        b3: out.as_ptr(),
+                        y_dst,
+                    },
+                    *rows,
+                    *cols,
+                    *padded_cols,
+                ),
+                Self::RawF32 { rows, cols, w_buf } => (
+                    VxtMetalOp {
+                        kind: 5,
+                        sub: 0,
+                        rows: *rows as u32,
+                        cols: *cols as u32,
+                        lut8: [0; 8],
+                        poly16: [0.0; 16],
+                        b0: w_buf.as_ptr(),
+                        b1: null_mut(),
+                        b2: null_mut(),
+                        b3: null_mut(),
+                        y_dst,
+                    },
+                    *rows,
+                    *cols,
+                    *cols,
+                ),
             }
-            Ok(total_ms / (runs as f64))
+        }
+
+        pub fn to_op(&self, x_len: usize, y: &mut [f32]) -> (VxtMetalOp, usize) {
+            let (op, rows, cols, pcols) = self.raw_op(y.as_mut_ptr());
+            assert_eq!((x_len, y.len()), (cols, rows));
+            (op, pcols)
+        }
+
+        pub fn run(
+            &self,
+            eng: &mut MetalEngineInner,
+            x: &[f32],
+            y: &mut [f32],
+            iters: u32,
+        ) -> Result<f64> {
+            eng.ops_scratch.clear();
+            let (op, pcols) = self.to_op(x.len(), y);
+            eng.ops_scratch.push(op);
+            eng.dispatch_ops(x, pcols, iters)
         }
     }
 }
@@ -515,9 +415,42 @@ impl MetalEngine {
             Err(Error::Unsupported("Metal backend unavailable".into()))
         }
     }
+
+    /// Executes multiple compressed `GEMV`s sharing the same input `x` inside ONE `MTLCommandBuffer`.
+    pub fn run_multi_same_x(
+        &mut self,
+        x: &[f32],
+        jobs: &mut [(&GpuPackedTensor, &mut [f32])],
+    ) -> Result<f64> {
+        #[cfg(vxt_has_metal)]
+        {
+            self.inner.ops_scratch.clear();
+            let mut max_pcols = x.len();
+            for (t, y) in jobs.iter_mut() {
+                let (op, pcols) = t.inner.to_op(x.len(), y);
+                max_pcols = max_pcols.max(pcols);
+                self.inner.ops_scratch.push(op);
+            }
+            self.inner.dispatch_ops(x, max_pcols, 1)
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (x, jobs);
+            Err(Error::Unsupported("Metal backend unavailable".into()))
+        }
+    }
+
+    #[cfg(vxt_has_metal)]
+    pub(crate) fn raw_ctx(&self) -> core::ptr::NonNull<core::ffi::c_void> {
+        self.inner.ctx
+    }
+
+    #[cfg(vxt_has_metal)]
+    pub(crate) fn upload_f32_buf(&self, slice: &[f32]) -> Result<crate::metal_ffi::GpuBuf> {
+        crate::metal_ffi::GpuBuf::upload(self.inner.ctx, slice)
+    }
 }
 
-/// Persistent Unified-Memory uncompressed 16-bit (`BF16`/`FP16`) matrix on Apple Metal GPU.
 pub struct GpuRaw16Matrix {
     #[cfg(vxt_has_metal)]
     inner: imp::GpuRaw16Inner,
@@ -526,7 +459,6 @@ pub struct GpuRaw16Matrix {
 }
 
 impl GpuRaw16Matrix {
-    /// Runs `iters` GPU `GEMV` dispatches (`y = W · x`) and returns average GPU kernel ms/iter.
     pub fn run_gemv(
         &self,
         engine: &mut MetalEngine,
@@ -546,7 +478,6 @@ impl GpuRaw16Matrix {
     }
 }
 
-/// Persistent Unified-Memory compressed `.vxt` matrix (`Lossless`, `Cb4`, `Cb3`, or `Q4_0`) on GPU.
 pub struct GpuPackedTensor {
     #[cfg(vxt_has_metal)]
     inner: imp::GpuPackedInner,
@@ -555,7 +486,6 @@ pub struct GpuPackedTensor {
 }
 
 impl GpuPackedTensor {
-    /// Runs `iters` fused compressed-domain GPU `GEMV` dispatches and returns average GPU ms/iter.
     pub fn run_gemv(
         &self,
         engine: &mut MetalEngine,
@@ -572,5 +502,10 @@ impl GpuPackedTensor {
             let _ = (engine, x, y, iters);
             Err(Error::Unsupported("Metal backend unavailable".into()))
         }
+    }
+
+    #[cfg(vxt_has_metal)]
+    pub(crate) fn descriptor_op(&self) -> crate::metal_ffi::VxtMetalOp {
+        self.inner.raw_op(core::ptr::null_mut()).0
     }
 }

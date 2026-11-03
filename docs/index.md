@@ -9,6 +9,9 @@ hero:
     - theme: brand
       text: Try Live WASM Playground →
       link: /playground
+    - theme: brand
+      text: AI Tensor & Metal LLM (.vxt) →
+      link: /TENSOR
     - theme: alt
       text: Get Started
       link: /guide/getting-started
@@ -26,8 +29,8 @@ features:
     details: "Across the 10-dataset v4 qualification suite (16 MiB), VXG achieves a 0.0250 geometric-mean compression ratio (40:1) at 2.09 GB/s encode and 8.21 GB/s decode (1T) — scaling to 11.75 GB/s encode and 41.55 GB/s decode on 8 threads."
   - title: "Compressed-Domain SQL Analytics & Splicing"
     details: "Execute compound WHERE filters, GROUP BY / SUM / AVG aggregations (40+ GB/s), single-column updates, and zero-reencode VXG->VXG column projections directly on compressed frames without full decode."
-  - title: "Universal Zero-Dependency Footprint"
-    details: "Zero external runtime dependencies in default builds. Compiles simultaneously as a Rust library (rlib), static C archive (libvxg.a / vxg.lib), shared library (.so / .dylib / .dll), and dependency-free WebAssembly (vxg.wasm)."
+  - title: "vxg-tensor (.vxt) AI Model Codec & Metal LLM"
+    details: "Zero-dependency LLM weight compression (1.41x bit-exact Lossless-BF16, 3.62x CB4+Outlier beating Q4_0 in both size & KL, 4.66x–5.57x CB3/WHT2) with 105–137 tok/s 1-CmdBuf Apple Metal GPU inference."
 ---
 
 ## Why VXG?
@@ -58,6 +61,12 @@ Traditional byte-stream LZ compressors (`LZ4`, `Zstd`) scan inputs sequentially 
 ### Compressed-Domain SQL Queries, `Top-K`, Analytics & Column Splicing
 
 <CompressedOpsChart />
+
+### Compressed-Domain AI Model Weights & Apple Metal GPU LLM Inference (`vxg-tensor` / `.vxt`)
+
+`crates/vxg-tensor` brings VXG's compressed-domain philosophy to LLM weights (`GGUF` & `SafeTensors` -> `.vxt` `VXT1`), executing `Qwen3.5-2B` directly from compressed Unified Memory planes inside a single concurrent `MTLCommandBuffer` per token ([Full Specification & Benchmarks →](/TENSOR)):
+
+<TensorBenchmarkChart compact />
 
 ---
 

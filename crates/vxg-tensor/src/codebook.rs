@@ -303,64 +303,66 @@ impl CodebookMatrix {
         self.outliers_packed.len()
     }
 
+    /// Reconstructs a single row `r` (`dst.len() == self.cols`) in `O(cols)`.
+    pub fn decode_row(&self, r: usize, dst: &mut [f32]) {
+        assert_eq!(dst.len(), self.cols);
+        let groups_per_row = self.padded_cols / 128;
+        let wpt = self.bits as usize;
+        if self.bits == 4 {
+            for g in 0..groups_per_row {
+                let g_idx = r * groups_per_row + g;
+                let sc = f16_to_f32(self.scales_f16[g_idx]);
+                for sub in 0..4 {
+                    let col_base = g * 128 + sub * 32;
+                    if col_base >= self.cols {
+                        break;
+                    }
+                    let valid = (self.cols - col_base).min(32);
+                    let tile_idx = g_idx * 4 + sub;
+                    let cw = &self.packed_words[tile_idx * wpt..(tile_idx + 1) * wpt];
+                    for l in 0..valid {
+                        let q = ((cw[l / 8] >> ((l % 8) * 4)) & 0x0f) as usize;
+                        dst[col_base + l] = sc * self.centroids[q];
+                    }
+                }
+            }
+        } else {
+            let row_pw = &self.packed_words[r * groups_per_row * 12..(r + 1) * groups_per_row * 12];
+            for step in 0..(groups_per_row / 2) {
+                let p24 = &row_pw[step * 24..step * 24 + 24];
+                for lane in 0..32 {
+                    let base_col = step * 256 + lane * 8;
+                    if base_col >= self.cols {
+                        break;
+                    }
+                    let valid = (self.cols - base_col).min(8);
+                    let g = step * 2 + (lane / 16);
+                    let sc = f16_to_f32(self.scales_f16[r * groups_per_row + g]);
+                    let lo2 = ((p24[lane / 2] >> ((lane % 2) * 16)) & 0xffff) as u16;
+                    let hi1 = (p24[16 + lane / 4].to_le_bytes())[lane % 4];
+                    for k in 0..valid {
+                        let q =
+                            (((lo2 >> (k * 2)) & 3) as usize) | ((((hi1 >> k) & 1) as usize) << 2);
+                        dst[base_col + k] = sc * self.centroids[q];
+                    }
+                }
+            }
+        }
+        let os = self.outlier_row_ptr[r] as usize;
+        let oe = self.outlier_row_ptr[r + 1] as usize;
+        for &packed in &self.outliers_packed[os..oe] {
+            let col = (packed & 0xffff) as usize;
+            if col < self.cols {
+                dst[col] += f16_to_f32((packed >> 16) as u16);
+            }
+        }
+    }
+
     /// Reconstructs approximated `f32` matrix (`rows * cols`) for `SQNR (dB)` verification.
     pub fn decode_f32(&self) -> Vec<f32> {
         let mut out = vec![0.0f32; self.rows * self.cols];
-        let groups_per_row = self.padded_cols / 128;
-        let wpt = self.bits as usize;
-
         for r in 0..self.rows {
-            let dst = &mut out[r * self.cols..(r + 1) * self.cols];
-            if self.bits == 4 {
-                for g in 0..groups_per_row {
-                    let g_idx = r * groups_per_row + g;
-                    let sc = f16_to_f32(self.scales_f16[g_idx]);
-                    for sub in 0..4 {
-                        let col_base = g * 128 + sub * 32;
-                        if col_base >= self.cols {
-                            break;
-                        }
-                        let valid = (self.cols - col_base).min(32);
-                        let tile_idx = g_idx * 4 + sub;
-                        let cw = &self.packed_words[tile_idx * wpt..(tile_idx + 1) * wpt];
-                        for l in 0..valid {
-                            let q = ((cw[l / 8] >> ((l % 8) * 4)) & 0x0f) as usize;
-                            dst[col_base + l] = sc * self.centroids[q];
-                        }
-                    }
-                }
-            } else {
-                let row_pw =
-                    &self.packed_words[r * groups_per_row * 12..(r + 1) * groups_per_row * 12];
-                for step in 0..(groups_per_row / 2) {
-                    let p24 = &row_pw[step * 24..step * 24 + 24];
-                    for lane in 0..32 {
-                        let base_col = step * 256 + lane * 8;
-                        if base_col >= self.cols {
-                            break;
-                        }
-                        let valid = (self.cols - base_col).min(8);
-                        let g = step * 2 + (lane / 16);
-                        let sc = f16_to_f32(self.scales_f16[r * groups_per_row + g]);
-                        let lo2 = ((p24[lane / 2] >> ((lane % 2) * 16)) & 0xffff) as u16;
-                        let hi1 = (p24[16 + lane / 4].to_le_bytes())[lane % 4];
-                        for k in 0..valid {
-                            let q = (((lo2 >> (k * 2)) & 3) as usize)
-                                | ((((hi1 >> k) & 1) as usize) << 2);
-                            dst[base_col + k] = sc * self.centroids[q];
-                        }
-                    }
-                }
-            }
-            let os = self.outlier_row_ptr[r] as usize;
-            let oe = self.outlier_row_ptr[r + 1] as usize;
-            for &packed in &self.outliers_packed[os..oe] {
-                let col = (packed & 0xffff) as usize;
-                let val = f16_to_f32((packed >> 16) as u16);
-                if col < self.cols {
-                    dst[col] += val;
-                }
-            }
+            self.decode_row(r, &mut out[r * self.cols..(r + 1) * self.cols]);
         }
         out
     }

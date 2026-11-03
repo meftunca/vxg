@@ -24,6 +24,7 @@ export default defineConfig({
     siteTitle: 'VXG v0.4.4',
     nav: [
       { text: 'Playground (WASM)', link: '/playground' },
+      { text: 'AI Tensor (.vxt)', link: '/TENSOR' },
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Architecture', link: '/guide/architecture' },
       { text: 'API & FFI', link: '/guide/api-and-ffi' },
@@ -34,6 +35,7 @@ export default defineConfig({
         items: [
           { text: 'Wire Format (v1–v4)', link: '/FORMAT' },
           { text: 'Column Models (v3/v4)', link: '/FORMAT_V3' },
+          { text: 'AI Tensor Codec (VXT1)', link: '/TENSOR' },
           { text: 'Mathematical Proofs', link: '/PROOFS' },
           { text: 'Safety & Security', link: '/SAFETY' },
           { text: 'GPU Kernels', link: '/GPU' }
@@ -46,6 +48,7 @@ export default defineConfig({
         items: [
           { text: 'Overview', link: '/' },
           { text: 'Live WASM Playground', link: '/playground' },
+          { text: 'AI Tensor & Metal LLM (.vxt)', link: '/TENSOR' },
           { text: 'Getting Started & CLI', link: '/guide/getting-started' },
           { text: 'Architecture & SIMD Internals', link: '/guide/architecture' },
           { text: 'Compressed-Domain Engine', link: '/STAGE2_DESIGN' },

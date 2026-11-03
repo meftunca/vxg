@@ -8,6 +8,7 @@ use crate::format::PackedTensor;
 use crate::fp16::{bf16_to_f32, f16_to_f32, f32_to_bf16, f32_to_f16, ErrorMetrics};
 use crate::lossless::{gemv_raw16_cpu, LosslessMatrix};
 use crate::metal::MetalEngine;
+use crate::wht2::Wht2Matrix;
 use crate::{DType, Result};
 
 /// Generates a deterministic, realistic heavy-tailed neural weight matrix (`rows * cols`) with
@@ -218,6 +219,24 @@ pub fn benchmark_matrix(
     entries.push(eval_packed(
         &cb3_packed,
         Some(&cb3_dec),
+        weights_f32,
+        &x,
+        &y_ref,
+        raw_16b_bytes,
+        cpu_threads,
+        cpu_iters,
+        gpu_iters,
+        metal.as_mut(),
+        raw_gpu_ms,
+    )?);
+
+    // 6. Mode 3: VXT-WHT2+Outlier (~2.40 bpw Walsh-Hadamard 2-bit)
+    let wht2 = Wht2Matrix::encode(rows, cols, weights_f32)?;
+    let wht2_dec = wht2.decode_f32();
+    let wht2_packed = PackedTensor::Wht2(wht2);
+    entries.push(eval_packed(
+        &wht2_packed,
+        Some(&wht2_dec),
         weights_f32,
         &x,
         &y_ref,
