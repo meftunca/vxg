@@ -21,7 +21,7 @@ export default defineConfig({
     ['meta', { name: 'og:description', content: '5x smaller than LZ4, 2.4x smaller than Zstd, and up to 54 GB/s multi-threaded decompression with O(1) random block access.' }]
   ],
   themeConfig: {
-    siteTitle: 'VXG v0.4.4',
+    siteTitle: 'VXG v0.4.5',
     nav: [
       { text: 'Playground (WASM)', link: '/playground' },
       { text: 'AI Tensor (.vxt)', link: '/TENSOR' },
@@ -61,6 +61,7 @@ export default defineConfig({
         text: 'Benchmarks & Energy',
         items: [
           { text: 'Cross-Platform Benchmarks', link: '/BENCHMARKS' },
+          { text: 'Chimera Envelope Showdown', link: '/CHIMERA_BENCHMARKS' },
           { text: 'Energy & Composite Indices (VPI / GCI)', link: '/ENERGY_BENCHMARKS' },
           { text: 'Validation & Reproducibility', link: '/VALIDATION' }
         ]

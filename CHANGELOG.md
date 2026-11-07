@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.5 — Persistent Lock-Free Worker Pool, Multi-Template SIMD, Compressed-Domain Speedups & "Chimera Envelope" Benchmarks
+
+- **Persistent Lock-Free Worker Pool & Parallel Boundary Inspection (`src/pool.rs`, `src/ops/par_meta.rs`, `src/query/parallel.rs`):**
+  - Replaced per-call `std::thread::scope` OS thread creation/teardown and cold TLS allocations across `encode`, `decode`, `query`, and `ops` with a cache-aligned persistent worker pool (`pool::parallel_run` / `parallel_try_run`) and parallel grammar boundary inspector (`inspect_grammar_boundary`), with graceful `wasm32` sequential fallback.
+  - Accelerated 8-thread compressed-domain analytics on `56.5 MB` (`300,000`-row) `ndjson_varied.ndjson`: `aggregate_column SUM/MIN/MAX(bytes)` **`6.13 ms -> 0.57 ms` (`98.91 GB/s`, `152.0x` vs naive — `10.8x` faster)**, `group_by(service) SUM/MIN/MAX(bytes)` **`5.22 ms -> 1.00 ms` (`56.38 GB/s`, `157.9x` — `5.2x` faster)**, and `top_k_by ORDER BY latency_ms ASC LIMIT 10` **`1.33 ms -> 0.58 ms` (`96.95 GB/s`, `138.9x` — `2.3x` faster)**.
+- **Cross-Block `leading_carry` Raw Boundary Routing & Zero-Alloc Multi-Template Ops (`src/encode.rs`, `src/columns/`):**
+  - Routed cross-block split-line leading fragments (`leading_carry`) directly to `Row::Raw(&data[..first_nl])`, eliminating bogus 1-row `Template 0` splits on 92% of CSV/TSV/logfmt blocks and preventing column-0 model poisoning (`events.tsv` `0.0334 -> 0.0326`, `data.csv` `0.1820 -> 0.1796`, CSV `1T` `filter_column` **`5.01 ms -> 0.58 ms` / `52.8 GB/s`**, `map_column` **`29.83 ms -> 2.92 ms` / `10.5 GB/s`**).
+  - Eliminated per-block heap allocations (`TplColSlices`) in `ops_search.rs` and `ops_pred.rs` and added compressed-domain multi-template `filter_frame` (`ops_filter_bytes.rs`, `8T` `4.24 ms -> 2.18 ms` / `26.0 GB/s`).
+- **Multi-Template SIMD Stream Matcher, `FAST_LZ` Periodic Overlap SIMD & 6-Step 4-Stream Huffman (`Format v4` — 100% Wire Compatible):**
+  - Added SIMD multi-template JSON stream matching (`grammar_multi.rs`), NEON 256-entry nibble LUT in `try_match_clf_stream`, early high-cardinality abort in `model_dict.rs`, and `u32` multiply-shift / single-digit-token fast paths in `prep_pattern.rs`.
+  - Added `OVERLAP_SHUF16` + `copy16_periodic` (`vqtbl1q_u8` / `_mm_shuffle_epi8`) for periodic `offset < match_len` matches in `fast_lz_unpack.rs` and constant-offset 6-step (`max_len <= 9`) / 5-step (`max_len in 10..=11`) 4-stream Huffman decoding (`huffman_dec4.rs`).
+  - Removed upfront `16+ MiB` zero-fill in `StreamEncoder::with_chunk_size` and added monotonic `out_len` buffer reuse in `StreamDecoder` (`src/stream.rs`).
+- **"Chimera Envelope" Benchmark Suite (`vxg-bench`, `docs/CHIMERA_BENCHMARKS.md`):**
+  - Added native C `lz4hc-c-l9` (`LZ4_compress_HC_extStateHC`) and `zstd-c-l9` baselines plus synthetic **`CHIMERA-LZ4`**, **`CHIMERA-ZSTD`**, and **`CHIMERA-ALL`** envelopes combining competitors' best high-compression ratio (`L9`) with their fastest preset encode/decode throughput (`LZ4-fast` / `Zstd -3`) simultaneously on every dataset (`VXG v4` `8T` 10-dataset geomean `VPI = 514.8`: **`4.09x` vs `LZ4 Chimera`, `3.97x` vs `Zstd Chimera`, `2.18x` vs `All-Rivals Chimera`**, and **`1.36x` higher `GCI`**).
+
 ## 0.4.4 — Compressed-Domain `ORDER BY` / `Top-K`, Expanded C/FFI Analytics ABI & Interactive VitePress Charts
 
 - **Compressed-Domain `ORDER BY` / `Top-K` Heap Engine (`vxg::ops`, `vxg::stream_ops`):**

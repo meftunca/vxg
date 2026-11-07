@@ -1,8 +1,8 @@
-# VXG 0.4.4 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
+# VXG 0.4.5 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
 
 [![CI — Source Validation](https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/ci.yml)
 [![CI — Cross-Platform Benchmarks](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml)
-[![Release v0.4.4](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.4)
+[![Release v0.4.5](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.5)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **High-throughput Rust CPU (SIMD/SWAR) codec & compressed-domain execution engine combining an adaptive structured-column engine (NDJSON / CSV / TSV / PSV / Logfmt / CLF), a 2D/Stride pixel engine (24-bpp & 32-bpp BMP), and a const-generic Fast-LZ + 4-stream canonical Huffman engine — with SQL-grade compressed-domain `SELECT` / `WHERE` / `ORDER BY Top-K` / `GROUP BY` / `UPDATE` / zero-reencode column splicing, zero-overhead C ABI (`staticlib` / `cdylib`), and native Metal / CUDA / Vulkan sources.**
@@ -17,7 +17,7 @@ VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the 
 | :--- | :--- |
 | **Format v4 Wire Layout** | Compact 8-byte per-block directory (`payload_size \| kind << 30`, `crc32c`); full backward read compatibility with `v1`–`v3` frames |
 | **Structured Column Engine** | Automatic schema & delimiter discovery for **NDJSON, Pretty-Printed JSON, CSV, TSV, PSV, CLF/Bracketed Logs, and Logfmt**; 11 specialized models including `Dictionary`, `DecimalDelta`, `DecimalSuffix`, `Timestamp` (SWAR+SIMD), `HexSuffix` (quoted & unquoted SIMD hex), `EpochCounter`, `SegmentDictionary`, `FrontCodedDict`, and `Pattern` (`MODEL_PATTERN` SWAR + `Copy16`) |
-| **Compressed-Domain SQL & Splicing** | Execute compound boolean `WHERE` (`&&` / `\|\|` / `!`), `SELECT` column projection, `ORDER BY` / `Top-K` heap queries (`35–42 GB/s`), `SUM`/`MIN`/`MAX`/`AVG` + `GROUP BY` analytics, `UPDATE`/`MAP` mutations, and **zero-reencode `VXG -> VXG` column splicing** directly on compressed blocks (`10–42 GB/s`, `15x–72x` faster than naive decode + scan) |
+| **Compressed-Domain SQL & Splicing** | Execute compound boolean `WHERE` (`&&` / `\|\|` / `!`), `SELECT` column projection, `ORDER BY` / `Top-K` heap queries (`37–97 GB/s`), `SUM`/`MIN`/`MAX`/`AVG` + `GROUP BY` analytics (`33–99 GB/s`), `UPDATE`/`MAP` mutations, and **zero-reencode `VXG -> VXG` column splicing** directly on compressed blocks (`10–99 GB/s`, `25x–160x` faster than naive decode + scan) |
 | **Image & Stride Engine** | 24-bpp / 32-bpp BMP and multi-stride (`1, 2, 3, 4, 8`) byte-plane transpose + `Subtract-Green` (`R-G`, `B-G`) color decorrelation + 2-level 64-bit hierarchical zero-mask & per-plane `Fast-LZ` |
 | **Prose & Source Code** | Const-generic `Fast-LZ` matcher paired with a 4-stream interleaved canonical Huffman coder |
 | **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning, 64-byte `FastPiece` unaligned `u128` row assembly, and SIMD prefix-sum plane interleaving |
@@ -45,6 +45,17 @@ Measured via `vxg-bench --suite v4 --size-mib 16 --samples 5 --seconds 0.08` aga
 | **`ui-render-32bpp.bmp`** | **0.0048** | 0.0140 | 0.0091 | 9.533 / 14.246 | **36.922 / 63.932** | **2435.3 / 10153.2** (`2.09x` / `2.47x`) | 0.562 / 0.345 | **5530.4** (`1.22x` / `5.24x`) |
 | **`rgb-frame-24bpp.bmp`** | **0.0012** | 0.0227 | 0.0119 | 8.793 / 14.846 | **35.666 / 64.509** | **9206.1 / 38648.9** (`19.42x` / `19.56x`) | 0.631 / 0.368 | **19116.6** (`13.67x` / `17.18x`) |
 | **10-Dataset Geometric Mean** | **0.0250** | 0.1272 | 0.0607 | **2.094 / 8.211** | **11.750 / 41.545** | **165.9 / 883.8** (`5.27x` / `5.29x`) | **2.333 / 0.665** | **133.2** (`3.92x` / `8.59x`) |
+
+### "Chimera Envelope" Showdown (`VXG v4` vs Impossible Best-of-Competitor Composites)
+
+Even if a competitor could simultaneously achieve its **maximum-compression ratio** (`LZ4-HC L9` or `Zstd L9`) and its **fastest preset throughput** (`LZ4-fast a1/a4` or `Zstd -3`) on every single dataset (`vxg-bench` Chimera Envelope, see [`docs/CHIMERA_BENCHMARKS.md`](docs/CHIMERA_BENCHMARKS.md), [`reports/v4-chimera-8t.md`](reports/v4-chimera-8t.md), and [`reports/real-chimera-8t.md`](reports/real-chimera-8t.md)):
+
+| Benchmark (`8T`, `64 KiB` blocks) | **VXG v4 Ratio** | `LZ4 Chimera` (`HC-L9` + `fast`) | `Zstd Chimera` (`L9` + `-3`) | `All-Rivals Chimera` (`Zstd-9` + `LZ4-fast`) | **VXG `VPI` Advantage** |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **`v4` 10-Dataset Geomean (`16 MiB`)** | **`0.0252` (`39.7:1`)** | `0.1011` · `6.55 / 24.71 GB/s` | `0.0557` · `5.16 / 10.11 GB/s` | `0.0557` · `6.55 / 24.71 GB/s` | **`4.09x` vs LZ4 Chimera · `3.97x` vs Zstd Chimera · `2.18x` vs All-Rivals** (`VXG: 7.05 / 23.82 GB/s`, `GCI 1.36x` greener) |
+| **`telemetry.csv` (`16 MiB`)** | **`0.0407`** | `0.1654` · `8.00 / 34.36 GB/s` | `0.0797` · `5.45 / 11.64 GB/s` | `0.0797` · `8.00 / 34.36 GB/s` | **Wins all 3 axes (`Ratio` + `9.14 GB/s` Enc + `40.04 GB/s` Dec) vs All-Rivals (`2.26x` VPI)** |
+| **`events.tsv` (`16 MiB`)** | **`0.0326`** | `0.1515` · `2.86 / 33.96 GB/s` | `0.0683` · `5.61 / 10.16 GB/s` | `0.0683` · `5.61 / 33.96 GB/s` | **Wins all 3 axes (`Ratio` + `8.55 GB/s` Enc + `42.33 GB/s` Dec) vs All-Rivals (`2.88x` VPI)** |
+| **`ndjson_varied.ndjson` (`56.5 MB` real)** | **`0.0914`** | `0.2180` · `3.82 / 17.55 GB/s` | `0.1480` · `4.74 / 9.49 GB/s` | `0.1480` · `4.74 / 17.55 GB/s` | **Wins all 3 axes vs LZ4 Chimera (`2.39x` smaller, `4.69 / 28.60 GB/s`) · `2.05x` vs All-Rivals** |
 
 ---
 
@@ -106,21 +117,23 @@ All benchmarks below are executed automatically on GitHub Actions via [`.github/
 
 ---
 
-## Compressed-Domain Query, Analytics, Mutation & Projection (`v0.4.2`)
+## Compressed-Domain Query, Analytics, Mutation & Projection (`v0.4.5`)
 
-Measured on real multi-template **`ndjson_varied.ndjson`** (`56.50 MB` raw -> `5.17 MB` / `9.14%` VXG `v4`, `300,000` rows, `863` independent `64 KiB` blocks, Apple Silicon `aarch64` NEON, median of 5 runs via `vxg-query-real`). Every output is asserted 100% byte-for-byte identical to `decompress + raw op (+ compress)`:
+Measured on real multi-template **`ndjson_varied.ndjson`** (`56.50 MB` raw -> `5.17 MB` / `9.14%` VXG `v4`, `300,000` rows, `863` independent `64 KiB` blocks) and **`data.csv`** (`30.53 MB` -> `5.48 MB` / `17.96%`, `250,001` rows, Apple Silicon `aarch64` NEON, persistent worker pool, median of 5 runs via `vxg-query-real`). Every output is asserted 100% byte-for-byte identical to `decompress + raw op (+ compress)`:
 
-| Workload | `1T` VXG | `1T` Speedup (`GB/s`) | Multi-Thread VXG | Multi-Thread Speedup (`GB/s`) |
+| Workload | `1T` VXG | `1T` Speedup (`GB/s`) | `8T` VXG | `8T` Speedup (`GB/s`) |
 | :--- | :---: | :---: | :---: | :---: |
-| **`filter_column` (`bytes >= 50000`, zone-map skip)** | `2.11 ms` | **`59.0x`** (`26.8 GB/s`) | `1.54 ms` (`8T`) | **`54.9x`** (**`36.8 GB/s`**) |
-| **`agg SUM/MIN/MAX(bytes)` (all `300k` rows)** | `3.74 ms` | **`49.4x`** (`15.1 GB/s`) | `6.13 ms` (`8T`) | **`21.6x`** (`9.2 GB/s`) |
-| **`group_by(service) COUNT(*)` (`8` groups)** | `4.07 ms` | **`41.2x`** (`13.9 GB/s`) | `5.39 ms` (`8T`) | **`28.3x`** (`10.5 GB/s`) |
-| **`group_by(service) SUM/MIN/MAX(bytes)`** | `8.45 ms` | **`31.2x`** (`6.7 GB/s`) | `5.22 ms` (`8T`) | **`48.5x`** (**`10.8 GB/s`**) |
-| **`select [ts,req_id]` (all `300k` rows -> `13.8 MB`)** | `8.58 ms` | **`17.3x`** (`6.6 GB/s`) | `4.53 ms` (`12T`) | **`29.0x`** (**`12.5 GB/s`**) |
-| **`select [ts,req_id,lat] WHERE fraud & 500 & lat>=150`** | `3.75 ms` | **`27.8x`** (`15.1 GB/s`) | `2.73 ms` (`12T`) | **`37.3x`** (**`20.7 GB/s`**) |
-| **`project_frame [service,status,bytes,lat]` (zero-reencode splice)** | `7.09 ms` | **`23.3x`** (`8.0 GB/s`) | `5.26 ms` (`12T`) | **`32.6x`** (**`10.7 GB/s`**) |
-| **`update_column WHERE status==500 SET CRITICAL`** | `11.55 ms` | **`22.6x`** (`4.9 GB/s`) | `3.20 ms` (`8T`) | **`34.5x`** (**`17.7 GB/s`**) |
-| **`map_column service -> uppercase` (`O(\|D\|)` dict splice)** | `8.44 ms` | **`30.5x`** (`6.7 GB/s`) | `3.27 ms` (`8T`) | **`31.5x`** (**`17.3 GB/s`**) |
+| **`filter_column` (`level == "NOPE"`, 0-hit alphabet)** | `1.54 ms` | **`59.7x`** (`36.8 GB/s`) | **`0.80 ms`** | **`103.4x`** (**`70.3 GB/s`**) |
+| **`filter_column` (`bytes >= 50000`, zone-map skip)** | `2.36 ms` | **`42.8x`** (`23.9 GB/s`) | **`0.93 ms`** | **`100.6x`** (**`60.9 GB/s`**) |
+| **`top_k_by` (`ORDER BY latency_ms ASC LIMIT 10`)** | `1.45 ms` | **`63.2x`** (`39.0 GB/s`) | **`0.58 ms`** | **`138.9x`** (**`97.0 GB/s`**) |
+| **`agg SUM/MIN/MAX(bytes)` (all `300k` rows)** | `1.70 ms` | **`62.6x`** (`33.2 GB/s`) | **`0.57 ms`** | **`152.0x`** (**`98.9 GB/s`**) |
+| **`group_by(service) COUNT(*)` (`8` groups)** | `2.23 ms` | **`46.4x`** (`25.4 GB/s`) | **`1.35 ms`** | **`79.3x`** (**`41.9 GB/s`**) |
+| **`group_by(service) SUM/MIN/MAX(bytes)`** | `4.25 ms` | **`40.3x`** (`13.3 GB/s`) | **`1.00 ms`** | **`157.9x`** (**`56.4 GB/s`**) |
+| **`select [service,status,bytes]` (all `300k` -> `16.2 MB`)** | `8.61 ms` | **`15.0x`** (`6.6 GB/s`) | **`3.07 ms`** | **`42.2x`** (**`18.4 GB/s`**) |
+| **`filter_frame` (`status == 500` -> `.vxg`)** | `13.25 ms` | **`8.0x`** (`4.3 GB/s`) | **`2.18 ms`** | **`40.1x`** (**`26.0 GB/s`**) |
+| **`update_column WHERE latency_ms>=250 SET CRITICAL`** | `4.89 ms` | **`30.8x`** (`11.6 GB/s`) | **`1.40 ms`** | **`66.6x`** (**`40.2 GB/s`**) |
+| **`map_column bytes -> bytes + 100` (1-col numeric splice)** | `4.86 ms` | **`32.3x`** (`11.6 GB/s`) | **`1.66 ms`** | **`61.9x`** (**`34.0 GB/s`**) |
+| **`data.csv` `filter_col` / `update` / `map` (`30.5 MB` CSV)** | `0.58 / 1.96 / 2.32 ms` | **`113.7x / 71.2x / 62.9x`** (`52.8 / 15.6 / 13.2 GB/s`) | `2.48 / 2.89 / 3.25 ms` | **`21.8x–36.5x`** (`9.4–12.3 GB/s`) |
 
 ---
 

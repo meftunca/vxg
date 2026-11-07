@@ -20,50 +20,50 @@ const OPS: OpRow[] = [
     tag: 'Filter',
     cat: 'query',
     name: 'filter_column: bytes >= 50000 (zone-map)',
-    ms1: [2.11, 124.59],
-    ms8: [1.54, 84.39]
+    ms1: [2.36, 101.03],
+    ms8: [0.93, 93.34]
   },
   {
     tag: 'Filter',
     cat: 'query',
     name: 'filter_column: latency_ms >= 200 (pushdown)',
-    ms1: [4.54, 130.25],
-    ms8: [1.88, 82.44]
+    ms1: [4.56, 104.41],
+    ms8: [1.81, 87.79]
   },
   {
     tag: 'Top-K',
     cat: 'query',
     name: 'top_k_by: ORDER BY latency_ms DESC LIMIT 10',
-    ms1: [1.78, 98.13],
-    ms8: [1.59, 91.26]
+    ms1: [1.52, 93.91],
+    ms8: [0.71, 113.43]
   },
   {
     tag: 'Top-K',
     cat: 'query',
     name: 'top_k_by: WHERE status==500 ORDER BY latency_ms DESC K=20',
-    ms1: [2.63, 93.32],
-    ms8: [1.56, 86.97]
+    ms1: [2.48, 94.21],
+    ms8: [0.84, 80.68]
   },
   {
     tag: 'Agg',
     cat: 'analytics',
     name: 'aggregate_column: SUM/MIN/MAX(bytes) (all 300k)',
-    ms1: [3.74, 184.61],
-    ms8: [4.97, 153.59]
+    ms1: [1.70, 106.65],
+    ms8: [0.57, 86.85]
   },
   {
     tag: 'Group By',
     cat: 'analytics',
     name: 'group_by(service): SUM/MIN/MAX(bytes) (8 groups)',
-    ms1: [8.45, 263.26],
-    ms8: [5.22, 253.17]
+    ms1: [4.25, 171.08],
+    ms8: [1.00, 158.21]
   },
   {
     tag: 'Select',
     cat: 'analytics',
-    name: 'select_columns [service,lat,bytes] WHERE status==500',
-    ms1: [3.39, 124.92],
-    ms8: [3.57, 109.96]
+    name: 'select_columns [service,status,bytes] (all 300k)',
+    ms1: [8.61, 129.27],
+    ms8: [3.07, 129.75]
   },
   {
     tag: 'Splice',
@@ -76,15 +76,15 @@ const OPS: OpRow[] = [
     tag: 'Update',
     cat: 'mutate',
     name: 'update_column: WHERE status==500 SET CRITICAL',
-    ms1: [11.55, 260.37],
-    ms8: [3.20, 110.40]
+    ms1: [5.30, 174.79],
+    ms8: [3.02, 120.22]
   },
   {
     tag: 'Map',
     cat: 'mutate',
-    name: 'map_column: service -> uppercase (O(|D|) dict splice)',
-    ms1: [8.44, 257.66],
-    ms8: [3.27, 103.17]
+    name: 'map_column: bytes -> bytes + 100 (1-col numeric splice)',
+    ms1: [4.86, 156.97],
+    ms8: [1.66, 103.03]
   }
 ]
 

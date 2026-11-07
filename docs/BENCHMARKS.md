@@ -3,6 +3,7 @@
 For the current numerical target, see [TARGET_4_006_12_15.md](TARGET_4_006_12_15.md).
 The fourth axis, CPU energy per GB, has its own [energy protocol](ENERGY_BENCHMARKS.md)
 with sustained workloads, idle observations and explicit measurement boundaries.
+For the **"Chimera Envelope" Showdown** (`VXG v4` vs impossible `LZ4-HC L9` / `Zstd L9` ratio + `LZ4-fast` / `Zstd -3` speed composites across all 10 `v4` datasets and real corpora), see **[CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md)**, [`reports/v4-chimera-1t.md`](../reports/v4-chimera-1t.md), and [`reports/v4-chimera-8t.md`](../reports/v4-chimera-8t.md).
 
 ## VXG v0.4.1 Local Comparative Results, Composite Index & Energy (Apple Silicon `aarch64`, SIMD=`Neon`, `16 MiB`, `block=65536`)
 
@@ -120,7 +121,7 @@ C libraries rather than reimplementations with potentially different performance
 
 All codecs use identical uncompressed input, independent block size, worker count, RAW
 fallback and checksum-off policy. Included configurations are VXG acceleration 1,
-LZ4 fast accelerations 1 and 4, and Zstd levels -3, 1 and 3. This is not a comparison to
+LZ4 fast accelerations 1 and 4 plus `LZ4-HC` level 9 (`lz4hc-c-l9`), and Zstd levels -3, 1, 3, and 9 (`zstd-c-l9`), alongside synthetic **Chimera Envelope** rows (`CHIMERA-LZ4`, `CHIMERA-ZSTD`, `CHIMERA-ALL`; see [CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md)). This is not a comparison to
 a single whole-file Zstd frame with cross-block history; that would be a separate workload.
 
 Compression includes allocating the encoded result, scratch/context creation per worker,
@@ -141,8 +142,7 @@ only with `--validated-decode`, after a `ValidatedFrame` has obtained its immuta
 proof outside timing; never compare that repeated-decode-only profile to LZ4's one-shot
 safe decode without reporting the one-time validation cost. Reference blocks already carry
 size/RAW metadata. Zstd decode context setup is per call, not hidden in a global cache.
-Multithreaded calls include scoped-thread creation/join; there is no persistent thread pool
-in this version.
+VXG multithreaded calls dispatch onto a persistent lock-free worker pool (`src/pool.rs`), eliminating per-call OS thread spawn and cold TLS allocation overhead.
 
 Inputs/buffers are reused (warm-cache workload). Two warmups are excluded. Each of five
 default samples runs for at least 100 ms, recording mean ns/operation within that sample;
