@@ -2,10 +2,10 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::thread::Thread;
 
-use crate::{block::WorkStats, Error, Result};
+use crate::{block::WorkStats, pool, Error, Result};
 
 use super::{
-    entry_size, max_compressed_size, write_entry, ArenaPart, WorkerOutput, HEADER_SIZE, MAGIC,
+    entry_size, max_compressed_size, write_entry, ArenaPart, WorkerSlice, HEADER_SIZE, MAGIC,
     VERSION_RELEASE,
 };
 
@@ -21,6 +21,14 @@ pub(crate) enum AssembleDest<'a> {
     Slice(&'a mut [u8]),
 }
 
+#[derive(Clone, Copy)]
+struct WorkerMeta {
+    arena_len: usize,
+    parts_ptr: *const ArenaPart,
+    parts_len: usize,
+    stats: WorkStats,
+}
+
 struct SyncCell<T>(UnsafeCell<T>);
 impl<T> SyncCell<T> {
     #[inline]
@@ -32,11 +40,14 @@ impl<T> SyncCell<T> {
 // - `slots[w]` and `parkers[w]` are written exclusively by worker `w` BEFORE
 //   `done_encode.fetch_add(1, AcqRel)`.
 // - The single thread observing `done_encode == workers` has `Acquire` visibility
-//   of all `slots`/`parkers`, exclusively accesses `dest_cell` and writes `plan_cell`
-//   and `plan_err`, then publishes `plan_ready.store(state, Release)`.
-// - After `plan_ready.load(Acquire) != 0`, `plan_cell` is read immutably and each
-//   `slots[k]` is claimed at most once via `next_copy.fetch_add(1, Relaxed)`.
+//   of all `slots`/`parkers` (while all other workers remain blocked inside `finish`
+//   keeping their borrowed `parts_ptr` slices alive), exclusively accesses `dest_cell`,
+//   writes `plan_cell` and `plan_err_cell`, then publishes `plan_ready.store(state, Release)`.
+// - After `plan_ready.load(Acquire) != 0`, `plan_cell` is read immutably and each worker `w`
+//   copies exclusively its own disjoint block indices into `out_base`.
 unsafe impl<T: Send> Sync for SyncCell<T> {}
+unsafe impl Sync for WorkerMeta {}
+unsafe impl Send for WorkerMeta {}
 
 fn wake_all(parkers: &[SyncCell<Option<Thread>>]) {
     for slot in parkers {
@@ -68,7 +79,7 @@ impl Drop for DoneGuard<'_> {
 }
 
 fn build_assembly_plan(
-    slots: &[SyncCell<Option<WorkerOutput>>],
+    slots: &[SyncCell<Option<WorkerMeta>>],
     n: usize,
     count: usize,
     block_size: usize,
@@ -81,12 +92,13 @@ fn build_assembly_plan(
     let mut total_stats = WorkStats::default();
     let mut seen = 0usize;
     for slot in slots {
-        let Some(ref w_out) = (unsafe { &*slot.0.get() }) else {
+        let Some(w_meta) = (unsafe { *slot.0.get() }) else {
             return Err(Error::WorkerPanic);
         };
-        let arena_len = w_out.arena.len();
-        total_stats += w_out.stats;
-        for part in &w_out.parts {
+        let arena_len = w_meta.arena_len;
+        total_stats += w_meta.stats;
+        let parts = unsafe { std::slice::from_raw_parts(w_meta.parts_ptr, w_meta.parts_len) };
+        for part in parts {
             let end = part
                 .offset
                 .checked_add(part.len)
@@ -203,14 +215,13 @@ pub(crate) fn parallel_encode_assemble<F>(
     encode_fn: F,
 ) -> Result<(usize, WorkStats)>
 where
-    F: Fn(usize) -> Result<WorkerOutput> + Sync,
+    F: Fn(usize, &mut dyn FnMut(WorkerSlice<'_>) -> Result<()>) -> Result<()> + Sync,
 {
     let bound = max_compressed_size(n, block_size)?;
     let done_encode = AtomicUsize::new(0);
-    let next_copy = AtomicUsize::new(0);
     let aborted = AtomicBool::new(false);
     let plan_ready = AtomicU8::new(0); // 0 = pending, 1 = ok, 2 = err
-    let slots: Vec<SyncCell<Option<WorkerOutput>>> =
+    let slots: Vec<SyncCell<Option<WorkerMeta>>> =
         (0..workers).map(|_| SyncCell(UnsafeCell::new(None))).collect();
     let parkers: Vec<SyncCell<Option<Thread>>> =
         (0..workers).map(|_| SyncCell(UnsafeCell::new(None))).collect();
@@ -219,22 +230,26 @@ where
         SyncCell(UnsafeCell::new((0, 0, Vec::new(), WorkStats::default())));
     let plan_err_cell: SyncCell<Option<Error>> = SyncCell(UnsafeCell::new(None));
 
-    let first_err = std::thread::scope(|scope| -> Option<Error> {
-        let run_worker = |w: usize| -> Result<()> {
+    pool::parallel_try_run(workers, |w| {
+        unsafe {
+            *parkers[w].0.get() = Some(std::thread::current());
+        }
+        let mut guard = DoneGuard {
+            done_encode: &done_encode,
+            aborted: &aborted,
+            plan_ready: &plan_ready,
+            parkers: &parkers,
+            workers,
+            completed: false,
+        };
+        encode_fn(w, &mut |slice: WorkerSlice<'_>| {
             unsafe {
-                *parkers[w].0.get() = Some(std::thread::current());
-            }
-            let mut guard = DoneGuard {
-                done_encode: &done_encode,
-                aborted: &aborted,
-                plan_ready: &plan_ready,
-                parkers: &parkers,
-                workers,
-                completed: false,
-            };
-            let out = encode_fn(w)?;
-            unsafe {
-                *slots[w].0.get() = Some(out);
+                *slots[w].0.get() = Some(WorkerMeta {
+                    arena_len: slice.arena.len(),
+                    parts_ptr: slice.parts.as_ptr(),
+                    parts_len: slice.parts.len(),
+                    stats: slice.stats,
+                });
             }
             guard.completed = true;
             if done_encode.fetch_add(1, Ordering::AcqRel) + 1 == workers {
@@ -269,7 +284,7 @@ where
                 plan_ready.store(state, Ordering::Release);
                 wake_all(&parkers);
             } else {
-                for _ in 0..64 {
+                for _ in 0..256 {
                     if plan_ready.load(Ordering::Acquire) != 0 {
                         break;
                     }
@@ -279,52 +294,16 @@ where
                     std::thread::park();
                 }
             }
-            let state = plan_ready.load(Ordering::Acquire);
-            loop {
-                let k = next_copy.fetch_add(1, Ordering::Relaxed);
-                if k >= workers {
-                    break;
-                }
-                if let Some(w_out) = unsafe { (*slots[k].get()).take() } {
-                    if state == 1 {
-                        let (out_base, _, ref dst_offsets, _) = unsafe { &*plan_cell.get() };
-                        unsafe {
-                            copy_worker_parts(&w_out.arena, &w_out.parts, *out_base, dst_offsets);
-                        }
-                    }
-                    drop(w_out);
+            if plan_ready.load(Ordering::Acquire) == 1 {
+                let (out_base, _, ref dst_offsets, _) = unsafe { &*plan_cell.get() };
+                unsafe {
+                    copy_worker_parts(slice.arena, slice.parts, *out_base, dst_offsets);
                 }
             }
             Ok(())
-        };
+        })
+    })?;
 
-        let mut handles_uninit = [const {
-            core::mem::MaybeUninit::<std::thread::ScopedJoinHandle<'_, Result<()>>>::uninit()
-        }; 256];
-        let spawned = workers - 1;
-        for w in 1..workers {
-            handles_uninit[w - 1].write(scope.spawn(move || run_worker(w)));
-        }
-        let mut first_err = run_worker(0).err();
-        for slot in handles_uninit.iter_mut().take(spawned) {
-            match unsafe { slot.assume_init_read() }.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) if first_err.is_none() => first_err = Some(e),
-                Err(_) => {
-                    aborted.store(true, Ordering::Release);
-                    if first_err.is_none() {
-                        first_err = Some(Error::WorkerPanic);
-                    }
-                }
-                _ => {}
-            }
-        }
-        first_err
-    });
-
-    if let Some(e) = first_err {
-        return Err(e);
-    }
     if let Some(e) = plan_err_cell.0.into_inner() {
         return Err(e);
     }
@@ -335,8 +314,8 @@ where
     let dest = dest_cell.0.into_inner();
     if let AssembleDest::Alloc(vec) = dest {
         // SAFETY: `build_assembly_plan` reserved `>= exact_len` bytes and initialized
-        // `0..table_end`, and all `workers` slots were claimed and copied without error
-        // or panic before `std::thread::scope` returned, initializing `table_end..exact_len`.
+        // `0..table_end`, and all `workers` copied their disjoint payload slices without error
+        // or panic before `pool::parallel_try_run` returned, initializing `table_end..exact_len`.
         unsafe {
             vec.set_len(exact_len);
         }

@@ -2,7 +2,7 @@ fn grammar_from_block<'a>(
     data: &'a [u8],
 ) -> Result<(Vec<Template<'a>>, Vec<Row<'a>>, usize, usize)> {
     let (templates, rows, template_rows, raw_rows, _raw_bytes) =
-        grammar_from_block_mode(data, false)?;
+        grammar_from_block_mode(data, false, false)?;
     Ok((templates, rows, template_rows, raw_rows))
 }
 
@@ -65,6 +65,63 @@ const CLF_TOK_OK: [bool; 256] = {
     }
     t
 };
+
+const fn build_ascii_nibble_lut(table: &[bool; 256]) -> [u8; 16] {
+    let mut lut = [0u8; 16];
+    let mut lo = 0usize;
+    while lo < 16 {
+        let mut mask = 0u8;
+        let mut hi = 0usize;
+        while hi < 8 {
+            if table[(hi << 4) | lo] {
+                mask |= 1u8 << hi;
+            }
+            hi += 1;
+        }
+        lut[lo] = mask;
+        lo += 1;
+    }
+    lut
+}
+
+const CLF_IP_NIBBLE_LUT: [u8; 16] = build_ascii_nibble_lut(&CLF_IP_OK);
+const CLF_TOK_NIBBLE_LUT: [u8; 16] = build_ascii_nibble_lut(&CLF_TOK_OK);
+
+#[inline(always)]
+unsafe fn scan_ascii_pred(
+    ptr: *const u8,
+    len: usize,
+    mut pos: usize,
+    table: &[bool; 256],
+    nibble_lut: &[u8; 16],
+) -> usize {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::*;
+        const HI_BITS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0];
+        let v_lut = vld1q_u8(nibble_lut.as_ptr());
+        let v_hi = vld1q_u8(HI_BITS.as_ptr());
+        let v_0f = vdupq_n_u8(0x0f);
+        while pos + 16 <= len {
+            let c = vld1q_u8(ptr.add(pos));
+            let m = vqtbl1q_u8(v_lut, vandq_u8(c, v_0f));
+            let b = vqtbl1q_u8(v_hi, vshrq_n_u8(c, 4));
+            let not_ok = vmvnq_u8(vtstq_u8(m, b));
+            let bits = vget_lane_u64::<0>(vreinterpret_u64_u8(vshrn_n_u16::<4>(
+                vreinterpretq_u16_u8(not_ok),
+            )));
+            if bits != 0 {
+                return pos + (bits.trailing_zeros() >> 2) as usize;
+            }
+            pos += 16;
+        }
+    }
+    let _ = nibble_lut;
+    while pos < len && table[unsafe { *ptr.add(pos) } as usize] {
+        pos += 1;
+    }
+    pos
+}
 
 #[inline(always)]
 unsafe fn scan_clf_bracket(ptr: *const u8, len: usize, pos: usize) -> Option<usize> {
@@ -197,10 +254,7 @@ fn try_match_clf_stream<'a>(
     if start >= len || !unsafe { *ptr.add(start) }.is_ascii_digit() {
         return None;
     }
-    let mut end0 = start + 1;
-    while end0 < len && CLF_IP_OK[unsafe { *ptr.add(end0) } as usize] {
-        end0 += 1;
-    }
+    let end0 = unsafe { scan_ascii_pred(ptr, len, start + 1, &CLF_IP_OK, &CLF_IP_NIBBLE_LUT) };
     if end0 - start < 7 {
         return None;
     }
@@ -242,10 +296,7 @@ fn try_match_clf_stream<'a>(
             unsafe { *col_ptrs.get_unchecked(slot).add(row_idx) = data.get_unchecked(pos..end); }
             pos = end;
         } else {
-            let mut end = pos;
-            while end < len && CLF_TOK_OK[unsafe { *ptr.add(end) } as usize] {
-                end += 1;
-            }
+            let end = unsafe { scan_ascii_pred(ptr, len, pos, &CLF_TOK_OK, &CLF_TOK_NIBBLE_LUT) };
             if end == pos || (end < len && { let b = unsafe { *ptr.add(end) }; b > b' ' && b < 0x7f }) {
                 return None;
             }
@@ -366,70 +417,6 @@ fn match_single_delim_or_logfmt_stream<'a>(
     *line_start = cur_line_start;
     *row_idx = cur_row_idx;
     *col_cap = cur_col_cap;
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn match_multi_clean_stream<'a>(
-    data: &'a [u8],
-    templates: &mut [Template<'a>],
-    clean_nl_flags: &[bool],
-    shared_segs: &[[u8; 16]; 16],
-    max_shared: &[u8; 16],
-    last_template: &mut usize,
-    line_start: &mut usize,
-    template_rows: &mut usize,
-    rows: &mut Vec<Row<'a>>,
-    val_buf: &mut [&'a [u8]; MAX_SLOTS],
-) -> bool {
-    let total_len = data.len();
-    let mut cur_line_start = *line_start;
-    let mut cur_last_tpl = *last_template;
-    let mut matched_any = false;
-    while cur_line_start < total_len {
-        let Some((matched_idx, line_len)) = try_match_clean_stream(
-            data,
-            cur_line_start,
-            templates,
-            clean_nl_flags,
-            shared_segs,
-            max_shared,
-            cur_last_tpl,
-            val_buf,
-        ) else {
-            break;
-        };
-        cur_line_start += line_len;
-        let tpl = unsafe { templates.get_unchecked_mut(matched_idx) };
-        let slots = tpl.values.len();
-        if slots != 0 {
-            cur_last_tpl = matched_idx;
-            let row_idx = unsafe { tpl.values.get_unchecked(0).len() };
-            if row_idx < min_col_capacity(&tpl.values) {
-                for slot in 0..slots {
-                    unsafe {
-                        let col = tpl.values.get_unchecked_mut(slot);
-                        *col.as_mut_ptr().add(row_idx) = *val_buf.get_unchecked(slot);
-                        col.set_len(row_idx + 1);
-                    }
-                }
-            } else {
-                for slot in 0..slots {
-                    unsafe {
-                        tpl.values
-                            .get_unchecked_mut(slot)
-                            .push(*val_buf.get_unchecked(slot));
-                    }
-                }
-            }
-        }
-        rows.push(Row::Template(matched_idx));
-        *template_rows += 1;
-        matched_any = true;
-    }
-    *line_start = cur_line_start;
-    *last_template = cur_last_tpl;
-    matched_any
 }
 
 #[inline(never)]

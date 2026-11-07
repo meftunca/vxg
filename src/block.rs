@@ -127,9 +127,6 @@ impl Scratch {
     pub fn payloads_mut(&mut self) -> &mut Vec<u8> {
         &mut self.payloads
     }
-    pub fn finish(self) -> Vec<u8> {
-        self.payloads
-    }
 }
 #[derive(Debug)]
 pub(crate) struct Encoded {

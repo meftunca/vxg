@@ -16,13 +16,13 @@ fn filter_column_parallel(
     let nb = in_blocks.len();
     let (meta, boundary_lines) = build_par_meta_and_boundary(in_blocks, options)?;
     let mut boundary_matches = Vec::new();
-    for bl in boundary_lines {
-        if line_matches_col_pred(&bl.bytes, pred) {
+    for bl in boundary_lines.iter() {
+        if line_matches_col_pred(bl.bytes, pred) {
             boundary_matches.push(RowMatch {
                 block_index: bl.block_index,
                 row_index: bl.row_index,
                 global_row_index: bl.global_row_index,
-                bytes: bl.bytes,
+                bytes: bl.bytes.to_vec(),
             });
         }
     }
@@ -39,7 +39,7 @@ fn filter_column_parallel(
         1
     };
 
-    let run_worker = || {
+    let run_worker = |_wid: usize| {
         let mut dec_buf = Vec::new();
         loop {
             if failed.load(Ordering::Relaxed) {
@@ -142,12 +142,7 @@ fn filter_column_parallel(
         }
     };
 
-    std::thread::scope(|s| {
-        for _ in 1..workers {
-            s.spawn(run_worker);
-        }
-        run_worker();
-    });
+    crate::pool::parallel_run(workers, run_worker);
 
     let cut = cutoff.load(Ordering::Relaxed);
     let mut out = Vec::new();

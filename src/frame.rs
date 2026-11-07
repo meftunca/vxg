@@ -83,10 +83,10 @@ pub(crate) struct ArenaPart {
     pub checksum: u32,
     pub raw_size: usize,
 }
-#[derive(Debug)]
-pub(crate) struct WorkerOutput {
-    pub arena: Vec<u8>,
-    pub parts: Vec<ArenaPart>,
+#[derive(Clone, Copy)]
+pub(crate) struct WorkerSlice<'a> {
+    pub arena: &'a [u8],
+    pub parts: &'a [ArenaPart],
     pub stats: block::WorkStats,
 }
 #[derive(Debug)]

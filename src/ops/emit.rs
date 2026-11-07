@@ -154,10 +154,16 @@ pub(super) fn encode_raw_chunks<'a>(
     scratch: &mut block::Scratch,
     out: &mut Vec<ReadyBlock<'a>>,
 ) -> Result<()> {
+    let mut raw_off = 0usize;
     for chunk in raw.chunks(chunk_size.max(1)) {
+        let leading_carry = raw_off > 0 && raw[raw_off - 1] != b'\n';
+        raw_off += chunk.len();
         scratch.payloads_mut().clear();
-        let (kind, off, len) =
-            match crate::columns::encode_grammar_block_into(chunk, scratch.payloads_mut())? {
+        let (kind, off, len) = match crate::columns::encode_grammar_block_into_with_carry(
+            chunk,
+            leading_carry,
+            scratch.payloads_mut(),
+        )? {
                 Some((po, pl)) => (block::COLUMN, po, pl),
                 None if (512..=65536).contains(&chunk.len()) => {
                     let p = scratch.payloads_mut();

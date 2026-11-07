@@ -15,6 +15,7 @@ pub mod baselines;
 mod block;
 pub mod checksum;
 pub mod columns;
+mod encode;
 mod error;
 pub mod ffi;
 mod frame;
@@ -25,6 +26,7 @@ pub mod mmap;
 pub mod ops;
 #[cfg(feature = "bench")]
 pub mod packing;
+pub(crate) mod pool;
 #[cfg(kani)]
 mod proofs;
 pub mod query;
@@ -119,10 +121,6 @@ impl DecodeOptions {
         Ok(())
     }
 }
-thread_local! {
-    static ENCODE_SCRATCH_POOL: std::cell::RefCell<block::Scratch> =
-        std::cell::RefCell::new(block::Scratch::new());
-}
 
 pub fn compress(input: &[u8], options: &Options) -> Result<Vec<u8>> {
     Ok(compress_inner::<false>(input, options)?.0)
@@ -131,7 +129,7 @@ pub fn compress_with_stats(input: &[u8], options: &Options) -> Result<(Vec<u8>, 
     compress_inner::<true>(input, options)
 }
 /// Compresses `input` directly into caller-supplied `out[..written]`, avoiding per-call output
-/// buffer allocation on the single-threaded path by reusing a thread-local scratch arena.
+/// buffer allocation on both single-threaded and multi-threaded paths by reusing thread-local scratch arenas.
 pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<usize> {
     options.validate()?;
     max_compressed_size(input.len(), options.block_size)?;
@@ -144,86 +142,7 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
         frame::VERSION_RELEASE
     };
     if workers == 1 {
-        let esize = frame::entry_size(version);
-        let adaptive = !options.legacy_v2;
-        let table_end = frame::HEADER_SIZE
-            .checked_add(esize.checked_mul(count).ok_or(Error::SizeOverflow)?)
-            .ok_or(Error::SizeOverflow)?;
-        return ENCODE_SCRATCH_POOL.with(|cell| -> Result<usize> {
-            let mut scratch = cell.borrow_mut();
-            scratch.payloads_mut().clear();
-            let payload_reserve = if adaptive {
-                (input.len() / 12).max(options.block_size.min(input.len()))
-            } else {
-                (input.len() / 4).max(options.block_size.min(input.len()))
-            };
-            scratch.reserve_payloads_for(table_end.saturating_add(payload_reserve));
-            scratch.payloads_mut().resize(table_end, 0);
-            let mut raw_offset = 0usize;
-            for (index, chunk) in input.chunks(options.block_size).enumerate() {
-                let (kind, offset, len) = if adaptive {
-                    match columns::encode_grammar_block_into(chunk, scratch.payloads_mut())? {
-                        Some((packet_offset, packet_len)) => {
-                            (block::COLUMN, packet_offset, packet_len)
-                        }
-                        None if (512..=65536).contains(&chunk.len()) => {
-                            let payloads = scratch.payloads_mut();
-                            let p_offset = payloads.len();
-                            payloads.extend_from_slice(chunk);
-                            (block::RAW, p_offset, chunk.len())
-                        }
-                        None => {
-                            let enc = block::encode::<false>(
-                                chunk,
-                                &mut scratch,
-                                engine,
-                                options.acceleration,
-                            );
-                            (enc.kind, enc.offset, enc.len)
-                        }
-                    }
-                } else {
-                    let enc =
-                        block::encode::<false>(chunk, &mut scratch, engine, options.acceleration);
-                    (enc.kind, enc.offset, enc.len)
-                };
-                let csum = if options.checksum {
-                    checksum::crc32c(chunk)
-                } else {
-                    0
-                };
-                let p = frame::HEADER_SIZE + index * esize;
-                frame::write_entry(
-                    scratch.payloads_mut(),
-                    p,
-                    version,
-                    raw_offset,
-                    offset,
-                    chunk.len(),
-                    len,
-                    csum,
-                    kind,
-                );
-                raw_offset += chunk.len();
-            }
-            let payloads = scratch.payloads_mut();
-            let written = payloads.len();
-            if out.len() < written {
-                return Err(Error::OutputSize {
-                    expected: written,
-                    actual: out.len(),
-                });
-            }
-            payloads[0..4].copy_from_slice(frame::MAGIC);
-            payloads[4..6].copy_from_slice(&version.to_le_bytes());
-            payloads[6..8].copy_from_slice(&(u16::from(options.checksum)).to_le_bytes());
-            payloads[8..16].copy_from_slice(&(input.len() as u64).to_le_bytes());
-            payloads[16..20].copy_from_slice(&(options.block_size as u32).to_le_bytes());
-            payloads[20..24].copy_from_slice(&(count as u32).to_le_bytes());
-            payloads[24..32].copy_from_slice(&0u64.to_le_bytes());
-            out[..written].copy_from_slice(payloads);
-            Ok(written)
-        });
+        return encode::encode_single_into(input, out, options, engine, count, version);
     }
     let next_idx = std::sync::atomic::AtomicUsize::new(0);
     let (written, _) = frame::parallel_encode_assemble(
@@ -234,10 +153,15 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
         options.checksum,
         version,
         frame::AssembleDest::Slice(out),
-        |worker| encode_worker::<false>(input, options, engine, worker, workers, &next_idx),
+        |worker, finish| {
+            encode::encode_worker_tls::<false, _>(
+                input, options, engine, worker, workers, &next_idx, finish,
+            )
+        },
     )?;
     Ok(written)
 }
+
 fn compress_inner<const STATS: bool>(
     input: &[u8],
     options: &Options,
@@ -253,7 +177,7 @@ fn compress_inner<const STATS: bool>(
         frame::VERSION_RELEASE
     };
     if workers == 1 {
-        return encode_single_worker::<STATS>(input, options, engine, count, version);
+        return encode::encode_single_worker::<STATS>(input, options, engine, count, version);
     }
     let next_idx = std::sync::atomic::AtomicUsize::new(0);
     let mut out = Vec::new();
@@ -265,191 +189,15 @@ fn compress_inner<const STATS: bool>(
         options.checksum,
         version,
         frame::AssembleDest::Alloc(&mut out),
-        |worker| encode_worker::<STATS>(input, options, engine, worker, workers, &next_idx),
+        |worker, finish| {
+            encode::encode_worker_tls::<STATS, _>(
+                input, options, engine, worker, workers, &next_idx, finish,
+            )
+        },
     )?;
     Ok((out, stats))
 }
-fn encode_single_worker<const STATS: bool>(
-    input: &[u8],
-    opt: &Options,
-    engine: simd::Engine,
-    count: usize,
-    version: u16,
-) -> Result<(Vec<u8>, WorkStats)> {
-    let mut scratch = block::Scratch::new();
-    let esize = frame::entry_size(version);
-    let adaptive = !opt.legacy_v2;
-    let table_end = frame::HEADER_SIZE
-        .checked_add(esize.checked_mul(count).ok_or(Error::SizeOverflow)?)
-        .ok_or(Error::SizeOverflow)?;
-    let payload_reserve = if adaptive {
-        (input.len() / 12).max(opt.block_size.min(input.len()))
-    } else {
-        (input.len() / 4).max(opt.block_size.min(input.len()))
-    };
-    scratch.reserve_payloads_for(table_end.saturating_add(payload_reserve));
-    scratch.payloads_mut().resize(table_end, 0);
-    let mut stats = WorkStats::default();
-    let mut raw_offset = 0usize;
-    for (index, chunk) in input.chunks(opt.block_size).enumerate() {
-        if index > 0 {
-            let payloads = scratch.payloads_mut();
-            let cur_len = payloads.len();
-            let written = cur_len - table_end;
-            if cur_len + chunk.len() + 1024 > payloads.capacity()
-                || (index == 1
-                    && table_end + written * count + opt.block_size > payloads.capacity())
-            {
-                let rem_raw = input.len() - raw_offset;
-                let est_rem = if written * 2 >= raw_offset {
-                    rem_raw + (count - index) * 64
-                } else {
-                    ((rem_raw as u64 * written as u64) / (raw_offset as u64).max(1)) as usize
-                        + opt.block_size * 2
-                };
-                payloads.reserve(est_rem.max(chunk.len() + 1024));
-            }
-        }
-        let (kind, offset, len) = if adaptive {
-            match columns::encode_grammar_block_into(chunk, scratch.payloads_mut())? {
-                Some((packet_offset, packet_len)) => (block::COLUMN, packet_offset, packet_len),
-                None if (512..=65536).contains(&chunk.len()) => {
-                    let payloads = scratch.payloads_mut();
-                    let p_offset = payloads.len();
-                    payloads.extend_from_slice(chunk);
-                    (block::RAW, p_offset, chunk.len())
-                }
-                None => {
-                    let enc = block::encode::<STATS>(chunk, &mut scratch, engine, opt.acceleration);
-                    if STATS {
-                        stats += enc.stats;
-                    }
-                    (enc.kind, enc.offset, enc.len)
-                }
-            }
-        } else {
-            let enc = block::encode::<STATS>(chunk, &mut scratch, engine, opt.acceleration);
-            if STATS {
-                stats += enc.stats;
-            }
-            (enc.kind, enc.offset, enc.len)
-        };
-        let csum = if opt.checksum {
-            checksum::crc32c(chunk)
-        } else {
-            0
-        };
-        let p = frame::HEADER_SIZE + index * esize;
-        frame::write_entry(
-            scratch.payloads_mut(),
-            p,
-            version,
-            raw_offset,
-            offset,
-            chunk.len(),
-            len,
-            csum,
-            kind,
-        );
-        raw_offset += chunk.len();
-    }
-    let payloads = scratch.payloads_mut();
-    payloads[0..4].copy_from_slice(frame::MAGIC);
-    payloads[4..6].copy_from_slice(&version.to_le_bytes());
-    payloads[6..8].copy_from_slice(&(u16::from(opt.checksum)).to_le_bytes());
-    payloads[8..16].copy_from_slice(&(input.len() as u64).to_le_bytes());
-    payloads[16..20].copy_from_slice(&(opt.block_size as u32).to_le_bytes());
-    payloads[20..24].copy_from_slice(&(count as u32).to_le_bytes());
-    payloads[24..32].copy_from_slice(&0u64.to_le_bytes());
-    Ok((scratch.finish(), stats))
-}
-fn encode_worker<const STATS: bool>(
-    input: &[u8],
-    opt: &Options,
-    engine: simd::Engine,
-    worker: usize,
-    workers: usize,
-    next_idx: &std::sync::atomic::AtomicUsize,
-) -> Result<frame::WorkerOutput> {
-    let mut scratch = block::Scratch::new();
-    let count = input.len().div_ceil(opt.block_size);
-    let capacity = count.saturating_sub(worker).div_ceil(workers);
-    let worker_raw_est = capacity.saturating_mul(opt.block_size).min(input.len());
-    let adaptive = !opt.legacy_v2;
-    let payload_reserve = if adaptive {
-        (worker_raw_est / 8).max(opt.block_size.min(input.len()) + 1024)
-    } else {
-        (worker_raw_est / 4).max(opt.block_size.min(input.len()) + 1024)
-    };
-    scratch.reserve_payloads_for(payload_reserve);
-    let mut parts = Vec::with_capacity(capacity);
-    let mut stats = WorkStats::default();
-    loop {
-        let index = next_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if index >= count {
-            break;
-        }
-        let start_byte = index * opt.block_size;
-        let end_byte = (start_byte + opt.block_size).min(input.len());
-        let chunk = &input[start_byte..end_byte];
-        if !parts.is_empty() {
-            let done = parts.len();
-            let payloads = scratch.payloads_mut();
-            let cur_len = payloads.len();
-            if cur_len + chunk.len() + 1024 > payloads.capacity()
-                || (done == 1
-                    && cur_len.saturating_mul(capacity) + opt.block_size + 4096
-                        > payloads.capacity())
-            {
-                let rem_blocks = capacity.saturating_sub(done).max(2);
-                let avg = cur_len / done;
-                let est_rem = rem_blocks.saturating_mul(avg + 1024) + opt.block_size;
-                payloads.reserve(est_rem.max(chunk.len() + 1024));
-            }
-        }
-        let (kind, offset, len) = if adaptive {
-            match columns::encode_grammar_block_into(chunk, scratch.payloads_mut())? {
-                Some((packet_offset, packet_len)) => (block::COLUMN, packet_offset, packet_len),
-                None if (512..=65536).contains(&chunk.len()) => {
-                    let payloads = scratch.payloads_mut();
-                    let raw_offset = payloads.len();
-                    payloads.extend_from_slice(chunk);
-                    (block::RAW, raw_offset, chunk.len())
-                }
-                None => {
-                    let enc = block::encode::<STATS>(chunk, &mut scratch, engine, opt.acceleration);
-                    if STATS {
-                        stats += enc.stats;
-                    }
-                    (enc.kind, enc.offset, enc.len)
-                }
-            }
-        } else {
-            let enc = block::encode::<STATS>(chunk, &mut scratch, engine, opt.acceleration);
-            if STATS {
-                stats += enc.stats;
-            }
-            (enc.kind, enc.offset, enc.len)
-        };
-        parts.push(frame::ArenaPart {
-            index,
-            offset,
-            len,
-            kind,
-            raw_size: chunk.len(),
-            checksum: if opt.checksum {
-                checksum::crc32c(chunk)
-            } else {
-                0
-            },
-        });
-    }
-    Ok(frame::WorkerOutput {
-        arena: scratch.finish(),
-        parts,
-        stats,
-    })
-}
+
 pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     options.validate()?;
     let mut v4_offsets = [core::mem::MaybeUninit::<u32>::uninit(); frame::MAX_STACK_DIR_BLOCKS + 1];
@@ -504,6 +252,7 @@ pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     frame.decode_into(&mut out, options)?;
     Ok(out)
 }
+
 pub fn decompress_into(src: &[u8], out: &mut [u8], options: &DecodeOptions) -> Result<()> {
     options.validate()?;
     let mut v4_offsets = [core::mem::MaybeUninit::<u32>::uninit(); frame::MAX_STACK_DIR_BLOCKS + 1];
@@ -548,6 +297,7 @@ pub fn decompress_into(src: &[u8], out: &mut [u8], options: &DecodeOptions) -> R
     }
     Frame::parse(src, options.max_output)?.decode_into(out, options)
 }
+
 /// Zero-allocation random-access decompression of a single block `block_index`
 /// directly into `out[..block_raw_size]`.
 pub fn extract_block_into(

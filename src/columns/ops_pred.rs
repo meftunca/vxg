@@ -309,7 +309,17 @@ fn eval_col_pred_on_slot<'a>(
 
     if let ColumnStream::Dictionary { u8_offset, .. } = col.stream {
         if let Some((slice_off, entries)) = col.dict_slices {
-            let mut valid = vec![false; entries];
+            let mut valid_inline = [false; 256];
+            let mut valid_ov = if entries > 256 {
+                vec![false; entries]
+            } else {
+                Vec::new()
+            };
+            let valid: &mut [bool] = if entries <= 256 {
+                &mut valid_inline[..entries]
+            } else {
+                &mut valid_ov[..entries]
+            };
             let mut match_count = 0usize;
             let mut single_id = 0u8;
             for (e, slot_ok) in valid.iter_mut().enumerate() {

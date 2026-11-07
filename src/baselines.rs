@@ -10,6 +10,7 @@ extern "C" {
     fn LZ4_versionString() -> *const c_char;
     fn LZ4_compressBound(n: c_int) -> c_int;
     fn LZ4_sizeofState() -> c_int;
+    fn LZ4_sizeofStateHC() -> c_int;
     fn LZ4_compress_fast_extState(
         state: *mut c_void,
         src: *const c_char,
@@ -17,6 +18,14 @@ extern "C" {
         n: c_int,
         cap: c_int,
         acc: c_int,
+    ) -> c_int;
+    fn LZ4_compress_HC_extStateHC(
+        state: *mut c_void,
+        src: *const c_char,
+        dst: *mut c_char,
+        n: c_int,
+        cap: c_int,
+        level: c_int,
     ) -> c_int;
     fn LZ4_decompress_safe(src: *const c_char, dst: *mut c_char, size: c_int, cap: c_int) -> c_int;
     fn ZSTD_versionString() -> *const c_char;
@@ -46,12 +55,14 @@ extern "C" {
 #[derive(Clone, Copy, Debug)]
 pub enum Codec {
     Lz4 { acceleration: i32 },
+    Lz4Hc { level: i32 },
     Zstd { level: i32 },
 }
 impl Codec {
     pub fn name(self) -> String {
         match self {
             Self::Lz4 { acceleration } => format!("lz4-c-a{acceleration}"),
+            Self::Lz4Hc { level } => format!("lz4hc-c-l{level}"),
             Self::Zstd { level } => format!("zstd-c-l{level}"),
         }
     }
@@ -135,6 +146,9 @@ impl Encoded {
         if matches!(codec,Codec::Lz4{acceleration} if acceleration<1) {
             return Err(Error::InvalidOption("LZ4 acceleration must be positive"));
         }
+        if matches!(codec, Codec::Lz4Hc { level } if !(1..=12).contains(&level)) {
+            return Err(Error::InvalidOption("LZ4-HC level must be 1..=12"));
+        }
         let count = input.len().div_ceil(block_size);
         let workers = threads.min(count.max(1));
         let mut indexed = if workers == 1 {
@@ -207,21 +221,31 @@ fn encode_group(
     } else {
         None
     };
-    // LZ4 extState requires 8-byte alignment. Vec<u64>, not Vec<u8>.
-    let mut state = if matches!(codec, Codec::Lz4 { .. }) {
-        let n = unsafe { LZ4_sizeofState() };
-        if n <= 0 {
-            return Err(Error::Backend("LZ4 state size".into()));
+    // LZ4 extState / extStateHC requires 8-byte alignment. Vec<u64>, not Vec<u8>.
+    let mut state = match codec {
+        Codec::Lz4 { .. } => {
+            let n = unsafe { LZ4_sizeofState() };
+            if n <= 0 {
+                return Err(Error::Backend("LZ4 state size".into()));
+            }
+            vec![0u64; (n as usize).div_ceil(8)]
         }
-        vec![0u64; (n as usize).div_ceil(8)]
-    } else {
-        Vec::new()
+        Codec::Lz4Hc { .. } => {
+            let n = unsafe { LZ4_sizeofStateHC() };
+            if n <= 0 {
+                return Err(Error::Backend("LZ4-HC state size".into()));
+            }
+            vec![0u64; (n as usize).div_ceil(8)]
+        }
+        Codec::Zstd { .. } => Vec::new(),
     };
     let mut all = Vec::new();
     for (i, src) in input.chunks(bs).enumerate().skip(worker).step_by(workers) {
         let cap = unsafe {
             match codec {
-                Codec::Lz4 { .. } => LZ4_compressBound(src.len() as c_int) as usize,
+                Codec::Lz4 { .. } | Codec::Lz4Hc { .. } => {
+                    LZ4_compressBound(src.len() as c_int) as usize
+                }
                 Codec::Zstd { .. } => ZSTD_compressBound(src.len()),
             }
         };
@@ -241,6 +265,20 @@ fn encode_group(
                     );
                     if n <= 0 {
                         return Err(Error::Backend("LZ4 compression failed".into()));
+                    }
+                    n as usize
+                }
+                Codec::Lz4Hc { level } => {
+                    let n = LZ4_compress_HC_extStateHC(
+                        state.as_mut_ptr().cast(),
+                        src.as_ptr().cast(),
+                        dst.as_mut_ptr().cast(),
+                        src.len() as c_int,
+                        cap as c_int,
+                        level,
+                    );
+                    if n <= 0 {
+                        return Err(Error::Backend("LZ4-HC compression failed".into()));
                     }
                     n as usize
                 }
@@ -288,7 +326,7 @@ fn decode_group(chunks: &[Chunk], out: &mut [u8], codec: Codec) -> Result<()> {
         }
         let n = unsafe {
             match codec {
-                Codec::Lz4 { .. } => {
+                Codec::Lz4 { .. } | Codec::Lz4Hc { .. } => {
                     let n = LZ4_decompress_safe(
                         chunk.bytes.as_ptr().cast(),
                         dst.as_mut_ptr().cast(),
@@ -314,4 +352,42 @@ fn decode_group(chunks: &[Chunk], out: &mut [u8], codec: Codec) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lz4hc_and_zstd9_roundtrip_and_beat_fast_levels_on_text() {
+        let mut src = Vec::with_capacity(200_000);
+        for i in 0..2500u32 {
+            src.extend_from_slice(
+                format!(
+                    "{{\"ts\":{},\"svc\":\"auth-api\",\"status\":200,\"user\":\"u{:05}\",\"msg\":\"token verified ok\"}}\n",
+                    1_700_000_000 + i,
+                    i % 317
+                )
+                .as_bytes(),
+            );
+        }
+        let mut out = vec![0u8; src.len()];
+        let lz4_fast = Encoded::compress(&src, Codec::Lz4 { acceleration: 1 }, 65536, 2).unwrap();
+        lz4_fast.decode_into(&mut out, 2).unwrap();
+        assert_eq!(out, src);
+
+        let lz4_hc9 = Encoded::compress(&src, Codec::Lz4Hc { level: 9 }, 65536, 2).unwrap();
+        lz4_hc9.decode_into(&mut out, 2).unwrap();
+        assert_eq!(out, src);
+        assert!(lz4_hc9.encoded_size() < lz4_fast.encoded_size());
+
+        let zstd_1 = Encoded::compress(&src, Codec::Zstd { level: 1 }, 65536, 2).unwrap();
+        zstd_1.decode_into(&mut out, 2).unwrap();
+        assert_eq!(out, src);
+
+        let zstd_9 = Encoded::compress(&src, Codec::Zstd { level: 9 }, 65536, 2).unwrap();
+        zstd_9.decode_into(&mut out, 2).unwrap();
+        assert_eq!(out, src);
+        assert!(zstd_9.encoded_size() <= zstd_1.encoded_size());
+    }
 }

@@ -13,8 +13,9 @@ use vxg::{
 
 use super::{
     allocator_name,
+    config::{CodecPoint, Config, DatasetSummary},
     metrics::measure_op,
-    Config, DatasetSummary, R,
+    R,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -32,13 +33,22 @@ pub(super) fn evaluate_baselines_and_gpu(
     lz: &str,
     zs: &str,
 ) -> R<()> {
-    for codec in [
+    let mut codecs = vec![
         Codec::Lz4 { acceleration: 1 },
         Codec::Lz4 { acceleration: 4 },
+    ];
+    if !c.fast_baselines {
+        codecs.push(Codec::Lz4Hc { level: 9 });
+    }
+    codecs.extend([
         Codec::Zstd { level: -3 },
         Codec::Zstd { level: 1 },
         Codec::Zstd { level: 3 },
-    ] {
+    ]);
+    if !c.fast_baselines {
+        codecs.push(Codec::Zstd { level: 9 });
+    }
+    for codec in codecs {
         let compressed = Encoded::compress(data, codec, c.block_size, c.threads)?;
         compressed.decode_into(out, c.threads)?;
         assert_eq!(out, data, "baseline correctness before timing");
@@ -83,34 +93,39 @@ pub(super) fn evaluate_baselines_and_gpu(
             zs,
             "",
         )?;
-        let ratio = compressed.encoded_size() as f64 / data.len() as f64;
-        let enc_gbps = data.len() as f64 / median(&en.ns_samples);
-        let dec_gbps = data.len() as f64 / median(&de.ns_samples);
+        let pt = CodecPoint {
+            ratio: compressed.encoded_size() as f64 / data.len() as f64,
+            enc: data.len() as f64 / median(&en.ns_samples),
+            dec: data.len() as f64 / median(&de.ns_samples),
+            enc_j_gb: en.j_per_gb,
+            dec_j_gb: de.j_per_gb,
+        };
         match codec {
-            Codec::Lz4 { acceleration: 1 } => {
-                ds_summary.lz4_ratio = ratio;
-                ds_summary.lz4_enc = enc_gbps;
-                ds_summary.lz4_dec = dec_gbps;
-                ds_summary.lz4_enc_j_gb = en.j_per_gb;
-                ds_summary.lz4_dec_j_gb = de.j_per_gb;
-            }
-            Codec::Zstd { level: 1 } => {
-                ds_summary.zstd1_ratio = ratio;
-                ds_summary.zstd1_enc = enc_gbps;
-                ds_summary.zstd1_dec = dec_gbps;
-                ds_summary.zstd1_enc_j_gb = en.j_per_gb;
-                ds_summary.zstd1_dec_j_gb = de.j_per_gb;
-            }
-            Codec::Zstd { level: 3 } => {
-                ds_summary.zstd3_ratio = ratio;
-                ds_summary.zstd3_enc = enc_gbps;
-                ds_summary.zstd3_dec = dec_gbps;
-                ds_summary.zstd3_enc_j_gb = en.j_per_gb;
-                ds_summary.zstd3_dec_j_gb = de.j_per_gb;
-            }
+            Codec::Lz4 { acceleration: 1 } => ds_summary.lz4_a1 = pt,
+            Codec::Lz4 { acceleration: 4 } => ds_summary.lz4_a4 = pt,
+            Codec::Lz4Hc { level: 9 } => ds_summary.lz4hc_9 = pt,
+            Codec::Zstd { level: -3 } => ds_summary.zstd_m3 = pt,
+            Codec::Zstd { level: 1 } => ds_summary.zstd_1 = pt,
+            Codec::Zstd { level: 3 } => ds_summary.zstd_3 = pt,
+            Codec::Zstd { level: 9 } => ds_summary.zstd_9 = pt,
             _ => {}
         }
     }
+    let lc = ds_summary.lz4_chimera();
+    let zc = ds_summary.zstd_chimera();
+    let ac = ds_summary.all_rivals_chimera();
+    eprintln!(
+        "{name:22} CHIMERA-LZ4    envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [min-ratio + max-speed]",
+        lc.ratio, lc.enc, lc.dec
+    );
+    eprintln!(
+        "{name:22} CHIMERA-ZSTD   envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [min-ratio + max-speed]",
+        zc.ratio, zc.enc, zc.dec
+    );
+    eprintln!(
+        "{name:22} CHIMERA-ALL    envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [VXG ratio={:.3} enc={:.3} dec={:.3}]",
+        ac.ratio, ac.enc, ac.dec, ds_summary.vxg.ratio, ds_summary.vxg.enc, ds_summary.vxg.dec
+    );
     if let Some(device) = gpu.as_mut() {
         let options = GpuOptions {
             block_size: c.block_size,

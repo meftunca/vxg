@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::{block, query, simd, DecodeOptions, Frame, Options, Result, BLOCK_COLUMN};
+use crate::{query, simd, DecodeOptions, Frame, Options, Result, BLOCK_COLUMN};
 
 use super::emit::{emit_ready_blocks, encode_raw_chunks, BytesRef, ReadyBlock};
 use super::expr::{line_matches_expr, PredExpr};
@@ -74,10 +74,10 @@ fn select_columns_parallel(
     } else {
         vec![None; nb]
     };
-    for bl in boundary_lines {
-        if where_expr.is_none_or(|e| line_matches_expr(&bl.bytes, e)) {
+    for bl in boundary_lines.iter() {
+        if where_expr.is_none_or(|e| line_matches_expr(bl.bytes, e)) {
             let mut proj = Vec::new();
-            if project_line(&bl.bytes, cols, &mut proj) {
+            if project_line(bl.bytes, cols, &mut proj) {
                 boundary_after[bl.block_index] = Some(proj);
             }
         }
@@ -95,7 +95,7 @@ fn select_columns_parallel(
         1
     };
 
-    let run_worker = || {
+    let run_worker = |_wid: usize| {
         let mut dec_buf = Vec::new();
         loop {
             if failed.load(Ordering::Relaxed) {
@@ -145,12 +145,7 @@ fn select_columns_parallel(
         }
     };
 
-    std::thread::scope(|s| {
-        for _ in 1..workers {
-            s.spawn(run_worker);
-        }
-        run_worker();
-    });
+    crate::pool::parallel_run(workers, run_worker);
 
     let cut = cutoff.load(Ordering::Relaxed);
     let mut unpacked: Vec<Option<(usize, Vec<u8>)>> = Vec::with_capacity(nb);
@@ -410,10 +405,10 @@ pub(super) fn project_frame_impl(
     } else {
         vec![None; nb]
     };
-    for bl in boundary_lines {
-        if where_expr.is_none_or(|e| line_matches_expr(&bl.bytes, e)) {
+    for bl in boundary_lines.iter() {
+        if where_expr.is_none_or(|e| line_matches_expr(bl.bytes, e)) {
             let mut proj = Vec::new();
-            if project_line(&bl.bytes, cols, &mut proj) && !proj.is_empty() {
+            if project_line(bl.bytes, cols, &mut proj) && !proj.is_empty() {
                 boundary_after[bl.block_index] = Some(proj);
             }
         }
@@ -444,7 +439,7 @@ pub(super) fn project_frame_impl(
         let next = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
         let step = if nb >= workers * 8 { 4 } else { 1 };
-        let run_worker = || {
+        let run_worker = |_wid: usize| {
             let mut dec_buf = Vec::new();
             let mut crc_buf = Vec::new();
             loop {
@@ -480,19 +475,13 @@ pub(super) fn project_frame_impl(
                 }
             }
         };
-        std::thread::scope(|s| {
-            for _ in 1..workers {
-                s.spawn(run_worker);
-            }
-            run_worker();
-        });
+        crate::pool::parallel_run(workers, run_worker);
         for slot in slots {
             results.push(slot.into_inner().unwrap()?);
         }
     }
 
     let engine = simd::Engine::new(enc_options.simd)?;
-    let mut enc_scratch: Option<block::Scratch> = None;
     let mut ready: Vec<ReadyBlock<'_>> = Vec::with_capacity(nb);
     let mut pending_bytes = Vec::new();
 
@@ -508,14 +497,16 @@ pub(super) fn project_frame_impl(
             } => {
                 spliced_absorbed_tail = true;
                 if !pending_bytes.is_empty() {
-                    encode_raw_chunks(
-                        &pending_bytes,
-                        enc_options.block_size,
-                        enc_options,
-                        engine,
-                        enc_scratch.get_or_insert_with(block::Scratch::new),
-                        &mut ready,
-                    )?;
+                    crate::encode::ENCODE_SCRATCH_POOL.with(|cell| {
+                        encode_raw_chunks(
+                            &pending_bytes,
+                            enc_options.block_size,
+                            enc_options,
+                            engine,
+                            &mut cell.borrow_mut(),
+                            &mut ready,
+                        )
+                    })?;
                     pending_bytes.clear();
                 }
                 ready.push(ReadyBlock {
@@ -537,14 +528,16 @@ pub(super) fn project_frame_impl(
         if ready.is_empty() {
             return crate::compress(&pending_bytes, enc_options);
         }
-        encode_raw_chunks(
-            &pending_bytes,
-            enc_options.block_size,
-            enc_options,
-            engine,
-            enc_scratch.get_or_insert_with(block::Scratch::new),
-            &mut ready,
-        )?;
+        crate::encode::ENCODE_SCRATCH_POOL.with(|cell| {
+            encode_raw_chunks(
+                &pending_bytes,
+                enc_options.block_size,
+                enc_options,
+                engine,
+                &mut cell.borrow_mut(),
+                &mut ready,
+            )
+        })?;
     }
 
     if ready.is_empty() {

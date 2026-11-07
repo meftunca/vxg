@@ -28,9 +28,9 @@ pub(crate) fn scan_frame_into_heap(
             .filter(|m| m.row_count > 0)
             .map(|m| m.row_count - usize::from(m.had_in_carry))
             .sum::<usize>();
-        for bl in &boundary_lines {
+        for bl in boundary_lines.iter() {
             heap.push_line_if_match(
-                &bl.bytes,
+                bl.bytes,
                 global_block_offset + bl.block_index,
                 bl.row_index,
                 global_row_offset + bl.global_row_index,
@@ -144,12 +144,7 @@ pub(crate) fn scan_frame_into_heap(
             }
         };
 
-        std::thread::scope(|s| {
-            for wid in 1..workers {
-                s.spawn(move || run_worker(wid));
-            }
-            run_worker(0);
-        });
+        crate::pool::parallel_run(workers, run_worker);
 
         for slot in worker_heaps {
             if let Some(res) = slot.into_inner() {

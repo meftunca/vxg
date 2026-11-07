@@ -44,6 +44,68 @@ fn unpack_block_mode(bytes: &[u8], strict: bool) -> Result<Vec<u8>> {
     }
 }
 
+fn raw_packet(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + uleb_len(data.len()) + 1);
+    out.push(RAW_PACKET);
+    put_uleb(&mut out, data.len());
+    out.extend_from_slice(data);
+    out
+}
+
+#[inline(always)]
+fn has_structured_line_near(
+    data: &[u8],
+    probe_base: usize,
+    skip_first_partial: bool,
+    max_lines: usize,
+    hits: &mut usize,
+    prev_slots: &mut Option<usize>,
+    probe_spans: &mut [(u32, u32); MAX_SLOTS],
+    probe_overflow: &mut Vec<(u32, u32)>,
+) -> bool {
+    let mut pos = if skip_first_partial {
+        let Some(nl) = find_byte(b'\n', &data[probe_base..data.len().min(probe_base + 4096)])
+        else {
+            return false;
+        };
+        probe_base + nl + 1
+    } else {
+        probe_base
+    };
+    for _ in 0..max_lines {
+        if pos >= data.len() {
+            break;
+        }
+        let Some(nl) = find_byte(b'\n', &data[pos..data.len().min(pos + 4096)]) else {
+            break;
+        };
+        let first_len = nl + 1;
+        let rec_len = scan_multiline_json_object(&data[pos..], first_len).unwrap_or(first_len);
+        let end = pos + rec_len;
+        let line = &data[pos..end];
+        if let Some(slots) = parse_record_spans(line, probe_spans, probe_overflow) {
+            let mut p = 0usize;
+            skip_space(line, &mut p);
+            if line.get(p) == Some(&b'{') {
+                return true;
+            }
+            if *prev_slots == Some(slots) {
+                *hits += 1;
+                if *hits >= 2 {
+                    return true;
+                }
+            } else {
+                *prev_slots = Some(slots);
+                if *hits == 0 {
+                    *hits = 1;
+                }
+            }
+        }
+        pos = end;
+    }
+    false
+}
+
 /// Encode one independent block as a canonical structured packet.
 ///
 /// Returns `None` when the grammar packet is not strictly smaller than the raw
@@ -58,7 +120,7 @@ pub fn encode_grammar_block(data: &[u8]) -> Result<Option<Vec<u8>>> {
     }
     let raw_len = 1 + uleb_len(data.len()) + data.len();
     let mut out = Vec::with_capacity(4096);
-    if pack_grammar_into(data, &mut out)? && out.len() < raw_len {
+    if pack_grammar_into(data, false, &mut out)? && out.len() < raw_len {
         return Ok(Some(out));
     }
     out.clear();
@@ -78,9 +140,11 @@ pub fn encode_grammar_block(data: &[u8]) -> Result<Option<Vec<u8>>> {
     Ok(None)
 }
 
-/// Encode one independent block directly into `out` if it compresses smaller than raw.
-pub(crate) fn encode_grammar_block_into(
+/// Encode one independent block into `out`, marking line 0 as `Row::Raw` when `leading_carry`
+/// indicates the previous block ended mid-line without `\n`.
+pub(crate) fn encode_grammar_block_into_with_carry(
     data: &[u8],
+    leading_carry: bool,
     out: &mut Vec<u8>,
 ) -> Result<Option<(usize, usize)>> {
     if data.is_empty() {
@@ -93,7 +157,7 @@ pub(crate) fn encode_grammar_block_into(
     // `cn >= rn` for COLUMN/LZ kinds (those blocks must be stored RAW instead).
     let raw_len = data.len();
     let start = out.len();
-    match pack_grammar_into(data, out) {
+    match pack_grammar_into(data, leading_carry, out) {
         Ok(true) => {
             let len = out.len() - start;
             if len < raw_len && (len * 4 < data.len() * 3 || data.len() < 512) {

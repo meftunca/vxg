@@ -155,68 +155,43 @@ fn verify_single_parsed_frame(
     let max_batch = (blocks.len() / (workers * 8)).clamp(1, 4);
     let tail_cutoff = blocks.len().saturating_sub(workers * 4);
 
-    std::thread::scope(|scope| {
-        let next_ref = &next_idx;
-        let abort_ref = &aborted;
-        let run_worker = || -> Result<()> {
-            let mut scratch = vec![0u8; max_blk];
-            loop {
-                if abort_ref.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
-                let step = if next_ref.load(Ordering::Relaxed) < tail_cutoff {
-                    max_batch
+    crate::pool::parallel_try_run(workers, |_| {
+        let mut scratch = vec![0u8; max_blk];
+        loop {
+            if aborted.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let step = if next_idx.load(Ordering::Relaxed) < tail_cutoff {
+                max_batch
+            } else {
+                1
+            };
+            let start = next_idx.fetch_add(step, Ordering::Relaxed);
+            if start >= blocks.len() {
+                return Ok(());
+            }
+            let end = (start + step).min(blocks.len());
+            for (local_off, b) in blocks[start..end].iter().enumerate() {
+                let idx = start + local_off;
+                if b.info.kind == block::RAW {
+                    if verify_csum && crc32c(b.payload) != b.info.checksum {
+                        aborted.store(true, Ordering::Relaxed);
+                        return Err(Error::Checksum { block: idx });
+                    }
                 } else {
-                    1
-                };
-                let start = next_ref.fetch_add(step, Ordering::Relaxed);
-                if start >= blocks.len() {
-                    return Ok(());
-                }
-                let end = (start + step).min(blocks.len());
-                for (local_off, b) in blocks[start..end].iter().enumerate() {
-                    let idx = start + local_off;
-                    if b.info.kind == block::RAW {
-                        if verify_csum && crc32c(b.payload) != b.info.checksum {
-                            abort_ref.store(true, Ordering::Relaxed);
-                            return Err(Error::Checksum { block: idx });
-                        }
-                    } else {
-                        let dst = &mut scratch[..b.info.raw_size];
-                        if let Err(e) =
-                            block::decode(b.payload, b.info.kind, dst, engine, short_distance)
-                        {
-                            abort_ref.store(true, Ordering::Relaxed);
-                            return Err(e);
-                        }
-                        if verify_csum && crc32c(dst) != b.info.checksum {
-                            abort_ref.store(true, Ordering::Relaxed);
-                            return Err(Error::Checksum { block: idx });
-                        }
+                    let dst = &mut scratch[..b.info.raw_size];
+                    if let Err(e) =
+                        block::decode(b.payload, b.info.kind, dst, engine, short_distance)
+                    {
+                        aborted.store(true, Ordering::Relaxed);
+                        return Err(e);
+                    }
+                    if verify_csum && crc32c(dst) != b.info.checksum {
+                        aborted.store(true, Ordering::Relaxed);
+                        return Err(Error::Checksum { block: idx });
                     }
                 }
             }
-        };
-
-        let mut handles = Vec::with_capacity(workers - 1);
-        for _ in 1..workers {
-            handles.push(scope.spawn(run_worker));
-        }
-        let mut first_err = run_worker().err();
-        for h in handles {
-            match h.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) if first_err.is_none() => first_err = Some(e),
-                Ok(Err(_)) => {}
-                Err(_) if first_err.is_none() => {
-                    first_err = Some(Error::Backend("worker thread panicked".into()));
-                }
-                Err(_) => {}
-            }
-        }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
         }
     })
 }

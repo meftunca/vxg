@@ -139,7 +139,30 @@ fn validate_raw_column(buf: &[u8], count: usize, err_msg: &'static str) -> Resul
     let ptr = buf.as_ptr();
     let mut pos = 0usize;
     let mut max_len = 0usize;
-    for _ in 0..count {
+    let mut rem = count;
+    while rem >= 4 && pos + 516 <= len {
+        unsafe {
+            let b0 = *ptr.add(pos);
+            if b0 >= 0x80 { break; }
+            let l0 = b0 as usize;
+            let p1 = pos + 1 + l0;
+            let b1 = *ptr.add(p1);
+            if b1 >= 0x80 { break; }
+            let l1 = b1 as usize;
+            let p2 = p1 + 1 + l1;
+            let b2 = *ptr.add(p2);
+            if b2 >= 0x80 { break; }
+            let l2 = b2 as usize;
+            let p3 = p2 + 1 + l2;
+            let b3 = *ptr.add(p3);
+            if b3 >= 0x80 { break; }
+            let l3 = b3 as usize;
+            pos = p3 + 1 + l3;
+            max_len = max_len.max(l0.max(l1).max(l2.max(l3)));
+            rem -= 4;
+        }
+    }
+    for _ in 0..rem {
         if pos >= len {
             return Err(invalid("unexpected eof"));
         }

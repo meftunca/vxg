@@ -88,13 +88,13 @@ impl<W: Write> StreamEncoder<W> {
         if aligned_chunk > (64 << 20) {
             return Err(Error::InvalidOption("stream chunk_size must be <= 64 MiB"));
         }
-        let max_enc = max_compressed_size(aligned_chunk, options.block_size)?;
+        let _max_enc = max_compressed_size(aligned_chunk, options.block_size)?;
         Ok(Self {
             writer: Some(writer),
             options,
             chunk_size: aligned_chunk,
-            raw_buf: Vec::with_capacity(aligned_chunk),
-            enc_buf: vec![0u8; max_enc],
+            raw_buf: Vec::new(),
+            enc_buf: Vec::new(),
             frames_emitted: 0,
             total_in: 0,
             total_out: 0,
@@ -111,22 +111,27 @@ impl<W: Write> StreamEncoder<W> {
         self.total_out
     }
 
-    fn flush_chunk(&mut self) -> io::Result<()> {
+    fn flush_slice(&mut self, len: usize) -> io::Result<()> {
         let writer = self
             .writer
             .as_mut()
             .ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
-        let bound =
-            max_compressed_size(self.raw_buf.len(), self.options.block_size).map_err(to_io_err)?;
+        let bound = max_compressed_size(len, self.options.block_size).map_err(to_io_err)?;
         if self.enc_buf.len() < bound {
             self.enc_buf.resize(bound, 0);
         }
-        let written = compress_into(&self.raw_buf, &mut self.enc_buf[..bound], &self.options)
+        let written = compress_into(&self.raw_buf[..len], &mut self.enc_buf[..bound], &self.options)
             .map_err(to_io_err)?;
         writer.write_all(&self.enc_buf[..written])?;
-        self.total_in += self.raw_buf.len() as u64;
+        self.total_in += len as u64;
         self.total_out += written as u64;
         self.frames_emitted += 1;
+        Ok(())
+    }
+
+    fn flush_chunk(&mut self) -> io::Result<()> {
+        let len = self.raw_buf.len();
+        self.flush_slice(len)?;
         self.raw_buf.clear();
         Ok(())
     }
@@ -183,6 +188,7 @@ pub struct StreamDecoder<R: Read> {
     options: DecodeOptions,
     frame_buf: Vec<u8>,
     out_buf: Vec<u8>,
+    out_len: usize,
     out_pos: usize,
     frames_decoded: u64,
     total_out: u64,
@@ -198,6 +204,7 @@ impl<R: Read> StreamDecoder<R> {
             options,
             frame_buf: Vec::new(),
             out_buf: Vec::new(),
+            out_len: 0,
             out_pos: 0,
             frames_decoded: 0,
             total_out: 0,
@@ -225,7 +232,9 @@ impl<R: Read> StreamDecoder<R> {
                 .min(usize::MAX as u64) as usize;
             let (_raw_size, _block_size, _count, _version, _csum, dir_end) =
                 frame::parse_header_only(&hdr, rem_budget).map_err(to_io_err)?;
-            self.frame_buf.resize(dir_end, 0);
+            if self.frame_buf.len() < dir_end {
+                self.frame_buf.resize(dir_end, 0);
+            }
             self.frame_buf[..frame::HEADER_SIZE].copy_from_slice(&hdr);
             self.reader
                 .read_exact(&mut self.frame_buf[frame::HEADER_SIZE..dir_end])
@@ -239,7 +248,9 @@ impl<R: Read> StreamDecoder<R> {
             let (frame_len, raw_size) =
                 frame::parse_header_and_dir(&self.frame_buf[..dir_end], rem_budget)
                     .map_err(to_io_err)?;
-            self.frame_buf.resize(frame_len, 0);
+            if self.frame_buf.len() < frame_len {
+                self.frame_buf.resize(frame_len, 0);
+            }
             self.reader
                 .read_exact(&mut self.frame_buf[dir_end..frame_len])
                 .map_err(|e| {
@@ -249,10 +260,18 @@ impl<R: Read> StreamDecoder<R> {
                         e
                     }
                 })?;
-            self.out_buf.resize(raw_size, 0);
+            if self.out_buf.len() < raw_size {
+                self.out_buf.resize(raw_size, 0);
+            }
             let mut frame_opt = self.options.clone();
             frame_opt.max_output = rem_budget;
-            decompress_into(&self.frame_buf, &mut self.out_buf, &frame_opt).map_err(to_io_err)?;
+            decompress_into(
+                &self.frame_buf[..frame_len],
+                &mut self.out_buf[..raw_size],
+                &frame_opt,
+            )
+            .map_err(to_io_err)?;
+            self.out_len = raw_size;
             self.out_pos = 0;
             self.frames_decoded += 1;
             self.total_out += raw_size as u64;
@@ -268,12 +287,12 @@ impl<R: Read> Read for StreamDecoder<R> {
         if buf.is_empty() || self.eof {
             return Ok(0);
         }
-        while self.out_pos >= self.out_buf.len() {
+        while self.out_pos >= self.out_len {
             if !self.load_next_frame()? {
                 return Ok(0);
             }
         }
-        let avail = &self.out_buf[self.out_pos..];
+        let avail = &self.out_buf[self.out_pos..self.out_len];
         let take = avail.len().min(buf.len());
         buf[..take].copy_from_slice(&avail[..take]);
         self.out_pos += take;
@@ -297,8 +316,7 @@ pub fn compress_stream<R: Read, W: Write>(
             Ok(n) => {
                 filled += n;
                 if filled == enc.chunk_size {
-                    enc.flush_chunk().map_err(from_io_err)?;
-                    enc.raw_buf.resize(enc.chunk_size, 0);
+                    enc.flush_slice(filled).map_err(from_io_err)?;
                     filled = 0;
                 }
             }
@@ -306,10 +324,10 @@ pub fn compress_stream<R: Read, W: Write>(
             Err(e) => return Err(from_io_err(e)),
         }
     }
-    enc.raw_buf.truncate(filled);
-    if !enc.raw_buf.is_empty() || enc.frames_emitted == 0 {
-        enc.flush_chunk().map_err(from_io_err)?;
+    if filled > 0 || enc.frames_emitted == 0 {
+        enc.flush_slice(filled).map_err(from_io_err)?;
     }
+    enc.raw_buf.clear();
     let stats = (enc.total_in, enc.total_out);
     enc.finish().map_err(from_io_err)?;
     Ok(stats)
@@ -324,7 +342,9 @@ pub fn decompress_stream<R: Read, W: Write>(
 ) -> Result<u64> {
     let mut dec = StreamDecoder::new(reader, options.clone())?;
     while dec.load_next_frame().map_err(from_io_err)? {
-        writer.write_all(&dec.out_buf).map_err(from_io_err)?;
+        writer
+            .write_all(&dec.out_buf[..dec.out_len])
+            .map_err(from_io_err)?;
     }
     writer.flush().map_err(from_io_err)?;
     Ok(dec.total_out)

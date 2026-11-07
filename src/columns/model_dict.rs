@@ -370,7 +370,7 @@ fn pack_dictionary_model_mode_impl(values: &[&[u8]], limit: usize, allow_front: 
                     if 1 + uleb_len(u) + est_dict + 1 + min_packed >= limit {
                         return None;
                     }
-                    if allow_front && n > 288 && new_id == 64 && row_idx <= 66 {
+                    if allow_front && n > 288 && ((new_id == 32 && row_idx <= 34) || (new_id == 64 && row_idx <= 80)) {
                         return None;
                     }
                     if new_id >= 256 {

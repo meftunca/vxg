@@ -1,6 +1,7 @@
 fn grammar_from_block_mode<'a>(
     data: &'a [u8],
     allow_early_abort: bool,
+    leading_carry: bool,
 ) -> Result<(Vec<Template<'a>>, Vec<Row<'a>>, usize, usize, usize)> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -8,8 +9,9 @@ fn grammar_from_block_mode<'a>(
         unsafe fn grammar_from_block_mode_x86_v3<'a>(
             data: &'a [u8],
             allow_early_abort: bool,
+            leading_carry: bool,
         ) -> Result<(Vec<Template<'a>>, Vec<Row<'a>>, usize, usize, usize)> {
-            grammar_from_block_mode_impl(data, allow_early_abort)
+            grammar_from_block_mode_impl(data, allow_early_abort, leading_carry)
         }
         if std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("bmi1")
@@ -18,16 +20,19 @@ fn grammar_from_block_mode<'a>(
             && std::arch::is_x86_feature_detected!("ssse3")
             && std::arch::is_x86_feature_detected!("sse4.1")
         {
-            return unsafe { grammar_from_block_mode_x86_v3(data, allow_early_abort) };
+            return unsafe {
+                grammar_from_block_mode_x86_v3(data, allow_early_abort, leading_carry)
+            };
         }
     }
-    grammar_from_block_mode_impl(data, allow_early_abort)
+    grammar_from_block_mode_impl(data, allow_early_abort, leading_carry)
 }
 
 #[inline(always)]
 fn grammar_from_block_mode_impl<'a>(
     data: &'a [u8],
     allow_early_abort: bool,
+    leading_carry: bool,
 ) -> Result<(Vec<Template<'a>>, Vec<Row<'a>>, usize, usize, usize)> {
     let first_nl = find_byte(b'\n', data).map_or(data.len(), |i| i + 1);
     let est_rows = (data.len() / first_nl.max(24).min(64)).max(16) + 16;
@@ -55,6 +60,12 @@ fn grammar_from_block_mode_impl<'a>(
     let mut overflow_spans = Vec::new();
     let mut line_start = 0usize;
     let total_len = data.len();
+    if leading_carry && first_nl < total_len {
+        rows.push(Row::Raw(&data[..first_nl]));
+        raw_rows = 1;
+        raw_bytes = first_nl;
+        line_start = first_nl;
+    }
     let mut delim_mask_cache = (usize::MAX, 0u64, 0u64);
     let mut delim_cache_for: Option<u8> = None;
     while line_start < total_len {
@@ -152,6 +163,10 @@ fn grammar_from_block_mode_impl<'a>(
                 continue;
             }
         } else if !templates.is_empty() {
+            if delim_cache_for != Some(0) {
+                delim_mask_cache = (usize::MAX, 0, 0);
+                delim_cache_for = Some(0);
+            }
             let clean_nl_slice = unsafe { std::slice::from_raw_parts(clean_nl_ptr, templates.len()) };
             if match_multi_clean_stream(
                 data,
@@ -163,6 +178,7 @@ fn grammar_from_block_mode_impl<'a>(
                 &mut line_start,
                 &mut template_rows,
                 &mut rows,
+                &mut delim_mask_cache,
                 val_buf,
             ) {
                 continue;
@@ -426,6 +442,7 @@ fn grammar_from_block_mode_impl<'a>(
             if (!has_param_tpl
                 && (template_rows == 0
                     || (line_start >= 2048 && raw_bytes > (line_start * 3) / 4)))
+                || (line_start >= 1536 && template_rows <= 1 && raw_bytes * 4 > line_start * 3)
                 || (line_start >= 4096 && (template_rows < 2 || raw_bytes > (line_start * 3) / 4))
                 || (line_start >= 2048 && !has_json_tpl && raw_bytes * 2 > line_start)
             {
@@ -546,14 +563,6 @@ fn grammar_from_block_mode_impl<'a>(
         }
     }
     Ok((templates, rows, template_rows, raw_rows, raw_bytes))
-}
-
-fn raw_packet(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + uleb_len(data.len()) + 1);
-    out.push(RAW_PACKET);
-    put_uleb(&mut out, data.len());
-    out.extend_from_slice(data);
-    out
 }
 
 #[inline(always)]

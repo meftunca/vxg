@@ -1,20 +1,22 @@
 use std::{env, fs, hint::black_box, io::Write};
-use vxg::{
-    baselines, compress_with_stats,
-    gpu::{Backend, GpuCodec},
-    DecodeOptions, Frame, Options, Simd,
-};
+use vxg::{baselines, compress_with_stats, gpu::GpuCodec, DecodeOptions, Frame, Options};
 
+#[path = "bench_support/config.rs"]
+mod config;
 #[path = "bench_support/datasets.rs"]
 mod datasets;
 #[path = "bench_support/harness.rs"]
 mod harness;
 #[path = "bench_support/metrics.rs"]
 mod metrics;
+#[path = "bench_support/report.rs"]
+mod report;
 
+use config::{CodecPoint, Config, DatasetSummary};
 use datasets::{datasets, datasets_v4};
 use harness::{evaluate_baselines_and_gpu, measure, median, row, run_microbench};
-use metrics::{measure_op, write_markdown_report};
+use metrics::measure_op;
+use report::write_markdown_report;
 
 type R<T> = Result<T, Box<dyn std::error::Error>>;
 #[cfg(all(feature = "mimalloc", feature = "jemalloc"))]
@@ -127,138 +129,19 @@ mod alloc_probe {
         }
     }
 }
-#[derive(Clone)]
-struct Config {
-    size: usize,
-    seconds: f64,
-    samples: usize,
-    threads: usize,
-    block_size: usize,
-    simd: Simd,
-    csv: String,
-    samples_csv: Option<String>,
-    markdown: Option<String>,
-    suite: String,
-    files: Vec<String>,
-    only: Option<String>,
-    gpu: Option<Backend>,
-    microbench: bool,
-    vxg_only: bool,
-    decode_only: bool,
-    validated_decode: bool,
-    legacy_v2: bool,
-}
-#[derive(Default, Clone)]
-struct DatasetSummary {
-    name: String,
-    raw_bytes: usize,
-    vxg_ratio: f64,
-    vxg_enc: f64,
-    vxg_dec: f64,
-    vxg_enc_j_gb: Option<f64>,
-    vxg_dec_j_gb: Option<f64>,
-    lz4_ratio: f64,
-    lz4_enc: f64,
-    lz4_dec: f64,
-    lz4_enc_j_gb: Option<f64>,
-    lz4_dec_j_gb: Option<f64>,
-    zstd1_ratio: f64,
-    zstd1_enc: f64,
-    zstd1_dec: f64,
-    zstd1_enc_j_gb: Option<f64>,
-    zstd1_dec_j_gb: Option<f64>,
-    zstd3_ratio: f64,
-    zstd3_enc: f64,
-    zstd3_dec: f64,
-    zstd3_enc_j_gb: Option<f64>,
-    zstd3_dec_j_gb: Option<f64>,
-}
-fn next<'a>(args: &'a [String], i: &mut usize) -> R<&'a str> {
-    *i += 1;
-    Ok(args.get(*i).ok_or("missing value")?.as_str())
-}
-fn parse_threads(s: &str) -> R<usize> {
-    if s.eq_ignore_ascii_case("auto") || s == "0" {
-        Ok(std::thread::available_parallelism()
-            .map(|x| x.get())
-            .unwrap_or(1)
-            .clamp(1, 256))
-    } else {
-        Ok(s.parse()?)
-    }
-}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("benchmark failed: {e}");
         std::process::exit(1);
     }
 }
+
 fn run() -> R<()> {
-    let mut c = Config {
-        size: 4 << 20,
-        seconds: 0.1,
-        samples: 5,
-        threads: 1,
-        block_size: 65536,
-        simd: Simd::Auto,
-        csv: "reports/local-benchmark.csv".into(),
-        samples_csv: None,
-        markdown: None,
-        suite: "default".into(),
-        files: Vec::new(),
-        only: None,
-        gpu: None,
-        microbench: false,
-        vxg_only: false,
-        decode_only: false,
-        validated_decode: false,
-        legacy_v2: false,
-    };
     let args: Vec<String> = env::args().skip(1).collect();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--size-mib" => {
-                c.size = next(&args, &mut i)?
-                    .parse::<usize>()?
-                    .checked_mul(1 << 20)
-                    .ok_or("size overflow")?
-            }
-            "--seconds" => c.seconds = next(&args, &mut i)?.parse()?,
-            "--samples" => c.samples = next(&args, &mut i)?.parse()?,
-            "--threads" => c.threads = parse_threads(next(&args, &mut i)?)?,
-            "--block-size" => c.block_size = next(&args, &mut i)?.parse()?,
-            "--simd" => c.simd = next(&args, &mut i)?.parse()?,
-            "--csv" => c.csv = next(&args, &mut i)?.into(),
-            "--samples-csv" => c.samples_csv = Some(next(&args, &mut i)?.into()),
-            "--markdown" => c.markdown = Some(next(&args, &mut i)?.into()),
-            "--suite" => c.suite = next(&args, &mut i)?.into(),
-            "--gpu" => c.gpu = Some(next(&args, &mut i)?.parse()?),
-            "--file" => c.files.push(next(&args, &mut i)?.into()),
-            "--only" => c.only = Some(next(&args, &mut i)?.into()),
-            "--microbench" => c.microbench = true,
-            "--vxg-only" => c.vxg_only = true,
-            "--decode-only" => c.decode_only = true,
-            "--validated-decode" => c.validated_decode = true,
-            "--v3" | "--v4" => {} // unified pipeline is the default; kept for script compatibility
-            "--legacy" => c.legacy_v2 = true,
-            "--help" => {
-                println!("vxg-bench [--suite default|v4|all] [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1|auto] [--block-size 65536] [--simd auto] [--csv FILE] [--samples-csv FILE] [--markdown FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--decode-only] [--validated-decode] [--legacy]\nAll CPU codecs use independent blocks, RAW fallback and no checksum. --suite v4 runs the 10-dataset multi-format v4 suite (CSV, TSV, Logfmt, 4x NDJSON, Source/Docs, 32-bpp BMP, 24-bpp BMP). --markdown writes a GitHub Markdown comparison table. --only selects one built-in dataset name or --file path. --decode-only skips encode rows and baseline/GPU work after creating one VXG frame. --validated-decode validates the immutable VXG command streams once before timing repeated CPU decode; it is separately profiled from safe one-shot decode and is unavailable for v3 structured-column frames. --legacy emits LZ-only v2 frames instead of the default unified adaptive v4 pipeline. --samples-csv retains every timed sample (sorted by duration) with the same profile labels as --csv. GPU rows are explicitly host-e2e, not CPU preallocated rows. --microbench measures Engine LCP/copy/pattern kernels without codec framing. --vxg-only skips baseline codecs and GPU rows.");
-                return Ok(());
-            }
-            x => return Err(format!("unknown option {x}").into()),
-        }
-        i += 1;
-    }
-    if c.size == 0
-        || !c.seconds.is_finite()
-        || c.seconds <= 0.0
-        || c.seconds > 60.0
-        || c.samples < 3
-        || c.samples > 101
-    {
-        return Err("invalid size, seconds (0..60], or samples (3..101)".into());
-    }
+    let Some(c) = Config::from_args(&args)? else {
+        return Ok(());
+    };
     let engine = vxg::simd::Engine::new(c.simd)?;
     if c.microbench {
         return run_microbench(&c, engine);
@@ -268,7 +151,16 @@ fn run() -> R<()> {
         "ALLOC-STATS enabled: allocation counters perturb timing; use counts only, not GB/s."
     );
     let (lz, zs) = baselines::versions();
-    eprintln!("VXG {} / liblz4 {lz} / libzstd {zs}; {} {}; SIMD={:?}; allocator={}; threads={}; block={}",env!("CARGO_PKG_VERSION"),env::consts::OS,env::consts::ARCH,engine.kind(),allocator_name(),c.threads,c.block_size);
+    eprintln!(
+        "VXG {} / liblz4 {lz} / libzstd {zs}; {} {}; SIMD={:?}; allocator={}; threads={}; block={}",
+        env!("CARGO_PKG_VERSION"),
+        env::consts::OS,
+        env::consts::ARCH,
+        engine.kind(),
+        allocator_name(),
+        c.threads,
+        c.block_size
+    );
     eprintln!("CPU profiles: cpu_allocating_encode; cpu_preallocated_decode = prepared directory + checked command decode; cpu_full_frame_preallocated_decode = parse + checked decode; cpu_prepared_validate_commands = command validation on a prepared directory; cpu_parse_validate_commands = parse + command validation; cpu_prevalidated_decode = prepared proof + repeated decode only. Per-call contexts included. RAW fallback for ALL codecs. Checksums OFF. Warm cache. GPU: separate host-e2e profile.");
     let mut datasets = if c.files.is_empty() {
         match c.suite.as_str() {
@@ -279,7 +171,9 @@ fn run() -> R<()> {
                 v.extend(datasets(c.size));
                 v
             }
-            other => return Err(format!("unknown --suite {other} (expected default, v4, or all)").into()),
+            other => {
+                return Err(format!("unknown --suite {other} (expected default, v4, or all)").into())
+            }
         }
     } else {
         Vec::new()
@@ -376,7 +270,10 @@ fn run() -> R<()> {
                 .unwrap_or(&name)
                 .to_owned(),
             raw_bytes: data.len(),
-            vxg_ratio: frame.len() as f64 / data.len() as f64,
+            vxg: CodecPoint {
+                ratio: frame.len() as f64 / data.len() as f64,
+                ..CodecPoint::default()
+            },
             ..DatasetSummary::default()
         };
         if !c.decode_only {
@@ -388,8 +285,8 @@ fn run() -> R<()> {
                 black_box(f);
                 Ok(())
             })?;
-            ds_summary.vxg_enc = data.len() as f64 / median(&en.ns_samples);
-            ds_summary.vxg_enc_j_gb = en.j_per_gb;
+            ds_summary.vxg.enc = data.len() as f64 / median(&en.ns_samples);
+            ds_summary.vxg.enc_j_gb = en.j_per_gb;
             row(
                 &mut csv,
                 &mut samples_csv,
@@ -412,8 +309,8 @@ fn run() -> R<()> {
             Ok(())
         })?;
         assert_eq!(out, data, "VXG correctness after timing");
-        ds_summary.vxg_dec = data.len() as f64 / median(&safe_de.ns_samples);
-        ds_summary.vxg_dec_j_gb = safe_de.j_per_gb;
+        ds_summary.vxg.dec = data.len() as f64 / median(&safe_de.ns_samples);
+        ds_summary.vxg.dec_j_gb = safe_de.j_per_gb;
         row(
             &mut csv,
             &mut samples_csv,

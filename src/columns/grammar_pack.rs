@@ -1,63 +1,13 @@
-#[inline(always)]
-fn has_structured_line_near(
-    data: &[u8],
-    probe_base: usize,
-    skip_first_partial: bool,
-    max_lines: usize,
-    hits: &mut usize,
-    prev_slots: &mut Option<usize>,
-    probe_spans: &mut [(u32, u32); MAX_SLOTS],
-    probe_overflow: &mut Vec<(u32, u32)>,
-) -> bool {
-    let mut pos = if skip_first_partial {
-        let Some(nl) = find_byte(b'\n', &data[probe_base..data.len().min(probe_base + 4096)])
-        else {
-            return false;
-        };
-        probe_base + nl + 1
-    } else {
-        probe_base
-    };
-    for _ in 0..max_lines {
-        if pos >= data.len() {
-            break;
-        }
-        let Some(nl) = find_byte(b'\n', &data[pos..data.len().min(pos + 4096)]) else {
-            break;
-        };
-        let first_len = nl + 1;
-        let rec_len = scan_multiline_json_object(&data[pos..], first_len).unwrap_or(first_len);
-        let end = pos + rec_len;
-        let line = &data[pos..end];
-        if let Some(slots) = parse_record_spans(line, probe_spans, probe_overflow) {
-            let mut p = 0usize;
-            skip_space(line, &mut p);
-            if line.get(p) == Some(&b'{') {
-                return true;
-            }
-            if *prev_slots == Some(slots) {
-                *hits += 1;
-                if *hits >= 2 {
-                    return true;
-                }
-            } else {
-                *prev_slots = Some(slots);
-                if *hits == 0 {
-                    *hits = 1;
-                }
-            }
-        }
-        pos = end;
-    }
-    false
-}
-
-fn pack_grammar_into(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
+fn pack_grammar_into(data: &[u8], leading_carry: bool, out: &mut Vec<u8>) -> Result<bool> {
     #[cfg(target_arch = "x86_64")]
     {
         #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
-        unsafe fn pack_grammar_into_x86_v3(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
-            pack_grammar_into_impl(data, out)
+        unsafe fn pack_grammar_into_x86_v3(
+            data: &[u8],
+            leading_carry: bool,
+            out: &mut Vec<u8>,
+        ) -> Result<bool> {
+            pack_grammar_into_impl(data, leading_carry, out)
         }
         if std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("ssse3")
@@ -66,14 +16,14 @@ fn pack_grammar_into(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
             && std::arch::is_x86_feature_detected!("bmi1")
             && std::arch::is_x86_feature_detected!("bmi2")
         {
-            return unsafe { pack_grammar_into_x86_v3(data, out) };
+            return unsafe { pack_grammar_into_x86_v3(data, leading_carry, out) };
         }
     }
-    pack_grammar_into_impl(data, out)
+    pack_grammar_into_impl(data, leading_carry, out)
 }
 
 #[inline(always)]
-fn pack_grammar_into_impl(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
+fn pack_grammar_into_impl(data: &[u8], leading_carry: bool, out: &mut Vec<u8>) -> Result<bool> {
     if data.len() >= 256 {
         let sample_end = data.len().min(64);
         for &b in &data[..sample_end] {
@@ -81,11 +31,22 @@ fn pack_grammar_into_impl(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
                 return Ok(false);
             }
         }
-        let first_looks_json = data[0] == b'{'
-            && find_byte(b'\n', &data[..data.len().min(4096)]).is_some_and(|nl| {
+        let probe_start = if leading_carry {
+            find_byte(b'\n', &data[..data.len().min(4096)]).map_or(0, |nl| (nl + 1).min(data.len()))
+        } else {
+            0
+        };
+        let first_looks_json = data.get(probe_start) == Some(&b'{')
+            && find_byte(
+                b'\n',
+                &data[probe_start..data.len().min(probe_start + 4096)],
+            )
+            .is_some_and(|nl| {
                 nl >= 2
-                    && (data[nl - 1] == b'}'
-                        || (nl >= 3 && data[nl - 1] == b'\r' && data[nl - 2] == b'}'))
+                    && (data[probe_start + nl - 1] == b'}'
+                        || (nl >= 3
+                            && data[probe_start + nl - 1] == b'\r'
+                            && data[probe_start + nl - 2] == b'}'))
             });
         if !first_looks_json {
             let mut probe_spans = [(0u32, 0u32); MAX_SLOTS];
@@ -94,7 +55,7 @@ fn pack_grammar_into_impl(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
             let mut prev_slots = None;
             let has_start = has_structured_line_near(
                 data,
-                0,
+                probe_start,
                 false,
                 8,
                 &mut hits,
@@ -128,7 +89,8 @@ fn pack_grammar_into_impl(data: &[u8], out: &mut Vec<u8>) -> Result<bool> {
             }
         }
     }
-    let (templates, rows, template_rows, raw_rows, raw_bytes) = grammar_from_block_mode(data, true)?;
+    let (templates, rows, template_rows, raw_rows, raw_bytes) =
+        grammar_from_block_mode(data, true, leading_carry)?;
     if templates.is_empty()
         || !templates.iter().any(|t| !t.values.is_empty())
         || template_rows < 2

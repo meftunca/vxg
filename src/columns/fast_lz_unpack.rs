@@ -41,6 +41,53 @@ fn unpack_fast_lz_core(
     unpack_fast_lz_core_impl(seq_count, off_count, toks, offs_bytes, ext_bytes, lits, out)
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+const OVERLAP_SHUF16: [[u8; 16]; 16] = {
+    let mut t = [[0u8; 16]; 16];
+    let mut k = 1usize;
+    while k < 16 {
+        let mut i = 0usize;
+        while i < 16 {
+            t[k][i] = (i % k) as u8;
+            i += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn copy16_periodic_ssse3(msrc: *const u8, mdst: *mut u8, offset: usize) {
+    use core::arch::x86_64::*;
+    let v = unsafe { _mm_loadu_si128(msrc.cast::<__m128i>()) };
+    let idx = unsafe { _mm_loadu_si128(OVERLAP_SHUF16.get_unchecked(offset).as_ptr().cast::<__m128i>()) };
+    unsafe { _mm_storeu_si128(mdst.cast::<__m128i>(), _mm_shuffle_epi8(v, idx)) };
+}
+
+#[inline(always)]
+unsafe fn copy16_periodic(msrc: *const u8, mdst: *mut u8, offset: usize) {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::*;
+        let v = vld1q_u8(msrc);
+        let idx = vld1q_u8(OVERLAP_SHUF16.get_unchecked(offset).as_ptr());
+        vst1q_u8(mdst, vqtbl1q_u8(v, idx));
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("ssse3") {
+        unsafe { copy16_periodic_ssse3(msrc, mdst, offset) };
+        return;
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    unsafe {
+        for i in 0..16 {
+            *mdst.add(i) = *msrc.add(i % offset);
+        }
+    }
+}
+
 #[inline(always)]
 fn unpack_fast_lz_core_impl(
     seq_count: usize,
@@ -64,6 +111,8 @@ fn unpack_fast_lz_core_impl(
     let mut dst_pos = 0usize;
     let mut lit_pos = 0usize;
     let mut ext_pos = 0usize;
+    let safe_dst = raw_len.saturating_sub(64);
+    let safe_lit = lit_total_len.saturating_sub(16);
 
     for seq_idx in 0..seq_count {
         let tok = unsafe { *tok_ptr.add(seq_idx) };
@@ -72,23 +121,25 @@ fn unpack_fast_lz_core_impl(
         let offset = u16::from_le(unsafe { off_ptr.add(seq_idx).read_unaligned() }) as usize;
         let next_lit_dst = dst_pos + lit_len;
         if (lit_len < 15)
-            & (dst_pos + 48 <= raw_len)
-            & (lit_pos + 16 <= lit_total_len)
+            & (dst_pos <= safe_dst)
+            & (lit_pos <= safe_lit)
             & (offset.wrapping_sub(1) < next_lit_dst)
         {
             if ml_code <= 12 {
                 let match_len = ml_code + 4;
-                if offset >= match_len {
-                    unsafe {
-                        copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
-                        lit_pos += lit_len;
-                        let msrc = out_ptr.add(next_lit_dst - offset);
-                        let mdst = out_ptr.add(next_lit_dst);
+                unsafe {
+                    copy16_unaligned(lit_ptr.add(lit_pos), out_ptr.add(dst_pos));
+                    lit_pos += lit_len;
+                    let msrc = out_ptr.add(next_lit_dst - offset);
+                    let mdst = out_ptr.add(next_lit_dst);
+                    if offset >= match_len {
                         copy16_unaligned(msrc, mdst);
-                        dst_pos = next_lit_dst + match_len;
+                    } else {
+                        copy16_periodic(msrc, mdst, offset);
                     }
-                    continue;
+                    dst_pos = next_lit_dst + match_len;
                 }
+                continue;
             } else if offset >= 16 {
                 if ml_code < 15 {
                     let match_len = ml_code + 4;

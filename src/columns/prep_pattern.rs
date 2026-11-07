@@ -25,8 +25,9 @@ unsafe fn write_padded_digits(dst: *mut u8, width: usize, mut val: u64) {
             }
             1 => *dst = b'0' + (val as u8),
             6 => {
-                let hi = (val / 10_000) as usize;
-                let lo = (val % 10_000) as usize;
+                let v32 = val as u32;
+                let hi = (v32 / 10_000) as usize;
+                let lo = (v32 % 10_000) as usize;
                 let p = TWO_DIGITS.as_ptr().add(hi * 2).cast::<u16>().read_unaligned();
                 dst.cast::<u16>().write_unaligned(p);
                 dst.add(2).cast::<u32>().write_unaligned(*DEC_PADDED_10K.get_unchecked(lo));
@@ -353,6 +354,35 @@ impl<'a> PreparedColumn<'a> {
             scratch.u8_arena.reserve(count * stride);
             let out_ptr = unsafe { scratch.u8_arena.as_mut_ptr().add(out_u8_offset) };
             let mut cur = n0;
+            if act_len == 1 && exc_count == 0 {
+                if let FastPatTok::Digits { width, min, radix, .. } = act_toks[0] {
+                    let w_u = width as usize;
+                    unsafe {
+                        write_padded_digits(cur_bytes.as_mut_ptr(), w_u, min + cur);
+                        store_fixed(out_ptr, &cur_bytes, stride);
+                    }
+                    for r in 1..count {
+                        let z = reader.next_u64();
+                        let delta = ((z >> 1) as i64) ^ -((z & 1) as i64);
+                        let next_u = (cur as i64).wrapping_add(delta) as u64;
+                        if next_u >= radix {
+                            return Err(invalid("column pattern range"));
+                        }
+                        cur = next_u;
+                        unsafe {
+                            write_padded_digits(cur_bytes.as_mut_ptr(), w_u, min + cur);
+                            store_fixed(out_ptr.add(r * stride), &cur_bytes, stride);
+                        }
+                    }
+                    unsafe { scratch.u8_arena.set_len(out_u8_offset + count * stride); }
+                    let stream = if stride == 16 {
+                        ColumnStream::Copy16 { u8_offset: out_u8_offset, emit_len: flen as u8, col_mask }
+                    } else {
+                        ColumnStream::Copy32 { u8_offset: out_u8_offset, emit_len: flen as u8, col_mask }
+                    };
+                    return Ok(Self { const_full: ConstValue::None, const_lead, const_trail, dict_slices: None, max_emit_len: flen, stream });
+                }
+            }
             let mut last_field = render_fixed(cur, &mut cur_bytes, &scratch.slice_arena);
             unsafe { store_fixed(out_ptr, &cur_bytes, stride); }
 
@@ -380,12 +410,12 @@ impl<'a> PreparedColumn<'a> {
                 }
                 let delta = ((z >> 1) as i64) ^ -((z & 1) as i64);
                 if let Some((radix, width, min, toff)) = tail_digits {
-                    if delta > 0 && (delta as u64) < radix - last_field {
-                        let d_u = delta as u64;
-                        last_field += d_u;
-                        cur += d_u;
+                    let next_f = (last_field as i64).wrapping_add(delta) as u64;
+                    if next_f < radix {
+                        last_field = next_f;
+                        cur = (cur as i64).wrapping_add(delta) as u64;
                         unsafe {
-                            write_padded_digits(cur_bytes.as_mut_ptr().add(toff), width, min + last_field);
+                            write_padded_digits(cur_bytes.as_mut_ptr().add(toff), width, min + next_f);
                             store_fixed(out_ptr.add(r * stride), &cur_bytes, stride);
                         }
                         continue;

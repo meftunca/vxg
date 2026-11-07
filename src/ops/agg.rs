@@ -204,8 +204,8 @@ pub(super) fn aggregate_column_impl(
         if nb > 1 {
             let (meta, boundary_lines) = build_par_meta_and_boundary(&in_blocks, options)?;
             let mut total = AggStats::default();
-            for bl in &boundary_lines {
-                agg_line(&bl.bytes, where_expr, agg_col, &mut total);
+            for bl in boundary_lines.iter() {
+                agg_line(bl.bytes, where_expr, agg_col, &mut total);
             }
             let workers = options.threads.min(nb);
             let next = AtomicUsize::new(0);
@@ -282,12 +282,7 @@ pub(super) fn aggregate_column_impl(
                 }
             };
 
-            std::thread::scope(|s| {
-                for wid in 1..workers {
-                    s.spawn(move || run_worker(wid));
-                }
-                run_worker(0);
-            });
+            crate::pool::parallel_run(workers, run_worker);
             for slot in worker_stats {
                 total.merge(&slot.into_inner()?);
             }
@@ -359,8 +354,8 @@ pub(super) fn group_by_impl(
         if nb > 1 {
             let (meta, boundary_lines) = build_par_meta_and_boundary(&in_blocks, options)?;
             let mut total_map = GroupMap::default();
-            for bl in &boundary_lines {
-                group_by_line(&bl.bytes, where_expr, group_col, agg_col, &mut total_map);
+            for bl in boundary_lines.iter() {
+                group_by_line(bl.bytes, where_expr, group_col, agg_col, &mut total_map);
             }
             let workers = options.threads.min(nb);
             let next = AtomicUsize::new(0);
@@ -438,12 +433,7 @@ pub(super) fn group_by_impl(
                 }
             };
 
-            std::thread::scope(|s| {
-                for wid in 1..workers {
-                    s.spawn(move || run_worker(wid));
-                }
-                run_worker(0);
-            });
+            crate::pool::parallel_run(workers, run_worker);
             for slot in worker_maps {
                 total_map.merge_map(slot.into_inner()?);
             }

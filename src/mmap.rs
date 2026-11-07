@@ -383,38 +383,22 @@ fn decode_large_frames_bounded(
                 }
                 let base_ptr = batch_buf.as_mut_ptr() as usize;
                 let next = std::sync::atomic::AtomicUsize::new(0);
-                std::thread::scope(|s| -> Result<()> {
-                    let mut handles = Vec::with_capacity(workers);
-                    for _ in 0..workers {
-                        handles.push(s.spawn(|| -> Result<()> {
-                            loop {
-                                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if k >= b_end - b_start {
-                                    return Ok(());
-                                }
-                                let bi = b_start + k;
-                                let rn = parsed.blocks[bi].info.raw_size;
-                                let dst = unsafe {
-                                    std::slice::from_raw_parts_mut(
-                                        (base_ptr + offsets[k]) as *mut u8,
-                                        rn,
-                                    )
-                                };
-                                parsed.decode_block_into(bi, dst, options)?;
-                            }
-                        }));
-                    }
-                    let mut first_err = None;
-                    for h in handles {
-                        match h.join() {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) if first_err.is_none() => first_err = Some(e),
-                            Ok(Err(_)) => {}
-                            Err(_) if first_err.is_none() => first_err = Some(Error::WorkerPanic),
-                            Err(_) => {}
+                crate::pool::parallel_try_run(workers, |_| {
+                    loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if k >= b_end - b_start {
+                            return Ok(());
                         }
+                        let bi = b_start + k;
+                        let rn = parsed.blocks[bi].info.raw_size;
+                        let dst = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                (base_ptr + offsets[k]) as *mut u8,
+                                rn,
+                            )
+                        };
+                        parsed.decode_block_into(bi, dst, options)?;
                     }
-                    first_err.map_or(Ok(()), Err)
                 })?;
             }
             std::io::Write::write_all(out_file, &batch_buf[..chunk_raw])

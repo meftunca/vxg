@@ -1,30 +1,13 @@
-use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::{
-    checksum::crc32c, frame, query, DecodeOptions, Frame, Options, Result, BLOCK_COLUMN,
-};
+use crate::{checksum::crc32c, query, DecodeOptions, Frame, Options, Result};
 
 use super::emit::{emit_ready_blocks, BytesRef, ReadyBlock};
 use super::expr::{line_matches_expr, PredExpr};
 use super::line::ColPred;
-use super::SyncCell;
-
-struct FilterBlock<'a> {
-    f_bytes: &'a [u8],
-    local_idx: usize,
-    frame_checksummed: bool,
-    info: frame::BlockInfo,
-    payload: &'a [u8],
-}
-
-struct FilterMeta<'a> {
-    decoded_raw: Option<Vec<u8>>,
-    row_count: usize,
-    had_in_carry: bool,
-    first_frag: Option<Cow<'a, [u8]>>,
-    last_unterm_frag: Option<Cow<'a, [u8]>>,
-}
+use super::{
+    build_boundary_set, collect_par_blocks, inspect_par_meta, ParInBlock, ParMeta, SyncCell,
+};
 
 enum BlockFilterOut {
     Empty,
@@ -33,8 +16,8 @@ enum BlockFilterOut {
 }
 
 fn eval_one_filter_block(
-    ib: &FilterBlock<'_>,
-    meta: &FilterMeta<'_>,
+    ib: &ParInBlock<'_>,
+    meta: &ParMeta<'_>,
     expr: &PredExpr<'_>,
     dec_options: &DecodeOptions,
     dec_buf: &mut Vec<u8>,
@@ -79,7 +62,7 @@ fn eval_one_filter_block(
     } else {
         query::decode_block_into(
             ib.f_bytes,
-            ib.local_idx,
+            ib.local_blk,
             ib.info.raw_size,
             dec_options,
             dec_buf,
@@ -134,123 +117,24 @@ pub(super) fn filter_frame_expr_impl(
     dec_eff.validate()?;
 
     let frames = Frame::parse_all(frame_bytes, dec_eff.max_output)?;
-    let mut in_blocks = Vec::new();
-    for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
-        let csum = parsed.checksummed();
-        for (local_idx, info) in parsed.blocks().enumerate() {
-            in_blocks.push(FilterBlock {
-                f_bytes,
-                local_idx,
-                frame_checksummed: csum,
-                info,
-                payload: &f_bytes[info.payload_offset..info.payload_offset + info.payload_size],
-            });
-        }
-    }
+    let in_blocks = collect_par_blocks(frame_bytes, &frames);
     let nb = in_blocks.len();
     if nb == 0 {
         return crate::compress(&[], enc_options);
     }
 
-    let mut meta: Vec<FilterMeta<'_>> = Vec::with_capacity(nb);
-    let mut non_empty = Vec::with_capacity(nb);
-    let mut incoming = false;
-    let mut any_unterm = false;
-
-    for (b, ib) in in_blocks.iter().enumerate() {
-        let had_in = incoming;
-        if ib.info.kind == BLOCK_COLUMN {
-            if let Some(gb) = crate::columns::peek_grammar_boundary_fast(ib.payload, had_in)? {
-                if gb.row_count > 0 {
-                    incoming = gb.last_unterminated_raw.is_some();
-                    any_unterm |= incoming;
-                    non_empty.push(b);
-                }
-                meta.push(FilterMeta {
-                    decoded_raw: None,
-                    row_count: gb.row_count,
-                    had_in_carry: had_in,
-                    first_frag: gb.first_raw,
-                    last_unterm_frag: gb.last_unterminated_raw,
-                });
-                continue;
-            }
-        }
-        let mut raw_vec = Vec::new();
-        query::decode_block_into(
-            ib.f_bytes,
-            ib.local_idx,
-            ib.info.raw_size,
-            &dec_eff,
-            &mut raw_vec,
-        )?;
-        let rc = raw_vec.split_inclusive(|&c| c == b'\n').count();
-        let ends_nl = raw_vec.last() == Some(&b'\n');
-        let first_frag = if had_in && !raw_vec.is_empty() {
-            let end = raw_vec
-                .iter()
-                .position(|&c| c == b'\n')
-                .map_or(raw_vec.len(), |i| i + 1);
-            Some(Cow::Owned(raw_vec[..end].to_vec()))
-        } else {
-            None
-        };
-        let last_unterm_frag = if !raw_vec.is_empty() && !ends_nl {
-            let st = raw_vec
-                .iter()
-                .rposition(|&c| c == b'\n')
-                .map_or(0, |i| i + 1);
-            Some(Cow::Owned(raw_vec[st..].to_vec()))
-        } else {
-            None
-        };
-        if rc > 0 {
-            incoming = !ends_nl;
-            any_unterm |= incoming;
-            non_empty.push(b);
-        }
-        meta.push(FilterMeta {
-            decoded_raw: Some(raw_vec),
-            row_count: rc,
-            had_in_carry: had_in,
-            first_frag,
-            last_unterm_frag,
-        });
-    }
-
-    let mut boundary_after: Vec<Option<Vec<u8>>> = if any_unterm {
-        vec![None; nb]
-    } else {
+    let (meta, non_empty, any_unterm) = inspect_par_meta(&in_blocks, &dec_eff)?;
+    let boundary_set = build_boundary_set(&meta, &non_empty, any_unterm);
+    let mut boundary_after: Vec<Option<&[u8]>> = if boundary_set.is_empty() {
         Vec::new()
+    } else {
+        vec![None; nb]
     };
     let mut any_boundary_match = false;
-    if any_unterm {
-        let mut k_idx = 0usize;
-        while k_idx < non_empty.len() {
-            let b0 = non_empty[k_idx];
-            let Some(ref f0) = meta[b0].last_unterm_frag else {
-                k_idx += 1;
-                continue;
-            };
-            let mut full = f0.as_ref().to_vec();
-            let mut m = k_idx + 1;
-            while m < non_empty.len() {
-                let bm = non_empty[m];
-                let Some(ref fm) = meta[bm].first_frag else {
-                    break;
-                };
-                full.extend_from_slice(fm);
-                if meta[bm].row_count == 1 && meta[bm].last_unterm_frag.is_some() {
-                    m += 1;
-                } else {
-                    break;
-                }
-            }
-            if line_matches_expr(&full, expr) {
-                boundary_after[b0] = Some(full);
-                any_boundary_match = true;
-            }
-            k_idx = m.max(k_idx + 1);
+    for bl in boundary_set.iter() {
+        if line_matches_expr(bl.bytes, expr) {
+            boundary_after[bl.block_index] = Some(bl.bytes);
+            any_boundary_match = true;
         }
     }
 
@@ -273,7 +157,7 @@ pub(super) fn filter_frame_expr_impl(
         let next = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
         let step = if nb >= workers * 8 { 4 } else { 1 };
-        let run_worker = || {
+        let run_worker = |_wid: usize| {
             let mut dec_buf = Vec::new();
             loop {
                 if failed.load(Ordering::Relaxed) {
@@ -298,12 +182,7 @@ pub(super) fn filter_frame_expr_impl(
                 }
             }
         };
-        std::thread::scope(|s| {
-            for _ in 1..workers {
-                s.spawn(run_worker);
-            }
-            run_worker();
-        });
+        crate::pool::parallel_run(workers, run_worker);
         for slot in slots {
             results.push(slot.into_inner().unwrap()?);
         }
@@ -331,7 +210,7 @@ pub(super) fn filter_frame_expr_impl(
             } else {
                 query::decode_block_into(
                     ib.f_bytes,
-                    ib.local_idx,
+                    ib.local_blk,
                     ib.info.raw_size,
                     &dec_eff,
                     &mut crc_buf,
@@ -356,7 +235,7 @@ pub(super) fn filter_frame_expr_impl(
             BlockFilterOut::Bytes(v) => total_len += v.len(),
         }
         if any_boundary_match {
-            if let Some(ref bm) = boundary_after[b] {
+            if let Some(bm) = boundary_after[b] {
                 total_len += bm.len();
             }
         }
@@ -381,7 +260,7 @@ pub(super) fn filter_frame_expr_impl(
                     dec_opts_full.max_output = dec_opts_full.max_output.max(ib.info.raw_size);
                     crate::extract_block_into(
                         ib.f_bytes,
-                        ib.local_idx,
+                        ib.local_blk,
                         &mut raw[pos..pos + ib.info.raw_size],
                         &dec_opts_full,
                     )?;
@@ -389,7 +268,7 @@ pub(super) fn filter_frame_expr_impl(
             }
         }
         if any_boundary_match {
-            if let Some(ref bm) = boundary_after[b] {
+            if let Some(bm) = boundary_after[b] {
                 raw.extend_from_slice(bm);
             }
         }
