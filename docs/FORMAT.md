@@ -16,7 +16,7 @@ not part of the file contract. Every `VXG1` frame is completely self-contained (
 | 8 | u64 | Total uncompressed byte count $N$ |
 | 16 | u32 | Nominal block size $B$; `4,096..1,048,576`, multiple of 64 |
 | 20 | u32 | Block count (`ceil(N/B)` when `FLAG_VAR_RAW` is clear; in `[ceil(N/B)..min(N, max(ceil(N/B)*8/3, ceil(N/B)+4))]` when `FLAG_VAR_RAW` is set) |
-| 24 | u64 (`v1–v4`) / `u32 + u32` (`v5`) | Zero in `v1–v4`. In `v5`: `u32 dict_wire_len` (offset 24) + `u32 dict_raw_len` (offset 28) when `FLAG_FRAME_DICT` is set (`64 <= dict_raw_len <= 32,768`, `1 <= dict_wire_len <= dict_raw_len`); both zero otherwise |
+| 24 | u64 (`v1–v4`) / `u32 + u32` (`v5`) | Zero in `v1–v4`. In `v5`: `u32 dict_wire_len` (offset 24) + `u32 dict_raw_len` (offset 28) when `FLAG_FRAME_DICT` is set (`64 <= dict_raw_len <= 262,144`, `1 <= dict_wire_len <= dict_raw_len`); both zero otherwise |
 
 The empty frame is exactly 32 bytes, with count=0, N=0 and a valid block size.
 
@@ -33,11 +33,11 @@ In versions 4 and 5, raw offsets and payload offsets are reconstructed determini
 
 In `VERSION_V5`, immediately following the `8 * count`-byte block directory and preceding block 0's payload:
 1. **`var_raw` table (`4 * count` bytes, present iff `FLAG_VAR_RAW` is set):** `u32[count]` uncompressed byte lengths `rn_i` (`1 <= rn_i <= B`, $\sum rn_i = N$), used by `--record-aligned` (`Options { record_aligned: true }`) to snap block boundaries to `\n` record delimiters so zero structured records split across blocks.
-2. **Frame prefix dictionary (`dict_wire_len` bytes, present iff `FLAG_FRAME_DICT` is set):** Self-contained raw (`dict_wire_len == dict_raw_len`) or `DICT_LZ`-compressed (`wire[0] & 0x80 != 0`) FastCover-trained shared prefix dictionary (`64..=32,768` uncompressed bytes), decoded once per frame and shared read-only across all worker threads without cross-block state.
+2. **Frame prefix dictionary (`dict_wire_len` bytes, present iff `FLAG_FRAME_DICT` is set):** Self-contained raw (`dict_wire_len == dict_raw_len`) or `DICT_LZ`-compressed (`wire[0] & 0x80 != 0`) shared prefix dictionary (`64..=262,144` uncompressed bytes: FastCover `<= 32 KiB` shingle vocabulary or macroscopic `<= 256 KiB` repeating-span coalescer), decoded once per frame and shared read-only across all worker threads without cross-block state.
 
 ### `BLOCK_DICT_LZ` (`kind = 3`, `VERSION_V5`)
 
-`BLOCK_DICT_LZ` payloads begin with header byte `0x80 | huf_flags` (`bit 0` = literals Huffman, `bit 1` = tokens Huffman, `bit 2` = offset-codes Huffman, `bit 3` = length-extensions Huffman), followed by ULEB128 stream counts/byte lengths and five streams (`lits`, `toks` `(lit_code << 4) | ml_code`, `off_codes` supporting 3 repeat-offset slots `0..=2` and log2 offset classes `3..` across intra-block + optional frame dictionary history, `len_ext`, and `off_bits` extra offset bits). Each of the four byte streams is independently 4-stream canonical Huffman coded only when strictly smaller.
+`BLOCK_DICT_LZ` payloads begin with header byte `0x80 | huf_flags` (`bit 0` = literals Huffman, `bit 1` = tokens Huffman, `bit 2` = offset-codes Huffman, `bit 3` = length-extensions Huffman), followed by ULEB128 stream counts/byte lengths and five streams (`lits`, `toks` `(lit_code) | (ml_code << 4)`, `off_codes` supporting 3 repeat-offset slots `0..=2` and log2 offset classes `3..` across intra-block + optional frame dictionary history, `len_ext`, and `off_bits` extra offset bits). Each of the four byte streams is independently 4-stream canonical Huffman coded only when strictly smaller (`huf_flags == 0` decodes zero-copy directly from the payload slice).
 
 ### `MODEL_SCALED_DECIMAL` (`tag = 16`, `GRAMMAR_PACKET`)
 

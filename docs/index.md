@@ -2,9 +2,9 @@
 layout: home
 
 hero:
-  name: "VXG Codec v0.5"
+  name: "VXG Codec v0.5.1"
   text: "Vectorized Execution Grammar"
-  tagline: "Store raw NDJSON/CSV verbatim (2.4x–16.7x faster ingest than Parquet ETL), 1.17x–1.32x smaller 64 KiB blocks than Zstd + Trained Dict on flat tabular records, beat Zstd-9 on the 6-dataset real public geomean (0.1231), SQL on 40M+ compressed rows, and 100% byte-exact original recovery."
+  tagline: "Store raw NDJSON/CSV verbatim (2.4x–16.7x faster ingest than Parquet ETL), 1.17x–1.32x smaller 64 KiB blocks than Zstd + Trained Dict on flat tabular records, beat Zstd-9 & Zstd+Dict-3 on the 6-dataset real public geomean (0.1213, within 0.66% of Zstd+Dict-9), SQL on 40M+ compressed rows, and 100% byte-exact original recovery."
   actions:
     - theme: brand
       text: Try Live WASM Playground →
@@ -26,7 +26,7 @@ features:
   - title: "Zero-ETL Lossless Archive + SQL (`vxg sql`)"
     details: "Keep raw JSON/CSV verbatim without lossy Parquet ETL, run SQL (`SELECT`, `WHERE`, `GROUP BY`, `ORDER BY Top-K`) directly on compressed blocks (CSV header names & dotted nested JSON), and recover the original file byte-for-byte."
   - title: "Honest Real-Corpus Trade-Offs (`Format v4/v5`)"
-    details: "1.17x–1.32x smaller than Zstd + Trained Dict L9 on flat tabular records; pure-Rust BLOCK_DICT_LZ brings the 6-dataset real geomean to 0.1231 — beating Zstd-9 (0.1419) and Zstd+Dict-3 (0.1407), within 2.1% of Zstd+Dict-9 (0.1205)."
+    details: "1.17x–1.32x smaller than Zstd + Trained Dict L9 on flat tabular records; pure-Rust L1D u16 + PreparedDict BLOCK_DICT_LZ brings the 6-dataset real geomean to 0.1213 — beating Zstd-9 (0.1419) and Zstd+Dict-3 (0.1407), within 0.66% of Zstd+Dict-9 (0.1205)."
   - title: "Calibrated vs DuckDB 2.0 + Parquet (Up to 40M Rows)"
     details: "Wins 15/15 in-cache 8T queries (0.16–1.32 ms) and 5/5 out-of-cache 8T queries on 40M-row (3.06 GB) NYC TLC CSV (17.5–44.4 ms), while DuckDB + Parquet leads 1T NDJSON and 10M-row NDJSON selective zone-map scans."
   - title: "vxg-tensor (.vxt) AI Model Codec & Metal LLM"
@@ -37,18 +37,18 @@ features:
 
 Traditional byte-stream LZ compressors (`LZ4`, `Zstd`) scan inputs sequentially through a sliding window. On structured logs, telemetry tables, and columnar JSON streams, they repeatedly rediscover field names, delimiters, timestamps, and numeric formatting on every row.
 
-**VXG (`VXG1` v4/v5)** splits each independent block (`64 KiB` default, or `\n`-snapped `--record-aligned`) into a **Vectorized Execution Grammar (`GRAMMAR_PACKET`)**, **Self-Contained Frame Dictionary + 5-Stream Canonical Huffman (`BLOCK_DICT_LZ`)**, **Strided Decorrelation Planes (`STRIDE_PACKET`)**, or **Fast-LZ (`FAST_LZ_PACKET`)**, selected strictly by exact byte budget. For public real-world corpora (`NYC TLC Taxi`, `GitHub Archive`, `Kodak` true-color photos), `Zstd + Trained Dictionary`, whole-file `zstd -19 --long`, and **DuckDB 2.0 + Parquet (`200k` to `40M` rows)** head-to-head benchmarks, see **[Competitor Sweep & DuckDB](/CHIMERA_BENCHMARKS)**.
+**VXG (`VXG1` v4/v5)** splits each independent block (`64 KiB` default, or `\n`-snapped `--record-aligned`) into a **Vectorized Execution Grammar (`GRAMMAR_PACKET`)**, **Self-Contained Frame Dictionary (`<= 256 KiB`) + 5-Stream Canonical Huffman (`BLOCK_DICT_LZ`)**, **Strided Decorrelation Planes (`STRIDE_PACKET`)**, or **Fast-LZ (`FAST_LZ_PACKET`)**, selected strictly by exact byte budget. For public real-world corpora (`NYC TLC Taxi`, `GitHub Archive`, `Kodak` true-color photos), `Zstd + Trained Dictionary`, whole-file `zstd -19 --long`, and **DuckDB 2.0 + Parquet (`200k` to `40M` rows)** head-to-head benchmarks, see **[Competitor Sweep & DuckDB](/CHIMERA_BENCHMARKS)**.
 
 <CodecBenchmarkChart compact />
 
-| Metric (`--suite v4` Synthetic Qualification Geomean, `16 MiB`) | **VXG v0.5** | **LZ4 (`1.10.0`)** | **Zstd (`-1`, `1.5.7`)** | **Trade-Off Notes** |
+| Metric (`--suite v4` Synthetic Qualification Geomean, `16 MiB`) | **VXG v0.5.1** | **LZ4 (`1.10.0`)** | **Zstd (`-1`, `1.5.7`)** | **Trade-Off Notes** |
 | :--- | :---: | :---: | :---: | :--- |
-| **8-Dataset Structured/Text Ratio** *(excl. procedural BMP)* | **`0.0442` (`22.6:1`)** | `0.2105` (`4.8:1`) | `0.0958` (`10.4:1`) | **`4.76x` smaller than LZ4, `2.17x` smaller than Zstd-1** (`0.0845` Zstd+Dict-9) |
-| **10-Dataset Ratio** *(incl. 2 procedural UI BMPs)* | **`0.0248` (`40.3:1`)** | `0.1285` (`7.8:1`) | `0.0615` (`16.3:1`) | **`5.18x` smaller than LZ4, `2.48x` smaller than Zstd-1** |
-| **1-Thread Encode / Decode (`GB/s`, 10-set)** | `1.56` / **`7.27 GB/s`** | **`2.23`** / `6.94 GB/s` | `1.55 / 2.67 GB/s` | **LZ4 encodes `1.43x` faster; VXG decodes `1.05x` faster** |
-| **8-Thread Encode / Decode (`GB/s`, 10-set)** | `6.99` / **`39.90 GB/s`** | **`9.96`** / `28.99 GB/s` | `7.29 / 12.49 GB/s` | **LZ4 encodes `1.42x` faster; VXG decodes `1.38x` faster** |
-| **Decode Energy (`J/GB`, 1T)** *(lower is better)* | `0.665 J/GB` | **`0.619 J/GB`** | `1.641 J/GB` | **`2.47x` less decode energy than Zstd-1** |
-| **Green Codec Index (`GCI`, 1T / 8T)** | **`133.2 / 728.7`** | `34.0 / 184.1` | `15.5 / 94.6` | **`3.92x` higher `GCI` than LZ4, `8.59x` higher than Zstd-1** |
+| **8-Dataset Structured/Text Ratio** *(excl. procedural BMP)* | **`0.0259` (`38.6:1`)** | `0.2107` (`4.7:1`) | `0.0959` (`10.4:1`) | **`8.14x` smaller than LZ4, `3.70x` smaller than Zstd-1** (`0.0846` Zstd+Dict-9; `source-and-docs.txt` `0.0036`) |
+| **10-Dataset Ratio** *(incl. 2 procedural UI BMPs)* | **`0.0162` (`61.7:1`)** | `0.1286` (`7.8:1`) | `0.0615` (`16.3:1`) | **`7.94x` smaller than LZ4, `3.80x` smaller than Zstd-1** |
+| **1-Thread Encode / Decode (`GB/s`, 10-set)** | `2.22` / **`10.53 GB/s`** | **`2.27`** / `6.94 GB/s` | `1.55 / 2.66 GB/s` | **Beats LZ4 on 8-set 1T Enc & Dec (`1.58 / 9.69` vs `1.51 / 5.79 GB/s`); `1.52x` faster 10-set decode** |
+| **8-Thread Encode / Decode (`GB/s`, 10-set)** | `8.51` / **`54.97 GB/s`** | **`10.96`** / `32.11 GB/s` | `7.73 / 14.07 GB/s` | **LZ4 encodes `1.29x` faster; VXG decodes `1.71x` faster** (`94.5 GB/s` on `source-and-docs.txt`) |
+| **Decode Energy (`J/GB`, 1T)** *(lower is better)* | **`0.533 J/GB`** | `0.634 J/GB` | `1.641 J/GB` | **`1.19x` less decode energy than LZ4, `3.08x` less than Zstd-1** |
+| **Green Codec Index (`GCI`, 1T / 8T)** | **`275.5 / 1,343.8`** | `32.4 / 157.9` | `15.5 / 94.6` | **`8.51x` higher `GCI` than LZ4, `14.2x`–`17.8x` higher than Zstd-1** |
 
 ### Cross-Platform GitHub Actions CI Summary (`1T`, `16 MiB` Geomean)
 

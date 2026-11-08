@@ -168,43 +168,43 @@ pub(super) fn serialize_streams(
     let mut flags = DICT_LZ_MAGIC;
 
     sb.huf_lits.clear();
-    let use_huf_lits = lit_total >= 32
-        && huf_encode_min(&sb.lits, &mut sb.huf_lits, lit_total.saturating_sub(2), 32)
-        && uleb_len(sb.huf_lits.len()) + sb.huf_lits.len() < lit_total;
+    let use_huf_lits = lit_total >= 96
+        && huf_encode_min(&sb.lits, &mut sb.huf_lits, lit_total.saturating_sub(12), 96)
+        && uleb_len(sb.huf_lits.len()) + sb.huf_lits.len() + 8 < lit_total;
     if use_huf_lits {
         flags |= FLAG_HUF_LITS;
     }
 
     sb.huf_toks.clear();
-    let use_huf_toks = seq_count >= 32
-        && huf_encode_min(&sb.toks, &mut sb.huf_toks, seq_count.saturating_sub(2), 32)
-        && uleb_len(sb.huf_toks.len()) + sb.huf_toks.len() < seq_count;
+    let use_huf_toks = seq_count >= 96
+        && huf_encode_min(&sb.toks, &mut sb.huf_toks, seq_count.saturating_sub(12), 96)
+        && uleb_len(sb.huf_toks.len()) + sb.huf_toks.len() + 8 < seq_count;
     if use_huf_toks {
         flags |= FLAG_HUF_TOKS;
     }
 
     sb.huf_offs.clear();
-    let use_huf_offs = seq_count >= 32
+    let use_huf_offs = seq_count >= 96
         && huf_encode_min(
             &sb.off_codes,
             &mut sb.huf_offs,
-            seq_count.saturating_sub(2),
-            32,
+            seq_count.saturating_sub(12),
+            96,
         )
-        && uleb_len(sb.huf_offs.len()) + sb.huf_offs.len() < seq_count;
+        && uleb_len(sb.huf_offs.len()) + sb.huf_offs.len() + 8 < seq_count;
     if use_huf_offs {
         flags |= FLAG_HUF_OFFS;
     }
 
     sb.huf_ext.clear();
-    let use_huf_ext = ext_raw_len >= 48
+    let use_huf_ext = ext_raw_len >= 256
         && huf_encode_min(
             &sb.len_ext,
             &mut sb.huf_ext,
-            ext_raw_len.saturating_sub(2),
-            48,
+            ext_raw_len.saturating_sub(16),
+            256,
         )
-        && uleb_len(sb.huf_ext.len()) + sb.huf_ext.len() < ext_raw_len;
+        && uleb_len(sb.huf_ext.len()) + sb.huf_ext.len() + 12 < ext_raw_len;
     if use_huf_ext {
         flags |= FLAG_HUF_EXT;
     }

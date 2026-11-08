@@ -527,3 +527,59 @@ fn v5_combined_dict_and_record_aligned_plus_malformed_rejection() {
         execute_sql(&csv_fix, &q_sel, SqlFormat::Csv, true, &csv_dec).unwrap()
     );
 }
+
+#[test]
+fn v5_adaptive_large_dict_coalesces_macroscopic_repeats_under_five_percent() {
+    let mut seed = Vec::with_capacity(205_000);
+    for i in 0..2000usize {
+        seed.extend_from_slice(
+            format!(
+                "pub fn kernel_dispatch_{i:04}(ctx: &mut ExecCtx, row: usize) -> Result<u64> {{ ctx.step({i}, row ^ 0x{:04x}) }}\n",
+                (i.wrapping_mul(40503)) & 0xffff
+            )
+            .as_bytes(),
+        );
+    }
+    assert!(seed.len() > 180_000 && seed.len() < 240_000);
+    let target_len = 8 * 1024 * 1024;
+    let mut raw = Vec::with_capacity(target_len + seed.len());
+    while raw.len() < target_len {
+        raw.extend_from_slice(&seed);
+    }
+    raw.truncate(target_len);
+
+    let opt_1t = Options {
+        block_size: 65536,
+        threads: 1,
+        checksum: true,
+        ..Options::default()
+    };
+    let opt_4t = Options {
+        threads: 4,
+        ..opt_1t.clone()
+    };
+    let dec_4t = DecodeOptions {
+        threads: 4,
+        max_output: raw.len() + 1024,
+        verify_checksum: true,
+        ..DecodeOptions::default()
+    };
+
+    let f_1t = compress(&raw, &opt_1t).unwrap();
+    let f_4t = compress(&raw, &opt_4t).unwrap();
+    assert_eq!(f_1t, f_4t);
+    assert!(
+        f_1t.len() * 20 < raw.len(),
+        "expected < 0.05 ratio on 190 KiB periodic source corpus, got {} / {}",
+        f_1t.len(),
+        raw.len()
+    );
+    let parsed = Frame::parse(&f_1t, raw.len()).unwrap();
+    assert!(parsed.dict().len() > 32_768 && parsed.dict().len() <= 262_144);
+    assert_eq!(decompress(&f_1t, &dec_4t).unwrap(), raw);
+
+    let mut blk = vec![0u8; 65536];
+    let mid_idx = parsed.block_count() / 2;
+    let got = extract_block_into(&f_1t, mid_idx, &mut blk, &dec_4t).unwrap();
+    assert_eq!(&blk[..got], &raw[mid_idx * 65536..mid_idx * 65536 + got]);
+}

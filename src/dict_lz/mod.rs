@@ -1,12 +1,12 @@
 //! Frame-shared prefix dictionary trainer and high-density `BLOCK_DICT_LZ` (`kind = 3`) codec.
 //!
-//! Combines a FastCover-inspired sampled cross-block prefix dictionary (up to 32 KiB, pre-indexed
-//! once per frame and shared immutably across all worker threads) with a 5-stream canonical
-//! Huffman + 3-repcode + log2-offset + lazy/backward-extended LZ77 block codec.
+//! Combines a FastCover-inspired sampled cross-block prefix dictionary (adaptively sized from
+//! 4 KiB up to 256 KiB with macroscopic verbatim span coalescing, pre-indexed once per frame and
+//! shared immutably across all worker threads) with a 5-stream canonical Huffman + 3-repcode +
+//! log2-offset + L1-resident `u16`-hashed LZ77 block codec.
 //! 100% pure Rust, zero C dependencies (`wasm32-unknown-unknown` compatible).
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{columns, Error, Result};
 
@@ -18,24 +18,25 @@ mod train;
 pub(crate) use decode::{decode_dict_block, validate_dict_block};
 pub(crate) use encode::DictLzScratch;
 
-pub(crate) const MAX_DICT_RAW: usize = 32_768;
+pub(crate) const MAX_DICT_RAW: usize = 262_144;
 pub(crate) const MIN_DICT_RAW: usize = 64;
-pub(crate) const HT4_BITS: usize = 12;
-pub(crate) const HT4_SIZE: usize = 1 << HT4_BITS; // 4096 x 4 x u32 = 64 KiB
-pub(crate) const HT6_BITS: usize = 12;
-pub(crate) const HT6_SIZE: usize = 1 << HT6_BITS; // 4096 x 2 x u32 = 32 KiB
-
-static NEXT_DICT_ID: AtomicU64 = AtomicU64::new(1);
+pub(crate) const DICT_HT4_BITS: usize = 13;
+pub(crate) const DICT_HT4_SIZE: usize = 1 << DICT_HT4_BITS; // 8192 x [u32; 2] = 64 KiB
+pub(crate) const LOCAL_HT4_BITS: usize = 13;
+pub(crate) const LOCAL_HT4_SIZE: usize = 1 << LOCAL_HT4_BITS; // 8192 x [u16; 2] = 32 KiB
+pub(crate) const LOCAL_HT6_BITS: usize = 13;
+pub(crate) const LOCAL_HT6_SIZE: usize = 1 << LOCAL_HT6_BITS; // 8192 x [u16; 2] = 32 KiB
+pub(super) const DICT_POS_MASK: u32 = 0x0007_ffff; // 19 bits (1..=262_144), top 13 bits = tag
 
 /// Pre-indexed frame-level prefix dictionary shared immutably across worker threads.
 pub(crate) struct PreparedDict {
-    pub(crate) id: u64,
     pub(crate) raw: Vec<u8>,
     pub(crate) wire_payload: Vec<u8>,
     pub(crate) prefer_over_grammar: bool,
     pub(crate) try_structured: bool,
-    pub(crate) ht4: Box<[[u32; 4]; HT4_SIZE]>,
-    pub(crate) ht6: Box<[[u32; 2]; HT6_SIZE]>,
+    pub(crate) ht4: Box<[[u32; 2]; DICT_HT4_SIZE]>,
+    pub(crate) ht6: Box<[[u32; 2]]>,
+    pub(crate) ht6_shift: u32,
 }
 
 thread_local! {
@@ -53,43 +54,71 @@ pub(super) fn read_u64(buf: &[u8], pos: usize) -> u64 {
 }
 
 #[inline(always)]
-pub(super) fn hash4(w4: u32) -> usize {
-    (w4.wrapping_mul(0x9e37_79b1) >> (32 - HT4_BITS)) as usize
+pub(super) fn mul4(w4: u32) -> u32 {
+    w4.wrapping_mul(0x9e37_79b1)
 }
 
 #[inline(always)]
-pub(super) fn hash6(w8: u64) -> usize {
-    ((w8 & 0x0000_ffff_ffff_ffff).wrapping_mul(0x9e37_79b1_85eb_ca87) >> (64 - HT6_BITS)) as usize
+pub(super) fn dict_tag4(w4: u32) -> u32 {
+    w4.wrapping_mul(0x85eb_ca6b) & !DICT_POS_MASK
 }
 
 #[inline(always)]
-pub(super) fn insert_pos(
-    win: &[u8],
-    vpos: usize,
-    ht4: &mut [[u32; 4]; HT4_SIZE],
-    ht6: &mut [[u32; 2]; HT6_SIZE],
-) {
-    let w8 = read_u64(win, vpos);
-    let p1 = (vpos + 1) as u32;
-    let b4 = unsafe { ht4.get_unchecked_mut(hash4(w8 as u32)) };
-    *b4 = [p1, b4[0], b4[1], b4[2]];
-    let b6 = unsafe { ht6.get_unchecked_mut(hash6(w8)) };
-    *b6 = [p1, b6[0]];
+pub(super) fn mul6(w8: u64) -> u64 {
+    (w8 & 0x0000_ffff_ffff_ffff).wrapping_mul(0x9e37_79b1_85eb_ca87)
 }
 
-pub(super) fn index_dict_tables(
+#[inline(always)]
+pub(super) fn dict_tag6(m6: u64) -> u32 {
+    ((m6 >> 16) as u32) & !DICT_POS_MASK
+}
+
+pub(super) fn build_dict_tables(
     raw: &[u8],
-    ht4: &mut [[u32; 4]; HT4_SIZE],
-    ht6: &mut [[u32; 2]; HT6_SIZE],
-) {
-    if raw.len() < 8 {
-        return;
+) -> (Box<[[u32; 2]; DICT_HT4_SIZE]>, Box<[[u32; 2]]>, u32) {
+    let ht6_bits: u32 = if raw.len() <= 16_384 {
+        13 // 8192 x 8 B = 64 KiB
+    } else if raw.len() <= 65_536 {
+        14 // 16384 x 8 B = 128 KiB
+    } else if raw.len() <= 131_072 {
+        15 // 32768 x 8 B = 256 KiB
+    } else {
+        16 // 65536 x 8 B = 512 KiB
+    };
+    let ht6_shift = 64 - ht6_bits;
+    let mut ht4 = Box::new([[0u32; 2]; DICT_HT4_SIZE]);
+    let mut ht6 = vec![[0u32; 2]; 1usize << ht6_bits].into_boxed_slice();
+    if raw.len() >= 8 {
+        let mut p = 0usize;
+        while p + 8 <= raw.len() {
+            let w8 = read_u64(raw, p);
+            let w4 = w8 as u32;
+            let w5 = w8 & 0x0000_00ff_ffff_ffff;
+            let m6 = mul6(w8);
+            let p1 = (p + 1) as u32;
+            let e4 = dict_tag4(w4) | p1;
+            let e6 = dict_tag6(m6) | p1;
+            unsafe {
+                if raw.len() <= 32_768 || (p & 1) == 0 {
+                    let b4 = ht4.get_unchecked_mut((mul4(w4) >> (32 - DICT_HT4_BITS)) as usize);
+                    if b4[0] != 0 && (b4[0] ^ e4) <= DICT_POS_MASK {
+                        let prev = ((b4[0] & DICT_POS_MASK) - 1) as usize;
+                        if (read_u64(raw, prev) & 0x0000_00ff_ffff_ffff) == w5 {
+                            b4[0] = e4;
+                        } else {
+                            *b4 = [e4, b4[0]];
+                        }
+                    } else {
+                        *b4 = [e4, b4[0]];
+                    }
+                }
+                let b6 = ht6.get_unchecked_mut((m6 >> ht6_shift) as usize);
+                *b6 = [e6, b6[0]];
+            }
+            p += 1;
+        }
     }
-    let mut p = 0usize;
-    while p + 8 <= raw.len() {
-        insert_pos(raw, p, ht4, ht6);
-        p += 1;
-    }
+    (ht4, ht6, ht6_shift)
 }
 
 /// Compress raw dictionary bytes for storage in a `VERSION_V5` frame header.
@@ -127,7 +156,7 @@ pub(crate) fn decode_wire_dict(wire: &[u8], raw_len: usize) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn prepare_frame_dict(input: &[u8], block_size: usize) -> Option<PreparedDict> {
-    train::build_prepared_dict(input, block_size, &NEXT_DICT_ID)
+    train::build_prepared_dict(input, block_size)
 }
 
 pub(crate) fn encode_dict_block_into(
@@ -143,9 +172,4 @@ pub(crate) fn encode_dict_block_into(
         let mut sc = cell.borrow_mut();
         encode::encode_into(chunk, dict, &mut sc, out, max_len)
     })
-}
-
-#[inline(always)]
-pub(crate) fn next_id() -> u64 {
-    NEXT_DICT_ID.fetch_add(1, Ordering::Relaxed)
 }

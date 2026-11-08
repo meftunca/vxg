@@ -1,11 +1,11 @@
-# Competitor Parameter-Sweep, Trained-Dictionary, Whole-File & DuckDB Scale Benchmarks (`v0.5.0`)
+# Competitor Parameter-Sweep, Trained-Dictionary, Whole-File & DuckDB Scale Benchmarks (`v0.5.1`)
 
-This document evaluates `VXG v0.5.0` (`Format v4/v5`) under four strict methodology rules required for an honest, reproducible evaluation of a random-access structured codec and SQL engine:
+This document evaluates `VXG v0.5.1` (`Format v4/v5`) under four strict methodology rules required for an honest, reproducible evaluation of a random-access structured codec and SQL engine:
 
 1. **Strict Separation of Real-World Public Corpora vs. Synthetic/Procedural Corpora:** Publicly downloadable operational datasets (`NYC TLC Yellow Taxi`, `GitHub Archive`, `Elastic Apache Access Log`, `Project Gutenberg Shakespeare`, `Kodak Lossless True Color` camera photographs, and macOS `/var/log/install.log`) are reported separately from synthetic/procedural qualification generators (`--suite v4`, `scripts/gen_varied_ndjson.py`, `scripts/gen_format_bench.py`, and procedural 2D UI `.bmp` renders).
 2. **Trained-Dictionary (`Zstd + Dict`) & Whole-File (`zstd -19 --long`) Baselines:**
    - **Block-independent codecs (`64 KiB` blocks, `O(1)` random access = `YES`):** Native C `liblz4 1.10.0` (`lz4-c-a1`, `lz4-c-a4`, `lz4hc-c-l9`) and `libzstd 1.5.7` (`zstd-c-l-3`, `zstd-c-l1`, `zstd-c-l3`, `zstd-c-l9`, **`zstd-dict-l3`**, **`zstd-dict-l9`**).
-   - **Dictionary accounting:** `zstd-dict-*` trains up to a `32 KiB` external dictionary per dataset via `ZDICT_trainFromBuffer` (`src/baselines/zstd_ext.rs`). The dictionary byte length (`dict_bytes`) is charged once in `encoded_size()`; `Enc` / `Dec` measure steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput, while one-time `ZDICT` training latency (`ms`) is reported separately. **`VXG v5`** embeds its self-trained `<= 32 KiB` prefix dictionary inside the `.vxg` frame itself (`FLAG_FRAME_DICT`), and **`VXG Enc` / `Dec` include full dictionary training and header decoding time**.
+   - **Dictionary accounting:** `zstd-dict-*` trains up to a `32 KiB` external dictionary per dataset via `ZDICT_trainFromBuffer` (`src/baselines/zstd_ext.rs`). The dictionary byte length (`dict_bytes`) is charged once in `encoded_size()`; `Enc` / `Dec` measure steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput, while one-time `ZDICT` training latency (`ms`) is reported separately. **`VXG v5`** embeds its self-trained `<= 256 KiB` prefix dictionary inside the `.vxg` frame itself (`FLAG_FRAME_DICT`), and **`VXG Enc` / `Dec` include full dictionary training and header decoding time**.
    - **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window / `windowLog = 27`, single stream) removes `64 KiB` block boundaries completely to quantify the exact compression-ratio cost of `64 KiB` random access.
 3. **Head-to-Head Analytical Queries vs. `DuckDB 2.0.0` + `Parquet` (In-Cache `200k–300k` & Out-of-Cache `10M–40M` Rows):** Compressed-domain queries are reported in **wall-clock latency (`ms`)** and **million rows/second (`M rows/s`)** — never by dividing raw file size by single-column scan time — calibrated with `SELECT 1` and `PREPARE / EXECUTE` (`prep`) statements, alongside compressed storage (`MB`), ingest/ETL time, and **byte-exact lossless reversibility** across both in-cache (`23–56.5 MB`) and multi-GB full-year NYC TLC (`2.62–3.06 GB`, `10M–40M` rows) corpora.
 4. **Honest Per-Row Bolding:** Bold cells mark **only the actual per-row winner** on each individual metric (lowest `64 KiB` block ratio, highest encode `GB/s`, highest decode `GB/s`, lowest query `ms`). Codecs storing near-raw bytes (`ratio >= 0.90`, `< 10%` compression) are excluded from speed/trade-off bolding.
@@ -32,41 +32,41 @@ Fetched reproducibly via [`scripts/fetch_real_corpora.py`](../scripts/fetch_real
 
 | Dataset | Size | VXG Ratio | LZ4 (`a1`) | Zstd-1 | Zstd-9 | Zstd+Dict-3 | Zstd+Dict-9 | `zstd -19 --long` *(whole)* | VXG Enc | LZ4 Enc | Zstd-1 Enc | Zstd+D3 Enc | VXG Dec | LZ4 Dec | Zstd-1 Dec | Zstd+D3 Dec | Dict Train (`ms`) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`nyc-taxi-2024-01.csv`** | 23.0 MB | **0.1829** | 0.4241 | 0.2440 | 0.2194 | 0.2414 | 0.2132 | 0.1617 | **0.606** | 0.595 | 0.464 | 0.240 | 2.171 | **2.908** | 1.269 | 0.900 | 83.6 |
-| **`nyc-taxi-2024-01.ndjson`** | 52.3 MB | **0.0592** | 0.1899 | 0.0977 | 0.0823 | 0.1010 | 0.0783 | 0.0554 | **1.586** | 1.304 | 1.029 | 0.533 | **6.159** | 4.495 | 2.014 | 1.722 | 53.7 |
-| **`gharchive-2025-01-15.ndjson`** | 50.3 MB | 0.1350 | 0.2256 | 0.1577 | 0.1414 | 0.1254 | **0.1150** | 0.0633 | 0.236 | **1.234** | 0.975 | 0.462 | 1.451 | **5.660** | 2.288 | 2.176 | 59.1 |
-| **`apache-access.clf`** | 2.4 MB | 0.0990 | 0.1730 | 0.1233 | 0.1062 | 0.1075 | **0.0878** | 0.0535 | 0.305 | **1.570** | 1.143 | 0.567 | 1.581 | **5.871** | 2.550 | 2.210 | 46.5 |
-| **`macos-install.log`** | 34.2 MB | 0.0605 | 0.1249 | 0.0882 | 0.0770 | 0.0590 | **0.0484** | 0.0277 | 0.559 | **2.112** | 1.454 | 0.753 | 2.139 | **7.635** | 3.439 | 3.431 | 36.4 |
-| **`pg100-shakespeare.txt`** | 5.6 MB | 0.3977 | 0.6223 | 0.4421 | 0.3918 | 0.4005 | **0.3745** | 0.3000 | 0.083 | 0.388 | **0.396** | 0.147 | 1.104 | **2.848** | 1.155 | 0.762 | 98.9 |
-| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.8106 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 0.117 | **0.827** | 0.525 | 0.107 | 1.544 | **4.209** | 1.012 | 0.975 | 111.5 |
-| **Text & Structured Geomean (6)** | — | 0.1231 | 0.2500 | 0.1620 | 0.1419 | 0.1407 | **0.1205** | 0.0795 | 0.384 | **1.036** | 0.821 | 0.393 | 2.042 | **4.598** | 1.974 | 1.640 | 59.5 |
-| **2D Camera BMP (1)** | — | 0.8106 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 0.117 | **0.827** | 0.525 | 0.107 | 1.544 | **4.209** | 1.012 | 0.975 | 111.5 |
+| **`nyc-taxi-2024-01.csv`** | 23.0 MB | **0.1829** | 0.4241 | 0.2440 | 0.2194 | 0.2414 | 0.2132 | 0.1617 | **0.639** | 0.598 | 0.481 | 0.243 | 2.020 | **3.077** | 1.289 | 0.916 | 83.0 |
+| **`nyc-taxi-2024-01.ndjson`** | 52.3 MB | **0.0592** | 0.1899 | 0.0977 | 0.0823 | 0.1010 | 0.0783 | 0.0554 | **1.594** | 1.326 | 1.020 | 0.541 | **5.803** | 4.523 | 2.064 | 1.757 | 50.3 |
+| **`gharchive-2025-01-15.ndjson`** | 50.3 MB | 0.1231 | 0.2256 | 0.1577 | 0.1414 | 0.1254 | **0.1150** | 0.0633 | 0.285 | **1.218** | 0.946 | 0.453 | 2.001 | **5.626** | 2.282 | 2.101 | 59.2 |
+| **`apache-access.clf`** | 2.4 MB | 0.1037 | 0.1730 | 0.1233 | 0.1062 | 0.1075 | **0.0878** | 0.0535 | 0.320 | **1.529** | 1.176 | 0.588 | 2.063 | **5.870** | 2.640 | 2.258 | 44.3 |
+| **`macos-install.log`** | 34.2 MB | 0.0594 | 0.1249 | 0.0882 | 0.0770 | 0.0590 | **0.0484** | 0.0277 | 0.667 | **2.161** | 1.500 | 0.770 | 2.468 | **7.679** | 3.474 | 3.380 | 34.8 |
+| **`pg100-shakespeare.txt`** | 5.6 MB | 0.3884 | 0.6223 | 0.4421 | 0.3918 | 0.4005 | **0.3745** | 0.3000 | 0.086 | 0.389 | **0.397** | 0.148 | 0.959 | **2.862** | 1.155 | 0.768 | 96.3 |
+| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.8256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 0.134 | **0.836** | 0.529 | 0.107 | 2.210 | **4.258** | 1.020 | 0.975 | 107.6 |
+| **Text & Structured Geomean (6)** | — | 0.1213 | 0.2500 | 0.1620 | 0.1419 | 0.1407 | **0.1205** | 0.0795 | 0.417 | **1.037** | 0.829 | 0.398 | 2.204 | **4.649** | 2.002 | 1.645 | 57.6 |
+| **2D Camera BMP (1)** | — | 0.8256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 0.134 | **0.836** | 0.529 | 0.107 | 2.210 | **4.258** | 1.020 | 0.975 | 107.6 |
 
 ### 1.3 Multi-Thread Results (`threads = 8`, `block = 65536`, Apple Silicon NEON)
 
 | Dataset | Size | VXG Ratio | LZ4 (`a1`) | Zstd-1 | Zstd-9 | Zstd+Dict-3 | Zstd+Dict-9 | `zstd -19 --long` *(whole)* | VXG Enc | LZ4 Enc | Zstd-1 Enc | Zstd+D3 Enc | VXG Dec | LZ4 Dec | Zstd-1 Dec | Zstd+D3 Dec |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`nyc-taxi-2024-01.csv`** | 23.0 MB | **0.1829** | 0.4241 | 0.2440 | 0.2194 | 0.2414 | 0.2132 | 0.1617 | 2.904 | **2.918** | 2.711 | 1.159 | **13.429** | 13.150 | 6.357 | 4.683 |
-| **`nyc-taxi-2024-01.ndjson`** | 52.3 MB | **0.0592** | 0.1899 | 0.0977 | 0.0823 | 0.1010 | 0.0783 | 0.0554 | **8.382** | 6.592 | 5.096 | 2.688 | **34.405** | 18.814 | 7.351 | 7.571 |
-| **`gharchive-2025-01-15.ndjson`** | 50.3 MB | 0.1350 | 0.2256 | 0.1577 | 0.1414 | 0.1254 | **0.1150** | 0.0633 | 1.481 | **5.680** | 4.908 | 2.295 | 8.592 | **23.268** | 10.702 | 9.421 |
-| **`apache-access.clf`** | 2.4 MB | 0.0990 | 0.1730 | 0.1233 | 0.1062 | 0.1075 | **0.0878** | 0.0535 | 1.119 | **5.326** | 4.787 | 2.691 | 8.197 | **13.850** | 7.575 | 6.855 |
-| **`macos-install.log`** | 34.2 MB | 0.0605 | 0.1249 | 0.0882 | 0.0770 | 0.0590 | **0.0484** | 0.0278 | 3.507 | **12.180** | 7.187 | 4.096 | 15.206 | **34.371** | 19.865 | 18.375 |
-| **`pg100-shakespeare.txt`** | 5.6 MB | 0.3977 | 0.6223 | 0.4421 | 0.3918 | 0.4005 | **0.3745** | 0.3000 | 0.396 | **2.749** | 1.875 | 0.754 | 7.217 | **14.219** | 6.163 | 4.615 |
-| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.8106 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 0.774 | **4.400** | 2.903 | 0.605 | 9.477 | **18.720** | 5.510 | 4.615 |
-| **Text & Structured Geomean (6)** | — | 0.1231 | 0.2500 | 0.1620 | 0.1419 | 0.1407 | **0.1205** | 0.0795 | 1.956 | **5.187** | 4.044 | 1.975 | 12.363 | **18.413** | 8.798 | 7.610 |
+| **`nyc-taxi-2024-01.csv`** | 23.0 MB | **0.1829** | 0.4241 | 0.2440 | 0.2194 | 0.2414 | 0.2132 | 0.1617 | 3.425 | **3.774** | 2.938 | 1.604 | 13.683 | **18.736** | 7.154 | 4.991 |
+| **`nyc-taxi-2024-01.ndjson`** | 52.3 MB | **0.0592** | 0.1899 | 0.0977 | 0.0823 | 0.1010 | 0.0783 | 0.0554 | **9.034** | 7.979 | 5.839 | 3.617 | **38.161** | 27.805 | 11.617 | 10.220 |
+| **`gharchive-2025-01-15.ndjson`** | 50.3 MB | 0.1231 | 0.2256 | 0.1577 | 0.1414 | 0.1254 | **0.1150** | 0.0633 | 1.852 | **7.148** | 6.132 | 3.009 | 14.349 | **31.371** | 12.137 | 13.369 |
+| **`apache-access.clf`** | 2.4 MB | 0.1037 | 0.1730 | 0.1233 | 0.1062 | 0.1075 | **0.0878** | 0.0535 | 0.997 | **6.204** | 4.861 | 2.409 | 12.939 | **16.055** | 9.153 | 7.986 |
+| **`macos-install.log`** | 34.2 MB | 0.0594 | 0.1249 | 0.0882 | 0.0770 | 0.0590 | **0.0484** | 0.0278 | 3.965 | **11.572** | 7.164 | 4.198 | 17.466 | **43.963** | 18.830 | 17.677 |
+| **`pg100-shakespeare.txt`** | 5.6 MB | 0.3884 | 0.6223 | 0.4421 | 0.3918 | 0.4005 | **0.3745** | 0.3000 | 0.460 | **2.273** | 2.271 | 0.821 | 5.390 | **12.356** | 7.532 | 5.085 |
+| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.8256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 0.873 | **5.271** | 2.969 | 0.620 | 13.907 | **21.288** | 5.797 | 5.860 |
+| **Text & Structured Geomean (6)** | — | 0.1213 | 0.2500 | 0.1620 | 0.1419 | 0.1407 | **0.1205** | 0.0795 | 2.169 | **5.723** | 4.501 | 2.292 | 14.456 | **22.855** | 10.460 | 8.878 |
 
 ### 1.4 Engineering Takeaways on Real-World Data
 
 1. **Flat Tabular Records (`nyc-taxi.ndjson`, `nyc-taxi.csv`):**
-   - On **`nyc-taxi-2024-01.ndjson`** (`52.3 MB`), `VXG v0.5.0` achieves **`0.0592` (`5.92%`)** — **`3.21×` smaller than `LZ4` (`0.1899`)**, **`1.65×` smaller than `Zstd-1` (`0.0977`)**, **`1.39×` smaller than `Zstd-9` (`0.0823`)**, **`1.32×` smaller than `Zstd + Trained Dict L9` (`0.0783`)**, and within **`6.9%` of non-random-access whole-file `zstd -19 --long` (`0.0554`)**, while encoding at **`8.38 GB/s`** and decoding at **`34.41 GB/s`** (`8T`) — faster than `LZ4 (a1)` (`6.59 / 18.81 GB/s`; `LZ4 a4` reaches `34.61 GB/s` decode in the sweep).
-   - On **`nyc-taxi-2024-01.csv`** (`23.0 MB`), `MODEL_SCALED_DECIMAL` + unquoted ISO-8601 `MODEL_TIMESTAMP` + Block-0 CSV header isolation lift `8T` throughput from `1.34 / 3.10 GB/s` (`v0.4.7`) to **`2.90 / 13.43 GB/s`** — **`1.17×` smaller than `Zstd+Dict-9` (`0.1829` vs `0.2132`)**, **`2.32×` smaller than `LZ4` (`0.4241`)**, and faster than `LZ4 (a1)` on `8T` decode (`13.43` vs `13.15 GB/s`).
+   - On **`nyc-taxi-2024-01.ndjson`** (`52.3 MB`), `VXG v0.5.1` achieves **`0.0592` (`5.92%`)** — **`3.21×` smaller than `LZ4` (`0.1899`)**, **`1.65×` smaller than `Zstd-1` (`0.0977`)**, **`1.39×` smaller than `Zstd-9` (`0.0823`)**, **`1.32×` smaller than `Zstd + Trained Dict L9` (`0.0783`)**, and within **`6.9%` of non-random-access whole-file `zstd -19 --long` (`0.0554`)**, while encoding at **`9.03 GB/s`** and decoding at **`38.16 GB/s`** (`8T`) — faster than `LZ4 (a1)` (`7.98 / 27.81 GB/s`; `LZ4 a4` reaches `38.94 GB/s` decode in the sweep).
+   - On **`nyc-taxi-2024-01.csv`** (`23.0 MB`), `MODEL_SCALED_DECIMAL` + unquoted ISO-8601 `MODEL_TIMESTAMP` + Block-0 CSV header isolation lift throughput from `1.34 / 3.10 GB/s` (`v0.4.7`) to **`3.43 / 13.68 GB/s`** (`8T`, beating `LZ4` `1T` encode `0.639` vs `0.598 GB/s`) — **`1.17×` smaller than `Zstd+Dict-9` (`0.1829` vs `0.2132`)** and **`2.32×` smaller than `LZ4` (`0.4241`)**, while `LZ4` leads `8T` speed (`3.77 / 18.74 GB/s`).
 2. **Unstructured Logs, Nested JSON & Prose (`BLOCK_DICT_LZ` in `Format v5`):**
-   - Adding pure-Rust `BLOCK_DICT_LZ` (`kind = 3`, FastCover `64`-window frame prefix dictionary + 5-stream canonical Huffman + 3-repcode LZ77) reduced `gharchive` from `0.1985` to **`0.1350`**, `apache-access.clf` from `0.1198` to **`0.0990`**, `macos-install.log` from `0.0948` to **`0.0605`**, `shakespeare` from `0.4424` to **`0.3977`**, and `kodak` camera photos from `0.9256` to **`0.8106`**.
-   - Across the **6-dataset real public geomean**, `VXG v0.5.0` (**`0.1231`**) now **strictly beats `LZ4` (`0.2500`), `Zstd-1` (`0.1620`), `Zstd-9` (`0.1419`), and `Zstd+Dict-3` (`0.1407`)**, coming within **`2.1%` of `Zstd + Trained Dict L9` (`0.1205`)** while keeping zero C dependencies (`wasm32` compatible) and full self-contained framing. `Zstd+Dict-9` (`FSE + optimal parsing`) still leads individual ratios on the 4 unstructured/nested-JSON files, and `LZ4` leads raw throughput (`5.19 / 18.41 GB/s` vs `1.96 / 12.36 GB/s` `8T` geomean).
+   - Adding `v0.5.1`'s L1D `u16` local hash + register-tagged shared `PreparedDict` (`BLOCK_DICT_LZ`, `kind = 3`) reduced `gharchive` from `0.1985` to **`0.1231`** (beating both `Zstd-9` `0.1414` and `Zstd+Dict-3` `0.1254` at `14.35 GB/s` `8T` decode), `apache-access.clf` from `0.1198` to **`0.1037`** (beating `Zstd-9` `0.1062` & `Zstd+Dict-3` `0.1075` at `12.94 GB/s`), `macos-install.log` from `0.0948` to **`0.0594`** (`3.97 / 17.47 GB/s`), **`pg100-shakespeare.txt` from `0.4424` to `0.3884`** (beating both `Zstd-9` `0.3918` and `Zstd+Dict-3` `0.4005`), and `kodak` camera photos from `0.9256` to **`0.8256`**.
+   - Across the **6-dataset real public geomean**, `VXG v0.5.1` (**`0.1213`**) **strictly beats `LZ4` (`0.2500`), `Zstd-1` (`0.1620`), `Zstd-9` (`0.1419`), and `Zstd+Dict-3` (`0.1407`)**, coming within **`0.66%` of `Zstd + Trained Dict L9` (`0.1205`)** at **`14.46 GB/s` `8T` decode** (`1.63×` faster than `Zstd+Dict-3`) while keeping zero C dependencies (`wasm32` compatible) and full self-contained framing. `Zstd+Dict-9` (`FSE + optimal parsing`) still leads individual ratios on the 4 unstructured/nested-JSON files, and `LZ4` leads raw throughput (`5.72 / 22.86 GB/s` vs `2.17 / 14.46 GB/s` `8T` geomean).
 
 ---
 
-## 2. In-Cache Analytical Queries (`200k–300k` Rows): `VXG v0.5.0` vs. `DuckDB 2.0.0` + `Parquet` {#duckdb}
+## 2. In-Cache Analytical Queries (`200k–300k` Rows): `VXG v0.5.1` vs. `DuckDB 2.0.0` + `Parquet` {#duckdb}
 
 Measured standalone with zero background CPU contention (`libvxg.dylib` via `ctypes` vs. `duckdb 2.0.0` Python C++ extension, warm OS page cache, median of 5–7 runs, **100% result equality asserted on every query** via [`scripts/bench_vs_duckdb.py`](../scripts/bench_vs_duckdb.py); raw JSON artifact: [`reports/duckdb-vs-vxg.json`](../reports/duckdb-vs-vxg.json)). Parquet columns report **`PREPARE / EXECUTE` (`prep`)** latencies (`SELECT 1` calibration = `0.04–0.05 ms` `1T`, `0.06–0.07 ms` `8T`).
 
@@ -164,18 +164,18 @@ All datasets in this section are **procedurally generated** for deterministic re
 
 | Dataset (`16 MiB`, `8T`) | VXG Ratio | LZ4 (`a1`) | Zstd-1 | Zstd-9 | Zstd+Dict-9 | `zstd -19 --long` *(whole)* | VXG Enc / Dec (`GB/s`) | `LZ4 Sweep` Enc / Dec | `Zstd+Dict Sweep` Enc / Dec |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`telemetry.csv`** | **0.0407** | 0.1994 | 0.0841 | 0.0797 | 0.0868 | 0.0014 | 6.463 / **41.768** | **9.023** / 35.636 | 6.188 / 15.226 |
-| **`events.tsv`** | **0.0326** | 0.2223 | 0.0741 | 0.0683 | 0.0680 | 0.0008 | 5.955 / **53.119** | 7.783 / 41.877 | **7.943** / 15.298 |
-| **`app-logs.logfmt`** | **0.0353** | 0.2007 | 0.0695 | 0.0722 | 0.0731 | 0.0013 | 7.315 / **54.775** | **9.479** / 44.010 | 7.280 / 14.582 |
-| **`json-records.ndjson`** | **0.0227** | 0.1497 | 0.0542 | 0.0488 | 0.0544 | 0.0196 | 9.512 / **58.922** | **12.512** / 44.187 | 8.717 / 20.988 |
-| **`field-order-optional-escaping.ndjson`** | **0.0445** | 0.2132 | 0.1043 | 0.0883 | 0.0902 | 0.0667 | 4.917 / 30.184 | **8.045 / 36.409** | 5.963 / 12.806 |
-| **`event-mix-identifiers.ndjson`** | **0.0248** | 0.1545 | 0.0779 | 0.0698 | 0.0696 | 0.0517 | 6.410 / **48.296** | **10.173** / 44.023 | 7.368 / 14.718 |
-| **`bursty-variable-records.ndjson`** | **0.0480** | 0.2065 | 0.1196 | 0.0926 | 0.0888 | 0.0642 | 4.956 / 21.545 | **7.571 / 25.372** | 4.964 / 12.347 |
-| **`source-and-docs.txt`** | 0.2592 | 0.4259 | 0.3107 | 0.2694 | **0.1986** | 0.0029 | 0.826 / 7.967 | **3.856 / 23.850** | 3.117 / 8.913 |
-| **Text & Structured Geomean (8)** | **0.0442** | 0.2105 | 0.0958 | 0.0858 | 0.0845 | 0.0081 | 4.924 / 34.014 | **8.173 / 35.990** | 6.177 / 14.003 |
-| **`ui-render-32bpp.bmp`** *(procedural UI)* | **0.0048** | 0.0140 | 0.0091 | 0.0086 | 0.0087 | 0.0010 | 29.456 / **81.515** | **32.942** / 63.044 | 29.169 / 24.405 |
-| **`rgb-frame-24bpp.bmp`** *(procedural 24bpp)* | **0.0012** | 0.0227 | 0.0119 | 0.0122 | 0.0141 | 0.0010 | 27.506 / **69.960** | **28.565** / 44.639 | 24.092 / 32.636 |
-| **Procedural 2D BMP Geomean (2)** | **0.0024** | 0.0178 | 0.0104 | 0.0103 | 0.0111 | 0.0010 | 28.464 / **75.517** | **30.676** / 53.049 | 26.509 / 28.222 |
+| **`telemetry.csv`** | **0.0407** | 0.1994 | 0.0841 | 0.0797 | 0.0868 | 0.0014 | 6.648 / **48.375** | **9.719** / 40.847 | 7.802 / 15.263 |
+| **`events.tsv`** | **0.0326** | 0.2223 | 0.0741 | 0.0683 | 0.0680 | 0.0008 | 6.982 / **56.157** | **8.974** / 47.520 | 7.332 / 17.985 |
+| **`app-logs.logfmt`** | **0.0353** | 0.2007 | 0.0695 | 0.0722 | 0.0731 | 0.0013 | 7.336 / **60.092** | **9.327** / 54.963 | 8.145 / 13.616 |
+| **`json-records.ndjson`** | **0.0227** | 0.1497 | 0.0542 | 0.0488 | 0.0544 | 0.0196 | 9.893 / **69.601** | **13.393** / 55.745 | 9.541 / 20.097 |
+| **`field-order-optional-escaping.ndjson`** | **0.0445** | 0.2132 | 0.1043 | 0.0883 | 0.0902 | 0.0667 | 5.523 / 32.666 | **8.183 / 32.982** | 4.945 / 13.114 |
+| **`event-mix-identifiers.ndjson`** | **0.0248** | 0.1545 | 0.0779 | 0.0698 | 0.0696 | 0.0517 | 6.465 / **48.273** | **11.105** / 42.341 | 7.320 / 17.102 |
+| **`bursty-variable-records.ndjson`** | **0.0480** | 0.2065 | 0.1196 | 0.0926 | 0.0888 | 0.0642 | 4.997 / 26.342 | **7.728 / 34.165** | 5.208 / 11.764 |
+| **`source-and-docs.txt`** | **0.0036** | 0.4286 | 0.3133 | 0.2716 | 0.2007 | 0.0029 | **4.358 / 94.539** | 4.013 / 21.922 | 3.254 / 10.564 |
+| **Text & Structured Geomean (8)** | **0.0259** | 0.2107 | 0.0959 | 0.0859 | 0.0846 | 0.0081 | 6.343 / **50.838** | **8.628** / 39.740 | 6.375 / 14.626 |
+| **`ui-render-32bpp.bmp`** *(procedural UI)* | **0.0048** | 0.0140 | 0.0091 | 0.0086 | 0.0087 | 0.0010 | 27.868 / **76.950** | **36.387** / 66.873 | 35.765 / 26.612 |
+| **`rgb-frame-24bpp.bmp`** *(procedural 24bpp)* | **0.0012** | 0.0227 | 0.0119 | 0.0122 | 0.0141 | 0.0010 | 27.348 / **73.312** | **34.627** / 44.447 | 27.465 / 33.933 |
+| **Procedural 2D BMP Geomean (2)** | **0.0024** | 0.0178 | 0.0104 | 0.0103 | 0.0111 | 0.0010 | 27.607 / **75.109** | **35.496** / 54.519 | 31.341 / 30.050 |
 
 ---
 

@@ -18,34 +18,34 @@ const PLATFORMS: Record<PlatformKey, { label: string; sub: string; rows: RowEntr
     label: 'Apple Silicon (1T)',
     sub: 'aarch64 NEON · threads=1 · 16 MiB · 64 KiB blocks',
     rows: [
-      { name: '10-Dataset Geometric Mean', kind: 'geomean', vxg: [0.0250, 2.094, 8.211], zstd: [0.0607, 1.568, 2.666], lz4: [0.1272, 2.309, 6.933] },
-      { name: 'json-records.ndjson', kind: 'structured', vxg: [0.0227, 2.202, 12.531], zstd: [0.0542, 1.606, 3.263], lz4: [0.1497, 2.296, 9.061] },
-      { name: 'event-mix-identifiers.ndjson', kind: 'structured', vxg: [0.0248, 1.756, 8.807], zstd: [0.0779, 1.291, 2.290], lz4: [0.1545, 1.944, 5.702] },
-      { name: 'events.tsv', kind: 'structured', vxg: [0.0334, 1.686, 9.441], zstd: [0.0741, 1.323, 2.610], lz4: [0.2223, 1.505, 5.750] },
-      { name: 'app-logs.logfmt', kind: 'structured', vxg: [0.0353, 1.861, 10.725], zstd: [0.0695, 1.264, 2.483], lz4: [0.2007, 1.735, 6.979] },
-      { name: 'telemetry.csv', kind: 'structured', vxg: [0.0407, 1.704, 9.420], zstd: [0.0841, 1.163, 2.249], lz4: [0.1994, 1.906, 7.468] },
-      { name: 'field-order-optional.ndjson', kind: 'structured', vxg: [0.0445, 1.322, 5.583], zstd: [0.1043, 0.939, 1.863], lz4: [0.2132, 1.300, 4.684] },
-      { name: 'bursty-variable-records.ndjson', kind: 'structured', vxg: [0.0480, 1.154, 4.523], zstd: [0.1196, 0.852, 1.737], lz4: [0.2065, 1.385, 4.320] },
-      { name: 'source-and-docs.txt', kind: 'structured', vxg: [0.2698, 0.592, 2.468], zstd: [0.2713, 0.567, 1.488], lz4: [0.3777, 0.691, 4.025] },
-      { name: 'ui-render-32bpp.bmp', kind: 'media', vxg: [0.0048, 9.533, 14.246], zstd: [0.0091, 6.624, 4.768], lz4: [0.0140, 13.631, 19.663] },
-      { name: 'rgb-frame-24bpp.bmp', kind: 'media', vxg: [0.0012, 8.793, 14.846], zstd: [0.0119, 7.379, 7.063], lz4: [0.0227, 11.159, 10.381] }
+      { name: '10-Dataset Geometric Mean', kind: 'geomean', vxg: [0.0162, 2.217, 10.532], zstd: [0.0615, 1.550, 2.657], lz4: [0.1286, 2.274, 6.937] },
+      { name: 'source-and-docs.txt', kind: 'structured', vxg: [0.0036, 3.620, 62.686], zstd: [0.3133, 0.509, 1.365], lz4: [0.4286, 0.635, 3.701] },
+      { name: 'json-records.ndjson', kind: 'structured', vxg: [0.0227, 2.077, 11.911], zstd: [0.0542, 1.695, 3.380], lz4: [0.1497, 2.455, 9.366] },
+      { name: 'event-mix-identifiers.ndjson', kind: 'structured', vxg: [0.0248, 1.465, 7.914], zstd: [0.0779, 1.251, 2.373], lz4: [0.1545, 1.962, 5.706] },
+      { name: 'events.tsv', kind: 'structured', vxg: [0.0326, 1.459, 8.642], zstd: [0.0741, 1.313, 2.593], lz4: [0.2223, 1.511, 5.828] },
+      { name: 'app-logs.logfmt', kind: 'structured', vxg: [0.0353, 1.512, 9.012], zstd: [0.0695, 1.270, 2.464], lz4: [0.2007, 1.738, 7.028] },
+      { name: 'telemetry.csv', kind: 'structured', vxg: [0.0407, 1.438, 7.935], zstd: [0.0841, 1.120, 2.161], lz4: [0.1994, 1.805, 7.245] },
+      { name: 'field-order-optional.ndjson', kind: 'structured', vxg: [0.0445, 1.139, 5.347], zstd: [0.1043, 0.982, 1.953], lz4: [0.2132, 1.377, 4.887] },
+      { name: 'bursty-variable-records.ndjson', kind: 'structured', vxg: [0.0480, 0.953, 3.984], zstd: [0.1196, 0.875, 1.736], lz4: [0.2065, 1.367, 4.401] },
+      { name: 'ui-render-32bpp.bmp', kind: 'media', vxg: [0.0048, 9.041, 14.588], zstd: [0.0091, 6.528, 4.801], lz4: [0.0140, 12.657, 19.655] },
+      { name: 'rgb-frame-24bpp.bmp', kind: 'media', vxg: [0.0012, 8.355, 14.792], zstd: [0.0119, 7.069, 7.120], lz4: [0.0227, 10.698, 10.397] }
     ]
   },
   m_8t: {
     label: 'Apple Silicon (8T)',
     sub: 'aarch64 NEON · threads=8 · work-stealing · 16 MiB',
     rows: [
-      { name: '10-Dataset Geometric Mean', kind: 'geomean', vxg: [0.0250, 11.750, 41.545], zstd: [0.0607, 8.771, 16.042], lz4: [0.1272, 12.383, 36.499] },
-      { name: 'json-records.ndjson', kind: 'structured', vxg: [0.0227, 13.772, 54.798], zstd: [0.0542, 8.598, 17.224], lz4: [0.1497, 12.896, 39.135] },
-      { name: 'event-mix-identifiers.ndjson', kind: 'structured', vxg: [0.0248, 10.532, 44.595], zstd: [0.0779, 8.022, 15.768], lz4: [0.1545, 9.997, 34.218] },
-      { name: 'events.tsv', kind: 'structured', vxg: [0.0334, 9.919, 45.716], zstd: [0.0741, 7.168, 13.654], lz4: [0.2223, 9.560, 30.671] },
-      { name: 'app-logs.logfmt', kind: 'structured', vxg: [0.0353, 11.470, 49.538], zstd: [0.0695, 6.915, 13.485], lz4: [0.2007, 9.994, 32.485] },
-      { name: 'telemetry.csv', kind: 'structured', vxg: [0.0407, 11.122, 47.196], zstd: [0.0841, 7.848, 15.575], lz4: [0.1994, 12.834, 41.839] },
-      { name: 'field-order-optional.ndjson', kind: 'structured', vxg: [0.0445, 6.190, 30.762], zstd: [0.1043, 4.913, 9.655], lz4: [0.2132, 7.728, 23.581] },
-      { name: 'bursty-variable-records.ndjson', kind: 'structured', vxg: [0.0480, 7.789, 27.442], zstd: [0.1196, 5.727, 12.079], lz4: [0.2065, 9.199, 27.281] },
-      { name: 'source-and-docs.txt', kind: 'structured', vxg: [0.2698, 4.306, 16.844], zstd: [0.2713, 4.205, 10.641], lz4: [0.3777, 5.077, 25.848] },
-      { name: 'ui-render-32bpp.bmp', kind: 'media', vxg: [0.0048, 36.922, 63.932], zstd: [0.0091, 27.504, 29.208], lz4: [0.0140, 40.151, 83.121] },
-      { name: 'rgb-frame-24bpp.bmp', kind: 'media', vxg: [0.0012, 35.666, 64.509], zstd: [0.0119, 30.885, 39.982], lz4: [0.0227, 37.010, 54.381] }
+      { name: '10-Dataset Geometric Mean', kind: 'geomean', vxg: [0.0162, 8.512, 54.965], zstd: [0.0615, 7.731, 14.065], lz4: [0.1286, 10.957, 32.112] },
+      { name: 'source-and-docs.txt', kind: 'structured', vxg: [0.0036, 4.358, 94.539], zstd: [0.3133, 3.254, 8.126], lz4: [0.4286, 4.013, 21.063] },
+      { name: 'json-records.ndjson', kind: 'structured', vxg: [0.0227, 9.893, 69.601], zstd: [0.0542, 8.816, 16.191], lz4: [0.1497, 13.356, 37.503] },
+      { name: 'event-mix-identifiers.ndjson', kind: 'structured', vxg: [0.0248, 6.465, 48.273], zstd: [0.0779, 7.320, 14.111], lz4: [0.1545, 9.696, 31.453] },
+      { name: 'events.tsv', kind: 'structured', vxg: [0.0326, 6.982, 56.157], zstd: [0.0741, 6.141, 13.133], lz4: [0.2223, 7.658, 25.999] },
+      { name: 'app-logs.logfmt', kind: 'structured', vxg: [0.0353, 7.336, 60.092], zstd: [0.0695, 6.566, 12.504], lz4: [0.2007, 9.327, 35.408] },
+      { name: 'telemetry.csv', kind: 'structured', vxg: [0.0407, 6.648, 48.375], zstd: [0.0841, 6.945, 11.244], lz4: [0.1994, 9.660, 31.411] },
+      { name: 'field-order-optional.ndjson', kind: 'structured', vxg: [0.0445, 5.523, 32.666], zstd: [0.1043, 4.945, 11.862], lz4: [0.2132, 7.382, 26.519] },
+      { name: 'bursty-variable-records.ndjson', kind: 'structured', vxg: [0.0480, 4.997, 26.342], zstd: [0.1196, 4.418, 10.934], lz4: [0.2065, 7.476, 20.590] },
+      { name: 'ui-render-32bpp.bmp', kind: 'media', vxg: [0.0048, 27.868, 76.950], zstd: [0.0091, 22.701, 20.078], lz4: [0.0140, 36.387, 66.873] },
+      { name: 'rgb-frame-24bpp.bmp', kind: 'media', vxg: [0.0012, 27.348, 73.312], zstd: [0.0119, 26.166, 33.933], lz4: [0.0227, 34.627, 44.447] }
     ]
   },
   ci_mac: {

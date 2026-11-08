@@ -45,7 +45,7 @@ To achieve multi-GB/s throughput across language boundaries without heap-allocat
 
 | Function | Signature | Description |
 | :--- | :--- | :--- |
-| `vxg_version_string` | `const char* vxg_version_string(void)` | Returns null-terminated version string (`"0.5.0"`). |
+| `vxg_version_string` | `const char* vxg_version_string(void)` | Returns null-terminated version string (`"0.5.1"`). |
 | `vxg_error_message` | `const char* vxg_error_message(vxg_ssize_t code)` | Returns static human-readable message for `< 0` error codes. |
 | `vxg_compress_bound` | `vxg_ssize_t vxg_compress_bound(size_t raw_len, size_t block_size)` | Worst-case compressed byte size (`block_size = 0` uses default `65536`). |
 | `vxg_frame_raw_size` | `vxg_ssize_t vxg_frame_raw_size(const uint8_t* src, size_t src_len)` | $O(1)$ header inspection (or multi-frame sum) returning exact uncompressed size in bytes. |
