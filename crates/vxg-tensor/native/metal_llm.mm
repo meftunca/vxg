@@ -1,6 +1,8 @@
 #include "metal_internal.h"
 
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
 
 namespace {
 
@@ -54,6 +56,12 @@ struct MetalLlmRunner {
     VxtLlmConfig cfg{};
     std::vector<VxtLlmLayerDesc> layers;
     VxtMetalOp output_head_op{};
+    VxtMetalOp embedding_op{};
+    float embedding_centroids[16]{};
+    bool greedy_ready = false;
+    id<MTLComputePipelineState> pso_embedding_cb4 = nil;
+    id<MTLComputePipelineState> pso_greedy = nil;
+    id<MTLBuffer> greedy_id_buf = nil;
     id<MTLBuffer> output_norm_buf = nil;
     std::vector<id<MTLBuffer>> retained_bufs;
 
@@ -137,15 +145,40 @@ void maybe_rot_ops(
     const VxtMetalOp* ops,
     uint32_t n
 ) {
-    uint32_t max_cols = 0;
+    uint32_t max_wht_cols = 0;
+    uint32_t max_turbo_cols = 0;
+    uint32_t raw_turbo_cols = 0;
     for (uint32_t i = 0; i < n; ++i) {
         if (ops[i].kind == 4u) {
-            max_cols = std::max(max_cols, ops[i].cols);
+            max_wht_cols = std::max(max_wht_cols, ops[i].cols);
+        } else if (ops[i].kind == 6u) {
+            max_turbo_cols = std::max(max_turbo_cols, ops[i].cols);
+            raw_turbo_cols = std::max(raw_turbo_cols, ops[i].lut8[0] > 0u ? ops[i].lut8[0] : ops[i].cols);
         }
     }
-    if (max_cols > 0) {
-        vxt_encode_fwht32_buf(g, enc, x_in, x_rot, max_cols);
+    if (max_turbo_cols > 0) {
+        vxt_encode_turbo_fwht32_buf(g, enc, x_in, x_rot, raw_turbo_cols, max_turbo_cols);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    } else if (max_wht_cols > 0) {
+        vxt_encode_fwht32_buf(g, enc, x_in, x_rot, max_wht_cols);
+        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
     }
+}
+
+void encode_cb4_embedding(MetalLlmRunner* r, id<MTLComputeCommandEncoder> enc, uint32_t token) {
+    uint32_t dim = r->cfg.n_embd;
+            const auto& op = r->embedding_op;
+            uint32_t ep[3] = {token, dim, op.cols};
+            [enc setComputePipelineState:r->pso_embedding_cb4];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b0 offset:0 atIndex:0];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b1 offset:0 atIndex:1];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b2 offset:0 atIndex:2];
+            [enc setBuffer:(__bridge id<MTLBuffer>)op.b3 offset:0 atIndex:3];
+            [enc setBuffer:r->cur_buf offset:0 atIndex:4];
+            [enc setBytes:ep length:sizeof(ep) atIndex:5];
+            [enc setBytes:r->embedding_centroids length:sizeof(r->embedding_centroids) atIndex:6];
+            dispatch_1d(enc, dim);
+
 }
 
 } // namespace
@@ -320,7 +353,7 @@ void vxt_metal_llm_state_destroy(void* raw_state) {
     }
 }
 
-int vxt_metal_llm_step(
+static int llm_step_impl(
     void* raw_runner,
     void* raw_state,
     const float* cur_init,
@@ -328,12 +361,14 @@ int vxt_metal_llm_step(
     uint32_t compute_logits,
     float* logits_out,
     char* err_out,
-    size_t err_cap
+    size_t err_cap,
+    bool greedy = false, uint32_t token = 0, uint32_t* next_token = nullptr
 ) {
     @autoreleasepool {
         auto* r = static_cast<MetalLlmRunner*>(raw_runner);
         auto* st = static_cast<MetalLlmState*>(raw_state);
-        if (!r || !st || !cur_init || (compute_logits && !logits_out)) {
+        if (!r || !st || (!greedy && !cur_init) || (!greedy && compute_logits && !logits_out)
+            || (greedy && (!r->greedy_ready || !next_token || token >= r->cfg.n_vocab))) {
             vxt_write_err(err_out, err_cap, "invalid arguments to vxt_metal_llm_step");
             return -1;
         }
@@ -342,6 +377,8 @@ int vxt_metal_llm_step(
             return -1;
         }
 
+        const bool command_timing = std::getenv("VXG_PROFILE_COMMAND") != nullptr;
+        const CFAbsoluteTime encode_start = command_timing ? CFAbsoluteTimeGetCurrent() : 0;
         const auto& cfg = r->cfg;
         uint32_t dim = cfg.n_embd;
         uint32_t n_ff = cfg.n_ff;
@@ -349,11 +386,54 @@ int vxt_metal_llm_step(
         MTLSize tg256 = MTLSizeMake(256, 1, 1);
         MTLSize one_tg = MTLSizeMake(1, 1, 1);
 
-        std::memcpy([r->cur_buf contents], cur_init, size_t(dim) * sizeof(float));
+        if (!greedy) std::memcpy([r->cur_buf contents], cur_init, size_t(dim) * sizeof(float));
 
         id<MTLCommandBuffer> cmd = [r->gemv.queue commandBuffer];
-        id<MTLComputeCommandEncoder> enc =
-            [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+        if (!cmd) { vxt_write_err(err_out, err_cap, "LLM command allocation failed"); return -1; }
+        // Opt-in diagnostic: stage timestamps require encoder boundaries on Apple GPU.
+        // This alters scheduling; never interpret it as the production kernel timeline.
+        const bool profile = std::getenv("VXG_PROFILE_STAGES") != nullptr;
+        id<MTLCounterSampleBuffer> samples = nil;
+        std::vector<const char*> stage_names;
+        if (profile) {
+            id<MTLDevice> dev = r->gemv.queue.device;
+            if (![dev supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+                vxt_write_err(err_out, err_cap, "stage timestamp sampling unsupported");
+                return -1;
+            }
+            MTLCounterSampleBufferDescriptor* d = [MTLCounterSampleBufferDescriptor new];
+            for (id<MTLCounterSet> set in dev.counterSets)
+                if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) d.counterSet = set;
+            d.storageMode = MTLStorageModeShared;
+            d.sampleCount = 24u * cfg.n_layer + 8u;
+            NSError* e = nil;
+            samples = [dev newCounterSampleBufferWithDescriptor:d error:&e];
+            if (!samples) {
+                vxt_write_err(err_out, err_cap, "timestamp sample allocation failed");
+                return -1;
+            }
+        }
+        id<MTLComputeCommandEncoder> enc = nil;
+        auto stage = [&](const char* name) {
+            if (!profile) return;
+            if (enc) [enc endEncoding];
+            MTLComputePassDescriptor* d = [MTLComputePassDescriptor computePassDescriptor];
+            d.dispatchType = MTLDispatchTypeConcurrent;
+            auto* a = d.sampleBufferAttachments[0];
+            a.sampleBuffer = samples;
+            a.startOfEncoderSampleIndex = stage_names.size() * 2;
+            a.endOfEncoderSampleIndex = stage_names.size() * 2 + 1;
+            stage_names.push_back(name);
+            enc = [cmd computeCommandEncoderWithDescriptor:d];
+        };
+        if (!profile) enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+        if (!profile && !enc) { vxt_write_err(err_out, err_cap, "LLM encoder allocation failed"); return -1; }
+
+        if (greedy) {
+            stage("embedding");
+            encode_cb4_embedding(r, enc, token);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+        }
 
         uint32_t conv_ch = cfg.ssm_inner_size + 2u * cfg.ssm_group_count * cfg.ssm_state_size;
         uint32_t dv = cfg.ssm_dt_rank > 0 ? (cfg.ssm_inner_size / cfg.ssm_dt_rank) : 0u;
@@ -364,6 +444,7 @@ int vxt_metal_llm_step(
 
         for (uint32_t il = 0; il < cfg.n_layer; ++il) {
             const auto& ly = r->layers[il];
+            stage("norm_residual");
             if (il > 0) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
             [enc setComputePipelineState:r->pso_rms_norm];
@@ -375,6 +456,7 @@ int vxt_metal_llm_step(
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
             if (ly.is_recurrent) {
+                stage("recurrent_gemv");
                 VxtMetalOp a_ops[4] = {ly.op_a0, ly.op_a1, ly.op_a2, ly.op_a3};
                 maybe_rot_ops(&r->gemv, enc, r->normed_buf, r->x_rot_buf, a_ops, 4);
                 vxt_encode_gemv_op(&r->gemv, enc, ly.op_a0, r->normed_buf, r->x_rot_buf, r->qkv_mixed_buf, 0);
@@ -383,6 +465,7 @@ int vxt_metal_llm_step(
                 vxt_encode_gemv_op(&r->gemv, enc, ly.op_a3, r->normed_buf, r->x_rot_buf, r->beta_buf, 0);
                 [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
+                stage("deltanet");
                 [enc setComputePipelineState:r->pso_deltanet_conv];
                 [enc setBuffer:r->qkv_mixed_buf offset:0 atIndex:0];
                 [enc setBuffer:(__bridge id<MTLBuffer>)ly.vec0_buf offset:0 atIndex:1];
@@ -406,10 +489,12 @@ int vxt_metal_llm_step(
                 [enc dispatchThreadgroups:MTLSizeMake(cfg.ssm_dt_rank, 1, 1) threadsPerThreadgroup:tg256];
                 [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
+                stage("recurrent_gemv");
                 maybe_rot_ops(&r->gemv, enc, r->y_concat_buf, r->x_rot_buf, &ly.op_out, 1);
                 vxt_encode_gemv_op(&r->gemv, enc, ly.op_out, r->y_concat_buf, r->x_rot_buf, r->attn_out_buf, 0);
                 [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             } else {
+                stage("attention_gemv");
                 VxtMetalOp g_ops[3] = {ly.op_a0, ly.op_a1, ly.op_a2};
                 maybe_rot_ops(&r->gemv, enc, r->normed_buf, r->x_rot_buf, g_ops, 3);
                 vxt_encode_gemv_op(&r->gemv, enc, ly.op_a0, r->normed_buf, r->x_rot_buf, r->q_raw_buf, 0);
@@ -432,6 +517,7 @@ int vxt_metal_llm_step(
                     return p ? (__bridge id<MTLBuffer>)p : r->dummy_buf;
                 };
 
+                stage("attention");
                 [enc setComputePipelineState:r->pso_gqa_prep];
                 [enc setBuffer:r->q_raw_buf offset:0 atIndex:0];
                 [enc setBuffer:r->k_cur_buf offset:0 atIndex:1];
@@ -460,11 +546,13 @@ int vxt_metal_llm_step(
                 [enc dispatchThreadgroups:MTLSizeMake(cfg.n_head, 1, 1) threadsPerThreadgroup:tg256];
                 [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
+                stage("attention_gemv");
                 maybe_rot_ops(&r->gemv, enc, r->att_cat_buf, r->x_rot_buf, &ly.op_out, 1);
                 vxt_encode_gemv_op(&r->gemv, enc, ly.op_out, r->att_cat_buf, r->x_rot_buf, r->attn_out_buf, 0);
                 [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             }
 
+            stage("norm_residual");
             [enc setComputePipelineState:r->pso_add_rms_norm];
             [enc setBuffer:r->cur_buf offset:0 atIndex:0];
             [enc setBuffer:r->attn_out_buf offset:0 atIndex:1];
@@ -474,12 +562,14 @@ int vxt_metal_llm_step(
             [enc dispatchThreadgroups:one_tg threadsPerThreadgroup:tg256];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
+            stage("ffn_gemv");
             VxtMetalOp ffn_ops[2] = {ly.op_ffn_gate, ly.op_ffn_up};
             maybe_rot_ops(&r->gemv, enc, r->normed_buf, r->x_rot_buf, ffn_ops, 2);
             vxt_encode_gemv_op(&r->gemv, enc, ly.op_ffn_gate, r->normed_buf, r->x_rot_buf, r->ffn_gate_buf, 0);
             vxt_encode_gemv_op(&r->gemv, enc, ly.op_ffn_up, r->normed_buf, r->x_rot_buf, r->ffn_up_buf, 0);
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
+            stage("ffn_activation");
             [enc setComputePipelineState:r->pso_swiglu_mul];
             [enc setBuffer:r->ffn_gate_buf offset:0 atIndex:0];
             [enc setBuffer:r->ffn_up_buf offset:0 atIndex:1];
@@ -487,10 +577,12 @@ int vxt_metal_llm_step(
             dispatch_1d(enc, n_ff);
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
+            stage("ffn_gemv");
             maybe_rot_ops(&r->gemv, enc, r->ffn_gate_buf, r->x_rot_buf, &ly.op_ffn_down, 1);
             vxt_encode_gemv_op(&r->gemv, enc, ly.op_ffn_down, r->ffn_gate_buf, r->x_rot_buf, r->ffn_out_buf, 0);
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
+            stage("norm_residual");
             [enc setComputePipelineState:r->pso_vec_add];
             [enc setBuffer:r->cur_buf offset:0 atIndex:0];
             [enc setBuffer:r->ffn_out_buf offset:0 atIndex:1];
@@ -499,6 +591,7 @@ int vxt_metal_llm_step(
         }
 
         if (compute_logits) {
+            stage("norm_residual");
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
             [enc setComputePipelineState:r->pso_rms_norm];
             [enc setBuffer:r->cur_buf offset:0 atIndex:0];
@@ -508,10 +601,20 @@ int vxt_metal_llm_step(
             [enc dispatchThreadgroups:one_tg threadsPerThreadgroup:tg256];
             [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
 
+            stage("lm_head");
             maybe_rot_ops(&r->gemv, enc, r->normed_buf, r->x_rot_buf, &r->output_head_op, 1);
             vxt_encode_gemv_op(&r->gemv, enc, r->output_head_op, r->normed_buf, r->x_rot_buf, r->logits_buf, 0);
         }
 
+        if (greedy) {
+            stage("greedy_argmax");
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            [enc setComputePipelineState:r->pso_greedy];
+            [enc setBuffer:r->logits_buf offset:0 atIndex:0];
+            [enc setBuffer:r->greedy_id_buf offset:0 atIndex:1];
+            [enc setBytes:&cfg.n_vocab length:sizeof(cfg.n_vocab) atIndex:2];
+            [enc dispatchThreadgroups:one_tg threadsPerThreadgroup:tg256];
+        }
         [enc endEncoding];
         CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
         [cmd commit];
@@ -529,11 +632,110 @@ int vxt_metal_llm_step(
             vxt_write_err(err_out, err_cap, e ? [[e localizedDescription] UTF8String] : "LLM MTLCommandBuffer failed");
             return -1;
         }
-        if (compute_logits) {
+        if (command_timing) {
+            const CFAbsoluteTime completed = CFAbsoluteTimeGetCurrent();
+            std::fprintf(stderr, "COMMAND pos=%u greedy=%u encode_s=%.9f wait_s=%.9f gpu_s=%.9f\n",
+                pos, greedy ? 1u : 0u, t0-encode_start, completed-t0, cmd.GPUEndTime-cmd.GPUStartTime);
+        }
+        if (profile) {
+            NSData* resolved = [samples resolveCounterRange:NSMakeRange(0, stage_names.size()*2)];
+            if (!resolved || resolved.length != stage_names.size()*2*sizeof(MTLCounterResultTimestamp)) {
+                vxt_write_err(err_out, err_cap, "timestamp resolve failed");
+                return -1;
+            }
+            auto* ts = static_cast<const MTLCounterResultTimestamp*>(resolved.bytes);
+            std::fprintf(stderr, "PROFILE pos=%u logits=%u gpu_s=%.9f", pos, compute_logits,
+                cmd.GPUEndTime-cmd.GPUStartTime);
+            for (size_t i=0; i<stage_names.size(); ++i) {
+                uint64_t begin=ts[2*i].timestamp, end=ts[2*i+1].timestamp;
+                if (!begin || end < begin || end == MTLCounterErrorValue) {
+                    vxt_write_err(err_out, err_cap, "invalid GPU timestamp");
+                    return -1;
+                }
+                std::fprintf(stderr, " %s=%llu",stage_names[i], (unsigned long long)(end-begin));
+            }
+            std::fprintf(stderr, "\n");
+        }
+        if (greedy && static_cast<const uint32_t*>([r->greedy_id_buf contents])[1]) {
+            vxt_write_err(err_out, err_cap, "nonfinite greedy logits; state has advanced and must be discarded");
+            return -1;
+        }
+        if (greedy) *next_token = *static_cast<const uint32_t*>([r->greedy_id_buf contents]);
+        if (compute_logits && !greedy) {
             std::memcpy(logits_out, [r->logits_buf contents], size_t(cfg.n_vocab) * sizeof(float));
         }
         return 0;
     }
+}
+
+int vxt_metal_llm_step(void* r, void* s, const float* cur, uint32_t pos,
+    uint32_t logits, float* out, char* err, size_t cap) {
+    return llm_step_impl(r, s, cur, pos, logits, out, err, cap);
+}
+
+int vxt_metal_llm_enable_cb4_greedy(void* raw, const VxtMetalOp* embedding,
+    const float* centroids, char* err, size_t cap) {
+    @autoreleasepool {
+        auto* r = static_cast<MetalLlmRunner*>(raw);
+        if (!r || !embedding || !centroids || embedding->kind != 2u || embedding->sub != 4u
+            || embedding->rows != r->cfg.n_vocab || embedding->cols < r->cfg.n_embd
+            || embedding->cols % 128u || !embedding->b0 || !embedding->b1
+            || !embedding->b2 || !embedding->b3) {
+            vxt_write_err(err, cap, "CB4 greedy requires compatible four-bit token embedding");
+            return -1;
+        }
+        if (r->greedy_ready) {
+            if (embedding->b0 == r->embedding_op.b0 && embedding->b1 == r->embedding_op.b1
+                && embedding->b2 == r->embedding_op.b2 && embedding->b3 == r->embedding_op.b3
+                && !std::memcmp(centroids, r->embedding_centroids, sizeof(r->embedding_centroids))) return 0;
+            vxt_write_err(err, cap, "greedy runner embedding already configured"); return -1;
+        }
+        auto e = vxt_build_pso(r->gemv.device, r->gemv.lib, @"vxt_embedding_cb4_exact", err, cap);
+        auto a = vxt_build_pso(r->gemv.device, r->gemv.lib, @"vxt_greedy_exact", err, cap);
+        auto b = [r->gemv.device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        if (!e || !a || !b) { vxt_write_err(err, cap, "CB4 greedy setup failed"); return -1; }
+        r->embedding_op = *embedding;
+        std::memcpy(r->embedding_centroids, centroids, sizeof(r->embedding_centroids));
+        retain_op_bufs(r->retained_bufs, *embedding);
+        r->pso_embedding_cb4 = e;
+        r->pso_greedy = a;
+        r->greedy_id_buf = b;
+        r->greedy_ready = true;
+        return 0;
+    }
+}
+
+// Focused GPU qualification entry point; no state is mutated.
+int vxt_metal_llm_greedy_probe(void* raw, uint32_t token, float* embedding_out,
+    const float* logits_in, uint32_t* id_out, char* err, size_t cap) {
+    @autoreleasepool {
+        auto* r = static_cast<MetalLlmRunner*>(raw);
+        if (!r || !r->greedy_ready || token >= r->cfg.n_vocab || !embedding_out || !logits_in || !id_out) {
+            vxt_write_err(err, cap, "invalid CB4 greedy probe"); return -1;
+        }
+        std::memcpy([r->logits_buf contents], logits_in, size_t(r->cfg.n_vocab)*sizeof(float));
+        auto cmd = [r->gemv.queue commandBuffer];
+        auto enc = [cmd computeCommandEncoder];
+        if (!cmd || !enc) { vxt_write_err(err, cap, "greedy probe allocation failed"); return -1; }
+        encode_cb4_embedding(r, enc, token);
+        [enc setComputePipelineState:r->pso_greedy];
+        [enc setBuffer:r->logits_buf offset:0 atIndex:0];
+        [enc setBuffer:r->greedy_id_buf offset:0 atIndex:1];
+        [enc setBytes:&r->cfg.n_vocab length:sizeof(r->cfg.n_vocab) atIndex:2];
+        [enc dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+        [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
+        if (cmd.status != MTLCommandBufferStatusCompleted) {
+            vxt_write_err(err, cap, "CB4 greedy probe command failed"); return -1;
+        }
+        std::memcpy(embedding_out, [r->cur_buf contents], size_t(r->cfg.n_embd)*sizeof(float));
+        *id_out = *static_cast<const uint32_t*>([r->greedy_id_buf contents]);
+        return 0;
+    }
+}
+
+int vxt_metal_llm_greedy_step(void* r, void* s, uint32_t token, uint32_t pos,
+    uint32_t* next, char* err, size_t cap) {
+    return llm_step_impl(r, s, nullptr, pos, 1u, nullptr, err, cap, true, token, next);
 }
 
 } // extern "C"

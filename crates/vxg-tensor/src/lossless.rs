@@ -183,6 +183,41 @@ impl LosslessMatrix {
         })
     }
 
+    /// Checks the complete padded stream used by CPU GEMV and GPU kernels.
+    /// Plane lengths must already have been checked by the archive reader.
+    pub(crate) fn validate_escape_stream(&self) -> Result<()> {
+        if self.dtype == DType::F16
+            && (self.lut[..7].iter().any(|&e| e > 31) || self.esc_bytes.iter().any(|&e| e > 31))
+        {
+            return Err(Error::Format("invalid VXT FP16 exponent".into()));
+        }
+        let (words_per_sb, plane_start) = match self.dtype {
+            DType::BF16 => (24, 0),
+            DType::F16 => (48, 24),
+        };
+        let mut consumed = 0usize;
+        for (sb, cw) in self.code_words.chunks_exact(words_per_sb).enumerate() {
+            if self.sb_esc_offsets[sb] as usize != consumed {
+                return Err(Error::Format("invalid VXT lossless escape offset".into()));
+            }
+            // Code 7 is the intersection of the three exponent-code planes.
+            let escapes: usize = (0..8)
+                .map(|w| {
+                    (cw[plane_start + w] & cw[plane_start + 8 + w] & cw[plane_start + 16 + w])
+                        .count_ones() as usize
+                })
+                .sum();
+            consumed = consumed
+                .checked_add(escapes)
+                .filter(|&n| n <= self.esc_bytes.len())
+                .ok_or_else(|| Error::Format("truncated VXT lossless escape stream".into()))?;
+        }
+        if consumed != self.esc_bytes.len() {
+            return Err(Error::Format("unused VXT lossless escape bytes".into()));
+        }
+        Ok(())
+    }
+
     pub fn compressed_bytes(&self) -> usize {
         8 + self.base_bytes.len()
             + self.code_words.len() * 4

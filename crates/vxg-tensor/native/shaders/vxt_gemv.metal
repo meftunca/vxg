@@ -91,9 +91,10 @@ kernel void vxt_gemv_lossless_bf16(
     constant LosslessParams& p     [[buffer(6)]],
     uint sg_id                     [[simdgroup_index_in_threadgroup]],
     uint lane                      [[thread_index_in_simdgroup]],
-    uint3 tg_pos                   [[threadgroup_position_in_grid]]
+    uint3 tg_pos                   [[threadgroup_position_in_grid]],
+    uint3 tg_size                  [[threads_per_threadgroup]]
 ) {
-    uint row = tg_pos.x * 2u + sg_id;
+    uint row = tg_pos.x * (tg_size.x / 32u) + sg_id;
     if (row >= p.rows) return;
 
     uint sbs_per_row = p.padded_cols >> 8u;
@@ -194,9 +195,10 @@ kernel void vxt_gemv_lossless_fp16(
     constant LosslessParams& p     [[buffer(6)]],
     uint sg_id                     [[simdgroup_index_in_threadgroup]],
     uint lane                      [[thread_index_in_simdgroup]],
-    uint3 tg_pos                   [[threadgroup_position_in_grid]]
+    uint3 tg_pos                   [[threadgroup_position_in_grid]],
+    uint3 tg_size                  [[threads_per_threadgroup]]
 ) {
-    uint row = tg_pos.x * 2u + sg_id;
+    uint row = tg_pos.x * (tg_size.x / 32u) + sg_id;
     if (row >= p.rows) return;
 
     uint sbs_per_row = p.padded_cols >> 8u;
@@ -292,19 +294,11 @@ inline float4 eval_cubic4(float4 u, float a0, float a1, float a2, float a3) {
     return fma(u, fma(a3, u2, a1), fma(a2, u2, a0));
 }
 
-kernel void vxt_gemv_cb4(
-    device const ushort* scales_f16 [[buffer(0)]],
-    device const uint* packed_words [[buffer(1)]],
-    device const uint* out_row_ptr  [[buffer(2)]],
-    device const uint* outliers     [[buffer(3)]],
-    device const float* x_pad       [[buffer(4)]],
-    device float* y                 [[buffer(5)]],
-    constant CodebookParams& p      [[buffer(6)]],
-    uint sg_id                      [[simdgroup_index_in_threadgroup]],
-    uint lane                       [[thread_index_in_simdgroup]],
-    uint3 tg_pos                    [[threadgroup_position_in_grid]]
-) {
-    uint row = tg_pos.x * 2u + sg_id;
+inline void vxt_gemv_cb4_row(
+    device const ushort* scales_f16, device const uint* packed_words,
+    device const uint* out_row_ptr, device const uint* outliers,
+    device const float* x_pad, device float* y, constant CodebookParams& p,
+    uint row, uint lane) {
     if (row >= p.rows) return;
 
     uint groups_per_row = p.padded_cols >> 7u;
@@ -353,6 +347,37 @@ kernel void vxt_gemv_cb4(
     if (lane == 0u) {
         y[row] = sum;
     }
+}
+
+kernel void vxt_gemv_cb4(
+    device const ushort* scales_f16 [[buffer(0)]],
+    device const uint* packed_words [[buffer(1)]],
+    device const uint* out_row_ptr  [[buffer(2)]],
+    device const uint* outliers     [[buffer(3)]],
+    device const float* x_pad       [[buffer(4)]],
+    device float* y                 [[buffer(5)]],
+    constant CodebookParams& p      [[buffer(6)]],
+    uint sg_id                      [[simdgroup_index_in_threadgroup]],
+    uint lane                       [[thread_index_in_simdgroup]],
+    uint3 tg_pos                    [[threadgroup_position_in_grid]]
+) {
+    vxt_gemv_cb4_row(scales_f16, packed_words, out_row_ptr, outliers, x_pad, y, p,
+        tg_pos.x * 2u + sg_id, lane);
+}
+kernel void vxt_gemv_cb4_rows4(
+    device const ushort* scales_f16 [[buffer(0)]],
+    device const uint* packed_words [[buffer(1)]],
+    device const uint* out_row_ptr  [[buffer(2)]],
+    device const uint* outliers     [[buffer(3)]],
+    device const float* x_pad       [[buffer(4)]],
+    device float* y                 [[buffer(5)]],
+    constant CodebookParams& p      [[buffer(6)]],
+    uint sg_id                      [[simdgroup_index_in_threadgroup]],
+    uint lane                       [[thread_index_in_simdgroup]],
+    uint3 tg_pos                    [[threadgroup_position_in_grid]]
+) {
+    vxt_gemv_cb4_row(scales_f16, packed_words, out_row_ptr, outliers, x_pad, y, p,
+        tg_pos.x * 4u + sg_id, lane);
 }
 
 kernel void vxt_gemv_cb3(

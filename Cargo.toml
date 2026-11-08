@@ -116,4 +116,4 @@ codegen-units = 1
 [workspace]
 members = [".", "crates/vxg-tensor"]
 default-members = ["."]
-exclude = ["fuzz"]
+exclude = ["fuzz", "apps/vxt-studio/src-tauri"]

@@ -46,7 +46,9 @@ pub fn f32_to_f16(val: f32) -> u16 {
     if unbiased > 15 {
         return sign | 0x7c00;
     }
-    if unbiased < -24 {
+    // Exponent -25 includes values above the midpoint between zero and
+    // the smallest f16 subnormal; let nearest-even rounding decide them.
+    if unbiased < -25 {
         return sign;
     }
     if unbiased < -14 {
@@ -78,6 +80,32 @@ pub fn f32_to_f16(val: f32) -> u16 {
 #[inline(always)]
 pub fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f16_subnormal_rounding_boundaries_both_signs() {
+        let midpoint = 2.0f32.powi(-25);
+        let cases = [
+            (0.0, 0),
+            (f32::from_bits(1), 0),
+            (f32::from_bits(midpoint.to_bits() - 1), 0),
+            (midpoint, 0),
+            (f32::from_bits(midpoint.to_bits() + 1), 1),
+            (0.75 * 2.0f32.powi(-24), 1),
+            (2.0f32.powi(-24), 1),
+            (3.0 * midpoint, 2),
+            (5.0 * midpoint, 2),
+            (f16_to_f32(0x03ff) + midpoint, 0x0400),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(f32_to_f16(value), expected, "{value:e}");
+            assert_eq!(f32_to_f16(-value), 0x8000 | expected, "-{value:e}");
+        }
+    }
 }
 
 /// Converts `f32` to `bfloat16` (`bf16`) raw `u16` bits using round-to-nearest-even.

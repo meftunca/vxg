@@ -9,8 +9,15 @@
 //! - Per-tensor 64-byte-aligned payload sections with FNV-1a64 section + whole-archive tags.
 
 use crate::codebook::{CodebookMatrix, Q4_0Matrix};
+use crate::entropy_pack::{pack_turbo_ec, unpack_turbo_ec};
+use crate::format_io::{
+    fnv1a64, pad64, push_f32_slice, push_hdr, push_u16_slice, push_u32_slice, push_u8_slice,
+    verify_section_crcs, Cur, SectionCrcJob,
+};
 use crate::lossless::LosslessMatrix;
+use crate::meta_lz::{compress_meta_blob, decompress_meta_blob};
 use crate::wht2::Wht2Matrix;
+use crate::wht_turbo::TurboWhtMatrix;
 use crate::{DType, Error, Result};
 
 const MAGIC: &[u8; 4] = b"VXT1";
@@ -21,6 +28,8 @@ const KIND_CODEBOOK: u8 = 2;
 const KIND_Q4_0: u8 = 3;
 const KIND_WHT2: u8 = 4;
 const KIND_RAW_F32: u8 = 5;
+const KIND_TURBO_WHT: u8 = 6;
+const KIND_TURBO_WHT_EC: u8 = 7;
 
 #[derive(Clone, Debug)]
 pub enum PackedTensor {
@@ -33,6 +42,7 @@ pub enum PackedTensor {
         cols: usize,
         data: Vec<f32>,
     },
+    TurboWht(TurboWhtMatrix),
 }
 
 impl PackedTensor {
@@ -43,6 +53,7 @@ impl PackedTensor {
             Self::Q4_0(m) => m.rows,
             Self::Wht2(m) => m.rows,
             Self::RawF32 { rows, .. } => *rows,
+            Self::TurboWht(m) => m.rows,
         }
     }
 
@@ -53,6 +64,7 @@ impl PackedTensor {
             Self::Q4_0(m) => m.cols,
             Self::Wht2(m) => m.cols,
             Self::RawF32 { cols, .. } => *cols,
+            Self::TurboWht(m) => m.cols,
         }
     }
 
@@ -63,6 +75,7 @@ impl PackedTensor {
             Self::Q4_0(m) => m.compressed_bytes(),
             Self::Wht2(m) => m.compressed_bytes(),
             Self::RawF32 { data, .. } => data.len() * 4,
+            Self::TurboWht(m) => m.compressed_bytes(),
         }
     }
 
@@ -75,6 +88,7 @@ impl PackedTensor {
             Self::RawF32 { rows, cols, data } => {
                 (data.len() as f64 * 32.0) / ((*rows * *cols).max(1) as f64)
             }
+            Self::TurboWht(m) => m.bits_per_weight(),
         }
     }
 
@@ -94,6 +108,12 @@ impl PackedTensor {
             Self::Q4_0(_) => "GGUF-Q4_0-Ref",
             Self::Wht2(_) => "VXT-WHT2+Outlier",
             Self::RawF32 { .. } => "VXT-Raw-FP32",
+            Self::TurboWht(m) => match m.bits {
+                2 => "VXT-Turbo2",
+                4 => "VXT-EC-Turbo3",
+                5 => "VXT-Turbo2.5",
+                _ => "VXT-Turbo3",
+            },
         }
     }
 
@@ -107,6 +127,7 @@ impl PackedTensor {
             Self::RawF32 { cols, data, .. } => {
                 dst.copy_from_slice(&data[r * *cols..(r + 1) * *cols]);
             }
+            Self::TurboWht(m) => m.decode_row(r, dst),
         }
     }
 
@@ -142,6 +163,7 @@ impl PackedTensor {
                     *out_y = s;
                 }
             }
+            Self::TurboWht(m) => m.gemv_cpu(x, y, threads),
         }
     }
 }
@@ -150,59 +172,6 @@ impl PackedTensor {
 pub struct VxtEntry {
     pub name: String,
     pub tensor: PackedTensor,
-}
-
-#[inline]
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
-
-#[inline]
-fn pad64(buf: &mut Vec<u8>) {
-    while buf.len() % 64 != 0 {
-        buf.push(0);
-    }
-}
-
-fn push_u16_slice(buf: &mut Vec<u8>, s: &[u16]) {
-    buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
-    buf.reserve(s.len() * 2);
-    for &v in s {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-}
-
-fn push_u32_slice(buf: &mut Vec<u8>, s: &[u32]) {
-    buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
-    buf.reserve(s.len() * 4);
-    for &v in s {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-}
-
-fn push_f32_slice(buf: &mut Vec<u8>, s: &[f32]) {
-    buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
-    buf.reserve(s.len() * 4);
-    for &v in s {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-}
-
-fn push_u8_slice(buf: &mut Vec<u8>, s: &[u8]) {
-    buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
-    buf.extend_from_slice(s);
-}
-
-fn push_hdr(out: &mut Vec<u8>, kind: u8, sub: u8, rows: usize, cols: usize, pcols: usize) {
-    out.extend_from_slice(&[kind, sub, 0, 0, 0, 0, 0, 0]);
-    out.extend_from_slice(&(rows as u64).to_le_bytes());
-    out.extend_from_slice(&(cols as u64).to_le_bytes());
-    out.extend_from_slice(&(pcols as u64).to_le_bytes());
 }
 
 /// Serializes one or more [`VxtEntry`] compressed matrices into a `.vxt` (`VXT1`) archive.
@@ -227,7 +196,8 @@ pub fn write_vxt_model(meta_kv: &[(String, Vec<u8>)], entries: &[VxtEntry]) -> R
         let kb = k.as_bytes();
         out.extend_from_slice(&(kb.len() as u32).to_le_bytes());
         out.extend_from_slice(kb);
-        push_u8_slice(&mut out, v);
+        let packed_v = compress_meta_blob(v);
+        push_u8_slice(&mut out, &packed_v);
     }
 
     for entry in entries {
@@ -289,6 +259,30 @@ pub fn write_vxt_model(meta_kv: &[(String, Vec<u8>)], entries: &[VxtEntry]) -> R
                 push_hdr(&mut out, KIND_RAW_F32, 0, *rows, *cols, *cols);
                 push_f32_slice(&mut out, data);
             }
+            PackedTensor::TurboWht(m) => {
+                if matches!(m.bits, 2 | 4 | 5) {
+                    push_hdr(
+                        &mut out,
+                        KIND_TURBO_WHT_EC,
+                        m.bits,
+                        m.rows,
+                        m.cols,
+                        m.padded_cols,
+                    );
+                    pack_turbo_ec(m, &mut out);
+                } else {
+                    push_hdr(
+                        &mut out,
+                        KIND_TURBO_WHT,
+                        m.bits,
+                        m.rows,
+                        m.cols,
+                        m.padded_cols,
+                    );
+                    push_u16_slice(&mut out, &m.scales_f16);
+                    push_u32_slice(&mut out, &m.packed_words);
+                }
+            }
         }
         let checksum = fnv1a64(&out[section_start..]);
         out.extend_from_slice(&checksum.to_le_bytes());
@@ -317,9 +311,23 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
     }
     let body = &bytes[..bytes.len() - 8];
     let expected_archive_crc = u64::from_le_bytes(bytes[bytes.len() - 8..].try_into().unwrap());
-    if fnv1a64(body) != expected_archive_crc {
-        return Err(Error::Checksum("VXT archive checksum mismatch".into()));
+    if bytes.len() < 4 * 1024 * 1024 {
+        if fnv1a64(body) != expected_archive_crc {
+            return Err(Error::Checksum("VXT archive checksum mismatch".into()));
+        }
+        return read_vxt_body(bytes, body);
     }
+    std::thread::scope(|s| {
+        let arc_job = s.spawn(|| fnv1a64(body) == expected_archive_crc);
+        let parsed = read_vxt_body(bytes, body);
+        if !arc_job.join().unwrap_or(false) {
+            return Err(Error::Checksum("VXT archive checksum mismatch".into()));
+        }
+        parsed
+    })
+}
+
+fn read_vxt_body(bytes: &[u8], body: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEntry>)> {
     let mut r = Cur { b: body, pos: 8 };
     let count = r.u32()? as usize;
     let mcount = r.u32()? as usize;
@@ -330,11 +338,13 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
         let k = std::str::from_utf8(r.take(klen)?)
             .map_err(|_| Error::Format("invalid UTF-8 metadata key in VXT".into()))?
             .to_owned();
-        let v = r.u8_vec()?;
+        let raw_v = r.u8_vec()?;
+        let v = decompress_meta_blob(&raw_v)?;
         meta_kv.push((k, v));
     }
 
     let mut entries = Vec::with_capacity(count.min(4096));
+    let mut crc_jobs = Vec::with_capacity(count.min(4096));
     for _ in 0..count {
         r.align64()?;
         let section_start = r.pos;
@@ -351,6 +361,17 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
         let padded_cols = r.usize64()?;
         if rows == 0 || cols == 0 || padded_cols < cols {
             return Err(Error::Format("invalid VXT matrix dimensions".into()));
+        }
+
+        // Bound every downstream plane-size and allocation calculation, including
+        // TurboWht's four-row padding, before interpreting any payload.
+        let padded_rows_bound = rows.checked_add(3).map(|v| v / 4 * 4);
+        if cols.checked_add(255).is_none()
+            || padded_rows_bound
+                .and_then(|n| n.checked_mul(padded_cols))
+                .is_none_or(|n| n > isize::MAX as usize / 4)
+        {
+            return Err(Error::Format("VXT matrix dimensions overflow".into()));
         }
 
         let tensor = match kind {
@@ -382,7 +403,7 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
                 {
                     return Err(Error::Format("corrupt VXT lossless plane lengths".into()));
                 }
-                PackedTensor::Lossless(LosslessMatrix {
+                let matrix = LosslessMatrix {
                     dtype,
                     rows,
                     cols,
@@ -392,7 +413,9 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
                     code_words,
                     sb_esc_offsets,
                     esc_bytes,
-                })
+                };
+                matrix.validate_escape_stream()?;
+                PackedTensor::Lossless(matrix)
             }
             KIND_CODEBOOK => {
                 let bits = sub;
@@ -413,6 +436,7 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
                 {
                     return Err(Error::Format("corrupt VXT codebook plane lengths".into()));
                 }
+                validate_outliers(&outlier_row_ptr, &outliers_packed, cols)?;
                 PackedTensor::Codebook(CodebookMatrix {
                     bits,
                     rows,
@@ -462,6 +486,7 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
                 {
                     return Err(Error::Format("corrupt VXT WHT2 plane lengths".into()));
                 }
+                validate_outliers(&outlier_row_ptr, &outliers_packed, cols)?;
                 PackedTensor::Wht2(Wht2Matrix {
                     rows,
                     cols,
@@ -480,114 +505,60 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
                 }
                 PackedTensor::RawF32 { rows, cols, data }
             }
+            KIND_TURBO_WHT => {
+                let bits = sub;
+                if !matches!(bits, 2 | 3 | 5) || padded_cols != cols.div_ceil(256) * 256 {
+                    return Err(Error::Format("invalid VXT TurboWht header".into()));
+                }
+                let scales_f16 = r.u16_vec()?;
+                let packed_words = r.u32_vec()?;
+                let padded_rows = rows.div_ceil(4) * 4;
+                let row_tiles = padded_rows / 4;
+                let steps = padded_cols / 256;
+                let wps = TurboWhtMatrix::words_per_tile_step(bits);
+                if scales_f16.len() != row_tiles * steps * 8
+                    || packed_words.len() != row_tiles * steps * wps
+                {
+                    return Err(Error::Format("corrupt VXT TurboWht plane lengths".into()));
+                }
+                PackedTensor::TurboWht(TurboWhtMatrix {
+                    bits,
+                    rows,
+                    cols,
+                    padded_rows,
+                    padded_cols,
+                    disk_bytes: 0,
+                    scales_f16,
+                    packed_words,
+                })
+            }
+            KIND_TURBO_WHT_EC => {
+                PackedTensor::TurboWht(unpack_turbo_ec(sub, rows, cols, padded_cols, &mut r)?)
+            }
             _ => return Err(Error::Format(format!("unknown VXT tensor kind {kind}"))),
         };
 
         let section_end = r.pos;
         let expected_crc = r.u64()?;
-        let actual_crc = fnv1a64(&bytes[section_start..section_end]);
-        if expected_crc != actual_crc {
-            return Err(Error::Checksum(format!(
-                "VXT integrity mismatch on tensor '{name}'"
-            )));
-        }
+        crc_jobs.push(SectionCrcJob {
+            name: name.clone(),
+            slice: &bytes[section_start..section_end],
+            expected: expected_crc,
+        });
         entries.push(VxtEntry { name, tensor });
     }
+    verify_section_crcs(&crc_jobs)?;
     Ok((meta_kv, entries))
 }
 
-struct Cur<'a> {
-    b: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cur<'a> {
-    fn align64(&mut self) -> Result<()> {
-        let rem = self.pos % 64;
-        if rem != 0 {
-            let _ = self.take(64 - rem)?;
-        }
-        Ok(())
+// Length and terminal-pointer checks precede this helper at both call sites.
+fn validate_outliers(row_ptr: &[u32], packed: &[u32], cols: usize) -> Result<()> {
+    if row_ptr.first() != Some(&0)
+        || row_ptr.windows(2).any(|w| w[0] > w[1])
+        || row_ptr.iter().any(|&p| p as usize > packed.len())
+        || packed.iter().any(|&p| (p & 0xffff) as usize >= cols)
+    {
+        return Err(Error::Format("invalid VXT outlier CSR indices".into()));
     }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .ok_or_else(|| Error::Format("VXT cursor overflow".into()))?;
-        if end > self.b.len() {
-            return Err(Error::Format("truncated VXT archive".into()));
-        }
-        let s = &self.b[self.pos..end];
-        self.pos = end;
-        Ok(s)
-    }
-
-    fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u32(&mut self) -> Result<u32> {
-        let s = self.take(4)?;
-        Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-    }
-
-    fn u64(&mut self) -> Result<u64> {
-        let s = self.take(8)?;
-        Ok(u64::from_le_bytes(s.try_into().unwrap()))
-    }
-
-    fn usize64(&mut self) -> Result<usize> {
-        usize::try_from(self.u64()?).map_err(|_| Error::Format("VXT length overflow".into()))
-    }
-
-    fn f32_16(&mut self) -> Result<[f32; 16]> {
-        let mut out = [0.0f32; 16];
-        for slot in &mut out {
-            let s = self.take(4)?;
-            *slot = f32::from_le_bytes([s[0], s[1], s[2], s[3]]);
-        }
-        Ok(out)
-    }
-
-    fn u8_vec(&mut self) -> Result<Vec<u8>> {
-        let n = self.usize64()?;
-        Ok(self.take(n)?.to_vec())
-    }
-
-    fn u16_vec(&mut self) -> Result<Vec<u16>> {
-        let n = self.usize64()?;
-        let bytes = self.take(
-            n.checked_mul(2)
-                .ok_or_else(|| Error::Format("u16 overflow".into()))?,
-        )?;
-        Ok(bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect())
-    }
-
-    fn u32_vec(&mut self) -> Result<Vec<u32>> {
-        let n = self.usize64()?;
-        let bytes = self.take(
-            n.checked_mul(4)
-                .ok_or_else(|| Error::Format("u32 overflow".into()))?,
-        )?;
-        Ok(bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect())
-    }
-
-    fn f32_vec(&mut self) -> Result<Vec<f32>> {
-        let n = self.usize64()?;
-        let bytes = self.take(
-            n.checked_mul(4)
-                .ok_or_else(|| Error::Format("f32 overflow".into()))?,
-        )?;
-        Ok(bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect())
-    }
+    Ok(())
 }

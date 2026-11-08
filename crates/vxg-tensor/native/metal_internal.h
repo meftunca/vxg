@@ -63,30 +63,70 @@ struct VxtLlmLayerDesc {
     VxtMetalOp op_ffn_down;
 };
 
+struct VxtTurboMat {
+    uint32_t bits;
+    uint32_t rows;
+    uint32_t cols;
+    uint32_t padded_cols;
+    void* scales_buf;
+    void* packed_buf;
+};
+
+struct VxtTurboLayerDesc {
+    uint32_t is_recurrent;
+    uint32_t gated_q;
+    uint32_t has_split_gate;
+    uint32_t gqa_flags;
+    void* attn_norm_buf;
+    void* post_attn_norm_buf;
+    VxtTurboMat w_qkv;
+    VxtTurboMat w_gate_sep;
+    void* ab_rot_f16_buf;
+    VxtTurboMat w_out;
+    void* vec0_buf;
+    void* vec1_buf;
+    void* vec2_buf;
+    void* vec3_buf;
+    void* vec4_buf;
+    VxtTurboMat w_ffn_gu;
+    VxtTurboMat w_ffn_down;
+};
+
 } // extern "C"
 
 struct MetalGemvCtx {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
     id<MTLLibrary> lib = nil;
+    id<MTLLibrary> fast_lib = nil;
     id<MTLComputePipelineState> pso_raw16 = nil;
     id<MTLComputePipelineState> pso_raw32 = nil;
     id<MTLComputePipelineState> pso_lossless_bf16 = nil;
     id<MTLComputePipelineState> pso_lossless_fp16 = nil;
     id<MTLComputePipelineState> pso_cb4 = nil;
+    bool cb4_rows4 = false;
     id<MTLComputePipelineState> pso_cb3 = nil;
     id<MTLComputePipelineState> pso_q4_0 = nil;
     id<MTLComputePipelineState> pso_fwht32 = nil;
     id<MTLComputePipelineState> pso_wht2 = nil;
+    id<MTLComputePipelineState> pso_turbo_fwht32 = nil;
+    id<MTLComputePipelineState> pso_turbo2_nr4 = nil;
+    id<MTLComputePipelineState> pso_turbo2_nr8 = nil;
+    id<MTLComputePipelineState> pso_turbo25_nr4 = nil;
+    id<MTLComputePipelineState> pso_turbo25_nr8 = nil;
+    id<MTLComputePipelineState> pso_turbo3_nr4 = nil;
+    id<MTLComputePipelineState> pso_turbo3_nr8 = nil;
 
     id<MTLBuffer> x_buf = nil;
     size_t x_cap = 0;
     id<MTLBuffer> x_rot_buf = nil;
     size_t x_rot_cap = 0;
+    id<MTLBuffer> x_turbo_buf = nil;
+    size_t x_turbo_cap = 0;
     id<MTLBuffer> y_buf = nil;
     size_t y_cap = 0;
 
-    bool ensure_io(size_t x_bytes, size_t y_bytes, bool need_rot) {
+    bool ensure_io(size_t x_bytes, size_t y_bytes, bool need_rot, bool need_turbo = false) {
         size_t xb = std::max<size_t>(x_bytes, 64);
         size_t yb = std::max<size_t>(y_bytes, 64);
         if (!x_buf || x_cap < xb) {
@@ -98,6 +138,11 @@ struct MetalGemvCtx {
             x_rot_buf = [device newBufferWithLength:xb options:MTLResourceStorageModeShared];
             if (!x_rot_buf) return false;
             x_rot_cap = xb;
+        }
+        if (need_turbo && (!x_turbo_buf || x_turbo_cap < xb)) {
+            x_turbo_buf = [device newBufferWithLength:xb options:MTLResourceStorageModeShared];
+            if (!x_turbo_buf) return false;
+            x_turbo_cap = xb;
         }
         if (!y_buf || y_cap < yb) {
             y_buf = [device newBufferWithLength:yb options:MTLResourceStorageModeShared];
@@ -123,6 +168,15 @@ void vxt_encode_fwht32_buf(
     id<MTLComputeCommandEncoder> enc,
     id<MTLBuffer> x_in,
     id<MTLBuffer> x_rot_out,
+    uint32_t padded_cols
+);
+
+void vxt_encode_turbo_fwht32_buf(
+    MetalGemvCtx* ctx,
+    id<MTLComputeCommandEncoder> enc,
+    id<MTLBuffer> x_in,
+    id<MTLBuffer> x_rot_out,
+    uint32_t cols,
     uint32_t padded_cols
 );
 

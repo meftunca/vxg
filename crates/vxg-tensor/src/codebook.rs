@@ -37,6 +37,9 @@ impl CodebookMatrix {
                 "invalid rows*cols for CodebookMatrix::encode",
             ));
         }
+        if bits == 4 {
+            return crate::cb4_opt::encode_cb4_optimized(rows, cols, weights, None, 0.0074);
+        }
         let k_cent = 1usize << bits;
         let padded_cols = cols.div_ceil(256) * 256;
         let groups_per_row = padded_cols / 128;
@@ -135,69 +138,44 @@ impl CodebookMatrix {
             for (dr, row_pw) in pw_slice.chunks_exact_mut(words_per_row).enumerate() {
                 let r = r_start + dr;
                 let row_w = &weights[r * cols..(r + 1) * cols];
-                if bits == 4 {
-                    for g in 0..groups_per_row {
+                // Coalesced 256-weight blocks (2 groups of 128 = 24 u32s: 32 ushort lo2 + 32 uchar hi1)
+                let steps = groups_per_row / 2;
+                for step in 0..steps {
+                    let mut lo2_arr = [0u16; 32];
+                    let mut hi1_arr = [0u8; 32];
+                    for lane in 0..32 {
+                        let g = step * 2 + (lane / 16);
                         let g_idx = r * groups_per_row + g;
                         let sc = group_scales_f32[g_idx];
                         let inv_sc = if sc > 0.0 { 1.0 / sc } else { 0.0 };
-                        for sub in 0..4 {
-                            let base_col = g * 128 + sub * 32;
-                            let off = (g * 4 + sub) * 4;
-                            for w in 0..4 {
-                                let mut word = 0u32;
-                                for k in 0..8 {
-                                    let col = base_col + w * 8 + k;
-                                    let q = if col >= cols || sc == 0.0 {
-                                        0usize
-                                    } else {
-                                        nearest_centroid(row_w[col] * inv_sc, &midpoints[..15])
-                                    };
-                                    word |= (q as u32) << (k * 4);
-                                }
-                                row_pw[off + w] = word;
-                            }
+                        let base_col = step * 256 + lane * 8;
+                        let mut lo2 = 0u16;
+                        let mut hi1 = 0u8;
+                        for k in 0..8 {
+                            let col = base_col + k;
+                            let q = if col >= cols || sc == 0.0 {
+                                0usize
+                            } else {
+                                nearest_centroid(row_w[col] * inv_sc, &midpoints[..7])
+                            };
+                            lo2 |= ((q as u16) & 3) << (k * 2);
+                            hi1 |= (((q as u8) >> 2) & 1) << k;
                         }
+                        lo2_arr[lane] = lo2;
+                        hi1_arr[lane] = hi1;
                     }
-                } else {
-                    // Coalesced 256-weight blocks (2 groups of 128 = 24 u32s: 32 ushort lo2 + 32 uchar hi1)
-                    let steps = groups_per_row / 2;
-                    for step in 0..steps {
-                        let mut lo2_arr = [0u16; 32];
-                        let mut hi1_arr = [0u8; 32];
-                        for lane in 0..32 {
-                            let g = step * 2 + (lane / 16);
-                            let g_idx = r * groups_per_row + g;
-                            let sc = group_scales_f32[g_idx];
-                            let inv_sc = if sc > 0.0 { 1.0 / sc } else { 0.0 };
-                            let base_col = step * 256 + lane * 8;
-                            let mut lo2 = 0u16;
-                            let mut hi1 = 0u8;
-                            for k in 0..8 {
-                                let col = base_col + k;
-                                let q = if col >= cols || sc == 0.0 {
-                                    0usize
-                                } else {
-                                    nearest_centroid(row_w[col] * inv_sc, &midpoints[..7])
-                                };
-                                lo2 |= ((q as u16) & 3) << (k * 2);
-                                hi1 |= (((q as u8) >> 2) & 1) << k;
-                            }
-                            lo2_arr[lane] = lo2;
-                            hi1_arr[lane] = hi1;
-                        }
-                        let dst24 = &mut row_pw[step * 24..step * 24 + 24];
-                        for w in 0..16 {
-                            dst24[w] =
-                                (lo2_arr[w * 2] as u32) | ((lo2_arr[w * 2 + 1] as u32) << 16);
-                        }
-                        for w in 0..8 {
-                            dst24[16 + w] = u32::from_le_bytes([
-                                hi1_arr[w * 4],
-                                hi1_arr[w * 4 + 1],
-                                hi1_arr[w * 4 + 2],
-                                hi1_arr[w * 4 + 3],
-                            ]);
-                        }
+                    let dst24 = &mut row_pw[step * 24..step * 24 + 24];
+                    for w in 0..16 {
+                        dst24[w] =
+                            (lo2_arr[w * 2] as u32) | ((lo2_arr[w * 2 + 1] as u32) << 16);
+                    }
+                    for w in 0..8 {
+                        dst24[16 + w] = u32::from_le_bytes([
+                            hi1_arr[w * 4],
+                            hi1_arr[w * 4 + 1],
+                            hi1_arr[w * 4 + 2],
+                            hi1_arr[w * 4 + 3],
+                        ]);
                     }
                 }
             }

@@ -363,12 +363,14 @@ examples/ffi/            Zero-copy integration examples for C, Python, Go, Bun/J
 native/shaders/core.gpu  Shared GPU kernel source (Metal, Vulkan GLSL, CUDA)
 native/                  Metal, Vulkan, and CUDA host bridges
 verification/            Independent Python reference model and C++ SIMT emulator
+crates/vxg-tensor/       Compressed-domain AI weight codec (.vxt), CB4-Fast Metal LLM engine & OpenAI SSE server
+apps/vxt-studio/         Tauri v2 + React + shadcn/ui + AI SDK desktop app (Chat, Tensor Forge & API Hub)
 tests/                   Property, stress, differential analytics/projection, and golden wire tests
 reports/ci-v0.4.1/       Cross-platform GitHub Actions benchmark outputs (macOS, Linux, Windows)
-docs/                    Wire format, FFI guide, proofs, benchmarks, GPU architecture, and safety
+docs/                    Wire format, tensor engine, FFI guide, proofs, benchmarks, GPU architecture, and safety
 ```
 
-[Wire Format](docs/FORMAT.md) · [FFI & Language Bindings](docs/FFI.md) · [Benchmarks](docs/BENCHMARKS.md) · [Proofs](docs/PROOFS.md) · [GPU Architecture](docs/GPU.md) · [Safety](docs/SAFETY.md) · [Validation](docs/VALIDATION.md)
+[Wire Format](docs/FORMAT.md) · [VXT Tensor & Metal LLM Engine](docs/TENSOR.md) · [FFI & Language Bindings](docs/FFI.md) · [Benchmarks](docs/BENCHMARKS.md) · [Proofs](docs/PROOFS.md) · [GPU Architecture](docs/GPU.md) · [Safety](docs/SAFETY.md) · [Validation](docs/VALIDATION.md)
 
 ---
 

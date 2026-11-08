@@ -16,6 +16,7 @@ mod imp {
     use crate::lossless::LosslessMatrix;
     pub use crate::metal_ffi::{GpuBuf, MetalEngineInner, VxtMetalOp};
     use crate::wht2::Wht2Matrix;
+    use crate::wht_turbo::TurboWhtMatrix;
     use crate::{DType, Error, Result};
 
     pub struct GpuRaw16Inner {
@@ -116,6 +117,14 @@ mod imp {
             cols: usize,
             w_buf: GpuBuf,
         },
+        TurboWht {
+            bits: u8,
+            rows: usize,
+            cols: usize,
+            padded_cols: usize,
+            sc: GpuBuf,
+            pw: GpuBuf,
+        },
     }
 
     impl GpuPackedInner {
@@ -130,6 +139,7 @@ mod imp {
                     cols: *cols,
                     w_buf: GpuBuf::upload(eng.ctx, data)?,
                 }),
+                PackedTensor::TurboWht(m) => Self::upload_turbo(eng, m),
             }
         }
 
@@ -189,6 +199,17 @@ mod imp {
                 pw: GpuBuf::upload(eng.ctx, &m.packed_words)?,
                 row_ptr: GpuBuf::upload(eng.ctx, &m.outlier_row_ptr)?,
                 out: GpuBuf::upload(eng.ctx, &m.outliers_packed)?,
+            })
+        }
+
+        fn upload_turbo(eng: &MetalEngineInner, m: &TurboWhtMatrix) -> Result<Self> {
+            Ok(Self::TurboWht {
+                bits: m.bits,
+                rows: m.rows,
+                cols: m.cols,
+                padded_cols: m.padded_cols,
+                sc: GpuBuf::upload(eng.ctx, &m.scales_f16)?,
+                pw: GpuBuf::upload(eng.ctx, &m.packed_words)?,
             })
         }
 
@@ -318,6 +339,31 @@ mod imp {
                     *rows,
                     *cols,
                     *cols,
+                ),
+                Self::TurboWht {
+                    bits,
+                    rows,
+                    cols,
+                    padded_cols,
+                    sc,
+                    pw,
+                } => (
+                    VxtMetalOp {
+                        kind: 6,
+                        sub: *bits as u32,
+                        rows: *rows as u32,
+                        cols: *padded_cols as u32,
+                        lut8: [*cols as u32, 0, 0, 0, 0, 0, 0, 0],
+                        poly16: [0.0; 16],
+                        b0: sc.as_ptr(),
+                        b1: pw.as_ptr(),
+                        b2: null_mut(),
+                        b3: null_mut(),
+                        y_dst,
+                    },
+                    *rows,
+                    *cols,
+                    *padded_cols,
                 ),
             }
         }

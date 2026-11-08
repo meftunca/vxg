@@ -540,3 +540,62 @@ kernel void vxt_gqa_attn(
         att_cat[h * hd + d] = out_d;
     }
 }
+
+// Decode the same learned centroid table and additive CSR outliers as CPU
+// CodebookMatrix::decode_row. This is deliberately independent of the polynomial
+// approximation used by GEMV. Volatile forces the CPU's multiply-then-add rounding.
+kernel void vxt_embedding_cb4_exact(
+    device const ushort* scales [[buffer(0)]],
+    device const uint* words [[buffer(1)]],
+    device const uint* row_ptr [[buffer(2)]],
+    device const uint* outliers [[buffer(3)]],
+    device float* dst [[buffer(4)]],
+    constant uint* p [[buffer(5)]], // token, logical columns, padded columns
+    constant float* centroids [[buffer(6)]],
+    uint col [[thread_position_in_grid]]) {
+    if (col >= p[1]) return;
+    ulong group = ulong(p[0]) * (p[2] / 128u) + col / 128u;
+    uint word = words[group * 16ul + (col % 128u) / 8u];
+    uint q = (word >> ((col % 8u) * 4u)) & 15u;
+    volatile float value = float(as_type<half>(scales[group])) * centroids[q];
+    for (uint k = row_ptr[p[0]]; k < row_ptr[p[0] + 1u]; ++k) {
+        uint packed = outliers[k];
+        if ((packed & 65535u) == col)
+            value = value + float(as_type<half>(ushort(packed >> 16u)));
+    }
+    dst[col] = value;
+}
+
+// Strict > with lowest-index tie matches the ordinary greedy sampler for finite
+// logits. Reduction explicitly resolves equal values by index, including zeros.
+kernel void vxt_greedy_exact(device const float* logits [[buffer(0)]],
+    device uint* result [[buffer(1)]], constant uint& n [[buffer(2)]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float values[256];
+    threadgroup uint ids[256];
+    threadgroup uint invalid[256];
+    uint nonfinite = 0u;
+    float best = -INFINITY;
+    uint id = 0u;
+    for (uint i = tid; i < n; i += 256u) {
+        float v = logits[i];
+        nonfinite |= !isfinite(v);
+        if (v > best || (v == best && i < id)) { best = v; id = i; }
+    }
+    values[tid] = best;
+    ids[tid] = id;
+    invalid[tid] = nonfinite;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128u; stride; stride >>= 1u) {
+        if (tid < stride) {
+            invalid[tid] |= invalid[tid + stride];
+            float v = values[tid + stride];
+            uint i = ids[tid + stride];
+            if (v > values[tid] || (v == values[tid] && i < ids[tid])) {
+                values[tid] = v; ids[tid] = i;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0u) { result[0] = ids[0]; result[1] = invalid[0]; }
+}

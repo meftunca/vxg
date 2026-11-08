@@ -7,19 +7,21 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::llm::{compare_logits, sample_logits, LlmModel};
-use crate::llm_pack::{pack_gguf_model_to_vxt, LlmPackMode};
+use crate::llm_ops::{has_severe_loop, sample_logits_top_k_p, TokenPenaltyTracker};
+use crate::llm_pack::{pack_gguf_model_to_vxt_with_entropy_scale, LlmPackMode};
 use crate::mmap::TensorBytes;
 use crate::{Error, Result};
 
 pub fn cmd_pack_model(args: &[String]) -> Result<()> {
     if args.len() < 2 {
         return Err(Error::Format(
-            "usage: vxg-tensor pack-model <in.gguf> <out.vxt> [--mode lossless|cb4|cb3|wht2|q4_0] [--threads T]".into(),
+            "usage: vxg-tensor pack-model <in.gguf | hf_model_dir | model.safetensors> <out.vxt> [--mode lossless|cb4|cb3|wht2|turbo|q4_0] [--threads T] [--turbo-entropy-scale S]".into(),
         ));
     }
     let in_path = &args[0];
     let out_path = &args[1];
-    let mut mode = LlmPackMode::Cb4;
+    let mut mode = LlmPackMode::Lossless;
+    let mut entropy_scale = None;
     let mut threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -34,6 +36,11 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
                     .ok_or_else(|| Error::Format("missing value for --mode".into()))?;
                 mode = LlmPackMode::parse(s)?;
             }
+            "--turbo-entropy-scale" => {
+                i += 1;
+                entropy_scale = Some(args.get(i).and_then(|s| s.parse::<f32>().ok())
+                    .ok_or_else(|| Error::Format("invalid --turbo-entropy-scale".into()))?);
+            }
             "--threads" => {
                 i += 1;
                 threads = args
@@ -46,15 +53,37 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
         i += 1;
     }
 
+    if entropy_scale.is_some() && mode != LlmPackMode::Turbo {
+        return Err(Error::Format("--turbo-entropy-scale requires --mode turbo".into()));
+    }
+    let scale = entropy_scale.unwrap_or(1.0);
+    if !scale.is_finite() || scale < 0.0 {
+        return Err(Error::Format("--turbo-entropy-scale must be finite and nonnegative".into()));
+    }
     let t0 = Instant::now();
-    let mapped = TensorBytes::open(in_path)?;
-    let in_bytes = mapped.as_slice();
-    let (cfg, archive) = pack_gguf_model_to_vxt(in_bytes, mode, threads)?;
+    let in_p = Path::new(in_path);
+    let is_hf = !in_path.to_ascii_lowercase().ends_with(".gguf")
+        && (in_p.is_dir() || crate::hf_pack::resolve_hf_model_dir(in_p).is_some());
+    let (cfg, in_len, archive) = if is_hf {
+        if entropy_scale.is_some() {
+            return Err(Error::Format(
+                "--turbo-entropy-scale is only supported for GGUF inputs".into(),
+            ));
+        }
+        let (cfg, raw_bytes, archive) = crate::hf_pack::pack_hf_model_to_vxt(in_p, mode, threads)?;
+        (cfg, raw_bytes as usize, archive)
+    } else {
+        let mapped = TensorBytes::open(in_path)?;
+        let in_bytes = mapped.as_slice();
+        let (cfg, archive) =
+            pack_gguf_model_to_vxt_with_entropy_scale(in_bytes, mode, threads, scale)?;
+        (cfg, in_bytes.len(), archive)
+    };
     fs::write(Path::new(out_path), &archive).map_err(|e| Error::Io(e.to_string()))?;
 
-    let in_mib = in_bytes.len() as f64 / (1024.0 * 1024.0);
+    let in_mib = in_len as f64 / (1024.0 * 1024.0);
     let out_mib = archive.len() as f64 / (1024.0 * 1024.0);
-    let ratio = (in_bytes.len() as f64) / (archive.len().max(1) as f64);
+    let ratio = (in_len as f64) / (archive.len().max(1) as f64);
     println!(
         "Packed LLM '{}' (arch={}, {} layers, vocab={}) [{}] -> {}\n  {:.2} MiB -> {:.2} MiB ({:.2}x compression) in {:.2}s",
         cfg.model_name,
@@ -74,7 +103,7 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
 pub fn cmd_run_llm(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(Error::Format(
-            "usage: vxg-tensor run <model.vxt | model.gguf> --prompt \"...\" [--max-tokens N] [--temp T] [--cpu] [--raw] [--think]".into(),
+            "usage: vxg-tensor run <model.vxt | model.gguf | model.safetensors> --prompt \"...\" [--max-tokens N] [--temp T] [--cpu] [--raw] [--think] [--reference-decode] [--cb4-greedy --temp 0 --presence-penalty 0]".into(),
         ));
     }
     let model_path = &args[0];
@@ -82,9 +111,13 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
         String::from("Explain why memory bandwidth limits LLM inference in 3 short bullet points.");
     let mut max_tokens = 64usize;
     let mut temp = 0.0f32;
+    let mut presence_penalty: Option<f32> = None;
     let mut use_gpu = true;
     let mut raw_prompt = false;
     let mut enable_thinking = false;
+    let mut exact_head = false;
+    let mut reference_decode = false;
+    let mut cb4_greedy = false;
     let mut threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -113,6 +146,14 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
                     .and_then(|s| s.parse().ok())
                     .ok_or_else(|| Error::Format("invalid --temp".into()))?;
             }
+            "--presence-penalty" => {
+                i += 1;
+                presence_penalty = Some(
+                    args.get(i)
+                        .and_then(|s| s.parse().ok())
+                        .ok_or_else(|| Error::Format("invalid --presence-penalty".into()))?,
+                );
+            }
             "--threads" => {
                 i += 1;
                 threads = args
@@ -123,13 +164,20 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
             "--cpu" => use_gpu = false,
             "--raw" => raw_prompt = true,
             "--think" => enable_thinking = true,
+            "--exact-head" => exact_head = true,
+            "--reference-decode" => reference_decode = true,
+            "--cb4-greedy" => cb4_greedy = true,
             other => return Err(Error::Format(format!("unexpected flag '{other}'"))),
         }
         i += 1;
     }
 
+    if cb4_greedy && (!use_gpu || temp != 0.0 || presence_penalty != Some(0.0) || reference_decode || exact_head) {
+        return Err(Error::Unsupported("--cb4-greedy requires GPU, --temp 0, explicit --presence-penalty 0, and no alternate decode flags".into()));
+    }
     let t_load = Instant::now();
     let mut model = LlmModel::load_file(model_path, use_gpu, threads)?;
+    if cb4_greedy { model.enable_cb4_greedy()?; }
     let load_s = t_load.elapsed().as_secs_f64();
 
     let prompt_ids = if raw_prompt {
@@ -158,40 +206,145 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
     let mut logits = vec![0.0f32; model.cfg.n_vocab];
 
     let t_prefill = Instant::now();
-    for (idx, &tid) in prompt_ids.iter().enumerate() {
-        let last = idx + 1 == prompt_ids.len();
-        model.forward_step(&mut state, tid, last.then_some(logits.as_mut_slice()))?;
-    }
+    model.prefill(&mut state, &prompt_ids, &mut logits)?;
     let prefill_s = t_prefill.elapsed().as_secs_f64();
+    if cb4_greedy && !logits.iter().all(|x| x.is_finite()) {
+        return Err(Error::Format("CB4 greedy requires finite prefill logits".into()));
+    }
 
     let eos_id = model.cfg.eos_token_id;
     let im_end_id = model.tokenizer.token_id("<|im_end|>").unwrap_or(eos_id);
     let eot_id = model.tokenizer.token_id("<|endoftext|>").unwrap_or(eos_id);
+    let think_end_id = model.tokenizer.token_id("</think>");
+    let is_qwen3 = model.cfg.arch.starts_with("qwen3");
+
+    let explicit_zero_pen = presence_penalty == Some(0.0) || cb4_greedy;
+    let presence_pen = if explicit_zero_pen {
+        0.0
+    } else {
+        presence_penalty.unwrap_or(if is_qwen3 { 0.5 } else { 0.0 })
+    };
+    let freq_pen = 0.0f32;
+    let top_k = if is_qwen3 { 20 } else { 40 };
+    let top_p = if enable_thinking { 0.95 } else if is_qwen3 { 0.85 } else { 1.0 };
+
+    let mut exempt = vec![eos_id, im_end_id, eot_id];
+    if let Some(te) = think_end_id {
+        exempt.push(te);
+    }
+    let mut tracker = TokenPenaltyTracker::new(model.cfg.n_vocab, &exempt);
 
     let mut rng = 0x2026_11_03_5eed_u64;
-    let mut gen_ids = Vec::with_capacity(max_tokens);
-    let mut printed_bytes = 0usize;
-    let t_decode = Instant::now();
-
-    for step in 0..max_tokens {
-        let next_id = sample_logits(&logits, temp, &mut rng);
-        if next_id == eos_id || next_id == im_end_id || next_id == eot_id {
-            break;
-        }
-        gen_ids.push(next_id);
-        let decoded = model.tokenizer.decode(&gen_ids);
-        if decoded.len() > printed_bytes && !decoded.ends_with('\u{FFFD}') {
-            print!("{}", &decoded[printed_bytes..]);
-            let _ = io::stdout().flush();
-            printed_bytes = decoded.len();
-        }
-        if step + 1 < max_tokens {
-            model.forward_step(&mut state, next_id, Some(&mut logits))?;
-        }
+    let mut dec_start_tok = 0usize;
+    let t_decode: Instant;
+    println!("Decode path: {} | presence_penalty={presence_pen} max_tokens={max_tokens}",
+        if cb4_greedy { "cb4-greedy-full-head" } else if temp <= 1e-6 && model.has_turbo_fast_decode() && !reference_decode {
+            if exact_head { "turbo-fast-exact-head" } else { "turbo-fast-sketch-head" }
+        } else { "forward-step" });
+    if enable_thinking && !raw_prompt && is_qwen3 {
+        print!("<think>\n");
+        let _ = io::stdout().flush();
     }
-    let full = model.tokenizer.decode(&gen_ids);
-    if full.len() > printed_bytes {
-        print!("{}", &full[printed_bytes..]);
+
+    let gen_ids = if cb4_greedy {
+        let first_id = sample_logits(&logits, 0.0, &mut rng);
+        t_decode = Instant::now();
+        let mut streamed_ids = Vec::with_capacity(max_tokens);
+        model.generate_greedy_cb4(&mut state, first_id, max_tokens, &[eos_id, im_end_id, eot_id], |tok, tokenizer| {
+            streamed_ids.push(tok);
+            let chunk = tokenizer.decode(&streamed_ids[dec_start_tok..]);
+            if !chunk.is_empty() && !chunk.ends_with('\u{FFFD}') {
+                print!("{chunk}");
+                let _ = io::stdout().flush();
+                dec_start_tok = streamed_ids.len();
+            }
+            true
+        })?
+    } else if temp <= 1e-6 && model.has_turbo_fast_decode() && !reference_decode {
+        let first_id = sample_logits(&logits, 0.0, &mut rng);
+        t_decode = Instant::now();
+        let mut streamed_ids = Vec::with_capacity(max_tokens);
+        model.generate_greedy_turbo(
+            &mut state,
+            &prompt_ids,
+            first_id,
+            max_tokens,
+            !exact_head,
+            presence_pen,
+            &[eos_id, im_end_id, eot_id],
+            |tok| {
+                streamed_ids.push(tok);
+                let chunk = model.tokenizer.decode(&streamed_ids[dec_start_tok..]);
+                if !chunk.is_empty() && !chunk.ends_with('\u{FFFD}') {
+                    print!("{chunk}");
+                    let _ = io::stdout().flush();
+                    dec_start_tok = streamed_ids.len();
+                }
+                true
+            },
+        )?
+    } else {
+        t_decode = Instant::now();
+        let mut ids = Vec::with_capacity(max_tokens);
+        let mut in_think = enable_thinking && !raw_prompt && is_qwen3;
+        let think_budget = (max_tokens / 2).clamp(256, 1536);
+        let close_nl = model.tokenizer.encode("\n</think>\n\n");
+        let close_after_nl = model.tokenizer.encode("</think>\n\n");
+        let mut last_ended_nl = false;
+
+        while ids.len() < max_tokens {
+            let force_close = in_think
+                && ((ids.len() >= think_budget && (last_ended_nl || ids.len() >= think_budget + 48))
+                    || has_severe_loop(&ids));
+            if force_close && ids.len() + close_nl.len() < max_tokens {
+                let seq = if last_ended_nl { &close_after_nl } else { &close_nl };
+                for (k, &ctok) in seq.iter().enumerate() {
+                    ids.push(ctok);
+                    let last = k + 1 == seq.len();
+                    model.forward_step(&mut state, ctok, if last { Some(&mut logits) } else { None })?;
+                }
+                let chunk = model.tokenizer.decode(&ids[dec_start_tok..]);
+                if !chunk.is_empty() && !chunk.ends_with('\u{FFFD}') {
+                    print!("{chunk}");
+                    let _ = io::stdout().flush();
+                    dec_start_tok = ids.len();
+                }
+                in_think = false;
+                tracker.clear_counts();
+            }
+
+            if !explicit_zero_pen {
+                tracker.apply(&mut logits, presence_pen, freq_pen);
+            }
+            let next_id = sample_logits_top_k_p(&logits, temp, top_k, top_p, &mut rng);
+            if next_id == eos_id || next_id == im_end_id || next_id == eot_id {
+                break;
+            }
+            if in_think && Some(next_id) == think_end_id {
+                in_think = false;
+                tracker.clear_counts();
+            } else {
+                tracker.record(next_id, &model.tokenizer);
+            }
+            ids.push(next_id);
+            let chunk = model.tokenizer.decode(&ids[dec_start_tok..]);
+            if !chunk.is_empty() && !chunk.ends_with('\u{FFFD}') {
+                last_ended_nl = chunk.ends_with('\n');
+                print!("{chunk}");
+                let _ = io::stdout().flush();
+                dec_start_tok = ids.len();
+            }
+            if !in_think && !explicit_zero_pen && has_severe_loop(&ids) {
+                break;
+            }
+            if ids.len() < max_tokens {
+                model.forward_step(&mut state, next_id, Some(&mut logits))?;
+            }
+        }
+        ids
+    };
+    if dec_start_tok < gen_ids.len() {
+        print!("{}", model.tokenizer.decode(&gen_ids[dec_start_tok..]));
     }
     println!("\n---");
 
@@ -214,6 +367,7 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
         gen_ids.len(),
         eq_bw_gbs
     );
+    println!("Timing: load_s={load_s:.6} prefill_s={prefill_s:.6} decode_s={decode_s:.6} generated={} state_pos={}", gen_ids.len(), state.pos);
     Ok(())
 }
 

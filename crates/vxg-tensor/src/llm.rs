@@ -11,32 +11,33 @@ use crate::llm_ops::{
     alloc_cpu_state_vecs, rms_norm, silu, step_deltanet_recurrent, step_full_gqa,
 };
 pub use crate::llm_ops::{compare_logits, sample_logits, LogitEvalMetrics};
-use crate::llm_pack::{encode_gguf_tensor, LlmPackMode};
 use crate::metal::{GpuPackedTensor, MetalEngine};
-use crate::metal_llm::{MetalLlmAttnSpec, MetalLlmLayerSpec, MetalLlmRunner, MetalLlmState};
+use crate::metal_cb4_fast::{MetalCb4FastRunner, MetalCb4FastState};
+use crate::metal_llm::{MetalLlmRunner, MetalLlmState};
+use crate::metal_llm_turbo::{MetalTurboRunner, MetalTurboState};
 use crate::mmap::TensorBytes;
 use crate::tokenizer::BpeTokenizer;
 use crate::{Error, Result};
 
-struct MatWeight {
-    cpu: PackedTensor,
-    gpu: Option<GpuPackedTensor>,
+pub(crate) struct MatWeight {
+    pub(crate) cpu: PackedTensor,
+    pub(crate) gpu: Option<GpuPackedTensor>,
 }
 
 impl MatWeight {
-    fn from_packed(cpu: PackedTensor, metal: Option<&MetalEngine>) -> Result<Self> {
-        let gpu = match metal {
-            Some(eng) => Some(eng.upload_packed(&cpu)?),
-            None => None,
-        };
-        Ok(Self { cpu, gpu })
+    fn cpu_only(cpu: PackedTensor) -> Self {
+        Self { cpu, gpu: None }
     }
-
+    pub(crate) fn upload_gpu(&mut self, eng: &MetalEngine) -> Result<()> {
+        if self.gpu.is_none() {
+            self.gpu = Some(eng.upload_packed(&self.cpu)?);
+        }
+        Ok(())
+    }
     #[inline]
     fn rows(&self) -> usize {
         self.cpu.rows()
     }
-
     #[inline]
     fn forward(
         &self,
@@ -76,7 +77,7 @@ fn forward_multi(
     Ok(())
 }
 
-enum LayerAttn {
+pub(crate) enum LayerAttn {
     LinearDeltaNet {
         wqkv: MatWeight,
         wqkv_gate: MatWeight,
@@ -102,17 +103,20 @@ enum LayerAttn {
     },
 }
 
-struct DecoderLayer {
-    attn_norm: Vec<f32>,
-    post_attn_norm: Vec<f32>,
-    attn: LayerAttn,
-    ffn_gate: MatWeight,
-    ffn_up: MatWeight,
-    ffn_down: MatWeight,
+pub(crate) struct DecoderLayer {
+    pub(crate) attn_norm: Vec<f32>,
+    pub(crate) post_attn_norm: Vec<f32>,
+    pub(crate) attn: LayerAttn,
+    pub(crate) ffn_gate: MatWeight,
+    pub(crate) ffn_up: MatWeight,
+    pub(crate) ffn_down: MatWeight,
 }
 
 pub struct LlmState {
     pub pos: usize,
+    cb4_failed: bool,
+    turbo_gpu: Option<MetalTurboState>,
+    cb4_fast_gpu: Option<MetalCb4FastState>,
     gpu: Option<MetalLlmState>,
     k_caches: Vec<Vec<f32>>,
     v_caches: Vec<Vec<f32>>,
@@ -125,80 +129,15 @@ pub struct LlmModel {
     pub tokenizer: BpeTokenizer,
     pub total_compressed_bytes: usize,
     metal: Option<MetalEngine>,
+    metal_turbo: Option<MetalTurboRunner>,
+    metal_cb4_fast: Option<MetalCb4FastRunner>,
     metal_llm: Option<MetalLlmRunner>,
     cpu_threads: usize,
+    cb4_greedy_enabled: bool,
     token_embd: MatWeight,
     output_norm: Vec<f32>,
     output_head: Option<MatWeight>,
     layers: Vec<DecoderLayer>,
-}
-
-fn try_build_metal_llm(
-    eng: &MetalEngine,
-    cfg: &ModelConfig,
-    layers: &[DecoderLayer],
-    output_norm: &[f32],
-    head: &MatWeight,
-) -> Option<MetalLlmRunner> {
-    let head_gpu = head.gpu.as_ref()?;
-    let mut specs = Vec::with_capacity(layers.len());
-    for ly in layers {
-        let attn = match &ly.attn {
-            LayerAttn::LinearDeltaNet {
-                wqkv,
-                wqkv_gate,
-                ssm_alpha,
-                ssm_beta,
-                ssm_out,
-                ssm_conv1d,
-                ssm_a,
-                ssm_dt_bias,
-                ssm_norm,
-            } => MetalLlmAttnSpec::LinearDeltaNet {
-                wqkv: wqkv.gpu.as_ref()?,
-                wqkv_gate: wqkv_gate.gpu.as_ref()?,
-                ssm_alpha: ssm_alpha.gpu.as_ref()?,
-                ssm_beta: ssm_beta.gpu.as_ref()?,
-                ssm_out: ssm_out.gpu.as_ref()?,
-                ssm_conv1d,
-                ssm_a,
-                ssm_dt_bias,
-                ssm_norm,
-            },
-            LayerAttn::FullGqa {
-                wq,
-                wk,
-                wv,
-                wo,
-                q_norm,
-                k_norm,
-                q_bias,
-                k_bias,
-                v_bias,
-                gated_q,
-            } => MetalLlmAttnSpec::FullGqa {
-                wq: wq.gpu.as_ref()?,
-                wk: wk.gpu.as_ref()?,
-                wv: wv.gpu.as_ref()?,
-                wo: wo.gpu.as_ref()?,
-                q_norm: q_norm.as_deref(),
-                k_norm: k_norm.as_deref(),
-                q_bias: q_bias.as_deref(),
-                k_bias: k_bias.as_deref(),
-                v_bias: v_bias.as_deref(),
-                gated_q: *gated_q,
-            },
-        };
-        specs.push(MetalLlmLayerSpec {
-            attn_norm: &ly.attn_norm,
-            post_attn_norm: &ly.post_attn_norm,
-            attn,
-            ffn_gate: ly.ffn_gate.gpu.as_ref()?,
-            ffn_up: ly.ffn_up.gpu.as_ref()?,
-            ffn_down: ly.ffn_down.gpu.as_ref()?,
-        });
-    }
-    MetalLlmRunner::new(eng, cfg, &specs, output_norm, head_gpu).ok()
 }
 
 impl LlmModel {
@@ -210,12 +149,20 @@ impl LlmModel {
         } else if bytes.starts_with(b"GGUF") {
             Self::from_gguf_bytes(bytes, use_gpu, cpu_threads)
         } else {
-            Err(Error::Unsupported("expected .vxt or .gguf LLM file".into()))
+            let dir = std::path::Path::new(path).parent().unwrap_or_else(|| std::path::Path::new("."));
+            let config = std::fs::read(dir.join("config.json")).map_err(|e| Error::Io(format!("native config.json: {e}")))?;
+            let tokenizer = std::fs::read(dir.join("tokenizer.json")).map_err(|e| Error::Io(format!("native tokenizer.json: {e}")))?;
+            let (cfg, tok, map) = crate::native_qwen35::load_source(bytes, &config, &tokenizer)?;
+            Self::assemble(cfg, tok, map, bytes.len(), use_gpu, cpu_threads)
         }
     }
 
     pub fn from_vxt_bytes(bytes: &[u8], use_gpu: bool, cpu_threads: usize) -> Result<Self> {
         let (meta_kv, entries) = read_vxt_model(bytes)?;
+        if meta_kv.iter().any(|(k, _)| k == crate::native_qwen35::MANIFEST) {
+            let (cfg, tokenizer, map) = crate::native_qwen35::load_archive(&meta_kv, entries)?;
+            return Self::assemble(cfg, tokenizer, map, bytes.len(), use_gpu, cpu_threads);
+        }
         let cfg_bytes = meta_kv
             .iter()
             .find(|(k, _)| k == "model.config")
@@ -226,6 +173,30 @@ impl LlmModel {
         let map: HashMap<String, PackedTensor> =
             entries.into_iter().map(|e| (e.name, e.tensor)).collect();
         Self::assemble(cfg, tokenizer, map, bytes.len(), use_gpu, cpu_threads)
+    }
+
+    /// Explicit diagnostic: reconstruct every packed tensor before backend selection.
+    /// Config/tokenizer and smoothing vectors come from the archive unchanged.
+    pub fn load_vxt_decoded_raw_diagnostic(path: &str, use_gpu: bool, cpu_threads: usize) -> Result<(Self, serde_json::Value)> {
+        let mapped = TensorBytes::open(path)?;
+        let bytes = mapped.as_slice();
+        let (meta, entries) = read_vxt_model(bytes)?;
+        if meta.iter().any(|(k, _)| k == crate::native_qwen35::MANIFEST) {
+            return Err(Error::Unsupported("decoded diagnostic requires standard pack-model archive".into()));
+        }
+        let cfg = ModelConfig::from_kv_bytes(&meta.iter().find(|(k, _)| k == "model.config")
+            .ok_or_else(|| Error::Format("missing model.config".into()))?.1)?;
+        let tokenizer = BpeTokenizer::from_vxt_meta(&meta)?;
+        let mut map = HashMap::new();
+        let mut inventory = Vec::new();
+        for e in entries {
+            let (raw, audit) = diagnostic_raw_tensor(e.tensor);
+            inventory.push(serde_json::json!({"name":e.name,"decoded":audit}));
+            map.insert(e.name, raw);
+        }
+        inventory.sort_by(|a,b| a["name"].as_str().cmp(&b["name"].as_str()));
+        let model = Self::assemble(cfg, tokenizer, map, bytes.len(), use_gpu, cpu_threads)?;
+        Ok((model, serde_json::json!(inventory)))
     }
 
     pub fn from_gguf_bytes(bytes: &[u8], use_gpu: bool, cpu_threads: usize) -> Result<Self> {
@@ -250,7 +221,13 @@ impl LlmModel {
             }
             map.insert(
                 m.name.clone(),
-                encode_gguf_tensor(&gg, m, LlmPackMode::Lossless)?,
+                // Keep the reference independent of the packer: otherwise a shared
+                // conversion bug can make a lossy archive appear exact in eval.
+                {
+                    let data = gg.extract_f32(m)?;
+                    let (rows, cols) = m.matrix_dims().unwrap_or((1, data.len().max(1)));
+                    PackedTensor::RawF32 { rows, cols, data }
+                },
             );
         }
         Self::assemble(cfg, tokenizer, map, bytes.len(), use_gpu, cpu_threads)
@@ -269,13 +246,11 @@ impl LlmModel {
         } else {
             None
         };
-        let m_ref = metal.as_ref();
-
         let take_mat = |map: &mut HashMap<String, PackedTensor>, name: &str| -> Result<MatWeight> {
             let t = map
                 .remove(name)
                 .ok_or_else(|| Error::Format(format!("missing model tensor '{name}'")))?;
-            MatWeight::from_packed(t, m_ref)
+            Ok(MatWeight::cpu_only(t))
         };
         let take_vec = |map: &mut HashMap<String, PackedTensor>, name: &str| -> Result<Vec<f32>> {
             let t = map
@@ -284,12 +259,9 @@ impl LlmModel {
             Ok(t.decode_f32())
         };
 
-        let token_embd = take_mat(&mut map, "token_embd.weight")?;
+        let mut token_embd = take_mat(&mut map, "token_embd.weight")?;
         let output_norm = take_vec(&mut map, "output_norm.weight")?;
-        let output_head = match map.remove("output.weight") {
-            Some(t) => Some(MatWeight::from_packed(t, m_ref)?),
-            None => None,
-        };
+        let mut output_head = map.remove("output.weight").map(MatWeight::cpu_only);
 
         let mut layers = Vec::with_capacity(cfg.n_layer);
         for il in 0..cfg.n_layer {
@@ -353,18 +325,50 @@ impl LlmModel {
             });
         }
 
-        let head_ref = output_head.as_ref().unwrap_or(&token_embd);
-        let metal_llm = metal
-            .as_ref()
-            .and_then(|eng| try_build_metal_llm(eng, &cfg, &layers, &output_norm, head_ref));
+        let mut metal_turbo = None;
+        let mut metal_cb4_fast = None;
+        let mut metal_llm = None;
+        if let Some(eng) = metal.as_ref() {
+            metal_turbo = MetalTurboRunner::try_from_layers(
+                eng,
+                &cfg,
+                &token_embd.cpu,
+                &output_norm,
+                output_head.as_ref().map(|h| &h.cpu),
+                &layers,
+            )?;
+            if metal_turbo.is_none() {
+                metal_cb4_fast = MetalCb4FastRunner::try_from_layers(
+                    eng,
+                    &cfg,
+                    &token_embd.cpu,
+                    &output_norm,
+                    output_head.as_ref().map(|h| &h.cpu),
+                    &layers,
+                )?;
+            }
+            if metal_turbo.is_none() && metal_cb4_fast.is_none() {
+                metal_llm = MetalLlmRunner::upload_and_build(
+                    eng,
+                    &cfg,
+                    &mut token_embd,
+                    &mut output_head,
+                    &mut layers,
+                    &output_norm,
+                )?;
+            }
+        }
 
         Ok(Self {
             cfg,
             tokenizer,
             total_compressed_bytes: archive_bytes,
             metal,
+            metal_turbo,
+            metal_cb4_fast,
             metal_llm,
             cpu_threads: cpu_threads.max(1),
+            cb4_greedy_enabled: false,
             token_embd,
             output_norm,
             output_head,
@@ -373,18 +377,75 @@ impl LlmModel {
     }
 
     pub fn backend_label(&self) -> String {
-        match (&self.metal, &self.metal_llm) {
-            (Some(m), Some(_)) => format!("Apple Metal GPU ({}, 1-CmdBuf Fused)", m.device_name()),
-            (Some(m), None) => format!("Apple Metal GPU ({})", m.device_name()),
-            (None, _) => format!("CPU ({} threads)", self.cpu_threads),
+        match (
+            &self.metal,
+            &self.metal_turbo,
+            &self.metal_cb4_fast,
+            &self.metal_llm,
+        ) {
+            (Some(m), Some(_), _, _) => {
+                format!("Apple Metal GPU ({}, VXT-Turbo Pipelined)", m.device_name())
+            }
+            (Some(m), None, Some(_), _) => {
+                format!(
+                    "Apple Metal GPU ({}, 1-CmdBuf Fused, CB4-Fast Pipelined)",
+                    m.device_name()
+                )
+            }
+            (Some(m), None, None, Some(_)) => {
+                format!("Apple Metal GPU ({}, 1-CmdBuf Fused)", m.device_name())
+            }
+            (Some(m), None, None, None) => format!("Apple Metal GPU ({})", m.device_name()),
+            (None, _, _, _) => format!("CPU ({} threads)", self.cpu_threads),
         }
     }
 
+    pub fn has_turbo_fast_decode(&self) -> bool {
+        self.metal_turbo.is_some()
+    }
+
+    pub fn has_cb4_fast_decode(&self) -> bool {
+        self.metal_cb4_fast.is_some()
+    }
+
     pub fn new_state(&self) -> LlmState {
+        if let Some(tr) = &self.metal_turbo {
+            if let Ok(tst) = tr.new_state() {
+                return LlmState {
+                    pos: 0,
+                    cb4_failed: false,
+                    turbo_gpu: Some(tst),
+                    cb4_fast_gpu: None,
+                    gpu: None,
+                    k_caches: Vec::new(),
+                    v_caches: Vec::new(),
+                    conv_states: Vec::new(),
+                    ssm_states: Vec::new(),
+                };
+            }
+        }
+        if let Some(cf) = &self.metal_cb4_fast {
+            if let Ok(cst) = cf.new_state() {
+                return LlmState {
+                    pos: 0,
+                    cb4_failed: false,
+                    turbo_gpu: None,
+                    cb4_fast_gpu: Some(cst),
+                    gpu: None,
+                    k_caches: Vec::new(),
+                    v_caches: Vec::new(),
+                    conv_states: Vec::new(),
+                    ssm_states: Vec::new(),
+                };
+            }
+        }
         if let Some(runner) = &self.metal_llm {
             if let Ok(gpu_st) = runner.new_state() {
                 return LlmState {
                     pos: 0,
+                    cb4_failed: false,
+                    turbo_gpu: None,
+                    cb4_fast_gpu: None,
                     gpu: Some(gpu_st),
                     k_caches: Vec::new(),
                     v_caches: Vec::new(),
@@ -396,6 +457,9 @@ impl LlmModel {
         let (k_caches, v_caches, conv_states, ssm_states) = alloc_cpu_state_vecs(&self.cfg);
         LlmState {
             pos: 0,
+            cb4_failed: false,
+            turbo_gpu: None,
+            cb4_fast_gpu: None,
             gpu: None,
             k_caches,
             v_caches,
@@ -404,12 +468,135 @@ impl LlmModel {
         }
     }
 
+    pub fn prefill(
+        &mut self,
+        state: &mut LlmState,
+        prompt_ids: &[u32],
+        logits_out: &mut [f32],
+    ) -> Result<()> {
+        if state.cb4_failed { return Err(Error::Unsupported("CB4 device failure invalidated this state; create a new state".into())); }
+        if let (Some(tr), Some(tst)) = (self.metal_turbo.as_ref(), state.turbo_gpu.as_mut()) {
+            return tr.prefill_tokens(tst, &mut state.pos, prompt_ids, logits_out);
+        }
+        if let (Some(cf), Some(cst)) = (self.metal_cb4_fast.as_ref(), state.cb4_fast_gpu.as_mut()) {
+            return cf.prefill_tokens(cst, &mut state.pos, prompt_ids, logits_out);
+        }
+        for (idx, &tid) in prompt_ids.iter().enumerate() {
+            let last = idx + 1 == prompt_ids.len();
+            self.forward_step(state, tid, last.then_some(&mut *logits_out))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_greedy_turbo<F: FnMut(u32) -> bool>(
+        &self,
+        state: &mut LlmState,
+        prompt_ids: &[u32],
+        first_tok: u32,
+        max_new_tokens: usize,
+        use_sketch: bool,
+        presence_pen: f32,
+        stop_ids: &[u32],
+        on_token: F,
+    ) -> Result<Vec<u32>> {
+        if state.cb4_failed { return Err(Error::Unsupported("CB4 device failure invalidated this state; create a new state".into())); }
+        let (Some(tr), Some(tst)) = (self.metal_turbo.as_ref(), state.turbo_gpu.as_mut()) else {
+            return Err(Error::Unsupported("Turbo fast decode unavailable".into()));
+        };
+        tr.generate_greedy_fast(
+            tst,
+            &mut state.pos,
+            prompt_ids,
+            first_tok,
+            max_new_tokens,
+            use_sketch,
+            presence_pen,
+            stop_ids,
+            on_token,
+        )
+    }
+
+    /// Opt in to exact CB4 embedding decode and full-head GPU greedy selection.
+    pub fn enable_cb4_greedy(&mut self) -> Result<()> {
+        let PackedTensor::Codebook(embedding) = &self.token_embd.cpu else {
+            return Err(Error::Unsupported("CB4 greedy requires a four-bit Codebook embedding".into()));
+        };
+        if embedding.bits != 4 {
+            return Err(Error::Unsupported("CB4 greedy requires a four-bit Codebook embedding".into()));
+        }
+        if self.metal_cb4_fast.is_some() {
+            self.cb4_greedy_enabled = true;
+            return Ok(());
+        }
+        let gpu = self.token_embd.gpu.as_ref().ok_or_else(|| Error::Unsupported("CB4 greedy requires an uploaded Metal embedding".into()))?;
+        let runner = self.metal_llm.as_mut().ok_or_else(|| Error::Unsupported("CB4 greedy requires the generic Metal runner".into()))?;
+        runner.enable_cb4_greedy(gpu, &embedding.centroids)?;
+        self.cb4_greedy_enabled = true;
+        Ok(())
+    }
+
+    /// `first_tok` is predicted but unconsumed. On cap/cancellation the last
+    /// emitted token remains pending; stop tokens are never emitted or consumed.
+    /// A device-step error invalidates the state: discard it and create a new one.
+    pub fn generate_greedy_cb4<F: FnMut(u32, &BpeTokenizer) -> bool>(
+        &mut self, state: &mut LlmState, first_tok: u32,
+        max_new_tokens: usize, stop_ids: &[u32], mut on_token: F,
+    ) -> Result<Vec<u32>> {
+        if state.cb4_failed { return Err(Error::Unsupported("CB4 device failure invalidated this state; create a new state".into())); }
+        if !self.cb4_greedy_enabled {
+            return Err(Error::Unsupported("CB4 greedy must be explicitly enabled".into()));
+        }
+        if let (Some(cf), Some(cst)) = (self.metal_cb4_fast.as_ref(), state.cb4_fast_gpu.as_mut()) {
+            return cf.generate_greedy_fast(
+                cst,
+                &mut state.pos,
+                &mut state.cb4_failed,
+                &self.tokenizer,
+                first_tok,
+                max_new_tokens,
+                stop_ids,
+                on_token,
+            );
+        }
+        let (Some(runner), Some(gpu)) = (self.metal_llm.as_mut(), state.gpu.as_mut()) else {
+            return Err(Error::Unsupported("CB4 greedy requires Metal model and state".into()));
+        };
+        let mut emitted = Vec::with_capacity(max_new_tokens);
+        let mut next = first_tok;
+        while emitted.len() < max_new_tokens && !stop_ids.contains(&next) {
+            if next as usize >= self.cfg.n_vocab {
+                return Err(Error::Format("CB4 greedy token outside vocabulary".into()));
+            }
+            emitted.push(next);
+            if !on_token(next, &self.tokenizer) || emitted.len() == max_new_tokens { break; }
+            let predicted = match runner.greedy_step(gpu, next, state.pos) {
+                Ok(token) => token,
+                Err(error) => { state.cb4_failed = true; return Err(error); }
+            };
+            state.pos += 1;
+            next = predicted;
+        }
+        Ok(emitted)
+    }
+
     pub fn forward_step(
         &mut self,
         state: &mut LlmState,
         token_id: u32,
         mut logits_out: Option<&mut [f32]>,
     ) -> Result<()> {
+        if state.cb4_failed { return Err(Error::Unsupported("CB4 device failure invalidated this state; create a new state".into())); }
+        if let (Some(tr), Some(tst)) = (self.metal_turbo.as_ref(), state.turbo_gpu.as_mut()) {
+            tr.step_single(tst, state.pos as u32, token_id, logits_out)?;
+            state.pos += 1;
+            return Ok(());
+        }
+        if let (Some(cf), Some(cst)) = (self.metal_cb4_fast.as_ref(), state.cb4_fast_gpu.as_mut()) {
+            cf.step_single(cst, state.pos as u32, token_id, logits_out)?;
+            state.pos += 1;
+            return Ok(());
+        }
         let dim = self.cfg.n_embd;
         let mut cur = vec![0.0f32; dim];
         self.token_embd.cpu.decode_row(token_id as usize, &mut cur);
@@ -575,5 +762,39 @@ impl LlmModel {
             head.forward(&normed, logits, self.metal.as_mut(), threads)?;
         }
         Ok(())
+    }
+}
+
+// Fingerprint is FNV-1a over exact reconstructed LE f32 bits, not a quality metric.
+fn diagnostic_raw_tensor(t: PackedTensor) -> (PackedTensor, serde_json::Value) {
+    let (rows, cols) = (t.rows(), t.cols());
+    let kind = format!("{:?}", std::mem::discriminant(&t));
+    let data = t.decode_f32();
+    let mut hash = 0xcbf29ce484222325u64;
+    for x in &data { for b in x.to_le_bytes() { hash = (hash ^ b as u64).wrapping_mul(0x100000001b3); } }
+    let audit = serde_json::json!({"rows":rows,"cols":cols,"elements":data.len(),"source_kind":kind,"decoded_f32_fnv1a":format!("{hash:016x}"),"finite":data.iter().all(|x|x.is_finite())});
+    (PackedTensor::RawF32 {rows, cols, data}, audit)
+}
+#[cfg(test)]
+mod decoded_diagnostic_tests {
+    use super::*;
+    #[test]
+    fn turbo_materialization_preserves_exact_decode_bits_and_raw_route() {
+        let w:Vec<f32>=(0..256).map(|i| ((i as f32)*0.31).sin()).collect();
+        let t=PackedTensor::TurboWht(crate::wht_turbo::TurboWhtMatrix::encode(4,4,64,&w).unwrap());
+        let expected:Vec<_>=t.decode_f32().iter().map(|x|x.to_bits()).collect();
+        let (raw,audit)=diagnostic_raw_tensor(t);
+        assert!(matches!(raw,PackedTensor::RawF32{rows:4,cols:64,..}));
+        assert_eq!(expected,raw.decode_f32().iter().map(|x|x.to_bits()).collect::<Vec<_>>());
+        assert_eq!(audit["finite"],true);
+    }
+    #[test]
+    fn raw_materialization_preserves_exact_decode_bits() {
+        let input = PackedTensor::RawF32 {rows:1,cols:4,data:vec![-0.0,1.25,-2.5,f32::from_bits(1)]};
+        let expected:Vec<_> = input.decode_f32().iter().map(|x|x.to_bits()).collect();
+        let (raw,audit)=diagnostic_raw_tensor(input);
+        assert!(matches!(raw,PackedTensor::RawF32{..}));
+        assert_eq!(expected,raw.decode_f32().iter().map(|x|x.to_bits()).collect::<Vec<_>>());
+        assert_eq!(audit["elements"],4);
     }
 }

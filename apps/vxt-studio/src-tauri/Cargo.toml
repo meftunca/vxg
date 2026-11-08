@@ -1,0 +1,32 @@
+[package]
+name = "vxt-studio"
+version = "0.1.0"
+description = "VXT Studio — Native Apple Metal Compressed-Domain LLM Chat & Tensor Forge"
+edition = "2021"
+
+[lib]
+name = "vxt_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vxg-tensor = { path = "../../../crates/vxg-tensor", features = ["metal"] }
+
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[workspace]

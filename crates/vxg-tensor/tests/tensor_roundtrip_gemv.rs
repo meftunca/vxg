@@ -8,6 +8,7 @@ use vxg_tensor::lossless::{gemv_raw16_cpu, LosslessMatrix};
 use vxg_tensor::metal::MetalEngine;
 use vxg_tensor::safetensors::{write_safetensors_u16, SafeTensorsView};
 use vxg_tensor::wht2::Wht2Matrix;
+use vxg_tensor::wht_turbo::TurboWhtMatrix;
 use vxg_tensor::{DType, Error};
 
 #[test]
@@ -256,6 +257,10 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
             PackedTensor::Codebook(CodebookMatrix::encode(3, rows, cols, &bf_f32).unwrap()),
             PackedTensor::Q4_0(Q4_0Matrix::encode(rows, cols, &bf_f32)),
             PackedTensor::Wht2(Wht2Matrix::encode(rows, cols, &bf_f32).unwrap()),
+            PackedTensor::TurboWht(TurboWhtMatrix::encode(3, rows, cols, &bf_f32).unwrap()),
+            PackedTensor::TurboWht(TurboWhtMatrix::encode(4, rows, cols, &bf_f32).unwrap()),
+            PackedTensor::TurboWht(TurboWhtMatrix::encode(5, rows, cols, &bf_f32).unwrap()),
+            PackedTensor::TurboWht(TurboWhtMatrix::encode(2, rows, cols, &bf_f32).unwrap()),
         ];
         let mut gpu_cases = Vec::new();
         let mut cpu_refs = Vec::new();
@@ -296,17 +301,83 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
         for (got, want) in [&m0, &m1, &m2, &m3].into_iter().zip(&cpu_refs) {
             assert!(ErrorMetrics::compute(want, got).max_abs_err < 2e-4);
         }
+
+        // Also test NR=8 (`rows >= 4096`, odd tail `4102`) + `concat_vertical` for Turbo2 & Turbo3!
+        let r_a = 2048usize;
+        let r_b = 2054usize;
+        let (_, wf_a) = generate_realistic_llm_weights(DType::BF16, r_a, cols, 301);
+        let (_, wf_b) = generate_realistic_llm_weights(DType::BF16, r_b, cols, 302);
+        let mut wf_ab = wf_a.clone();
+        wf_ab.extend_from_slice(&wf_b);
+        for bits in [2u8, 3u8, 4u8, 5u8] {
+            let ta = TurboWhtMatrix::encode(bits, r_a, cols, &wf_a).unwrap();
+            let tb = TurboWhtMatrix::encode(bits, r_b, cols, &wf_b).unwrap();
+            let tab = TurboWhtMatrix::concat_vertical(&[&ta, &tb]).unwrap();
+            let tab_direct = TurboWhtMatrix::encode(bits, r_a + r_b, cols, &wf_ab).unwrap();
+            assert_eq!(tab.scales_f16, tab_direct.scales_f16);
+            if !matches!(bits, 4 | 5) {
+                assert_eq!(tab.packed_words, tab_direct.packed_words);
+            }
+            assert_eq!(
+                PackedTensor::TurboWht(tab.clone()).decode_f32(),
+                PackedTensor::TurboWht(tab_direct).decode_f32()
+            );
+
+            let packed_ab = PackedTensor::TurboWht(tab);
+            let mut y_cpu = vec![0.0f32; r_a + r_b];
+            let mut y_gpu = vec![0.0f32; r_a + r_b];
+            packed_ab.gemv_cpu(&x, &mut y_cpu, 4);
+            let gpu_ab = eng.upload_packed(&packed_ab).unwrap();
+            gpu_ab.run_gemv(&mut eng, &x, &mut y_gpu, 1).unwrap();
+            let err = ErrorMetrics::compute(&y_cpu, &y_gpu);
+            assert!(
+                err.max_abs_err < 2e-4,
+                "Metal Turbo{bits} NR=8 mismatch: max_err={}",
+                err.max_abs_err
+            );
+        }
     }
 
-    // Also verify Wht2 + RawF32 + Metadata roundtrip in .vxt model container
+    // Also verify Wht2 + TurboWht + RawF32 + Metadata roundtrip in .vxt model container
     let wht = Wht2Matrix::encode(rows, cols, &bf_f32).unwrap();
-    let meta = vec![("arch".to_owned(), b"qwen35".to_vec())];
+    let t2 = TurboWhtMatrix::encode(2, rows, cols, &bf_f32).unwrap();
+    let t25 = TurboWhtMatrix::encode(5, rows, cols, &bf_f32).unwrap();
+    let t3 = TurboWhtMatrix::encode(3, rows, cols, &bf_f32).unwrap();
+    let tec = TurboWhtMatrix::encode_with_lambda(4, rows, cols, &bf_f32, |r| {
+        if r < 64 {
+            0.055
+        } else {
+            0.18
+        }
+    })
+    .unwrap();
+    let long_meta = b"qwen35-repeating-tokenizer-vocabulary-entry-".repeat(64);
+    let meta = vec![
+        ("arch".to_owned(), b"qwen35".to_vec()),
+        ("tokenizer.tokens".to_owned(), long_meta),
+    ];
     let model_bytes = write_vxt_model(
         &meta,
         &[
             VxtEntry {
                 name: "wht_proj".into(),
                 tensor: PackedTensor::Wht2(wht.clone()),
+            },
+            VxtEntry {
+                name: "t2_proj".into(),
+                tensor: PackedTensor::TurboWht(t2.clone()),
+            },
+            VxtEntry {
+                name: "t25_proj".into(),
+                tensor: PackedTensor::TurboWht(t25.clone()),
+            },
+            VxtEntry {
+                name: "t3_proj".into(),
+                tensor: PackedTensor::TurboWht(t3.clone()),
+            },
+            VxtEntry {
+                name: "tec_proj".into(),
+                tensor: PackedTensor::TurboWht(tec.clone()),
             },
             VxtEntry {
                 name: "norm".into(),
@@ -322,5 +393,16 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
     let (parsed_meta, parsed_entries) = read_vxt_model(&model_bytes).unwrap();
     assert_eq!(parsed_meta, meta);
     assert_eq!(parsed_entries[0].tensor.decode_f32(), wht.decode_f32());
-    assert_eq!(parsed_entries[1].tensor.decode_f32(), vec![1.25f32; 16]);
+    assert_eq!(parsed_entries[1].tensor.decode_f32(), PackedTensor::TurboWht(t2).decode_f32());
+    assert_eq!(parsed_entries[2].tensor.decode_f32(), PackedTensor::TurboWht(t25).decode_f32());
+    assert_eq!(parsed_entries[3].tensor.decode_f32(), PackedTensor::TurboWht(t3).decode_f32());
+    match &parsed_entries[4].tensor {
+        PackedTensor::TurboWht(m) => {
+            assert_eq!(m.scales_f16, tec.scales_f16);
+            assert_eq!(m.packed_words, tec.packed_words);
+            assert!(m.bits_per_weight() < 2.85, "expected EC-Turbo3 < 2.85 bpw, got {}", m.bits_per_weight());
+        }
+        _ => panic!("expected EC-Turbo3"),
+    }
+    assert_eq!(parsed_entries[5].tensor.decode_f32(), vec![1.25f32; 16]);
 }

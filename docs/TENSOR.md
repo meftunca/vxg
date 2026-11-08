@@ -1,8 +1,8 @@
-# `vxg-tensor` (`.vxt`) — Compressed-Domain AI Model Codec & Fused Apple Metal LLM Engine
+# `vxg-tensor` (`.vxt`) — Compressed-Domain AI Model Codec, `CB4-Fast` Apple Metal LLM Engine & `VXT Studio`
 
-`crates/vxg-tensor` extends VXG from structured telemetry and columnar analytics into **neural network weight compression (`.vxt` `VXT1`) and zero-decompression GPU/SIMD LLM inference**.
+`crates/vxg-tensor` extends VXG from structured telemetry and columnar analytics into **neural network weight compression (`.vxt` `VXT1`), zero-decompression Apple Metal GPU / SIMD LLM inference, OpenAI-compatible SSE serving, and the `VXT Studio` desktop application (`apps/vxt-studio`)**.
 
-Instead of inflating compressed weights back to `BF16`/`FP16` in RAM or VRAM, `vxg-tensor` uploads the **compressed `.vxt` planes directly into Apple Silicon Unified Memory** and executes the entire autoregressive LLM forward pass (`RMSNorm`, `Gated-DeltaNet` recurrent state updates, `Flash-Decoding` `Gated-GQA`, `SwiGLU`, and `248,320`-vocab `LM Head`) inside **one single concurrent `MTLCommandBuffer` per token** — with **`0` external runtime crate dependencies**.
+Instead of inflating compressed weights back to `BF16`/`FP16` in RAM or VRAM, `vxg-tensor` uploads the **compressed `.vxt` planes directly into Apple Silicon Unified Memory** and executes the entire autoregressive LLM forward pass (`RMSNorm`, `Gated-DeltaNet` recurrent state updates, `Flash-Decoding` `Gated-GQA`, `SwiGLU`, and `248,320`-vocab `LM Head`) directly from compressed representations on GPU.
 
 <TensorBenchmarkChart />
 
@@ -10,79 +10,74 @@ Instead of inflating compressed weights back to `BF16`/`FP16` in RAM or VRAM, `v
 
 ## Key Highlights (`Qwen3.5-2B` End-to-End on Apple M2 Max)
 
-- **100% Bit-Exact Lossless (`VXT-Lossless-BF16`)**: Shrinks `Qwen3.5-2B-BF16.gguf` from **`3600.80 MiB` -> `2556.80 MiB` (`1.41x` smaller, `11.35 bpw`)** with **`0.000000 nats` KL divergence**, `1.000000` cosine similarity, and `100.0%` Top-1 logit identity — verified bit-for-bit against raw `BF16` at **`41.8–49.6 tok/s`** directly on compressed bit-planes.
-- **Superior 4-Bit Quality & Size vs `GGUF Q4_0` (`VXT-CB4+Outlier`)**: Compresses the full 2B model (including its `248,320`-token BPE vocabulary) under `1 GiB` (**`993.59 MiB`, `3.62x` smaller**) — **`27.2 MiB` smaller than `GGUF Q4_0` (`1020.83 MiB`)** while achieving **`1.76x` lower KL divergence (`0.0304` vs `0.0533 nats`)**, higher weight SQNR (`20.82 dB` vs `19.76 dB`), `93.8%` vs `87.5%` Top-1 teacher-forced agreement, and **`93.6–105.0 tok/s`** fused Metal GPU generation.
-- **Sub-800 MiB & Sub-670 MiB Ultra-Compact Modes (`CB3+Outlier` & `WHT2+Outlier`)**:
-  - `VXT-CB3+Outlier` (`3.38 bpw`): **`772.40 MiB` (`4.66x` smaller)** with **`0.1117 nats` KL**, **`100%` Top-1 match** on the 16-step evaluation rollout, and **`80.4 tok/s`** decode.
-  - `VXT-WHT2+Outlier` (`2.31 bpw` Walsh-Hadamard 2-bit FFN/Attn + `3.38 bpw` recurrent gates): **`645.96 MiB` (`5.57x` smaller)** with **`93.8%` (`15/16`) teacher-forced Top-1 match** and **`114.2 tok/s`** GPU decode (`140.9 tok/s` prefill).
-- **Single-Matrix Fused `GEMV` Bandwidth**: Reaches **`710–720 GB/s` effective `BF16` bandwidth** on `VXT-CB4+Outlier` / `VXT-WHT2+Outlier` and **`995.8 GB/s`** on `Q4_0` (`2.03x–2.85x` faster than raw `BF16` `GEMV` on `248,320 x 2048` `token_embd.weight`).
+- **`CB4-v2` + `CB4-Fast` All-GPU Engine (`988.42 MiB`, `~176 tok/s`, `BF16` Quality Parity)**:
+  - Shrinks `Qwen3.5-2B` from **`3600.80 MiB` (`.gguf` `BF16`) / `4337.52 MiB` (official HuggingFace `.safetensors`) -> `988.42 MiB` (`4.38 bpw`, `3.64x–4.39x` smaller)** — `32.4 MiB` smaller than `GGUF Q4_0` (`1020.83 MiB`).
+  - **Zero-Shot Analytical Super-Weight Calibration (`CB4-v2`)**: Propagates residual-writer channel RMS (`ffn_down`, `ssm_out`, `attn_output`), `RMSNorm` gains, and 2-hop `SwiGLU` / `DeltaNet` / `GQA` row sensitivities (`col_amp`) without touching any calibration prompts, reaching **`36/40` (`0.900`) strict 40-item free-generation parity with raw `BF16` (`36/40`)**, **`0.047588 nats` `4x16` split KL divergence (`-16.6%` vs `CB4-v1`)**, **`0.972549` logit cosine similarity**, and **`61/64` Top-1 agreement** ([`reports/cb4-v2-2026-11-08.md`](../reports/cb4-v2-2026-11-08.md)).
+  - **`MetalCb4FastRunner` (`0-ULP` Exact, `175.92 tok/s`)**: Packs all model layers (`NR = 2` step-major) and `248,320`-row vocabulary (`NR = 4` tile-major) into a single `256B`-aligned Metal arena with `32`-bit SRAM `c16` codebook LUTs, `64`-threadgroup split-state `FP32` `DeltaNet`, batched `M <= 32` prefill (`221.9 tok/s`), and `2`-deep `8`-step speculative command-buffer pipelining (`182.3 GB/s` effective compressed weight bandwidth).
+- **100% Bit-Exact Lossless (`VXT-Lossless-BF16`)**: Shrinks `Qwen3.5-2B` to **`2556.80 MiB` (`1.41x` smaller, `11.35 bpw`)** with **`0.000000 nats` KL divergence**, `1.000000` cosine similarity, and `100.0%` bit-for-bit weight identity at **`49.6 tok/s`** directly on compressed bit-planes.
+- **Ultra-Compact Sub-800 MiB & Sub-670 MiB Modes (`CB3`, `WHT2`, `VXT-Turbo`)**:
+  - `VXT-CB3+Outlier` (`3.38 bpw`): **`772.40 MiB` (`4.66x` smaller)** with **`0.1117 nats` KL** and **`80.4 tok/s`** GPU decode.
+  - `VXT-WHT2+Outlier` (`2.31 bpw` Walsh-Hadamard 2-bit FFN/Attn + `3.38 bpw` recurrent gates): **`645.96 MiB` (`5.57x` smaller)** at **`114.2 tok/s`** GPU decode (`140.9 tok/s` prefill).
+- **Direct HuggingFace Folder & `.gguf` Packing**: Converts raw HuggingFace model directories (`config.json` + `tokenizer.json` + single or sharded `model.safetensors.index.json`) or `.gguf` files directly into self-contained `.vxt` models without external Python/`llama.cpp` toolchains.
+- **Multi-Turn Stateful Chat, OpenAI SSE Server & `VXT Studio`**:
+  - Prefix-cached `KV + Recurrent Gated-DeltaNet` multi-turn `ChatSession` (`152+ tok/s` cached follow-up turns), official Qwen BPE pretokenizer (`NFC` + Unicode regex), `top-k/top-p` sampling, and exponential **DRY** suffix-clone anti-loop protection for long `--think` reasoning chains.
+  - Built-in OpenAI-compatible HTTP/SSE server (`vxg-tensor serve`, `/v1/models`, `/v1/chat/completions`) and standalone **`VXT Studio.app` / `.dmg`** desktop suite (`Tauri v2` + `React 19` + `shadcn/ui` + Vercel AI SDK).
 
 ---
 
-## Architecture & Single-Command-Buffer Metal Pipeline
+## Architecture & `CB4-Fast` Speculative Metal Pipeline
 
 ```mermaid
 flowchart LR
-    GGUF["GGUF / SafeTensors (BF16 / FP16)"] -->|"vxg-tensor pack-model"| VXT["Self-Contained .vxt (VXT1 Archive)"]
-    VXT -->|"Zero-Copy mmap + Unified Memory Upload"| GPU["Persistent Compressed Planes in GPU RAM"]
-    TOK["Token ID"] -->|"O(cols) Row Decode"| CUR["cur_buf (FP32)"]
-    CUR --> ENC["1 Concurrent MTLCommandBuffer (All 24 Layers)"]
-    GPU --> ENC
-    ENC -->|"DeltaNet + Flash-GQA + SwiGLU + LM Head"| LOGITS["Next-Token Logits (94–137 tok/s)"]
+    SRC["HuggingFace Dir (.safetensors + config + tokenizer) / GGUF"] -->|"vxg-tensor pack-model --mode cb4"| VXT["Self-Contained CB4-v2 .vxt (< 1 GiB)"]
+    VXT -->|"Zero-Copy mmap + Single 256B Metal Arena"| GPU["NR=2 Step-Major Layers + NR=4 Vocab in Unified Memory"]
+    PROMPT["Prompt / ChatML History"] -->|"M <= 32 Batched GEMM Prefill + KV/DeltaNet Prefix Cache"| STATE["Persistent GPU KV + Split-State FP32 DeltaNet"]
+    GPU --> PIPE["2-Deep x 8-Step Speculative MTLCommandBuffer Pipeline"]
+    STATE --> PIPE
+    PIPE -->|"0-ULP SRAM c16 LUT + GPU ArgMax / Top-K-P + DRY"| STREAM["176 tok/s CLI / OpenAI SSE / VXT Studio"]
 ```
 
-### Why 1 `MTLCommandBuffer` Matters on Apple Silicon
+### Why Single-Arena + 2-Deep Pipelined `MTLCommandBuffer` Matters on Apple Silicon
 
-Launching individual `GEMV` command buffers per projection (`4` dispatches $\times 24$ layers $+ 1 = 97$ commits/token) incurs ~`450 us` of XNU/Metal scheduler latency per commit (~`45 ms/token`), capping decode throughput around `15 tok/s` even when actual GPU math takes `< 5 ms`.
+Launching individual `GEMV` command buffers per projection (`97+` commits/token) incurs ~`450 us` of XNU/Metal scheduler overhead per token, capping throughput near `15 tok/s`.
 
-`vxg-tensor` eliminates this bottleneck via `native/metal_llm.mm` and `native/shaders/vxt_llm_ops.metal`:
-1. **Concurrent Metal Encoder (`MTLDispatchTypeConcurrent`)**: Independent projections sharing the same normalized input (`wqkv` + `attn_gate` + `ssm_alpha` + `ssm_beta`, `wq` + `wk` + `wv`, and `ffn_gate` + `ffn_up`) execute **concurrently across all GPU cores** without serial stalls, synchronized strictly by explicit `MTLBarrierScopeBuffers` barriers.
-2. **All-GPU Hybrid `qwen35` Operators**:
-   - `vxt_rms_norm` & fused residual `vxt_add_rms_norm` (`256`-thread simdgroup reduction).
-   - `vxt_deltanet_conv` + register-resident `vxt_deltanet_heads` (`dk = 128` unrolled `r0..r3` single-load/single-store state matrix update in `FP32`).
-   - `vxt_gqa_prep` (fused QKV bias + per-head QK `RMSNorm` + partial/full NeoX `RoPE` + KV-cache write) + `vxt_gqa_attn` (8-simdgroup online Flash-Decoding softmax + sigmoid Q-gate).
-   - `vxt_fwht32_vec` (5-step `simd_shuffle_xor` butterfly Walsh-Hadamard rotation in pure SIMD registers, `0` threadgroup shared memory).
+`vxg-tensor` eliminates both CPU-GPU sync stalls and L1/SLC gather bottlenecks across two tiers:
+1. **`MetalCb4FastRunner` (`src/metal_cb4_fast.rs`, `native/metal_cb4_fast*.mm`, `native/shaders/vxt_cb4_fast*.metal`)**:
+   - **Single Contiguous Weight Arena**: Concatenates shared-input projections (`[wqkv; attn_gate]`, `[wq; wk; wv]`, `[ffn_gate; ffn_up]`) in `NR = 2` step-major layout (`256`-column coalesced SIMD transactions) and `token_embd` / `lm_head` in `NR = 4` tile-major layout.
+   - **Zero-ULP 32-Bit SRAM `c16` Codebook LUT**: Precomputes the exact cubic polynomial centroids once into `threadgroup` SRAM (`0-ULP` bit-identical to register polynomial `fma()`), eliminating inner-loop polynomial math.
+   - **`64`-TG Split-State `FP32` `DeltaNet` & `M = 1` Flash-GQA**: Partitions recurrent `128 x 128` head state updates across `64` threadgroups (`16` heads $\times 4$ `dv` splits) to saturate all Apple Silicon GPU cores even at batch size `1`.
+   - **`2`-Deep Speculative `8`-Step Burst Execution**: Enqueues `8` autoregressive steps per `MTLCommandBuffer` with GPU-side argmax token chaining and `FP32` `DeltaNet` state checkpoints, rolling back cleanly on mid-burst EOS (`<|im_end|>`) so multi-turn prefix caches remain exact.
+2. **Universal `MetalLlmRunner` (`src/metal_llm.rs`, `native/metal_llm.mm`)**: Executes `Lossless`, `CB3`, `WHT2`, and `Q4_0` `.vxt` models inside a single concurrent `MTLCommandBuffer` (`MTLDispatchTypeConcurrent` + `MTLBarrierScopeBuffers`).
 
 ---
 
 ## Mathematical Codec Modes (`VXT1`)
 
-Every `.vxt` archive (`MAGIC = b"VXT1"`, version `1`) stores model hyperparameters (`model.config`), Byte-Level BPE vocabulary & merge tables (`tokenizer.*`), and 64-byte-aligned compressed tensor sections protected by 64-bit FNV-1a integrity tags:
+Every `.vxt` archive (`MAGIC = b"VXT1"`, version `1`) embeds `model.config`, Byte-Level BPE tables (`tokenizer.tokens`, `tokenizer.merges`, `tokenizer.types`), and `64`-byte-aligned compressed tensors with `64`-bit FNV-1a integrity verification:
 
-### 1. `VXT-Lossless-BF16` / `VXT-Lossless-FP16` (`KIND_LOSSLESS = 1`)
-Splits 16-bit neural weights into sign + mantissa bit-planes and a per-tensor **Top-7 Exponent Lookup Table (`3`-bit index + escape stream)** grouped in `256`-element superblocks:
-- **Zero precision loss (`Bit-Exact`)**: `11.32–11.39 bpw` on `Qwen3.5-2B` (`1.41x` compression).
-- Reconstructs exact IEEE `BF16`/`FP16` values inside GPU registers during `GEMV`.
-
-### 2. `VXT-CB4+Outlier` & `VXT-CB3+Outlier` (`KIND_CODEBOOK = 2`)
-Models heavy-tailed neural weight distributions without uniform grid clipping:
-1. **Sparse `FP16` CSR Super-Outlier Extraction**: Weights exceeding adaptive row thresholds (`> 3.5\sigma`) are extracted into a compact Compressed Sparse Row (`CSR`) `(col_u16, val_fp16)` stream (`~0.15–0.25%` density).
-2. **1D K-Means / Lloyd-Max Non-Uniform Codebook (`16` or `8` centroids)**: Fits optimal centroids to the residual bulk per `128`-weight group (`FP16` group scale).
-3. **Register-Only Cubic Polynomial FMA Synthesis**: Rather than performing slow shared-memory LUT gather reads on GPU, `vxg-tensor` fits an exact degree-3 polynomial $c(u) = a_0 + u(a_1 + u(a_2 + u a_3))$ (`u = q - 7.5` or `q - 3.5`) evaluated in 3 hardware `float4` `fma()` instructions!
-
-### 3. `VXT-WHT2+Outlier` (`KIND_WHT2 = 4`)
-Combines pre-rotation `CSR` super-outlier extraction with an orthogonal $32 \times 32$ **Fast Walsh-Hadamard Transform (`FWHT_32`)**:
-
-$$
-W_{\text{rot}} = W_{\text{bulk}} H_{32}, \qquad H_{32}^T H_{32} = I_{32}
-$$
-
-By orthogonality, the inner product is preserved in rotated space ($\langle w_{\text{bulk}}, x \rangle = \langle w_{\text{bulk}} H_{32}, x H_{32} \rangle$). Rotating `x` once per vector (`O(cols log2 32)` via `simd_shuffle_xor`) Gaussianizes channel coordinates so a **2-bit (`4`-centroid) Lloyd-Max codebook** achieves **`2.30–2.37 bpw` (`6.75x–6.97x` matrix compression)**! In full-LLM `wht2` packing, memoryless FFN & full-attention projections use `WHT2` (`2.31 bpw`) while recurrent `DeltaNet` state gates & embeddings retain `CB3` (`3.38 bpw`) to prevent recurrent drift.
+1. **`VXT-Lossless-BF16` / `FP16` (`KIND_LOSSLESS = 1`)**: Sign + mantissa bit-planes + per-tensor **Top-7 Exponent LUT (`3`-bit index + escape stream)** in `256`-element superblocks (`11.35 bpw` on `Qwen3.5-2B`, `100%` bit-exact).
+2. **`VXT-CB4-v2` & `VXT-CB3` (`KIND_CODEBOOK = 2`)**:
+   - **Analytical Channel-Amplitude (`col_amp`) & Role-Aware Sparse `FP16` CSR Outliers**: Protects attention-sink / super-weight channels (e.g., `ch 1201` at `3.38x` RMS) and sensitive projections (`attn_k/v`, `attn_output`, `ssm_out`, `ffn_down`) in a compact `(col_u16, val_fp16)` CSR stream (`~0.5%–1.3%` density).
+   - **Alternating Weighted Lloyd-Max + `FP16`-Quantized Scale Optimization (`cb4_opt.rs`)**: Jointly optimizes group scales (snapped to exact `FP16`) and degree-3 polynomial centroids $c(u) = a_0 + u(a_1 + u(a_2 + u a_3))$.
+3. **`VXT-WHT2` & `VXT-Turbo` (`KIND_WHT2 = 4`, `KIND_TURBO_WHT = 5`)**: Applies an orthogonal $32 \times 32$ **Fast Walsh-Hadamard Transform** ($W_{\text{rot}} = W_{\text{bulk}} H_{32}$, $H_{32}^T H_{32} = I_{32}$) via register-only `simd_shuffle_xor` butterflies before low-bit (`2–4 bpw`) codebook / Huffman quantization.
 
 ---
 
 ## Real-Model Benchmarks (`Qwen3.5-2B`, Apple M2 Max)
 
-### 1. End-to-End LLM Compression, Logit Fidelity & GPU Speed
+### 1. End-to-End LLM Compression, Quality & Apple Metal Speed
 
-| Mode (`.vxt` / `.gguf`) | Archive Size | Ratio vs `BF16` | Mean `KL(P_ref \|\| P)` | Logit `CosSim` | Top-1 Match | Prefill (`tok/s`) | Decode (`tok/s`) |
+| Mode (`.vxt` / Reference) | Archive Size | Ratio vs `BF16` (`.gguf` / HF) | `4x16` Split `KL` (nats) | `4x16` `CosSim` | 40-Item Strict Gen | Prefill (`tok/s`) | Decode (`tok/s`) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Raw `BF16` (`.gguf` ref)** | `3600.80 MiB` | `1.00x` | `0.000000` | `1.000000` | `100.0%` | `40.2` | `38.4` |
-| **`VXT-Lossless-BF16`** | **`2556.80 MiB`** | **`1.41x`** | **`0.000000`** | **`1.000000`** | **`100.0%` (`16/16`)** | `41.6` | `49.6` |
-| **`GGUF-Q4_0` (`.vxt` ref)** | `1020.83 MiB` | `3.53x` | `0.053324` | `0.954276` | `87.5%` (`14/16`) | `160.0` | `137.3` |
-| **`VXT-CB4+Outlier`** | **`993.59 MiB`** | **`3.62x`** | **`0.030357`** | **`0.971171`** | **`93.8%` (`15/16`)** | **`133.0`** | **`105.0`** |
-| **`VXT-CB3+Outlier`** | **`772.40 MiB`** | **`4.66x`** | **`0.111692`** | **`0.863824`** | **`100.0%` (`16/16`)** | `118.2` | `80.4` |
-| **`VXT-WHT2+Outlier` (Hybrid)** | **`645.96 MiB`** | **`5.57x`** | **`0.799811`** | **`0.646364`** | **`93.8%` (`15/16`)** | `140.9` | `114.2` |
+| **Raw `BF16` Ref (`.gguf` / HF)** | `3600.8 / 4337.5 MiB` | `1.00x` | `0.000000` | `1.000000` | **`36 / 40` (`0.900`)** | `40.2` | `38.4` |
+| **`VXT-Lossless-BF16`** | **`2556.80 MiB`** | **`1.41x / 1.70x`** | **`0.000000`** | **`1.000000`** | **`36 / 40` (`0.900`)** | `41.6` | `49.6` |
+| **`GGUF-Q4_0` (`.vxt` ref)** | `1020.83 MiB` | `3.53x / 4.25x` | `0.053324`* | `0.954276`* | — | `160.0` | `137.3` |
+| **`VXT-CB4` (`v1` baseline)** | `988.60 MiB` | `3.64x / 4.39x` | `0.057072` | `0.964729` | `32 / 40` (`0.800`) | `133.0` | `105.0` (`173.2` fast) |
+| **`VXT-CB4-v2` (`CB4-Fast`)** | **`988.42 MiB`** | **`3.64x / 4.39x`** | **`0.047588`** | **`0.972549`** | **`36 / 40` (`0.900`)** | **`221.9`** | **`175.9`** |
+| **`VXT-CB3+Outlier`** | **`772.40 MiB`** | **`4.66x / 5.62x`** | `0.111692`* | `0.863824`* | — | `118.2` | `80.4` |
+| **`VXT-WHT2+Outlier` (Hybrid)** | **`645.96 MiB`** | **`5.57x / 6.71x`** | `0.799811`* | `0.646364`* | — | `140.9` | `114.2` |
+
+*\*16-step single-prompt teacher rollout (`vxg-tensor eval`); `CB4-v1` and `CB4-v2` report the stricter 4-category `4x16 = 64`-step independent split ([`reports/cb4-v2-2026-11-08.md`](../reports/cb4-v2-2026-11-08.md)).*
 
 ### 2. Single-Matrix Fused Metal GPU `GEMV` (`token_embd.weight`, `248,320 x 2048`)
 
@@ -97,23 +92,39 @@ By orthogonality, the inner product is preserved in rotated space ($\langle w_{\
 
 ---
 
-## CLI Quick Reference (`vxg-tensor`)
+## CLI, OpenAI Server & `VXT Studio` Quick Reference
 
 ```sh
-# Build the zero-dependency tensor codec + Apple Metal GPU engine
+# Build the tensor codec + Apple Metal GPU engine
 cargo build --release -p vxg-tensor --bin vxg-tensor
 
-# 1. Pack a full GGUF LLM (config + BPE tokenizer + weights) into a self-contained .vxt archive
-./target/release/vxg-tensor pack-model Qwen3.5-2B-BF16.gguf qwen35_2b_cb4.vxt --mode cb4
+# 1a. Pack a HuggingFace model folder (config.json + tokenizer.json + single/sharded .safetensors) -> CB4-v2 .vxt
+./target/release/vxg-tensor pack-model ./Qwen3.5-2B qwen35_2b_cb4_v2.vxt --mode cb4
 
-# 2. Generate text directly from compressed .vxt weights on Apple Metal GPU (1-CmdBuf Fused)
-./target/release/vxg-tensor run qwen35_2b_cb4.vxt \
-  -p "Türkiye'nin başkenti neresidir ve Cumhuriyet hangi tarihte ilan edilmiştir?" \
-  -n 160 --temp 0.0 --think
+# 1b. Or pack a GGUF LLM into a self-contained CB4-v2 .vxt archive
+./target/release/vxg-tensor pack-model Qwen3.5-2B-BF16.gguf qwen35_2b_cb4_v2.vxt --mode cb4
 
-# 3. Evaluate teacher-forced KL divergence, cosine similarity & Top-1 agreement vs BF16 ground truth
-./target/release/vxg-tensor eval Qwen3.5-2B-BF16.gguf qwen35_2b_cb4.vxt --steps 16
+# 2. Single-turn generation (176 tok/s greedy with --cb4-greedy, or sampled --think reasoning)
+./target/release/vxg-tensor run qwen35_2b_cb4_v2.vxt \
+  --cb4-greedy --temp 0 --presence-penalty 0 -n 256 \
+  -p "Explain why memory bandwidth limits LLM inference in 3 bullet points."
 
-# 4. Run 6-way fused GPU/CPU GEMV kernel benchmarks on any GGUF or SafeTensors file
-./target/release/vxg-tensor bench --gguf Qwen3.5-2B-BF16.gguf --max-tensors 3 --iters 40
+# 3. Interactive multi-turn terminal chat (stateful KV + DeltaNet prefix cache, /think, /fast, /reset)
+./target/release/vxg-tensor chat qwen35_2b_cb4_v2.vxt
+
+# 4. Launch the OpenAI-compatible SSE server (http://127.0.0.1:11435/v1/chat/completions)
+./target/release/vxg-tensor serve qwen35_2b_cb4_v2.vxt --port 11435
+
+# 5. Build the standalone macOS VXT Studio desktop app (.app + .dmg)
+cd apps/vxt-studio && pnpm install && pnpm tauri build
+```
+
+### Native Lossless Contract (`pack-native` / `verify-native`)
+
+For strict bit-exact archival of the `Qwen3.5-2B` language trunk retaining original HuggingFace tensor names, shapes, and raw `config.json` / `tokenizer.json` payloads:
+
+```sh
+vxg-tensor pack-native model.safetensors config.json tokenizer.json qwen35-native.vxt
+vxg-tensor verify-native model.safetensors config.json tokenizer.json qwen35-native.vxt
+vxg-tensor run qwen35-native.vxt --prompt "Hello" --raw --max-tokens 8
 ```

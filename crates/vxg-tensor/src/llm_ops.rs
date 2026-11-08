@@ -300,7 +300,21 @@ pub fn step_full_gqa(
 }
 
 pub fn sample_logits(logits: &[f32], temp: f32, rng_state: &mut u64) -> u32 {
-    if temp <= 1e-5 {
+    sample_logits_top_k_p(logits, temp, 40, 1.0, rng_state)
+}
+
+/// Zero-allocation O(V) top-k + nucleus (top-p) sampler matching HF/vLLM TopK -> TopP order.
+pub fn sample_logits_top_k_p(
+    logits: &[f32],
+    temp: f32,
+    top_k: usize,
+    top_p: f32,
+    rng_state: &mut u64,
+) -> u32 {
+    if logits.is_empty() {
+        return 0;
+    }
+    if temp <= 1e-5 || top_k <= 1 {
         let mut best_i = 0usize;
         let mut best_v = f32::NEG_INFINITY;
         for (i, &v) in logits.iter().enumerate() {
@@ -311,28 +325,225 @@ pub fn sample_logits(logits: &[f32], temp: f32, rng_state: &mut u64) -> u32 {
         }
         return best_i as u32;
     }
+
+    let k = top_k.min(64).min(logits.len());
+    let mut top = [(0u32, f32::NEG_INFINITY); 64];
+    let mut filled = 0usize;
+    let mut min_pos = 0usize;
+    let mut min_val = f32::NEG_INFINITY;
+
+    for (i, &v) in logits.iter().enumerate() {
+        if !v.is_finite() {
+            continue;
+        }
+        if filled < k {
+            top[filled] = (i as u32, v);
+            filled += 1;
+            if filled == k {
+                min_pos = 0;
+                min_val = top[0].1;
+                for (j, item) in top[..k].iter().enumerate().skip(1) {
+                    if item.1 < min_val {
+                        min_val = item.1;
+                        min_pos = j;
+                    }
+                }
+            }
+        } else if v > min_val {
+            top[min_pos] = (i as u32, v);
+            min_pos = 0;
+            min_val = top[0].1;
+            for (j, item) in top[..k].iter().enumerate().skip(1) {
+                if item.1 < min_val {
+                    min_val = item.1;
+                    min_pos = j;
+                }
+            }
+        }
+    }
+
+    if filled == 0 {
+        return 0;
+    }
+    let cand = &mut top[..filled];
+    cand.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+
+    let max_v = cand[0].1;
     let inv_t = 1.0 / temp;
-    let max_v = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut probs: Vec<(u32, f32)> = logits
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (i as u32, ((v - max_v) * inv_t).exp()))
-        .collect();
-    probs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    probs.truncate(40);
-    let sum: f32 = probs.iter().map(|p| p.1).sum();
+    let mut total_k = 0.0f32;
+    for item in cand.iter_mut() {
+        let p = ((item.1 - max_v) * inv_t).exp();
+        item.1 = p;
+        total_k += p;
+    }
+
+    let mut kept_sum = total_k;
+    let mut kept_len = cand.len();
+    if top_p > 0.0 && top_p < 0.9999 && total_k > 0.0 {
+        let thresh = total_k * top_p;
+        let mut cum = 0.0f32;
+        kept_len = 0;
+        for item in cand.iter() {
+            cum += item.1;
+            kept_len += 1;
+            if cum >= thresh {
+                break;
+            }
+        }
+        kept_sum = cum;
+    }
+
     *rng_state = rng_state
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);
-    let r = ((*rng_state >> 40) as f32 / ((1u32 << 24) as f32)) * sum;
+    let r = ((*rng_state >> 40) as f32 / ((1u32 << 24) as f32)) * kept_sum;
     let mut acc = 0.0f32;
-    for &(id, p) in &probs {
+    for &(id, p) in &cand[..kept_len] {
         acc += p;
         if acc >= r {
             return id;
         }
     }
-    probs[0].0
+    cand[0].0
+}
+
+/// Sparse OpenAI `presence_penalty` + DRY (Don't Repeat Yourself) suffix-clone anti-loop tracker.
+pub struct TokenPenaltyTracker {
+    counts: Vec<u16>,
+    is_word: Vec<u8>, // 0 = unknown, 1 = whitespace/exempt, 2 = symbol/digit, 3 = word
+    unique: Vec<u32>,
+    history: Vec<u32>,
+    exempt: Vec<u32>,
+}
+
+impl TokenPenaltyTracker {
+    pub fn new(n_vocab: usize, exempt: &[u32]) -> Self {
+        Self {
+            counts: vec![0u16; n_vocab],
+            is_word: vec![0u8; n_vocab],
+            unique: Vec::with_capacity(512),
+            history: Vec::with_capacity(1024),
+            exempt: exempt.to_vec(),
+        }
+    }
+
+    pub fn clear_counts(&mut self) {
+        for &id in &self.unique {
+            if let Some(slot) = self.counts.get_mut(id as usize) { *slot = 0; }
+        }
+        self.unique.clear();
+        self.history.clear();
+    }
+
+    fn classify(&mut self, tok: u32, tokenizer: &crate::tokenizer::BpeTokenizer) -> u8 {
+        let idx = tok as usize;
+        if idx >= self.is_word.len() || self.exempt.contains(&tok) { return 1; }
+        if self.is_word[idx] != 0 { return self.is_word[idx]; }
+        let piece = tokenizer.decode(&[tok]);
+        let kind = if piece.is_empty() || piece.chars().all(char::is_whitespace) { 1 }
+            else if piece.chars().any(char::is_alphabetic) { 3 }
+            else { 2 };
+        self.is_word[idx] = kind;
+        kind
+    }
+
+    pub fn record(&mut self, tok: u32, tokenizer: &crate::tokenizer::BpeTokenizer) {
+        self.history.push(tok);
+        if self.classify(tok, tokenizer) == 3 {
+            let idx = tok as usize;
+            if self.counts[idx] == 0 {
+                self.unique.push(tok);
+            }
+            self.counts[idx] = self.counts[idx].saturating_add(1);
+        }
+    }
+
+    pub fn apply(&self, logits: &mut [f32], presence_penalty: f32, frequency_penalty: f32) {
+        if presence_penalty > 0.0 || frequency_penalty > 0.0 {
+            for &tid in &self.unique {
+                let idx = tid as usize;
+                let cnt = self.counts[idx];
+                if cnt >= 1 && idx < logits.len() {
+                    let freq = ((cnt - 1).min(12)) as f32;
+                    logits[idx] -= presence_penalty + frequency_penalty * freq;
+                }
+            }
+        }
+        let n = self.history.len();
+        if n >= 10 {
+            let last = self.history[n - 1];
+            if self.history[n - 10..].iter().all(|&t| t == last) && (last as usize) < logits.len() {
+                logits[last as usize] -= 14.0;
+            }
+        }
+        if n >= 6 {
+            let start = n.saturating_sub(1024);
+            let last_tok = self.history[n - 1];
+            let mut cands: [(u32, usize); 16] = [(0, 0); 16];
+            let mut n_cand = 0usize;
+            for i in (start + 4)..(n - 1) {
+                if self.history[i] != last_tok {
+                    continue;
+                }
+                let nx = self.history[i + 1];
+                if self.exempt.contains(&nx)
+                    || ((nx as usize) < self.is_word.len() && self.is_word[nx as usize] == 1)
+                {
+                    continue;
+                }
+                let max_b = (i - start + 1).min(48);
+                let mut mlen = 1usize;
+                while mlen < max_b && self.history[i - mlen] == self.history[n - 1 - mlen] {
+                    mlen += 1;
+                }
+                if mlen >= 5 {
+                    if let Some(s) = cands[..n_cand].iter_mut().find(|s| s.0 == nx) {
+                        s.1 = s.1.max(mlen);
+                    } else if n_cand < cands.len() {
+                        cands[n_cand] = (nx, mlen);
+                        n_cand += 1;
+                    }
+                }
+            }
+            for &(nx, mlen) in &cands[..n_cand] {
+                if (nx as usize) < logits.len() {
+                    logits[nx as usize] -= 0.85 * 1.8f32.powi((mlen - 5).min(8) as i32);
+                }
+            }
+        }
+    }
+}
+
+/// Detects 14x identical token stutters or 3x consecutive periodic phrase loops `[B][B][B]` (`p >= 4`).
+pub fn has_severe_loop(ids: &[u32]) -> bool {
+    let n = ids.len();
+    if n >= 14 {
+        let last = ids[n - 1];
+        if ids[n - 14..].iter().all(|&t| t == last) {
+            return true;
+        }
+    }
+    let max_p = (n / 3).min(40);
+    for p in 4..=max_p {
+        let b0 = &ids[n - p..];
+        let b1 = &ids[n - 2 * p..n - p];
+        if b0 == b1 && b0 == &ids[n - 3 * p..n - 2 * p] {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strips `<think>...</think>` blocks from historical assistant turns per Qwen3.5 multi-turn spec.
+pub fn strip_think_block(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("<think>") {
+        return match rest.split_once("</think>") {
+            Some((_, after)) => after.trim_start_matches(['\r', '\n']),
+            None => "",
+        };
+    }
+    text
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -9,6 +9,7 @@ use crate::fp16::{bf16_to_f32, f16_to_f32, f32_to_bf16, f32_to_f16, ErrorMetrics
 use crate::lossless::{gemv_raw16_cpu, LosslessMatrix};
 use crate::metal::MetalEngine;
 use crate::wht2::Wht2Matrix;
+use crate::wht_turbo::TurboWhtMatrix;
 use crate::{DType, Result};
 
 /// Generates a deterministic, realistic heavy-tailed neural weight matrix (`rows * cols`) with
@@ -141,7 +142,7 @@ pub fn benchmark_matrix(
     let mut y_gpu = vec![0.0f32; rows];
     let raw_gpu_ms = if let Some(eng) = metal.as_mut() {
         let gpu_w = eng.upload_raw16(dtype, rows, cols, raw_words)?;
-        let _ = gpu_w.run_gemv(eng, &x, &mut y_gpu, 3)?; // warmup
+        let _ = gpu_w.run_gemv(eng, &x, &mut y_gpu, 12)?; // warmup to boost GPU P-state
         Some(gpu_w.run_gemv(eng, &x, &mut y_gpu, gpu_iters.max(1))?)
     } else {
         None
@@ -248,6 +249,40 @@ pub fn benchmark_matrix(
         raw_gpu_ms,
     )?);
 
+    // 7. Mode 4a: VXT-Turbo3 (3.125 bpw Outlier-Free Sign-Flipped Hadamard Orth2D-16 VQ)
+    let turbo3 = PackedTensor::TurboWht(TurboWhtMatrix::encode(3, rows, cols, weights_f32)?);
+    let turbo3_dec = turbo3.decode_f32();
+    entries.push(eval_packed(
+        &turbo3,
+        Some(&turbo3_dec),
+        weights_f32,
+        &x,
+        &y_ref,
+        raw_16b_bytes,
+        cpu_threads,
+        cpu_iters,
+        gpu_iters,
+        metal.as_mut(),
+        raw_gpu_ms,
+    )?);
+
+    // 8. Mode 4b: VXT-Turbo2 (2.125 bpw Outlier-Free Sign-Flipped Hadamard Orth4D-16 VQ)
+    let turbo2 = PackedTensor::TurboWht(TurboWhtMatrix::encode(2, rows, cols, weights_f32)?);
+    let turbo2_dec = turbo2.decode_f32();
+    entries.push(eval_packed(
+        &turbo2,
+        Some(&turbo2_dec),
+        weights_f32,
+        &x,
+        &y_ref,
+        raw_16b_bytes,
+        cpu_threads,
+        cpu_iters,
+        gpu_iters,
+        metal.as_mut(),
+        raw_gpu_ms,
+    )?);
+
     Ok(MatrixBenchReport {
         tensor_name: tensor_name.to_owned(),
         rows,
@@ -297,7 +332,7 @@ fn eval_packed(
     let gpu_ms = if let Some(eng) = metal {
         let mut y_g = vec![0.0f32; packed.rows()];
         let gpu_t = eng.upload_packed(packed)?;
-        let _ = gpu_t.run_gemv(eng, x, &mut y_g, 3)?; // warmup
+        let _ = gpu_t.run_gemv(eng, x, &mut y_g, 12)?; // warmup to boost GPU P-state
         Some(gpu_t.run_gemv(eng, x, &mut y_g, gpu_iters.max(1))?)
     } else {
         None

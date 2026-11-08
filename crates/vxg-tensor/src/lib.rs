@@ -10,25 +10,47 @@
 //!    compressed `GEMV`.
 
 pub mod bench;
+mod cb4_calib;
+pub mod cb4_opt;
+pub mod chat;
 pub mod cli_llm;
 pub mod codebook;
+mod entropy_pack;
 pub mod format;
+mod format_io;
 pub mod fp16;
 pub mod gguf;
 pub mod gguf_meta;
+mod hf_meta;
+pub mod hf_pack;
+mod huff;
 pub mod llm;
+mod llm_calib;
 pub mod llm_ops;
 pub mod llm_pack;
 pub mod lossless;
+mod meta_lz;
 pub mod metal;
+mod metal_cb4_fast;
+#[cfg(vxt_has_metal)]
+mod metal_cb4_fast_ffi;
 #[cfg(vxt_has_metal)]
 mod metal_ffi;
 mod metal_llm;
+mod metal_llm_turbo;
+#[cfg(vxt_has_metal)]
+mod metal_turbo_ffi;
 pub mod mmap;
+pub mod native_qwen35;
 pub mod q4_0;
 pub mod safetensors;
+pub mod server;
+mod server_http;
 pub mod tokenizer;
 pub mod wht2;
+pub mod wht_turbo;
+mod wht_turbo_enc;
+mod wht_turbo_tables;
 
 use std::fmt;
 

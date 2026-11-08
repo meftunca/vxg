@@ -26,24 +26,44 @@ fn archive(out: &Path, name: &str, objects: &[PathBuf]) {
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(vxt_has_metal)");
     println!("cargo:rerun-if-changed=native/metal_internal.h");
+    println!("cargo:rerun-if-changed=native/metal_cb4_fast.h");
     println!("cargo:rerun-if-changed=native/metal_gemv.mm");
     println!("cargo:rerun-if-changed=native/metal_llm.mm");
+    println!("cargo:rerun-if-changed=native/metal_llm_turbo.mm");
+    println!("cargo:rerun-if-changed=native/metal_cb4_fast.mm");
+    println!("cargo:rerun-if-changed=native/metal_cb4_fast_run.mm");
     println!("cargo:rerun-if-changed=native/shaders/vxt_gemv.metal");
     println!("cargo:rerun-if-changed=native/shaders/vxt_llm_ops.metal");
+    println!("cargo:rerun-if-changed=native/shaders/vxt_turbo.metal");
+    println!("cargo:rerun-if-changed=native/shaders/vxt_llm_turbo.metal");
+    println!("cargo:rerun-if-changed=native/shaders/vxt_cb4_fast.metal");
+    println!("cargo:rerun-if-changed=native/shaders/vxt_cb4_fast_ops.metal");
+    println!("cargo:rerun-if-changed=native/shaders/vxt_cb4_fast_gqa.metal");
     println!("cargo:rerun-if-env-changed=CXX");
     println!("cargo:rerun-if-env-changed=AR");
+    println!("cargo:rerun-if-env-changed=VXG_NO_METAL");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if os == "macos" {
+    if os == "macos" && env::var_os("VXG_NO_METAL").is_none() {
         let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
         let gemv_src = fs::read_to_string("native/shaders/vxt_gemv.metal")
             .expect("missing native/shaders/vxt_gemv.metal");
         let llm_src = fs::read_to_string("native/shaders/vxt_llm_ops.metal")
             .expect("missing native/shaders/vxt_llm_ops.metal");
+        let turbo_src = fs::read_to_string("native/shaders/vxt_turbo.metal")
+            .expect("missing native/shaders/vxt_turbo.metal");
+        let llm_turbo_src = fs::read_to_string("native/shaders/vxt_llm_turbo.metal")
+            .expect("missing native/shaders/vxt_llm_turbo.metal");
+        let cb4_fast_src = fs::read_to_string("native/shaders/vxt_cb4_fast.metal")
+            .expect("missing native/shaders/vxt_cb4_fast.metal");
+        let cb4_fast_ops_src = fs::read_to_string("native/shaders/vxt_cb4_fast_ops.metal")
+            .expect("missing native/shaders/vxt_cb4_fast_ops.metal");
+        let cb4_fast_gqa_src = fs::read_to_string("native/shaders/vxt_cb4_fast_gqa.metal")
+            .expect("missing native/shaders/vxt_cb4_fast_gqa.metal");
         fs::write(
             out.join("vxt_metal_source.h"),
             format!(
-                "#pragma once\nstatic const char* VXT_METAL_SOURCE = R\"VXT_MSL({gemv_src}\n{llm_src})VXT_MSL\";\n"
+                "#pragma once\nstatic const char* VXT_METAL_SOURCE = R\"VXT_MSL({gemv_src}\n{llm_src}\n{turbo_src}\n{llm_turbo_src}\n{cb4_fast_src}\n{cb4_fast_ops_src}\n{cb4_fast_gqa_src})VXT_MSL\";\n"
             ),
         )
         .unwrap();
@@ -53,6 +73,9 @@ fn main() {
         for (src, obj_name) in [
             ("native/metal_gemv.mm", "metal_gemv.o"),
             ("native/metal_llm.mm", "metal_llm.o"),
+            ("native/metal_llm_turbo.mm", "metal_llm_turbo.o"),
+            ("native/metal_cb4_fast.mm", "metal_cb4_fast.o"),
+            ("native/metal_cb4_fast_run.mm", "metal_cb4_fast_run.o"),
         ] {
             let obj = out.join(obj_name);
             run(

@@ -1,4 +1,4 @@
-//! Zero-dependency GPT-2 / Qwen Byte-Level BPE Tokenizer (`encode`, `encode_chat`, `decode`).
+//! GPT-2 / Qwen Byte-Level BPE Tokenizer (`encode`, `encode_chat`, `decode`).
 
 use std::collections::HashMap;
 
@@ -6,6 +6,7 @@ use crate::gguf_meta::{decode_string_list, encode_string_list, GgufVal};
 use crate::{Error, Result};
 
 pub struct BpeTokenizer {
+    native_pattern: Option<fancy_regex::Regex>,
     vocab: Vec<String>,
     token_to_id: HashMap<String, u32>,
     merge_ranks: HashMap<(String, String), u32>,
@@ -13,6 +14,9 @@ pub struct BpeTokenizer {
     byte_to_char: [char; 256],
     char_to_byte: HashMap<char, u8>,
 }
+
+pub const QWEN_PRETOKENIZER_REGEX: &str =
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 impl BpeTokenizer {
     pub fn from_vocab_and_merges(
@@ -28,10 +32,16 @@ impl BpeTokenizer {
         for (i, tok) in vocab.iter().enumerate() {
             let id = i as u32;
             token_to_id.entry(tok.clone()).or_insert(id);
-            let is_special = token_types
-                .and_then(|tt| tt.get(i))
-                .is_some_and(|&t| t == 3 || t == 4)
-                || (tok.starts_with('<') && tok.ends_with('>') && tok.len() >= 3);
+            let known_added = (tok.starts_with("<|") && tok.ends_with("|>"))
+                || matches!(
+                    tok.as_str(),
+                    "<think>" | "</think>" | "<tool_call>" | "</tool_call>" | "<tool_response>" | "</tool_response>"
+                );
+            let is_special = known_added
+                || token_types
+                    .and_then(|tt| tt.get(i))
+                    .is_some_and(|&t| t == 3 || t == 4)
+                || (token_types.is_none() && tok.starts_with('<') && tok.ends_with('>') && tok.len() >= 3);
             if is_special && !tok.is_empty() {
                 special_tokens.push((tok.clone(), id));
             }
@@ -46,15 +56,24 @@ impl BpeTokenizer {
             }
         }
 
+        let is_qwen_bpe = !merges.is_empty()
+            && token_to_id.contains_key("<|im_start|>")
+            && token_to_id.contains_key("<|im_end|>");
         let (byte_to_char, char_to_byte) = build_gpt2_byte_maps();
-        Ok(Self {
+        let tok = Self {
+            native_pattern: None,
             vocab,
             token_to_id,
             merge_ranks,
             special_tokens,
             byte_to_char,
             char_to_byte,
-        })
+        };
+        if is_qwen_bpe {
+            tok.with_native_pattern(QWEN_PRETOKENIZER_REGEX)
+        } else {
+            Ok(tok)
+        }
     }
 
     pub fn from_gguf_kv(kv: &HashMap<String, GgufVal>) -> Result<Self> {
@@ -123,6 +142,12 @@ impl BpeTokenizer {
         Self::from_vocab_and_merges(vocab, &merges, ttypes.as_deref())
     }
 
+    /// Enable the official native Qwen pretokenizer and NFC normalizer.
+    pub(crate) fn with_native_pattern(mut self, pattern: &str) -> Result<Self> {
+        self.native_pattern = Some(fancy_regex::Regex::new(pattern).map_err(|e| Error::Unsupported(format!("native tokenizer regex: {e}")))?);
+        Ok(self)
+    }
+
     pub fn vocab_size(&self) -> usize {
         self.vocab.len()
     }
@@ -133,6 +158,9 @@ impl BpeTokenizer {
 
     /// Formats a user prompt using Qwen ChatML (`enable_thinking=false` by default for crisp output).
     pub fn encode_chat(&self, user_prompt: &str, arch: &str, enable_thinking: bool) -> Vec<u32> {
+        if user_prompt.contains("<|im_start|>") {
+            return self.encode(user_prompt);
+        }
         if self.token_id("<|im_start|>").is_some() && self.token_id("<|im_end|>").is_some() {
             let suffix = if matches!(arch, "qwen3" | "qwen35") {
                 if enable_thinking {
@@ -152,6 +180,9 @@ impl BpeTokenizer {
 
     /// Encodes UTF-8 text (including embedded special tokens like `<|im_start|>`) into token IDs.
     pub fn encode(&self, text: &str) -> Vec<u32> {
+        use unicode_normalization::UnicodeNormalization;
+        let normalized;
+        let text = if self.native_pattern.is_some() { normalized = text.nfc().collect::<String>(); normalized.as_str() } else { text };
         let mut ids = Vec::new();
         let mut cursor = 0usize;
         let bytes = text.as_bytes();
@@ -188,7 +219,20 @@ impl BpeTokenizer {
     }
 
     fn encode_ordinary(&self, text: &str, out: &mut Vec<u32>) {
-        for piece in split_qwen_pretokens(text) {
+        let pieces = if let Some(pattern) = &self.native_pattern {
+            // The accepted fixed regex has no pathological input-dependent recursion.
+            // Split(Isolated) retains both matches and unmatched spans.
+            let mut pieces = Vec::new();
+            let mut cursor = 0;
+            for m in pattern.find_iter(text) {
+                let m = m.expect("validated native Qwen pretokenizer regex failed");
+                if cursor < m.start() { pieces.push(&text[cursor..m.start()]); }
+                pieces.push(m.as_str()); cursor = m.end();
+            }
+            if cursor < text.len() { pieces.push(&text[cursor..]); }
+            pieces
+        } else { split_qwen_pretokens(text) };
+        for piece in pieces {
             if piece.is_empty() {
                 continue;
             }

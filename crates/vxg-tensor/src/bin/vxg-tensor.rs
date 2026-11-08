@@ -5,15 +5,17 @@ use std::process;
 use std::time::Instant;
 
 use vxg_tensor::bench::{benchmark_matrix, generate_realistic_llm_weights, print_report};
+use vxg_tensor::chat::cmd_chat_llm;
 use vxg_tensor::cli_llm::{cmd_eval_llm, cmd_pack_model, cmd_run_llm};
 use vxg_tensor::codebook::{CodebookMatrix, Q4_0Matrix};
 use vxg_tensor::format::{read_vxt_model, write_vxt_archive, PackedTensor, VxtEntry};
-use vxg_tensor::fp16::f32_to_bf16;
 use vxg_tensor::gguf::GgufView;
 use vxg_tensor::lossless::LosslessMatrix;
 use vxg_tensor::mmap::TensorBytes;
 use vxg_tensor::safetensors::SafeTensorsView;
+use vxg_tensor::server::cmd_serve_llm;
 use vxg_tensor::wht2::Wht2Matrix;
+use vxg_tensor::wht_turbo::TurboWhtMatrix;
 use vxg_tensor::{DType, Error, Result};
 
 fn usage() -> ! {
@@ -21,13 +23,17 @@ fn usage() -> ! {
         "vxg-tensor — Compressed-Domain AI Model Weight Codec (.vxt) & Fused GPU/SIMD LLM Engine
 
 Usage:
-  vxg-tensor info       <model.safetensors | model.gguf | model.vxt>
-  vxg-tensor pack       <in.safetensors | in.gguf> <out.vxt> [--mode lossless|cb4|cb3|wht2|q4_0] [--max-tensors N]
-  vxg-tensor pack-model <in.gguf> <out.vxt> [--mode lossless|cb4|cb3|wht2|q4_0] [--threads T]
+  vxg-tensor info       <model.safetensors | model.gguf | model.vxt | hf_model_dir>
+  vxg-tensor pack       <in.safetensors | in.gguf> <out.vxt> [--mode lossless|cb4|cb3|wht2|turbo2|turbo3|q4_0] [--max-tensors N]
+  vxg-tensor verify-native <model.safetensors> <config.json> <tokenizer.json> <archive.vxt>
+  vxg-tensor pack-native <model.safetensors> <config.json> <tokenizer.json> <out.vxt>
+  vxg-tensor pack-model <in.gguf | hf_model_dir | model.safetensors> <out.vxt> [--mode lossless|cb4|cb3|wht2|turbo|q4_0] [--threads T]
   vxg-tensor verify     <archive.vxt>
   vxg-tensor bench      [--gguf <path> | --safetensors <path> | --rows R --cols C] [--dtype bf16|fp16] [--threads T] [--iters N] [--max-tensors K]
-  vxg-tensor run        <model.vxt | model.gguf> --prompt \"...\" [--max-tokens N] [--temp T] [--cpu] [--raw] [--think]
-  vxg-tensor eval       <ref.gguf | ref.vxt> <test.vxt> [--prompt \"...\"] [--steps N] [--cpu]"
+  vxg-tensor run        <model.vxt | model.gguf | model.safetensors> --prompt \"...\" [--max-tokens N] [--temp T] [--cpu] [--raw] [--think]
+  vxg-tensor chat       <model.vxt | model.gguf> [--temp T] [--max-tokens N] [--think] [--cpu]
+  vxg-tensor serve      [model.vxt | model.gguf] [--port 11435] [--host 127.0.0.1] [--cpu]
+  vxg-tensor eval       <ref.gguf | ref.vxt | ref.safetensors> <test.vxt> [--prompt \"...\"] [--steps N] [--cpu]"
     );
     process::exit(2);
 }
@@ -40,10 +46,14 @@ fn main() {
     let res = match args[0].as_str() {
         "info" => cmd_info(&args[1..]),
         "pack" => cmd_pack(&args[1..]),
+        "verify-native" => cmd_verify_native(&args[1..]),
+        "pack-native" => cmd_pack_native(&args[1..]),
         "pack-model" => cmd_pack_model(&args[1..]),
         "verify" => cmd_verify(&args[1..]),
         "bench" => cmd_bench(&args[1..]),
         "run" => cmd_run_llm(&args[1..]),
+        "chat" => cmd_chat_llm(&args[1..]),
+        "serve" => cmd_serve_llm(&args[1..]),
         "eval" => cmd_eval_llm(&args[1..]),
         _ => usage(),
     };
@@ -55,6 +65,33 @@ fn main() {
 
 fn cmd_info(args: &[String]) -> Result<()> {
     let Some(path) = args.first() else { usage() };
+    if Path::new(path).is_dir() {
+        let hf = vxg_tensor::hf_pack::resolve_hf_model_dir(Path::new(path)).ok_or_else(|| {
+            Error::Format(format!("'{}' is not a recognized HuggingFace model directory", path))
+        })?;
+        let sum = vxg_tensor::hf_pack::inspect_hf_model_dir(&hf)?;
+        println!(
+            "Directory: {} ({:.2} MiB across {} safetensors shard(s))",
+            path,
+            sum.total_bytes as f64 / (1024.0 * 1024.0),
+            sum.shard_count
+        );
+        println!(
+            "Format: HuggingFace Model (arch={}, layers={}, vocab={}, tensors={})",
+            sum.cfg.arch, sum.cfg.n_layer, sum.cfg.n_vocab, sum.tensor_count
+        );
+        for (i, t) in sum.preview.iter().take(40).enumerate() {
+            println!(
+                "  [{:>3}] {:<48} shape={:?} dtype={} ({:.2} KiB)",
+                i,
+                t.name,
+                t.shape,
+                t.dtype,
+                t.raw_bytes as f64 / 1024.0
+            );
+        }
+        return Ok(());
+    }
     let mapped = TensorBytes::open(path)?;
     let bytes = mapped.as_slice();
     println!(
@@ -120,12 +157,14 @@ fn cmd_info(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PackMode {
     Lossless,
     Cb4,
     Cb3,
     Wht2,
+    Turbo2,
+    Turbo3,
     Q4_0,
 }
 
@@ -135,7 +174,7 @@ fn cmd_pack(args: &[String]) -> Result<()> {
     }
     let in_path = &args[0];
     let out_path = &args[1];
-    let mut mode = PackMode::Cb4;
+    let mut mode = PackMode::Lossless;
     let mut max_tensors = usize::MAX;
 
     let mut i = 2;
@@ -148,10 +187,12 @@ fn cmd_pack(args: &[String]) -> Result<()> {
                     Some("cb4") => PackMode::Cb4,
                     Some("cb3") => PackMode::Cb3,
                     Some("wht2") => PackMode::Wht2,
+                    Some("turbo" | "turbo2") => PackMode::Turbo2,
+                    Some("turbo3") => PackMode::Turbo3,
                     Some("q4_0") => PackMode::Q4_0,
                     _ => {
                         return Err(Error::Format(
-                            "expected --mode lossless|cb4|cb3|wht2|q4_0".into(),
+                            "expected --mode lossless|cb4|cb3|wht2|turbo2|turbo3|q4_0".into(),
                         ))
                     }
                 };
@@ -168,6 +209,9 @@ fn cmd_pack(args: &[String]) -> Result<()> {
         i += 1;
     }
 
+    if max_tensors == 0 {
+        return Err(Error::Format("--max-tensors must be greater than zero".into()));
+    }
     let t0 = Instant::now();
     let mapped = TensorBytes::open(in_path)?;
     let bytes = mapped.as_slice();
@@ -179,27 +223,25 @@ fn cmd_pack(args: &[String]) -> Result<()> {
         for meta in gg
             .tensors
             .iter()
-            .filter(|m| m.ggml_type.is_supported_matrix())
+            .filter(|m| mode == PackMode::Lossless || m.ggml_type.is_supported_matrix())
         {
-            let Some((rows, cols)) = meta.matrix_dims() else {
-                continue;
+            let (rows, cols) = if mode == PackMode::Lossless {
+                meta.matrix_dims().unwrap_or((1, meta.numel()))
+            } else {
+                let Some(dims) = meta.matrix_dims() else { continue };
+                if dims.0 < 16 || dims.1 < 32 { continue; }
+                dims
             };
-            if rows < 16 || cols < 32 {
-                continue;
+            if rows == 0 || cols == 0 {
+                return Err(Error::Unsupported(format!("empty tensor '{}' cannot be packed", meta.name)));
             }
             let tensor = match mode {
                 PackMode::Lossless => {
                     if let Some((dt, words)) = gg.extract_fp16_words(meta)? {
                         PackedTensor::Lossless(LosslessMatrix::encode(dt, rows, cols, &words)?)
                     } else {
-                        let f32s = gg.extract_f32(meta)?;
-                        let words: Vec<u16> = f32s.iter().map(|&v| f32_to_bf16(v)).collect();
-                        PackedTensor::Lossless(LosslessMatrix::encode(
-                            DType::BF16,
-                            rows,
-                            cols,
-                            &words,
-                        )?)
+                        let data = gg.extract_f32(meta)?;
+                        PackedTensor::RawF32 { rows, cols, data }
                     }
                 }
                 PackMode::Cb4 => {
@@ -213,6 +255,14 @@ fn cmd_pack(args: &[String]) -> Result<()> {
                 PackMode::Wht2 => {
                     let f32s = gg.extract_f32(meta)?;
                     PackedTensor::Wht2(Wht2Matrix::encode(rows, cols, &f32s)?)
+                }
+                PackMode::Turbo2 => {
+                    let f32s = gg.extract_f32(meta)?;
+                    PackedTensor::TurboWht(TurboWhtMatrix::encode(2, rows, cols, &f32s)?)
+                }
+                PackMode::Turbo3 => {
+                    let f32s = gg.extract_f32(meta)?;
+                    PackedTensor::TurboWht(TurboWhtMatrix::encode(3, rows, cols, &f32s)?)
                 }
                 PackMode::Q4_0 => {
                     let f32s = gg.extract_f32(meta)?;
@@ -231,25 +281,23 @@ fn cmd_pack(args: &[String]) -> Result<()> {
     } else {
         let st = SafeTensorsView::parse(bytes)?;
         for meta in &st.tensors {
-            let Some((rows, cols)) = meta.matrix_dims() else {
-                continue;
+            let (rows, cols) = if mode == PackMode::Lossless {
+                meta.matrix_dims().unwrap_or((1, meta.numel()))
+            } else {
+                let Some(dims) = meta.matrix_dims() else { continue };
+                if dims.0 < 16 || dims.1 < 32 { continue; }
+                dims
             };
-            if rows < 16 || cols < 32 {
-                continue;
+            if rows == 0 || cols == 0 {
+                return Err(Error::Unsupported(format!("empty tensor '{}' cannot be packed", meta.name)));
             }
             let tensor = match mode {
                 PackMode::Lossless => {
                     if let Some((dt, words)) = st.extract_fp16_words(meta)? {
                         PackedTensor::Lossless(LosslessMatrix::encode(dt, rows, cols, &words)?)
                     } else {
-                        let f32s = st.extract_f32(meta)?;
-                        let words: Vec<u16> = f32s.iter().map(|&v| f32_to_bf16(v)).collect();
-                        PackedTensor::Lossless(LosslessMatrix::encode(
-                            DType::BF16,
-                            rows,
-                            cols,
-                            &words,
-                        )?)
+                        let data = st.extract_f32(meta)?;
+                        PackedTensor::RawF32 { rows, cols, data }
                     }
                 }
                 PackMode::Cb4 => {
@@ -263,6 +311,14 @@ fn cmd_pack(args: &[String]) -> Result<()> {
                 PackMode::Wht2 => {
                     let f32s = st.extract_f32(meta)?;
                     PackedTensor::Wht2(Wht2Matrix::encode(rows, cols, &f32s)?)
+                }
+                PackMode::Turbo2 => {
+                    let f32s = st.extract_f32(meta)?;
+                    PackedTensor::TurboWht(TurboWhtMatrix::encode(2, rows, cols, &f32s)?)
+                }
+                PackMode::Turbo3 => {
+                    let f32s = st.extract_f32(meta)?;
+                    PackedTensor::TurboWht(TurboWhtMatrix::encode(3, rows, cols, &f32s)?)
                 }
                 PackMode::Q4_0 => {
                     let f32s = st.extract_f32(meta)?;
@@ -280,11 +336,14 @@ fn cmd_pack(args: &[String]) -> Result<()> {
         }
     }
 
+    if max_tensors != usize::MAX {
+        println!("Explicit --max-tensors subset: packed at most {max_tensors} source tensors");
+    }
     let archive = write_vxt_archive(&entries)?;
     fs::write(Path::new(out_path), &archive).map_err(|e| Error::Io(e.to_string()))?;
     let ratio = (raw_16b_sum as f64) / (archive.len().max(1) as f64);
     println!(
-        "Packed {} matrices -> {} ({:.2} MiB -> {:.2} MiB, {:.2}x vs 16-bit) in {:.2}s",
+        "Packed {} tensors -> {} ({:.2} MiB -> {:.2} MiB, {:.2}x vs 16-bit) in {:.2}s",
         entries.len(),
         out_path,
         raw_16b_sum as f64 / (1024.0 * 1024.0),
@@ -446,4 +505,25 @@ fn cmd_bench(args: &[String]) -> Result<()> {
         print_report(&rep);
     }
     Ok(())
+}
+
+fn cmd_pack_native(args: &[String]) -> Result<()> {
+    if args.len() != 4 { return Err(Error::Format("usage: pack-native <model.safetensors> <config.json> <tokenizer.json> <out.vxt> (lossless language trunk only; single file)".into())); }
+    let source = TensorBytes::open(&args[0])?;
+    let cfg = fs::read(&args[1]).map_err(|e| Error::Io(e.to_string()))?;
+    let tok = fs::read(&args[2]).map_err(|e| Error::Io(e.to_string()))?;
+    let start = Instant::now();
+    let (config, archive) = vxg_tensor::native_qwen35::pack(source.as_slice(), &cfg, &tok)?;
+    fs::write(&args[3], &archive).map_err(|e| Error::Io(e.to_string()))?;
+    println!("Packed {}: language-only, original tensor names/shapes/dtypes/bits; visual and MTP excluded in manifest; {} bytes in {:.2}s", config.model_name, archive.len(), start.elapsed().as_secs_f64());
+    Ok(())
+}
+
+fn cmd_verify_native(args: &[String]) -> Result<()> {
+    if args.len()!=4 {return Err(Error::Format("usage: verify-native <model.safetensors> <config.json> <tokenizer.json> <archive.vxt>".into()));}
+    let source=TensorBytes::open(&args[0])?;let archive=TensorBytes::open(&args[3])?;
+    let config=fs::read(&args[1]).map_err(|e|Error::Io(e.to_string()))?;
+    let tokenizer=fs::read(&args[2]).map_err(|e|Error::Io(e.to_string()))?;
+    let count=vxg_tensor::native_qwen35::verify(source.as_slice(),&config,&tokenizer,archive.as_slice())?;
+    println!("Verified {count} native language tensors: source names, shapes, dtypes and every weight bit match; raw config/tokenizer match; visual/MTP exclusions match manifest.");Ok(())
 }
