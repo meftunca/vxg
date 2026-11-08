@@ -10,143 +10,187 @@
         "rows": 200000,
         "vxg_bytes": 3099064,
         "vxg_ratio": 0.05922603962486134,
-        "vxg_enc_1t_ms": 53.30091598443687,
-        "vxg_enc_8t_ms": 10.099750012159348,
+        "vxg_enc_1t_ms": 32.08429197547957,
+        "vxg_enc_8t_ms": 4.529958998318762,
         "zst_bytes": 4918522,
         "zst_ratio": 0.09399760020049674,
-        "zst_enc_8t_ms": 66.17991701932624,
+        "zst_enc_8t_ms": 32.87891700165346,
         "pq_zstd_bytes": 2961230,
         "pq_zstd_ratio": 0.05659190172204515,
-        "pq_zstd_etl_8t_ms": 111.87154200160876,
+        "pq_zstd_etl_8t_ms": 93.62879203399643,
         "pq_snap_bytes": 3939342,
         "pq_snap_ratio": 0.07528454571699084,
-        "pq_snap_etl_8t_ms": 124.34641597792506
+        "pq_snap_etl_8t_ms": 84.29833402624354
       },
       "threads": {
-        "1": [
-          {
-            "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
-            "vxg_ms": 6.496540969237685,
-            "vxg_mrows_s": 30.785613597610904,
-            "duck_raw_ms": 154.96545901987702,
-            "duck_zst_ms": 136.105542012956,
-            "duck_pq_snap_ms": 1.973415957763791,
-            "duck_pq_zstd_ms": 2.4331670138053596,
-            "duck_pq_zstd_mrows_s": 82.19739905449785
-          },
-          {
-            "label": "SUM/MIN/MAX(total_cents) [all 200k rows]",
-            "vxg_ms": 1.8403329886496067,
-            "vxg_mrows_s": 108.67598485356464,
-            "duck_raw_ms": 90.37483396241441,
-            "duck_zst_ms": 191.63037504768,
-            "duck_pq_snap_ms": 3.8029170245863497,
-            "duck_pq_zstd_ms": 4.566207993775606,
-            "duck_pq_zstd_mrows_s": 43.800019682114474
-          },
-          {
-            "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
-            "vxg_ms": 4.594708967488259,
-            "vxg_mrows_s": 43.528328217343415,
-            "duck_raw_ms": 101.56837495742366,
-            "duck_zst_ms": 153.6023750086315,
-            "duck_pq_snap_ms": 2.174916968215257,
-            "duck_pq_zstd_ms": 2.5835420237854123,
-            "duck_pq_zstd_mrows_s": 77.41310114513233
-          },
-          {
-            "label": "GROUP BY payment_type: COUNT(*), SUM(total)",
-            "vxg_ms": 3.4648330183699727,
-            "vxg_mrows_s": 57.72283943833167,
-            "duck_raw_ms": 104.72900001332164,
-            "duck_zst_ms": 199.15850000688806,
-            "duck_pq_snap_ms": 3.7835840485058725,
-            "duck_pq_zstd_ms": 4.384332976769656,
-            "duck_pq_zstd_mrows_s": 45.61697322253989
-          },
-          {
-            "label": "ORDER BY total_cents DESC LIMIT 10",
-            "vxg_ms": 4.799457965418696,
-            "vxg_mrows_s": 41.67137235934774,
-            "duck_raw_ms": 148.58741703210399,
-            "duck_zst_ms": 239.4019999774173,
-            "duck_pq_snap_ms": 5.731332988943905,
-            "duck_pq_zstd_ms": 9.027958963997662,
-            "duck_pq_zstd_mrows_s": 22.153401538218578
-          },
-          {
-            "label": "SELECT 4 cols WHERE tip_cents >= 2500",
-            "vxg_ms": 4.13579196901992,
-            "vxg_mrows_s": 48.358331729000156,
-            "duck_raw_ms": 193.243166024331,
-            "duck_zst_ms": 233.8864579796791,
-            "duck_pq_snap_ms": 6.661207997240126,
-            "duck_pq_zstd_ms": 9.61549999192357,
-            "duck_pq_zstd_mrows_s": 20.799750420465678
-          }
-        ],
-        "8": [
-          {
-            "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
-            "vxg_ms": 4.569082986563444,
-            "vxg_mrows_s": 43.77245950405171,
-            "duck_raw_ms": 99.26141600590199,
-            "duck_zst_ms": 175.59695802628994,
-            "duck_pq_snap_ms": 2.9369169496931136,
-            "duck_pq_zstd_ms": 2.106166968587786,
-            "duck_pq_zstd_mrows_s": 94.95923304414121
-          },
-          {
-            "label": "SUM/MIN/MAX(total_cents) [all 200k rows]",
-            "vxg_ms": 1.3190829777158797,
-            "vxg_mrows_s": 151.6204843658277,
-            "duck_raw_ms": 80.97641699714586,
-            "duck_zst_ms": 178.79475001245737,
-            "duck_pq_snap_ms": 4.885374975856394,
-            "duck_pq_zstd_ms": 3.167749964632094,
-            "duck_pq_zstd_mrows_s": 63.136296182779134
-          },
-          {
-            "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
-            "vxg_ms": 1.420999993570149,
-            "vxg_mrows_s": 140.74595419069354,
-            "duck_raw_ms": 84.06058297259733,
-            "duck_zst_ms": 230.26591702364385,
-            "duck_pq_snap_ms": 6.51754200225696,
-            "duck_pq_zstd_ms": 8.555833017453551,
-            "duck_pq_zstd_mrows_s": 23.37586528301898
-          },
-          {
-            "label": "GROUP BY payment_type: COUNT(*), SUM(total)",
-            "vxg_ms": 6.949207978323102,
-            "vxg_mrows_s": 28.780258214154294,
-            "duck_raw_ms": 83.37966701947153,
-            "duck_zst_ms": 153.12687499681488,
-            "duck_pq_snap_ms": 4.6504579950124025,
-            "duck_pq_zstd_ms": 4.35670797014609,
-            "duck_pq_zstd_mrows_s": 45.906221250191706
-          },
-          {
-            "label": "ORDER BY total_cents DESC LIMIT 10",
-            "vxg_ms": 4.64141700649634,
-            "vxg_mrows_s": 43.09028896133893,
-            "duck_raw_ms": 95.66620801342651,
-            "duck_zst_ms": 214.97762500075623,
-            "duck_pq_snap_ms": 9.106249955948442,
-            "duck_pq_zstd_ms": 21.022374974563718,
-            "duck_pq_zstd_mrows_s": 9.513672943327881
-          },
-          {
-            "label": "SELECT 4 cols WHERE tip_cents >= 2500",
-            "vxg_ms": 2.36679200315848,
-            "vxg_mrows_s": 84.50256707522264,
-            "duck_raw_ms": 97.91583404876292,
-            "duck_zst_ms": 180.5985840037465,
-            "duck_pq_snap_ms": 12.675624981056899,
-            "duck_pq_zstd_ms": 11.761165980715305,
-            "duck_pq_zstd_mrows_s": 17.005116697437867
-          }
-        ]
+        "1": {
+          "duck_select_1_adhoc_ms": 0.05779101047664881,
+          "duck_select_1_prepared_ms": 0.04433403955772519,
+          "queries": [
+            {
+              "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
+              "vxg_ms": 3.8403329672291875,
+              "vxg_mrows_s": 52.07881756781643,
+              "duck_raw_ms": 82.79287494951859,
+              "duck_zst_ms": 129.03549999464303,
+              "duck_pq_snap_ms": 1.7688749940134585,
+              "duck_pq_snap_prep_ms": 1.6889580292627215,
+              "duck_pq_zstd_ms": 2.5415829732082784,
+              "duck_pq_zstd_prep_ms": 2.364958985708654,
+              "duck_pq_zstd_mrows_s": 78.69111577637656,
+              "duck_pq_zstd_prep_mrows_s": 84.56806279034498
+            },
+            {
+              "label": "SUM/MIN/MAX(total_cents) [all 200k rows]",
+              "vxg_ms": 1.904709031805396,
+              "vxg_mrows_s": 105.00291470263474,
+              "duck_raw_ms": 85.81358304945752,
+              "duck_zst_ms": 120.12124998727813,
+              "duck_pq_snap_ms": 1.3070829445496202,
+              "duck_pq_snap_prep_ms": 1.226666965521872,
+              "duck_pq_zstd_ms": 1.7255829880014062,
+              "duck_pq_zstd_prep_ms": 1.614999957382679,
+              "duck_pq_zstd_mrows_s": 115.90285798519766,
+              "duck_pq_zstd_prep_mrows_s": 123.83901255584333
+            },
+            {
+              "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
+              "vxg_ms": 2.4569579982198775,
+              "vxg_mrows_s": 81.4014729372275,
+              "duck_raw_ms": 82.97925000078976,
+              "duck_zst_ms": 125.39770803414285,
+              "duck_pq_snap_ms": 1.4360419590957463,
+              "duck_pq_snap_prep_ms": 1.269417000003159,
+              "duck_pq_zstd_ms": 1.7202910385094583,
+              "duck_pq_zstd_prep_ms": 1.5120419557206333,
+              "duck_pq_zstd_mrows_s": 116.25939769661852,
+              "duck_pq_zstd_prep_mrows_s": 132.27146194146496
+            },
+            {
+              "label": "GROUP BY payment_type: COUNT(*), SUM(total)",
+              "vxg_ms": 2.9724169871769845,
+              "vxg_mrows_s": 67.28531052769533,
+              "duck_raw_ms": 81.48154197260737,
+              "duck_zst_ms": 121.71208299696445,
+              "duck_pq_snap_ms": 1.4797910116612911,
+              "duck_pq_snap_prep_ms": 1.2544170022010803,
+              "duck_pq_zstd_ms": 1.7377499607391655,
+              "duck_pq_zstd_prep_ms": 1.5800840337760746,
+              "duck_pq_zstd_mrows_s": 115.09135636229763,
+              "duck_pq_zstd_prep_mrows_s": 126.57554644232516
+            },
+            {
+              "label": "ORDER BY total_cents DESC LIMIT 10",
+              "vxg_ms": 2.487458987161517,
+              "vxg_mrows_s": 80.40333570613902,
+              "duck_raw_ms": 91.14983299514279,
+              "duck_zst_ms": 133.03329201880842,
+              "duck_pq_snap_ms": 3.3868749742396176,
+              "duck_pq_snap_prep_ms": 3.1731250346638262,
+              "duck_pq_zstd_ms": 5.424333969131112,
+              "duck_pq_zstd_prep_ms": 5.314582958817482,
+              "duck_pq_zstd_mrows_s": 36.870886110288055,
+              "duck_pq_zstd_prep_mrows_s": 37.63230371033683
+            },
+            {
+              "label": "SELECT 4 cols WHERE tip_cents >= 2500",
+              "vxg_ms": 2.941875020042062,
+              "vxg_mrows_s": 67.98385337156182,
+              "duck_raw_ms": 94.70949997194111,
+              "duck_zst_ms": 155.44754202710465,
+              "duck_pq_snap_ms": 4.36737498966977,
+              "duck_pq_snap_prep_ms": 3.5912080202251673,
+              "duck_pq_zstd_ms": 7.87345803109929,
+              "duck_pq_zstd_prep_ms": 5.66312501905486,
+              "duck_pq_zstd_mrows_s": 25.4017992107181,
+              "duck_pq_zstd_prep_mrows_s": 35.31619014714578
+            }
+          ]
+        },
+        "8": {
+          "duck_select_1_adhoc_ms": 0.08895801147446036,
+          "duck_select_1_prepared_ms": 0.06266700802370906,
+          "queries": [
+            {
+              "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
+              "vxg_ms": 1.3751660007983446,
+              "vxg_mrows_s": 145.43698715928926,
+              "duck_raw_ms": 57.23174999002367,
+              "duck_zst_ms": 125.11737499153242,
+              "duck_pq_snap_ms": 1.3996249763295054,
+              "duck_pq_snap_prep_ms": 1.362459035590291,
+              "duck_pq_zstd_ms": 1.7987089813686907,
+              "duck_pq_zstd_prep_ms": 1.6354590188711882,
+              "duck_pq_zstd_mrows_s": 111.19086081830432,
+              "duck_pq_zstd_prep_mrows_s": 122.2898267044577
+            },
+            {
+              "label": "SUM/MIN/MAX(total_cents) [all 200k rows]",
+              "vxg_ms": 0.7382500334642828,
+              "vxg_mrows_s": 270.9109257489471,
+              "duck_raw_ms": 54.150624957401305,
+              "duck_zst_ms": 133.0841250019148,
+              "duck_pq_snap_ms": 1.180000021122396,
+              "duck_pq_snap_prep_ms": 1.2167500099167228,
+              "duck_pq_zstd_ms": 1.4476670185104012,
+              "duck_pq_zstd_prep_ms": 1.381250040140003,
+              "duck_pq_zstd_mrows_s": 138.15331664169085,
+              "duck_pq_zstd_prep_mrows_s": 144.79637588262304
+            },
+            {
+              "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
+              "vxg_ms": 1.4650419470854104,
+              "vxg_mrows_s": 136.514862525189,
+              "duck_raw_ms": 59.56116697052494,
+              "duck_zst_ms": 124.31045802077278,
+              "duck_pq_snap_ms": 1.300916017498821,
+              "duck_pq_snap_prep_ms": 1.0799170122481883,
+              "duck_pq_zstd_ms": 1.4030829770490527,
+              "duck_pq_zstd_prep_ms": 1.2531669926829636,
+              "duck_pq_zstd_mrows_s": 142.54324460598733,
+              "duck_pq_zstd_prep_mrows_s": 159.59564939690176
+            },
+            {
+              "label": "GROUP BY payment_type: COUNT(*), SUM(total)",
+              "vxg_ms": 1.2208750122226775,
+              "vxg_mrows_s": 163.81693293557365,
+              "duck_raw_ms": 56.11474998295307,
+              "duck_zst_ms": 119.8288329760544,
+              "duck_pq_snap_ms": 1.1583339655771852,
+              "duck_pq_snap_prep_ms": 1.020000025164336,
+              "duck_pq_zstd_ms": 1.2257079943083227,
+              "duck_pq_zstd_prep_ms": 1.2099999585188925,
+              "duck_pq_zstd_mrows_s": 163.17100070222003,
+              "duck_pq_zstd_prep_mrows_s": 165.2892618647782
+            },
+            {
+              "label": "ORDER BY total_cents DESC LIMIT 10",
+              "vxg_ms": 0.877083046361804,
+              "vxg_mrows_s": 228.0285781712606,
+              "duck_raw_ms": 58.12341597629711,
+              "duck_zst_ms": 127.74591700872406,
+              "duck_pq_snap_ms": 2.298459003213793,
+              "duck_pq_snap_prep_ms": 2.2573749884031713,
+              "duck_pq_zstd_ms": 3.634041000623256,
+              "duck_pq_zstd_prep_ms": 3.480458981357515,
+              "duck_pq_zstd_mrows_s": 55.035152318231695,
+              "duck_pq_zstd_prep_mrows_s": 57.4636854136957
+            },
+            {
+              "label": "SELECT 4 cols WHERE tip_cents >= 2500",
+              "vxg_ms": 1.0860830079764128,
+              "vxg_mrows_s": 184.14798733721057,
+              "duck_raw_ms": 61.2413749913685,
+              "duck_zst_ms": 138.4505410096608,
+              "duck_pq_snap_ms": 2.1860830020159483,
+              "duck_pq_snap_prep_ms": 3.188542032148689,
+              "duck_pq_zstd_ms": 3.8325419882312417,
+              "duck_pq_zstd_prep_ms": 5.504834000021219,
+              "duck_pq_zstd_mrows_s": 52.18468593798815,
+              "duck_pq_zstd_prep_mrows_s": 36.331704098475825
+            }
+          ]
+        }
       }
     },
     {
@@ -158,83 +202,109 @@
         "rows": 300000,
         "vxg_bytes": 4155787,
         "vxg_ratio": 0.18072298377980273,
-        "vxg_enc_1t_ms": 64.11800003843382,
-        "vxg_enc_8t_ms": 12.171458976808935,
+        "vxg_enc_1t_ms": 42.137333017308265,
+        "vxg_enc_8t_ms": 6.597957981284708,
         "zst_bytes": 5009054,
         "zst_ratio": 0.21782906217141446,
-        "zst_enc_8t_ms": 62.65633302973583,
+        "zst_enc_8t_ms": 44.95500004850328,
         "pq_zstd_bytes": 4391579,
         "pq_zstd_ratio": 0.19097688605905988,
-        "pq_zstd_etl_8t_ms": 200.3921249997802,
+        "pq_zstd_etl_8t_ms": 97.5760419969447,
         "pq_snap_bytes": 5862734,
         "pq_snap_ratio": 0.2549531007213069,
-        "pq_snap_etl_8t_ms": 178.2883339910768
+        "pq_snap_etl_8t_ms": 89.48358404450119
       },
       "threads": {
-        "1": [
-          {
-            "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
-            "vxg_ms": 1.966125040780753,
-            "vxg_mrows_s": 152.5843950804214,
-            "duck_raw_ms": 94.23829097067937,
-            "duck_zst_ms": 157.04154199920595,
-            "duck_pq_snap_ms": 3.5068329889327288,
-            "duck_pq_zstd_ms": 4.407875007018447,
-            "duck_pq_zstd_mrows_s": 68.06000613046524
-          },
-          {
-            "label": "SUM/MIN/MAX(total_cents) [all 300k rows]",
-            "vxg_ms": 0.6872079684399068,
-            "vxg_mrows_s": 436.549070699889,
-            "duck_raw_ms": 118.91562503296882,
-            "duck_zst_ms": 151.64337499300018,
-            "duck_pq_snap_ms": 2.3288329830393195,
-            "duck_pq_zstd_ms": 3.1349590281024575,
-            "duck_pq_zstd_mrows_s": 95.69503056044256
-          },
-          {
-            "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
-            "vxg_ms": 0.8834999753162265,
-            "vxg_mrows_s": 339.5585833407891,
-            "duck_raw_ms": 87.7039170009084,
-            "duck_zst_ms": 136.0787499579601,
-            "duck_pq_snap_ms": 2.6431669830344617,
-            "duck_pq_zstd_ms": 3.554791968781501,
-            "duck_pq_zstd_mrows_s": 84.39312416440305
-          }
-        ],
-        "8": [
-          {
-            "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
-            "vxg_ms": 2.4095409899018705,
-            "vxg_mrows_s": 124.5050411083555,
-            "duck_raw_ms": 81.76237501902506,
-            "duck_zst_ms": 154.55608296906576,
-            "duck_pq_snap_ms": 6.018874992150813,
-            "duck_pq_zstd_ms": 11.016667005605996,
-            "duck_pq_zstd_mrows_s": 27.23146663572027
-          },
-          {
-            "label": "SUM/MIN/MAX(total_cents) [all 300k rows]",
-            "vxg_ms": 0.42212504195049405,
-            "vxg_mrows_s": 710.689890876418,
-            "duck_raw_ms": 76.05520798824728,
-            "duck_zst_ms": 138.42099998146296,
-            "duck_pq_snap_ms": 2.8954159934073687,
-            "duck_pq_zstd_ms": 2.8641250100918114,
-            "duck_pq_zstd_mrows_s": 104.74403140328826
-          },
-          {
-            "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
-            "vxg_ms": 3.0662090284749866,
-            "vxg_mrows_s": 97.84068770719404,
-            "duck_raw_ms": 71.40575000084937,
-            "duck_zst_ms": 141.2166670197621,
-            "duck_pq_snap_ms": 3.1375829712487757,
-            "duck_pq_zstd_ms": 3.7051669787615538,
-            "duck_pq_zstd_mrows_s": 80.9680108129093
-          }
-        ]
+        "1": {
+          "duck_select_1_adhoc_ms": 0.05512498319149017,
+          "duck_select_1_prepared_ms": 0.042000028770416975,
+          "queries": [
+            {
+              "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
+              "vxg_ms": 1.8752079922705889,
+              "vxg_mrows_s": 159.98225329487107,
+              "duck_raw_ms": 78.55149998795241,
+              "duck_zst_ms": 115.01091602258384,
+              "duck_pq_snap_ms": 2.29516695253551,
+              "duck_pq_snap_prep_ms": 1.843458041548729,
+              "duck_pq_zstd_ms": 2.950625028461218,
+              "duck_pq_zstd_prep_ms": 2.7905830065719783,
+              "duck_pq_zstd_mrows_s": 101.67337330438532,
+              "duck_pq_zstd_prep_mrows_s": 107.50441728251168
+            },
+            {
+              "label": "SUM/MIN/MAX(total_cents) [all 300k rows]",
+              "vxg_ms": 0.6342499982565641,
+              "vxg_mrows_s": 472.9996071338502,
+              "duck_raw_ms": 79.36354196863249,
+              "duck_zst_ms": 114.07591699389741,
+              "duck_pq_snap_ms": 1.886499987449497,
+              "duck_pq_snap_prep_ms": 1.6015419969335198,
+              "duck_pq_zstd_ms": 2.097334014251828,
+              "duck_pq_zstd_prep_ms": 1.9699169788509607,
+              "duck_pq_zstd_mrows_s": 143.03873296357975,
+              "duck_pq_zstd_prep_mrows_s": 152.29068190223325
+            },
+            {
+              "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
+              "vxg_ms": 0.8349159616045654,
+              "vxg_mrows_s": 359.31760056838704,
+              "duck_raw_ms": 76.4691669610329,
+              "duck_zst_ms": 111.57991702202708,
+              "duck_pq_snap_ms": 1.8378749955445528,
+              "duck_pq_snap_prep_ms": 1.5667499974370003,
+              "duck_pq_zstd_ms": 2.1611250122077763,
+              "duck_pq_zstd_prep_ms": 1.964666007552296,
+              "duck_pq_zstd_mrows_s": 138.81658779818758,
+              "duck_pq_zstd_prep_mrows_s": 152.6977098635502
+            }
+          ]
+        },
+        "8": {
+          "duck_select_1_adhoc_ms": 0.10687502799555659,
+          "duck_select_1_prepared_ms": 0.06833299994468689,
+          "queries": [
+            {
+              "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
+              "vxg_ms": 0.37558400072157383,
+              "vxg_mrows_s": 798.756069011562,
+              "duck_raw_ms": 51.664792001247406,
+              "duck_zst_ms": 120.59120897902176,
+              "duck_pq_snap_ms": 1.4927919837646186,
+              "duck_pq_snap_prep_ms": 1.244459010194987,
+              "duck_pq_zstd_ms": 1.761708001140505,
+              "duck_pq_zstd_prep_ms": 1.7622500308789313,
+              "duck_pq_zstd_mrows_s": 170.28928733126273,
+              "duck_pq_zstd_prep_mrows_s": 170.2369100543431
+            },
+            {
+              "label": "SUM/MIN/MAX(total_cents) [all 300k rows]",
+              "vxg_ms": 0.3240410005673766,
+              "vxg_mrows_s": 925.8087694912612,
+              "duck_raw_ms": 54.10108400974423,
+              "duck_zst_ms": 117.84908402478322,
+              "duck_pq_snap_ms": 1.2528340448625386,
+              "duck_pq_snap_prep_ms": 0.9955000132322311,
+              "duck_pq_zstd_ms": 1.3575829798355699,
+              "duck_pq_zstd_prep_ms": 1.229959016200155,
+              "duck_pq_zstd_mrows_s": 220.98096724543197,
+              "duck_pq_zstd_prep_mrows_s": 243.91056616408434
+            },
+            {
+              "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
+              "vxg_ms": 0.20637497073039412,
+              "vxg_mrows_s": 1453.6646519597405,
+              "duck_raw_ms": 51.21674999827519,
+              "duck_zst_ms": 113.78754198085517,
+              "duck_pq_snap_ms": 1.381542009767145,
+              "duck_pq_snap_prep_ms": 1.1107079917564988,
+              "duck_pq_zstd_ms": 1.4352500438690186,
+              "duck_pq_zstd_prep_ms": 1.2444580206647515,
+              "duck_pq_zstd_mrows_s": 209.02281193546378,
+              "duck_pq_zstd_prep_mrows_s": 241.0687986403504
+            }
+          ]
+        }
       }
     },
     {
@@ -246,123 +316,161 @@
         "rows": 300000,
         "vxg_bytes": 5167201,
         "vxg_ratio": 0.09144867453868664,
-        "vxg_enc_1t_ms": 62.88562499685213,
-        "vxg_enc_8t_ms": 17.818792024627328,
+        "vxg_enc_1t_ms": 52.952333993744105,
+        "vxg_enc_8t_ms": 8.685915963724256,
         "zst_bytes": 9863950,
         "zst_ratio": 0.17457133043902842,
-        "zst_enc_8t_ms": 143.11004104092717,
+        "zst_enc_8t_ms": 43.663457967340946,
         "pq_zstd_bytes": 5556774,
         "pq_zstd_ratio": 0.09834330365918335,
-        "pq_zstd_etl_8t_ms": 184.72683301661164,
+        "pq_zstd_etl_8t_ms": 120.55054196389392,
         "pq_snap_bytes": 9697531,
         "pq_snap_ratio": 0.17162606143012907,
-        "pq_snap_etl_8t_ms": 151.03979199193418
+        "pq_snap_etl_8t_ms": 115.67270901286975
       },
       "threads": {
-        "1": [
-          {
-            "label": "COUNT(*) WHERE fraud & status=500 & lat>=150",
-            "vxg_ms": 3.98945901542902,
-            "vxg_mrows_s": 75.19816567603928,
-            "duck_raw_ms": 115.46008300501853,
-            "duck_zst_ms": 211.00345900049433,
-            "duck_pq_snap_ms": 5.211833049543202,
-            "duck_pq_zstd_ms": 2.9674579855054617,
-            "duck_pq_zstd_mrows_s": 101.09662932562111
-          },
-          {
-            "label": "SUM/MIN/MAX(bytes) [all 300k rows]",
-            "vxg_ms": 2.00208299793303,
-            "vxg_mrows_s": 149.8439376937534,
-            "duck_raw_ms": 123.47533297725022,
-            "duck_zst_ms": 199.81241703499109,
-            "duck_pq_snap_ms": 5.2573749562725425,
-            "duck_pq_zstd_ms": 4.8086250317282975,
-            "duck_pq_zstd_mrows_s": 62.387896336382695
-          },
-          {
-            "label": "GROUP BY service: COUNT(*), SUM(bytes)",
-            "vxg_ms": 2.951250004116446,
-            "vxg_mrows_s": 101.65184229785876,
-            "duck_raw_ms": 123.92312497831881,
-            "duck_zst_ms": 188.307500036899,
-            "duck_pq_snap_ms": 5.4521249840036035,
-            "duck_pq_zstd_ms": 8.734584029298276,
-            "duck_pq_zstd_mrows_s": 34.34622633358553
-          },
-          {
-            "label": "ORDER BY latency_ms DESC LIMIT 10",
-            "vxg_ms": 2.508541976567358,
-            "vxg_mrows_s": 119.59138128934737,
-            "duck_raw_ms": 117.05687502399087,
-            "duck_zst_ms": 202.86045799730346,
-            "duck_pq_snap_ms": 7.55062501411885,
-            "duck_pq_zstd_ms": 12.237791961524636,
-            "duck_pq_zstd_mrows_s": 24.51422617276007
-          },
-          {
-            "label": "SELECT 3 cols WHERE fraud & 500 & lat>=150",
-            "vxg_ms": 5.288374959491193,
-            "vxg_mrows_s": 56.728201441462026,
-            "duck_raw_ms": 127.3487500147894,
-            "duck_zst_ms": 200.55304100969806,
-            "duck_pq_snap_ms": 8.758750045672059,
-            "duck_pq_zstd_ms": 11.313249997328967,
-            "duck_pq_zstd_mrows_s": 26.517578951303058
-          }
-        ],
-        "8": [
-          {
-            "label": "COUNT(*) WHERE fraud & status=500 & lat>=150",
-            "vxg_ms": 4.406791995279491,
-            "vxg_mrows_s": 68.07673253499526,
-            "duck_raw_ms": 96.53383301338181,
-            "duck_zst_ms": 184.10258297808468,
-            "duck_pq_snap_ms": 11.597166012506932,
-            "duck_pq_zstd_ms": 3.8250000216066837,
-            "duck_pq_zstd_mrows_s": 78.43137210597598
-          },
-          {
-            "label": "SUM/MIN/MAX(bytes) [all 300k rows]",
-            "vxg_ms": 3.078749985434115,
-            "vxg_mrows_s": 97.44214418817087,
-            "duck_raw_ms": 88.82970799459144,
-            "duck_zst_ms": 194.26366599509493,
-            "duck_pq_snap_ms": 2.6087909936904907,
-            "duck_pq_zstd_ms": 11.017250013537705,
-            "duck_pq_zstd_mrows_s": 27.230025608147944
-          },
-          {
-            "label": "GROUP BY service: COUNT(*), SUM(bytes)",
-            "vxg_ms": 1.5139160095714033,
-            "vxg_mrows_s": 198.16158763320786,
-            "duck_raw_ms": 86.62941603688523,
-            "duck_zst_ms": 188.65241704043,
-            "duck_pq_snap_ms": 4.819624999072403,
-            "duck_pq_zstd_ms": 11.503832996822894,
-            "duck_pq_zstd_mrows_s": 26.07826452999217
-          },
-          {
-            "label": "ORDER BY latency_ms DESC LIMIT 10",
-            "vxg_ms": 1.3186660362407565,
-            "vxg_mrows_s": 227.50263656993684,
-            "duck_raw_ms": 76.97625004220754,
-            "duck_zst_ms": 193.82425001822412,
-            "duck_pq_snap_ms": 11.852124996948987,
-            "duck_pq_zstd_ms": 11.830041999928653,
-            "duck_pq_zstd_mrows_s": 25.359166096097486
-          },
-          {
-            "label": "SELECT 3 cols WHERE fraud & 500 & lat>=150",
-            "vxg_ms": 3.844875027425587,
-            "vxg_mrows_s": 78.02594306969478,
-            "duck_raw_ms": 85.66758298547938,
-            "duck_zst_ms": 195.81062503857538,
-            "duck_pq_snap_ms": 13.32387502770871,
-            "duck_pq_zstd_ms": 18.867583014070988,
-            "duck_pq_zstd_mrows_s": 15.900287799251618
-          }
-        ]
+        "1": {
+          "duck_select_1_adhoc_ms": 0.055458047427237034,
+          "duck_select_1_prepared_ms": 0.04245800664648414,
+          "queries": [
+            {
+              "label": "COUNT(*) WHERE fraud & status=500 & lat>=150",
+              "vxg_ms": 3.5127910086885095,
+              "vxg_mrows_s": 85.40217714574604,
+              "duck_raw_ms": 102.05016698455438,
+              "duck_zst_ms": 146.99637499870732,
+              "duck_pq_snap_ms": 1.7463340191170573,
+              "duck_pq_snap_prep_ms": 1.2985409703105688,
+              "duck_pq_zstd_ms": 1.759209029842168,
+              "duck_pq_zstd_prep_ms": 1.5993750421330333,
+              "duck_pq_zstd_mrows_s": 170.5311847034546,
+              "duck_pq_zstd_prep_mrows_s": 187.57326586758535
+            },
+            {
+              "label": "SUM/MIN/MAX(bytes) [all 300k rows]",
+              "vxg_ms": 1.49891700129956,
+              "vxg_mrows_s": 200.14450415860264,
+              "duck_raw_ms": 91.0192919545807,
+              "duck_zst_ms": 138.3063340326771,
+              "duck_pq_snap_ms": 2.631374984048307,
+              "duck_pq_snap_prep_ms": 2.3792909923940897,
+              "duck_pq_zstd_ms": 3.8209999911487103,
+              "duck_pq_zstd_prep_ms": 3.717375046107918,
+              "duck_pq_zstd_mrows_s": 78.51347832895722,
+              "duck_pq_zstd_prep_mrows_s": 80.70210734160364
+            },
+            {
+              "label": "GROUP BY service: COUNT(*), SUM(bytes)",
+              "vxg_ms": 2.625207998789847,
+              "vxg_mrows_s": 114.27665927358603,
+              "duck_raw_ms": 104.14154099998996,
+              "duck_zst_ms": 148.2706670067273,
+              "duck_pq_snap_ms": 3.2170829945243895,
+              "duck_pq_snap_prep_ms": 3.0655000009573996,
+              "duck_pq_zstd_ms": 4.4575000065378845,
+              "duck_pq_zstd_prep_ms": 4.520541988313198,
+              "duck_pq_zstd_mrows_s": 67.30229939651943,
+              "duck_pq_zstd_prep_mrows_s": 66.36372381355592
+            },
+            {
+              "label": "ORDER BY latency_ms DESC LIMIT 10",
+              "vxg_ms": 1.8961250316351652,
+              "vxg_mrows_s": 158.21741446094848,
+              "duck_raw_ms": 100.63733300194144,
+              "duck_zst_ms": 151.68374998029321,
+              "duck_pq_snap_ms": 3.5917089553549886,
+              "duck_pq_snap_prep_ms": 3.4366660402156413,
+              "duck_pq_zstd_ms": 4.416166979353875,
+              "duck_pq_zstd_prep_ms": 4.257458029314876,
+              "duck_pq_zstd_mrows_s": 67.93221393179583,
+              "duck_pq_zstd_prep_mrows_s": 70.46458190176851
+            },
+            {
+              "label": "SELECT 3 cols WHERE fraud & 500 & lat>=150",
+              "vxg_ms": 3.8031660369597375,
+              "vxg_mrows_s": 78.8816467870598,
+              "duck_raw_ms": 106.0205830144696,
+              "duck_zst_ms": 152.3496659938246,
+              "duck_pq_snap_ms": 7.567542023025453,
+              "duck_pq_snap_prep_ms": 7.514208962675184,
+              "duck_pq_zstd_ms": 9.924624988343567,
+              "duck_pq_zstd_prep_ms": 9.47212497703731,
+              "duck_pq_zstd_mrows_s": 30.227842397304563,
+              "duck_pq_zstd_prep_mrows_s": 31.67187940691994
+            }
+          ]
+        },
+        "8": {
+          "duck_select_1_adhoc_ms": 0.11999998241662979,
+          "duck_select_1_prepared_ms": 0.07462501525878906,
+          "queries": [
+            {
+              "label": "COUNT(*) WHERE fraud & status=500 & lat>=150",
+              "vxg_ms": 0.9238750208169222,
+              "vxg_mrows_s": 324.7192458290837,
+              "duck_raw_ms": 61.83595798211172,
+              "duck_zst_ms": 153.1861670082435,
+              "duck_pq_snap_ms": 1.07999995816499,
+              "duck_pq_snap_prep_ms": 0.9362089913338423,
+              "duck_pq_zstd_ms": 1.0940000065602362,
+              "duck_pq_zstd_prep_ms": 1.0075420141220093,
+              "duck_pq_zstd_mrows_s": 274.22303309052296,
+              "duck_pq_zstd_prep_mrows_s": 297.7543326185018
+            },
+            {
+              "label": "SUM/MIN/MAX(bytes) [all 300k rows]",
+              "vxg_ms": 0.72283303597942,
+              "vxg_mrows_s": 415.0336039822914,
+              "duck_raw_ms": 59.273332997690886,
+              "duck_zst_ms": 142.52970804227516,
+              "duck_pq_snap_ms": 1.5429590130224824,
+              "duck_pq_snap_prep_ms": 1.2926670024171472,
+              "duck_pq_zstd_ms": 2.0220419974066317,
+              "duck_pq_zstd_prep_ms": 1.8876250251196325,
+              "duck_pq_zstd_mrows_s": 148.36487094964633,
+              "duck_pq_zstd_prep_mrows_s": 158.9298700789299
+            },
+            {
+              "label": "GROUP BY service: COUNT(*), SUM(bytes)",
+              "vxg_ms": 0.9482500026933849,
+              "vxg_mrows_s": 316.3722637995125,
+              "duck_raw_ms": 63.86466702679172,
+              "duck_zst_ms": 156.33991599315777,
+              "duck_pq_snap_ms": 1.8562909681349993,
+              "duck_pq_snap_prep_ms": 1.7372499569319189,
+              "duck_pq_zstd_ms": 2.4265419924631715,
+              "duck_pq_zstd_prep_ms": 2.27462500333786,
+              "duck_pq_zstd_mrows_s": 123.63272547180253,
+              "duck_pq_zstd_prep_mrows_s": 131.8898717633764
+            },
+            {
+              "label": "ORDER BY latency_ms DESC LIMIT 10",
+              "vxg_ms": 0.8054999634623528,
+              "vxg_mrows_s": 372.4394954786628,
+              "duck_raw_ms": 63.98050003917888,
+              "duck_zst_ms": 157.9886669642292,
+              "duck_pq_snap_ms": 2.517000015359372,
+              "duck_pq_snap_prep_ms": 2.531333011575043,
+              "duck_pq_zstd_ms": 2.970083965919912,
+              "duck_pq_zstd_prep_ms": 3.4879170125350356,
+              "duck_pq_zstd_mrows_s": 101.0072453985597,
+              "duck_pq_zstd_prep_mrows_s": 86.01122071478372
+            },
+            {
+              "label": "SELECT 3 cols WHERE fraud & 500 & lat>=150",
+              "vxg_ms": 1.5463330200873315,
+              "vxg_mrows_s": 194.00736846650085,
+              "duck_raw_ms": 62.7716250019148,
+              "duck_zst_ms": 156.9677499937825,
+              "duck_pq_snap_ms": 3.941625007428229,
+              "duck_pq_snap_prep_ms": 7.4512920109555125,
+              "duck_pq_zstd_ms": 4.620500025339425,
+              "duck_pq_zstd_prep_ms": 9.751708013936877,
+              "duck_pq_zstd_mrows_s": 64.92803773504185,
+              "duck_pq_zstd_prep_mrows_s": 30.763841531273098
+            }
+          ]
+        }
       }
     }
   ]

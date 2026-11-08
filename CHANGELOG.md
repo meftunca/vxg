@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.7 — Real-Data Headline Tightening, `PREPARE/EXECUTE` + `SELECT 1` DuckDB Calibration, Near-Raw Speed Guard & `v0.5` Roadmap
+
+- **Headline & Zero-ETL Lossless Framing (`README.md`, `docs/index.md`, `docs/CHIMERA_BENCHMARKS.md`):**
+  - Narrowed top-level compression-ratio claims strictly to real flat tabular corpora (`1.18x–1.32x` smaller `64 KiB` blocks than `Zstd + Trained Dict L9` on `nyc-taxi` NDJSON/CSV; `14x–21x` faster ingest than Parquet ETL with 100% byte-exact original file recovery), explicitly highlighting where `Zstd + Trained Dict` wins `64 KiB` ratio (`gharchive`, `apache-access.clf`, `macos-install.log`, `pg100-shakespeare.txt`; `0.1205` vs `0.1484` 6-dataset geomean) and where `LZ4` wins decode speed.
+- **Uncontested + `PREPARE/EXECUTE` + `SELECT 1` DuckDB Benchmark Calibration (`scripts/bench_vs_duckdb.py`, `reports/duckdb-vs-vxg.json`):**
+  - Added `SELECT 1` ad-hoc/prepared overhead calibration (`0.04–0.07 ms` prepared) and `PREPARE / EXECUTE` Parquet latencies across all queries on a standalone uncontested CPU, plus an explicit in-cache (`200k–300k`-row) scope boundary.
+- **Near-Raw Storage Speed-Bolding Guard (`src/bin/bench_support/report.rs`, `reports/real-public-{1t,8t}.md`):**
+  - Excluded codecs with `ratio >= 0.90` (`< 10%` compression, e.g., `VXG` `0.9256` on `kodak-truecolor-16.bmp`) from speed and composite-score bolding.
+- **Known Issues & `v0.5` Roadmap (`README.md`, `docs/ROADMAP.md`, `docs/PROGRESS.md`):**
+  - Documented non-short-circuit `BitSet` unpacking in multi-column `COUNT(*) WHERE` (`3.84 ms` `1T`), per-block `HashMap` allocation in `MODEL_DECIMAL_PACKED` `GROUP BY`, `BLOCK_ZSTD_DICT` hybrid fallback for unstructured logs/nested JSON, and `40M+`-row out-of-cache full-year NYC TLC benchmarking for `v0.5`.
+
 ## 0.4.6 — Trained-Dictionary & Whole-File `Zstd` Baselines, Real Public Corpora & `DuckDB + Parquet` Benchmarks
 
 - **Trained-Dictionary (`Zstd + Dict`) & Whole-File `zstd -19 --long` Baselines (`src/baselines/zstd_ext.rs`, `src/baselines.rs`, `vxg-bench`):**

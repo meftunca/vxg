@@ -9,7 +9,7 @@ This document evaluates `VXG v4` under three methodology requirements needed for
    - **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window / `windowLog = 27`, single stream) removes `64 KiB` block boundaries completely to quantify the exact compression-ratio cost (or absence thereof) of `64 KiB` random access.
 3. **Head-to-Head Analytical Queries vs. `DuckDB 2.0.0` + `Parquet`:** Compressed-domain queries are reported in **wall-clock latency (`ms`)** and **million rows/second (`M rows/s`)** — never by dividing raw file size by single-column scan time — alongside compressed storage (`MB`), one-time ingest/ETL time (`ms`), and **byte-exact lossless reversibility** against `DuckDB 2.0.0` (`read_json_auto` / `read_csv`, `.zst`, `Parquet-Snappy`, and `Parquet-Zstd`).
 
-> **Reading the tables:** Bold cells mark **only the actual per-row winner** on each individual metric (lowest `64 KiB` block ratio, highest encode `GB/s`, highest decode `GB/s`). Composite indices (`VPI` / `BCI` / `GCI`) summarize space-speed-energy trade-offs and do **not** imply faster raw `GB/s` than `LZ4` on rows where `LZ4` leads in `Enc` or `Dec`.
+> **Reading the tables:** Bold cells mark **only the actual per-row winner** on each individual metric (lowest `64 KiB` block ratio, highest encode `GB/s`, highest decode `GB/s`). Codecs storing near-raw bytes (`ratio >= 0.90`, `< 10%` compression) are excluded from speed/trade-off bolding. Composite indices (`VPI` / `BCI` / `GCI`) summarize space-speed-energy trade-offs and do **not** imply faster raw `GB/s` than `LZ4` on rows where `LZ4` leads in `Enc` or `Dec`.
 
 ---
 
@@ -39,9 +39,9 @@ Fetched reproducibly via [`scripts/fetch_real_corpora.py`](../scripts/fetch_real
 | **`apache-access.clf`** | 2.4 MB | 0.1198 | 0.1730 | 0.1233 | 0.1062 | 0.1075 | **0.0878** | 0.0535 | 0.401 | **1.202** | 1.078 | 0.533 | 2.107 | **5.567** | 2.463 | 1.835 | 64.3 |
 | **`macos-install.log`** | 34.2 MB | 0.0948 | 0.1249 | 0.0882 | 0.0770 | 0.0590 | **0.0484** | 0.0277 | 1.404 | **1.914** | 0.977 | 0.731 | 3.748 | **7.352** | 3.261 | 3.309 | 49.3 |
 | **`pg100-shakespeare.txt`** | 5.6 MB | 0.4424 | 0.6223 | 0.4421 | 0.3918 | 0.4005 | **0.3745** | 0.3000 | 0.398 | 0.399 | **0.399** | 0.147 | 1.803 | **2.927** | 1.150 | 0.756 | 97.8 |
-| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | **1.207** | 0.860 | 0.527 | 0.106 | **10.099** | 4.435 | 1.029 | 0.971 | 101.9 |
+| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 1.207 | **0.860** | 0.527 | 0.106 | 10.099 | **4.435** | 1.029 | 0.971 | 101.9 |
 | **Text & Structured Geomean (6)** | — | 0.1484 | 0.2500 | 0.1620 | 0.1419 | 0.1407 | **0.1205** | 0.0795 | 0.705 | **0.908** | 0.730 | 0.360 | 2.436 | **4.074** | 1.806 | 1.456 | 77.1 |
-| **2D Camera BMP (1)** | — | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | **1.207** | 0.860 | 0.527 | 0.106 | **10.099** | 4.435 | 1.029 | 0.971 | 101.9 |
+| **2D Camera BMP (1)** | — | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 1.207 | **0.860** | 0.527 | 0.106 | 10.099 | **4.435** | 1.029 | 0.971 | 101.9 |
 
 ### 1.3 Multi-Thread Results (`threads = 8`, `block = 65536`, Apple Silicon NEON)
 
@@ -53,61 +53,68 @@ Fetched reproducibly via [`scripts/fetch_real_corpora.py`](../scripts/fetch_real
 | **`apache-access.clf`** | 2.4 MB | 0.1198 | 0.1730 | 0.1233 | 0.1062 | 0.1075 | **0.0878** | 0.0535 | 0.621 | 0.943 | **1.052** | 0.513 | 1.616 | 1.462 | **1.969** | 1.228 |
 | **`macos-install.log`** | 34.2 MB | 0.0948 | 0.1249 | 0.0882 | 0.0770 | 0.0590 | **0.0484** | 0.0278 | **8.797** | 8.593 | 6.142 | 2.182 | 22.427 | **25.441** | 11.226 | 8.146 |
 | **`pg100-shakespeare.txt`** | 5.6 MB | 0.4424 | 0.6223 | 0.4421 | 0.3918 | 0.4005 | **0.3745** | 0.3000 | **2.480** | 2.124 | 1.906 | 0.738 | 11.102 | **11.333** | 5.216 | 3.561 |
-| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | **3.584** | 1.617 | 1.359 | 0.414 | **19.609** | 6.239 | 2.481 | 3.294 |
+| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 3.584 | **1.617** | 1.359 | 0.414 | 19.609 | **6.239** | 2.481 | 3.294 |
 | **Text & Structured Geomean (6)** | — | 0.1484 | 0.2500 | 0.1620 | 0.1419 | 0.1407 | **0.1205** | 0.0795 | 2.673 | **2.756** | 2.278 | 1.060 | 7.864 | **8.460** | 4.530 | 3.372 |
 
 ### 1.4 Engineering Takeaways on Real-World Data
 
-1. **Where `VXG v4` Wins Clearly (Flat / Multi-Template Tabular & Log Streams):**
+1. **Where `VXG v4` Wins Clearly (Flat Tabular Records):**
    - On **`nyc-taxi-2024-01.ndjson`** (`52.3 MB`), `VXG v4` achieves **`0.0592` (`5.92%`)** — **`3.21×` smaller than `LZ4` (`0.1899`)**, **`1.65×` smaller than `Zstd-1` (`0.0977`)**, **`1.39×` smaller than `Zstd-9` (`0.0823`)**, **`1.32×` smaller than `Zstd + Trained Dict L9` (`0.0783`)**, and within **`6.9%` of non-random-access whole-file `zstd -19 --long` (`0.0554`)**, while encoding at **`10.20 GB/s`** and decoding at **`34.69 GB/s`** (`8T`) — faster than `LZ4 (a1)` (`6.54 / 19.97 GB/s`), though `LZ4 (a4)` in the parameter sweep reaches `41.55 GB/s` decode.
    - On **`nyc-taxi-2024-01.csv`** (`23.0 MB`), `VXG v4` achieves **`0.1807`** — **`2.35×` smaller than `LZ4` (`0.4241`)**, **`1.35×` smaller than `Zstd-1` (`0.2440`)**, and **`1.18×` smaller than `Zstd + Trained Dict L9` (`0.2132`)**; `LZ4` remains `1.5×–2.0×` faster on raw CSV decode (`2.48 / 4.63 GB/s` vs `1.26 / 3.10 GB/s`).
-2. **Where `Zstd + Trained Dict` and `zstd -19 --long` Win (Deeply Nested Trees, Unstructured Logs & Prose):**
-   - On **`gharchive-2025-01-15.ndjson`** (deeply nested arbitrary JSON schemas + long PR/commit text bodies), **`macos-install.log`** (free-text multi-line log), **`apache-access.clf`** (`2.4 MB` with long repeated URLs/User-Agents across blocks), and **`pg100-shakespeare.txt`** (literary prose), `Zstd + Trained Dict` (`0.1150`, `0.0484`, `0.0878`, `0.3745`) outperforms both plain `Zstd` and `VXG` (`0.1985`, `0.0948`, `0.1198`, `0.4424`) on `64 KiB` block ratio, while `LZ4` leads raw decode speed.
+2. **Where `Zstd + Trained Dict` and `zstd -19 --long` Win (Nested JSON, Real Free-Text/CLF Logs & Prose):**
+   - On **`gharchive-2025-01-15.ndjson`** (deeply nested arbitrary JSON schemas + long PR/commit text bodies), **`macos-install.log`** (free-text multi-line log), **`apache-access.clf`** (`2.4 MB` real HTTP CLF), and **`pg100-shakespeare.txt`** (literary prose), `Zstd + Trained Dict L9` (`0.1150`, `0.0484`, `0.0878`, `0.3745`; **6-dataset geomean `0.1205`**) outperforms both plain `Zstd-9` (`0.1419`) and `VXG` (`0.1484`) on `64 KiB` block ratio, while `LZ4` leads raw decode speed (`8.46` vs `7.86 GB/s`).
+   - **Root cause on real `apache-access.clf` (`0.1198`) vs. synthetic `data.clf` (`0.0980`):** Real web logs contain high-cardinality URL paths, query strings, and User-Agents whose residuals fall back to `Fast-LZ + 4-stream Huffman`, which has lower compression density than `Zstd`'s `FSE + optimal parsing + shared 32 KiB dictionary`. Adding a `BLOCK_ZSTD_DICT` fallback block type in `v0.5` bounds unstructured block ratios by `Zstd + Dict` while retaining `BLOCK_COLUMN` SQL on tabular blocks.
    - Comparing `Zstd+Dict-9` (`0.1205` 6-dataset geomean) to whole-file `zstd -19 --long` (`0.0795`) isolates the exact **`1.52×` compression-ratio cost of `64 KiB` random-access block boundaries** on cross-block repetitive text (`~0.002–0.005 GB/s` encode speed, no random access).
 3. **Real Camera Photographs vs. Synthetic UI BMPs:**
-   - On **`kodak-truecolor-16.bmp`** (16 real optical camera photographs), sensor grain limits lossless compression across all general-purpose codecs to `0.5656` (`zstd -19 --long`) – `0.7452` (`Zstd+Dict-9`) – `0.9256` (`VXG`, `19.6 GB/s` `8T` decode). The `208:1` (`0.0048`) and `833:1` (`0.0012`) ratios seen in `--suite v4` occur strictly on synthetic flat-shaded UI/gradient renders and are reported separately in Section 3.
+   - On **`kodak-truecolor-16.bmp`** (16 real optical camera photographs), sensor grain limits lossless compression across all general-purpose codecs to `0.5656` (`zstd -19 --long`) – `0.7452` (`Zstd+Dict-9`) – `0.9256` (`VXG`). Because `0.9256` (`< 10%` reduction) is near-raw storage, `VXG`'s `19.6 GB/s` throughput is intentionally not bolded as a speed win. The `208:1` (`0.0048`) and `833:1` (`0.0012`) ratios seen in `--suite v4` occur strictly on synthetic flat-shaded UI/gradient renders and are reported separately in Section 3.
 
 ---
 
-## 2. Head-to-Head Analytical Queries: `VXG` vs. `DuckDB 2.0.0` + `Parquet` {#duckdb}
+## 2. In-Cache Analytical Queries: `VXG` vs. `DuckDB 2.0.0` + `Parquet` {#duckdb}
 
-Dividing an uncompressed `56.5 MB` file size by a `0.57 ms` single-column aggregation time yields `"98.9 GB/s"`, which overstates memory bandwidth because compressed-domain execution intentionally touches only a few megabytes of packed column metadata/values. Below we report **wall-clock latency (`ms`)** and **rows per second (`M rows/s`)** directly in-process (`libvxg.dylib` via `ctypes` vs. `duckdb 2.0.0` Python C++ extension, warm OS page cache, median of 5–7 runs, **100% result equality asserted on every query** via [`scripts/bench_vs_duckdb.py`](../scripts/bench_vs_duckdb.py); raw JSON artifact: [`reports/duckdb-vs-vxg.json`](../reports/duckdb-vs-vxg.json)).
+Dividing an uncompressed `56.5 MB` file size by a `0.57 ms` single-column aggregation time yields `"98.9 GB/s"`, which overstates memory bandwidth because compressed-domain execution intentionally touches only a few megabytes of packed column metadata/values. Below we report **wall-clock latency (`ms`)** and **rows per second (`M rows/s`)** measured standalone with zero background CPU contention (`libvxg.dylib` via `ctypes` vs. `duckdb 2.0.0` Python C++ extension, warm OS page cache, median of 5–7 runs, **100% result equality asserted on every query** via [`scripts/bench_vs_duckdb.py`](../scripts/bench_vs_duckdb.py); raw JSON artifact: [`reports/duckdb-vs-vxg.json`](../reports/duckdb-vs-vxg.json)).
+
+- **Python + SQL parse/plan calibration (`SELECT 1`):** `0.06 ms` ad-hoc / **`0.04 ms` prepared** at `1T`, and `0.09–0.12 ms` ad-hoc / **`0.06–0.07 ms` prepared** at `8T`. Parquet columns below report **`PREPARE / EXECUTE` (`prep`)** latencies (with ad-hoc `con.execute` in parentheses where different, and full details in [`reports/duckdb-vs-vxg.json`](../reports/duckdb-vs-vxg.json)).
+- **In-cache scale boundary:** All three datasets (`200k–300k` rows, `23–56.5 MB` raw, `3–10 MB` compressed) fit in CPU/RAM cache. General query superiority on out-of-cache `10M–40M+`-row multi-GB datasets (e.g., full-year NYC TLC) is **not** claimed here and is scheduled for `v0.5`.
 
 ### 2.1 Storage Footprint, Ingest / ETL Latency & Lossless Reversibility
 
 | Corpus | Raw Size | **`.vxg` (`VXG v4`)** | `.zst` (`Zstd-3`) | `Parquet-Snappy` | `Parquet-Zstd` | `8T` Ingest: `.vxg` vs `Parquet-Zstd` ETL | Byte-Exact Original File Recovery |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **`nyc-taxi-2024-01.ndjson`** *(real, 200k rows)* | 52.33 MB | **3.10 MB (`5.92%`)** | 4.92 MB (`9.40%`) | 3.94 MB (`7.53%`) | **2.96 MB (`5.66%`)** | **`10.1 ms`** vs `111.9 ms` (**`11.1×` faster**) | **`.vxg`: YES (`100%` exact)** · `Parquet`: NO |
-| **`nyc-taxi-2024-01.csv`** *(real, 300k rows)* | 23.00 MB | **4.16 MB (`18.07%`)** | 5.01 MB (`21.78%`) | 5.86 MB (`25.50%`) | 4.39 MB (`19.10%`) | **`12.2 ms`** vs `200.4 ms` (**`16.5×` faster**) | **`.vxg`: YES (`100%` exact)** · `Parquet`: NO |
-| **`ndjson_varied.ndjson`** *(synthetic, 300k rows)* | 56.50 MB | **5.17 MB (`9.14%`)** | 9.86 MB (`17.46%`) | 9.70 MB (`17.16%`) | 5.56 MB (`9.83%`) | **`17.8 ms`** vs `184.7 ms` (**`10.4×` faster**) | **`.vxg`: YES (`100%` exact)** · `Parquet`: NO |
+| **`nyc-taxi-2024-01.ndjson`** *(real, 200k rows)* | 52.33 MB | **3.10 MB (`5.92%`)** | 4.92 MB (`9.40%`) | 3.94 MB (`7.53%`) | **2.96 MB (`5.66%`)** | **`4.5 ms`** vs `93.6 ms` (**`20.7×` faster**) | **`.vxg`: YES (`100%` exact)** · `Parquet`: NO |
+| **`nyc-taxi-2024-01.csv`** *(real, 300k rows)* | 23.00 MB | **4.16 MB (`18.07%`)** | 5.01 MB (`21.78%`) | 5.86 MB (`25.50%`) | 4.39 MB (`19.10%`) | **`6.6 ms`** vs `97.6 ms` (**`14.8×` faster**) | **`.vxg`: YES (`100%` exact)** · `Parquet`: NO |
+| **`ndjson_varied.ndjson`** *(synthetic, 300k rows)* | 56.50 MB | **5.17 MB (`9.14%`)** | 9.86 MB (`17.46%`) | 9.70 MB (`17.16%`) | 5.56 MB (`9.83%`) | **`8.7 ms`** vs `120.6 ms` (**`13.9×` faster**) | **`.vxg`: YES (`100%` exact)** · `Parquet`: NO |
 
-> Notice that `.vxg` is **`1.27×–1.88×` smaller than `Parquet-Snappy` on all three datasets** and **smaller than `Parquet-Zstd` on both `nyc-taxi.csv` (`4.16 MB` vs `4.39 MB`) and multi-schema `ndjson_varied.ndjson` (`5.17 MB` vs `5.56 MB`, where Parquet must materialize sparse `NULL`-padded union columns)**, while ingesting **`10×–16×` faster** and remaining **100% byte-for-byte reversible** to the original `.ndjson`/`.csv` input.
+> `.vxg` is **`1.27×–1.88×` smaller than `Parquet-Snappy` on all three datasets** and **smaller than `Parquet-Zstd` on both `nyc-taxi.csv` (`4.16 MB` vs `4.39 MB`) and multi-schema `ndjson_varied.ndjson` (`5.17 MB` vs `5.56 MB`, where Parquet materializes sparse `NULL`-padded union columns)**, while ingesting **`14×–21×` faster** and remaining **100% byte-for-byte reversible** to the original `.ndjson`/`.csv` input.
 
 ### 2.2 Query Latency (`ms`, Lower is Faster) & Row Scan Rate (`M rows/s`)
 
-| Corpus & Query | Threads | **VXG `.vxg` (`ms` / `M rows/s`)** | DuckDB Raw (`ms`) | DuckDB `.zst` (`ms`) | DuckDB `Parquet-Snappy` (`ms`) | DuckDB `Parquet-Zstd` (`ms` / `M rows/s`) |
+| Corpus & Query (`SELECT 1` prep = `0.04 ms` `1T` / `0.06–0.07 ms` `8T`) | Threads | **VXG `.vxg` (`ms` / `M rows/s`)** | DuckDB Raw (`ms`) | DuckDB `.zst` (`ms`) | DuckDB `Parquet-Snappy` *(prep `ms`)* | DuckDB `Parquet-Zstd` *(prep `ms` / `M rows/s`)* |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Real `nyc-taxi-2024-01.ndjson` (`200k` rows)** | | | | | | |
-| `COUNT(*) WHERE pay=1 AND tip>=1000 AND dist>=500` | `1T` / `8T` | `6.50 / 4.57 ms` (`30.8 / 43.8 M/s`) | `154.97 / 99.26` | `136.11 / 175.60` | **`1.97`** / `2.94` | `2.43` / **`2.11 ms`** (`82.2 / 95.0 M/s`) |
-| `SUM/MIN/MAX(total_cents)` *(all 200k rows)* | `1T` / `8T` | **`1.84 / 1.32 ms` (`108.7 / 151.6 M/s`)** | `90.37 / 80.98` | `191.63 / 178.79` | `3.80 / 4.89` | `4.57 / 3.17 ms` (`43.8 / 63.1 M/s`) |
-| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | `1T` / `8T` | `4.59` / **`1.42 ms`** (`43.5` / **`140.7 M/s`**) | `101.57 / 84.06` | `153.60 / 230.27` | **`2.17`** / `6.52` | `2.58 / 8.56 ms` (`77.4 / 23.4 M/s`) |
-| `GROUP BY payment_type: COUNT(*), SUM(total)` | `1T` / `8T` | **`3.46`** / `6.95 ms` (`57.7 / 28.8 M/s`) | `104.73 / 83.38` | `199.16 / 153.13` | `3.78 / 4.65` | `4.38` / **`4.36 ms`** (`45.6 / 45.9 M/s`) |
-| `ORDER BY total_cents DESC LIMIT 10` | `1T` / `8T` | **`4.80 / 4.64 ms` (`41.7 / 43.1 M/s`)** | `148.59 / 95.67` | `239.40 / 214.98` | `5.73 / 9.11` | `9.03 / 21.02 ms` (`22.2 / 9.5 M/s`) |
-| `SELECT 4 cols WHERE tip_cents >= 2500` | `1T` / `8T` | **`4.14 / 2.37 ms` (`48.4 / 84.5 M/s`)** | `193.24 / 97.92` | `233.89 / 180.60` | `6.66 / 12.68` | `9.62 / 11.76 ms` (`20.8 / 17.0 M/s`) |
+| `COUNT(*) WHERE pay=1 AND tip>=1000 AND dist>=500` | `1T` / `8T` | `3.84 / 1.38 ms` (`52.1 / 145.4 M/s`) | `82.79 / 57.23` | `129.04 / 125.12` | **`1.69 / 1.36`** | `2.36 / 1.64 ms` (`84.7 / 122.0 M/s`) |
+| `SUM/MIN/MAX(total_cents)` *(all 200k rows)* | `1T` / `8T` | `1.90` / **`0.74 ms`** (`105.0` / **`270.9 M/s`**) | `85.81 / 54.15` | `120.12 / 133.08` | **`1.23`** / `1.22` | `1.61 / 1.38 ms` (`124.2 / 144.9 M/s`) |
+| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | `1T` / `8T` | `2.46 / 1.47 ms` (`81.4 / 136.5 M/s`) | `82.98 / 59.56` | `125.40 / 124.31` | **`1.27 / 1.08`** | `1.51 / 1.25 ms` (`132.5 / 160.0 M/s`) |
+| `GROUP BY payment_type: COUNT(*), SUM(total)` | `1T` / `8T` | `2.97 / 1.22 ms` (`67.3 / 163.8 M/s`) | `81.48 / 56.11` | `121.71 / 119.83` | **`1.25 / 1.02`** | `1.58 / 1.21 ms` (`126.6 / 165.3 M/s`) |
+| `ORDER BY total_cents DESC LIMIT 10` | `1T` / `8T` | **`2.49 / 0.88 ms` (`80.4 / 228.0 M/s`)** | `91.15 / 58.12` | `133.03 / 127.75` | `3.17 / 2.26` | `5.31 / 3.48 ms` (`37.7 / 57.5 M/s`) |
+| `SELECT 4 cols WHERE tip_cents >= 2500` | `1T` / `8T` | **`2.94 / 1.09 ms` (`68.0 / 184.1 M/s`)** | `94.71 / 61.24` | `155.45 / 138.45` | `3.59 / 3.19` *(ad-hoc `2.19`)* | `5.66 / 5.50 ms` *(ad-hoc `3.83`)* |
 | **Real `nyc-taxi-2024-01.csv` (`300k` rows)** | | | | | | |
-| `COUNT(*) WHERE pay=1 AND tip>=1000 AND dist>=500` | `1T` / `8T` | **`1.97 / 2.41 ms` (`152.6 / 124.5 M/s`)** | `94.24 / 81.76` | `157.04 / 154.56` | `3.51 / 6.02` | `4.41 / 11.02 ms` (`68.1 / 27.2 M/s`) |
-| `SUM/MIN/MAX(total_cents)` *(all 300k rows)* | `1T` / `8T` | **`0.69 / 0.42 ms` (`436.5 / 710.7 M/s`)** | `118.92 / 76.06` | `151.64 / 138.42` | `2.33 / 2.90` | `3.13 / 2.86 ms` (`95.7 / 104.7 M/s`) |
-| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | `1T` / `8T` | **`0.88 / 3.07 ms` (`339.6 / 97.8 M/s`)** | `87.70 / 71.41` | `136.08 / 141.22` | `2.64 / 3.14` | `3.55 / 3.71 ms` (`84.4 / 81.0 M/s`) |
+| `COUNT(*) WHERE pay=1 AND tip>=1000 AND dist>=500` | `1T` / `8T` | `1.88` / **`0.38 ms`** (`160.0` / **`798.8 M/s`**) | `78.55 / 51.66` | `115.01 / 120.59` | **`1.84`** / `1.24` | `2.79 / 1.76 ms` (`107.5 / 170.5 M/s`) |
+| `SUM/MIN/MAX(total_cents)` *(all 300k rows)* | `1T` / `8T` | **`0.63 / 0.32 ms` (`473.0 / 925.8 M/s`)** | `79.36 / 54.10` | `114.08 / 117.85` | `1.60 / 1.00` | `1.97 / 1.23 ms` (`152.3 / 243.9 M/s`) |
+| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | `1T` / `8T` | **`0.83 / 0.21 ms` (`359.3 / 1453.7 M/s`)** | `76.47 / 51.22` | `111.58 / 113.79` | `1.57 / 1.11` | `1.96 / 1.24 ms` (`153.1 / 241.9 M/s`) |
 | **Synthetic `ndjson_varied.ndjson` (`300k` rows)** | | | | | | |
-| `COUNT(*) WHERE fraud & status=500 & lat>=150` | `1T` / `8T` | `3.99 / 4.41 ms` (`75.2 / 68.1 M/s`) | `115.46 / 96.53` | `211.00 / 184.10` | `5.21 / 11.60` | **`2.97 / 3.83 ms`** (`101.1 / 78.4 M/s`) |
-| `SUM/MIN/MAX(bytes)` *(all 300k rows)* | `1T` / `8T` | **`2.00`** / `3.08 ms` (`149.8 / 97.4 M/s`) | `123.48 / 88.83` | `199.81 / 194.26` | `5.26` / **`2.61`** | `4.81 / 11.02 ms` (`62.4 / 27.2 M/s`) |
-| `GROUP BY service: COUNT(*), SUM(bytes)` | `1T` / `8T` | **`2.95 / 1.51 ms` (`101.7 / 198.2 M/s`)** | `123.92 / 86.63` | `188.31 / 188.65` | `5.45 / 4.82` | `8.73 / 11.50 ms` (`34.3 / 26.1 M/s`) |
-| `ORDER BY latency_ms DESC LIMIT 10` | `1T` / `8T` | **`2.51 / 1.32 ms` (`119.6 / 227.5 M/s`)** | `117.06 / 76.98` | `202.86 / 193.82` | `7.55 / 11.85` | `12.24 / 11.83 ms` (`24.5 / 25.4 M/s`) |
-| `SELECT 3 cols WHERE fraud & 500 & lat>=150` | `1T` / `8T` | **`5.29 / 3.84 ms` (`56.7 / 78.0 M/s`)** | `127.35 / 85.67` | `200.55 / 195.81` | `8.76 / 13.32` | `11.31 / 18.87 ms` (`26.5 / 15.9 M/s`) |
+| `COUNT(*) WHERE fraud & status=500 & lat>=150` | `1T` / `8T` | `3.51` / **`0.92 ms`** (`85.4` / **`324.7 M/s`**) | `102.05 / 61.84` | `147.00 / 153.19` | **`1.30`** / `0.94` | `1.60 / 1.01 ms` (`187.5 / 297.0 M/s`) |
+| `SUM/MIN/MAX(bytes)` *(all 300k rows)* | `1T` / `8T` | **`1.50 / 0.72 ms` (`200.1 / 415.0 M/s`)** | `91.02 / 59.27` | `138.31 / 142.53` | `2.38 / 1.29` | `3.72 / 1.89 ms` (`80.6 / 158.7 M/s`) |
+| `GROUP BY service: COUNT(*), SUM(bytes)` | `1T` / `8T` | **`2.63 / 0.95 ms` (`114.3 / 316.4 M/s`)** | `104.14 / 63.86` | `148.27 / 156.34` | `3.07 / 1.74` | `4.52 / 2.27 ms` (`66.4 / 132.2 M/s`) |
+| `ORDER BY latency_ms DESC LIMIT 10` | `1T` / `8T` | **`1.90 / 0.81 ms` (`158.2 / 372.4 M/s`)** | `100.64 / 63.98` | `151.68 / 157.99` | `3.44 / 2.53` | `4.26 / 3.49 ms` (`70.4 / 86.0 M/s`) |
+| `SELECT 3 cols WHERE fraud & 500 & lat>=150` | `1T` / `8T` | **`3.80 / 1.55 ms` (`78.9 / 194.0 M/s`)** | `106.02 / 62.77` | `152.35 / 156.97` | `7.51 / 7.45` *(ad-hoc `3.94`)* | `9.47 / 9.75 ms` *(ad-hoc `4.62`)* |
 
-**Summary vs. DuckDB:**
-- Against **DuckDB querying raw `.ndjson`/`.csv` or `.zst` directly** (the only DuckDB modes that preserve the original file), `VXG` is **`21×–181×` faster** (`0.42–6.95 ms` vs `71–239 ms`).
-- Against **DuckDB querying pre-converted `Parquet-Snappy` / `Parquet-Zstd`**, `VXG` is faster on `SUM/MIN/MAX`, `ORDER BY ... LIMIT 10`, `SELECT ... WHERE`, CSV `COUNT(*) WHERE`, and dictionary `GROUP BY service` (`0.42–4.80 ms` vs `2.33–21.02 ms`), while **`DuckDB + Parquet` is faster on multi-column numeric `COUNT(*) WHERE` (`1.97–2.11 ms` vs `4.57–6.50 ms` on `nyc-taxi.ndjson`, `2.97–3.83 ms` vs `3.99–4.41 ms` on `ndjson_varied`) and `8T` integer `GROUP BY payment_type` (`4.36 ms` vs `6.95 ms`)**.
+**Summary & Known QueryBottlenecks (`v0.4.7`):**
+- Against **DuckDB querying raw `.ndjson`/`.csv` or `.zst` directly** (the only DuckDB modes that preserve the original file), `VXG` is **`22×–540×` faster** (`0.21–3.84 ms` vs `51–158 ms`).
+- Against **prepared `DuckDB + Parquet` (`in-cache` `200k–300k` rows)**:
+  - `VXG` leads on `nyc-taxi.csv` scans (`0.21–0.38 ms` vs `1.00–1.24 ms` at `8T`), `ORDER BY ... DESC LIMIT 10` (`0.81–0.88 ms` vs `2.26–2.53 ms`), `SELECT ... WHERE` (`1.09–1.55 ms` vs `2.19–3.94 ms`), `8T` `SUM(total_cents)` (`0.74` vs `1.22 ms`), and dictionary `GROUP BY service` (`0.95` vs `1.74 ms`).
+  - **`DuckDB + Parquet` leads** on `nyc-taxi.ndjson` `1T`/`8T` `COUNT(*) WHERE` (`1.69 / 1.36 ms` vs `3.84 / 1.38 ms`), `SUM WHERE payment_type=2` (`1.27 / 1.08 ms` vs `2.46 / 1.47 ms`), integer `GROUP BY payment_type` (`1.25 / 1.02 ms` vs `2.97 / 1.22 ms`), and `1T` `COUNT(*) WHERE` on `ndjson_varied` (`1.30` vs `3.51 ms`).
+  - **Known Issues tracked for `v0.5`:** (1) Multi-column `AND` predicates (`COUNT(*) WHERE`) unpack every leaf `MODEL_DECIMAL_PACKED` column across all rows before intersecting bitsets (`3.84 ms` `1T`), rather than short-circuit propagating the surviving `BitSet` mask; (2) `MODEL_DECIMAL_PACKED` `GROUP BY` allocates a per-block `HashMap<u64, AggStats>` instead of using a stack bucket array.
 
 ---
 

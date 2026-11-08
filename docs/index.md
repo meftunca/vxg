@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "VXG Codec"
   text: "Vectorized Execution Grammar"
-  tagline: "LZ4-class multi-GB/s block throughput, 1.2x–3.2x smaller 64 KiB blocks than Zstd + Trained Dict on structured logs & tables, O(1) random access, and millisecond SQL queries directly on compressed files."
+  tagline: "Store raw NDJSON/CSV as-is (14x–21x faster ingest than Parquet ETL), 1.18x–1.32x smaller 64 KiB blocks than Zstd + Trained Dict on flat tabular records at LZ4-class speed, SQL on compressed files, and 100% byte-exact original recovery."
   actions:
     - theme: brand
       text: Try Live WASM Playground →
@@ -23,12 +23,12 @@ hero:
       link: https://github.com/meftunca/vxg
 
 features:
-  - title: "Grammar + Columnar + SIMD LZ"
-    details: "Automatically discovers repeating record templates in CSV, TSV, logfmt, NDJSON, pretty JSON, and CLF logs while handling prose/code (4-stream canonical Huffman + Fast-LZ) and strided media planes (SubGreen + sparse bitmask)."
-  - title: "Real Corpora, Zstd+Dict & Whole-File Reference"
-    details: "Benchmarked on public NYC TLC Taxi, GitHub Archive, Apache CLF, Shakespeare, and Kodak camera photos against LZ4, Zstd L9, Zstd + Trained Dictionary (64 KiB), and whole-file zstd -19 --long."
-  - title: "Compressed-Domain SQL vs DuckDB + Parquet"
-    details: "Execute WHERE, GROUP BY, SUM/MIN/MAX, ORDER BY Top-K, and zero-reencode splicing in 0.4–6.9 ms (30–710 M rows/s) — 21x–181x faster than DuckDB on raw/.zst while remaining 100% byte-exact lossless."
+  - title: "Zero-ETL Lossless Archive + SQL"
+    details: "Keep raw JSON/CSV verbatim without lossy Parquet ETL (14x–21x faster ingest), run SQL directly on compressed 64 KiB random-access blocks, and recover the original file byte-for-byte."
+  - title: "Honest Real-Corpus Trade-Offs"
+    details: "1.18x–1.32x smaller than Zstd + Trained Dict on flat tabular records (NYC TLC NDJSON/CSV); Zstd + Trained Dict leads on nested GitHub JSON, free-text logs, and prose (0.1205 vs 0.1484 geomean)."
+  - title: "Calibrated vs DuckDB 2.0 + Parquet"
+    details: "22x–540x faster than DuckDB on raw/.zst (0.21–3.84 ms vs 51–158 ms on 200k–300k in-cache rows), and competitive with or faster than prepared DuckDB + Parquet on CSV scans, Top-K, and projections."
   - title: "vxg-tensor (.vxt) AI Model Codec & Metal LLM"
     details: "Zero-dependency LLM weight compression (1.41x bit-exact Lossless-BF16, 3.62x CB4+Outlier beating Q4_0 in both size & KL, 4.66x–5.57x CB3/WHT2) with 105–137 tok/s 1-CmdBuf Apple Metal GPU inference."
 ---

@@ -19,10 +19,10 @@ export default defineConfig({
     ['meta', { name: 'theme-color', content: '#10b981' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:title', content: 'VXG — Vectorized Execution Grammar Codec' }],
-    ['meta', { name: 'og:description', content: 'LZ4-class multi-GB/s throughput, 1.2x-3.2x smaller 64 KiB random-access blocks than Zstd on structured logs & tables, and millisecond SQL analytics without Parquet ETL.' }]
+    ['meta', { name: 'og:description', content: 'Store raw NDJSON/CSV as-is (14x-21x faster than Parquet ETL), 1.18x-1.32x smaller than Zstd+Dict on flat tabular records at LZ4-class speed, SQL on compressed blocks, 100% byte-exact reversible.' }]
   ],
   themeConfig: {
-    siteTitle: 'VXG v0.4.6',
+    siteTitle: 'VXG v0.4.7',
     nav: [
       { text: 'Playground (WASM)', link: '/playground' },
       { text: 'AI Tensor (.vxt)', link: '/TENSOR' },

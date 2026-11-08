@@ -3,7 +3,7 @@
 - **Block-independent codecs (`65536`-byte blocks, random access = YES):** `VXG v4`, `liblz4 1.10.0` (`lz4-c-a1`, `lz4-c-a4`, `lz4hc-c-l9`), and `libzstd 1.5.7` (`zstd-c-l-3`, `zstd-c-l1`, `zstd-c-l3`, `zstd-dict-l3`, `zstd-c-l9`, `zstd-dict-l9`).
 - **Dictionary accounting:** `zstd-dict-*` trains up to a `32 KiB` dictionary via `ZDICT_trainFromBuffer` (charging `dict_bytes` in compressed size); steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput is reported in `Enc` / `Dec`, with one-time `ZDICT` training time reported separately in `Dict Train (ms)`.
 - **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window, single stream) quantifies the compression-ratio difference of removing `65536`-byte block boundaries.
-- Bold cells mark the best block-codec metric in each row (lowest block ratio, highest encode `GB/s`, highest decode `GB/s`).
+- Bold cells mark the best block-codec metric in each row; codecs storing near-raw bytes (`ratio >= 0.90`, `< 10%` size reduction) are excluded from speed/trade-off bolding.
 
 ### 1. Individual Codec Ratio & Throughput (`GB/s`)
 
@@ -15,9 +15,9 @@
 | **`apache-access.clf`** | 2.4 MB | 0.1198 | 0.1730 | 0.1233 | 0.1062 | 0.1075 | **0.0878** | 0.0535 | 0.621 | 0.943 | **1.052** | 0.513 | 1.616 | 1.462 | **1.969** | 1.228 | 70.3 |
 | **`macos-install.log`** | 34.2 MB | 0.0948 | 0.1249 | 0.0882 | 0.0770 | 0.0590 | **0.0484** | 0.0278 | **8.797** | 8.593 | 6.142 | 2.182 | 22.427 | **25.441** | 11.226 | 8.146 | 41.1 |
 | **`pg100-shakespeare.txt`** | 5.6 MB | 0.4424 | 0.6223 | 0.4421 | 0.3918 | 0.4005 | **0.3745** | 0.3000 | **2.480** | 2.124 | 1.906 | 0.738 | 11.102 | **11.333** | 5.216 | 3.561 | 99.8 |
-| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | **3.584** | 1.617 | 1.359 | 0.414 | **19.609** | 6.239 | 2.481 | 3.294 | 124.4 |
+| **`kodak-truecolor-16.bmp`** | 18.9 MB | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 3.584 | **1.617** | 1.359 | 0.414 | 19.609 | **6.239** | 2.481 | 3.294 | 124.4 |
 | **Text & Structured Geomean (6)** | — | 0.1484 | 0.2500 | 0.1620 | 0.1419 | 0.1407 | **0.1205** | 0.0795 | 2.673 | **2.756** | 2.278 | 1.060 | 7.864 | **8.460** | 4.530 | 3.372 | 75.8 |
-| **2D BMP Geomean (1)** | — | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | **3.584** | 1.617 | 1.359 | 0.414 | **19.609** | 6.239 | 2.481 | 3.294 | 124.4 |
+| **2D BMP Geomean (1)** | — | 0.9256 | 0.8732 | 0.8274 | 0.7494 | 0.7834 | **0.7452** | 0.5656 | 3.584 | **1.617** | 1.359 | 0.414 | 19.609 | **6.239** | 2.481 | 3.294 | 124.4 |
 | **All-Dataset Geomean (7)** | — | 0.1927 | 0.2990 | 0.2045 | 0.1800 | 0.1798 | **0.1563** | 0.1053 | **2.787** | 2.554 | 2.116 | 0.927 | **8.960** | 8.100 | 4.156 | 3.361 | 81.3 |
 
 ### 2. Parameter-Sweep Upper-Bound Envelopes (`min_ratio` + `max_speed` across Independent Blocks)
@@ -32,9 +32,9 @@ Each sweep envelope combines the best block ratio achieved by any tested level i
 | **`apache-access.clf`** | 0.1198 | 0.1362 | **0.0878** | 0.621 | 1.264 | **1.292** | 1.616 | **3.164** | 2.393 | 8.4 | 14.7 | 20.0 | **23.0** |
 | **`macos-install.log`** | 0.0948 | 0.1033 | **0.0484** | 8.797 | **9.533** | 6.142 | 22.427 | **25.441** | 11.934 | 148.2 | 150.8 | 177.0 | **321.9** |
 | **`pg100-shakespeare.txt`** | 0.4424 | 0.4970 | **0.3745** | **2.480** | 2.124 | 2.177 | 11.102 | **12.029** | 6.828 | 11.9 | 10.2 | 10.3 | **13.7** |
-| **`kodak-truecolor-16.bmp`** | 0.9256 | 0.8127 | **0.7452** | **3.584** | 3.016 | 3.127 | **19.609** | 11.266 | 6.147 | **9.1** | 7.2 | 5.9 | 8.0 |
+| **`kodak-truecolor-16.bmp`** | 0.9256 | 0.8127 | **0.7452** | 3.584 | 3.016 | **3.127** | 19.609 | **11.266** | 6.147 | 9.1 | 7.2 | 5.9 | **8.0** |
 | **Text & Structured Geomean (6)** | 0.1484 | 0.1903 | **0.1205** | 2.673 | **3.047** | 2.621 | 7.864 | **11.328** | 5.786 | 30.9 | 30.9 | 32.3 | **49.0** |
-| **2D BMP Geomean (1)** | 0.9256 | 0.8127 | **0.7452** | **3.584** | 3.016 | 3.127 | **19.609** | 11.266 | 6.147 | **9.1** | 7.2 | 5.9 | 8.0 |
+| **2D BMP Geomean (1)** | 0.9256 | 0.8127 | **0.7452** | 3.584 | 3.016 | **3.127** | 19.609 | **11.266** | 6.147 | 9.1 | 7.2 | 5.9 | **8.0** |
 | **All-Dataset Geomean (7)** | 0.1927 | 0.2342 | **0.1563** | 2.787 | **3.043** | 2.688 | 8.960 | **11.319** | 5.836 | 25.9 | 25.1 | 25.3 | **37.8** |
 
 ### 3. Composite Trade-Off Indices (`VPI` & `BCI`)
@@ -49,9 +49,9 @@ Each sweep envelope combines the best block ratio achieved by any tested level i
 | **`apache-access.clf`** | 8.4 | 6.8 | **11.7** | 7.4 | **2.03** | 2.00 | 1.80 |
 | **`macos-install.log`** | **148.2** | 118.4 | 94.2 | 71.5 | **12.77** | 12.05 | 6.71 |
 | **`pg100-shakespeare.txt`** | **11.9** | 7.9 | 7.1 | 4.0 | **3.96** | 3.38 | 1.87 |
-| **`kodak-truecolor-16.bmp`** | **9.1** | 3.6 | 2.2 | 1.5 | **4.23** | 2.26 | 1.20 |
+| **`kodak-truecolor-16.bmp`** | 9.1 | **3.6** | 2.2 | 1.5 | 4.23 | **2.26** | 1.20 |
 | **Text & Structured Geomean (6)** | **30.9** | 19.3 | 19.8 | 13.4 | **5.21** | 4.53 | 2.94 |
-| **2D BMP Geomean (1)** | **9.1** | 3.6 | 2.2 | 1.5 | **4.23** | 2.26 | 1.20 |
+| **2D BMP Geomean (1)** | 9.1 | **3.6** | 2.2 | 1.5 | 4.23 | **2.26** | 1.20 |
 | **All-Dataset Geomean (7)** | **25.9** | 15.2 | 14.5 | 9.8 | **5.06** | 4.11 | 2.59 |
 
 ### 4. Per-Process CPU Energy (`J/GB`, Lower is Better) & Green Codec Index (`GCI`)
@@ -64,4 +64,4 @@ Each sweep envelope combines the best block ratio achieved by any tested level i
 | **`apache-access.clf`** | 4.835 | **1.694** | 6.244 | 1.613 | **0.668** | 1.986 | 3.0 | **6.4** | 2.1 |
 | **`macos-install.log`** | 2.392 | **1.513** | 4.646 | 0.842 | **0.474** | 1.084 | 104.4 | **139.8** | 31.9 |
 | **`pg100-shakespeare.txt`** | 9.009 | **6.789** | 25.902 | 1.894 | **1.306** | 5.151 | **2.9** | 2.6 | 0.4 |
-| **`kodak-truecolor-16.bmp`** | **2.868** | 3.437 | 32.956 | **0.345** | 0.721 | 2.771 | **9.1** | 2.3 | 0.2 |
+| **`kodak-truecolor-16.bmp`** | **2.868** | 3.437 | 32.956 | **0.345** | 0.721 | 2.771 | 9.1 | **2.3** | 0.2 |

@@ -54,12 +54,22 @@ fn fmt_min(val: f64, peers: &[f64], prec: usize) -> String {
     }
 }
 
-fn fmt_max(val: f64, peers: &[f64], prec: usize) -> String {
+/// Formats throughput or composite score, refusing to bold codecs with near-raw storage
+/// (`ratio >= 0.90`, i.e. `< 10%` compression) when comparing speed/trade-off winners.
+fn fmt_max_compressed(val: f64, ratio: f64, peers: &[(f64, f64)], prec: usize) -> String {
     if val <= 0.0 {
         return "—".into();
     }
-    let best = peers.iter().copied().fold(0.0f64, f64::max);
-    if (val - best).abs() <= 1e-9 {
+    if ratio >= 0.90 {
+        return format!("{val:.prec$}");
+    }
+    let best = peers
+        .iter()
+        .copied()
+        .filter(|&(_, r)| r > 0.0 && r < 0.90)
+        .map(|(v, _)| v)
+        .fold(0.0f64, f64::max);
+    if best > 0.0 && (val - best).abs() <= 1e-9 {
         format!("**{val:.prec$}**")
     } else {
         format!("{val:.prec$}")
@@ -75,8 +85,18 @@ fn write_table1_row(f: &mut fs::File, label: &str, size_col: &str, s: &DatasetSu
         s.zstd_dict_3.ratio,
         s.zstd_dict_9.ratio,
     ];
-    let encs = [s.vxg.enc, s.lz4_a1.enc, s.zstd_1.enc, s.zstd_dict_3.enc];
-    let decs = [s.vxg.dec, s.lz4_a1.dec, s.zstd_1.dec, s.zstd_dict_3.dec];
+    let encs = [
+        (s.vxg.enc, s.vxg.ratio),
+        (s.lz4_a1.enc, s.lz4_a1.ratio),
+        (s.zstd_1.enc, s.zstd_1.ratio),
+        (s.zstd_dict_3.enc, s.zstd_dict_3.ratio),
+    ];
+    let decs = [
+        (s.vxg.dec, s.vxg.ratio),
+        (s.lz4_a1.dec, s.lz4_a1.ratio),
+        (s.zstd_1.dec, s.zstd_1.ratio),
+        (s.zstd_dict_3.dec, s.zstd_dict_3.ratio),
+    ];
     let whole_r = if s.zstd_whole_19.ratio > 0.0 {
         format!("{:.4}", s.zstd_whole_19.ratio)
     } else {
@@ -96,14 +116,14 @@ fn write_table1_row(f: &mut fs::File, label: &str, size_col: &str, s: &DatasetSu
         fmt_min(s.zstd_9.ratio, &blk_ratios, 4),
         fmt_min(s.zstd_dict_3.ratio, &blk_ratios, 4),
         fmt_min(s.zstd_dict_9.ratio, &blk_ratios, 4),
-        fmt_max(s.vxg.enc, &encs, 3),
-        fmt_max(s.lz4_a1.enc, &encs, 3),
-        fmt_max(s.zstd_1.enc, &encs, 3),
-        fmt_max(s.zstd_dict_3.enc, &encs, 3),
-        fmt_max(s.vxg.dec, &decs, 3),
-        fmt_max(s.lz4_a1.dec, &decs, 3),
-        fmt_max(s.zstd_1.dec, &decs, 3),
-        fmt_max(s.zstd_dict_3.dec, &decs, 3),
+        fmt_max_compressed(s.vxg.enc, s.vxg.ratio, &encs, 3),
+        fmt_max_compressed(s.lz4_a1.enc, s.lz4_a1.ratio, &encs, 3),
+        fmt_max_compressed(s.zstd_1.enc, s.zstd_1.ratio, &encs, 3),
+        fmt_max_compressed(s.zstd_dict_3.enc, s.zstd_dict_3.ratio, &encs, 3),
+        fmt_max_compressed(s.vxg.dec, s.vxg.ratio, &decs, 3),
+        fmt_max_compressed(s.lz4_a1.dec, s.lz4_a1.ratio, &decs, 3),
+        fmt_max_compressed(s.zstd_1.dec, s.zstd_1.ratio, &decs, 3),
+        fmt_max_compressed(s.zstd_dict_3.dec, s.zstd_dict_3.ratio, &decs, 3),
     )?;
     Ok(())
 }
@@ -192,7 +212,7 @@ pub(super) fn write_markdown_report(
     )?;
     writeln!(
         f,
-        "\n- **Block-independent codecs (`{}`-byte blocks, random access = YES):** `VXG v4`, `liblz4 {lz}` (`lz4-c-a1`, `lz4-c-a4`{}), and `libzstd {zs}` (`zstd-c-l-3`, `zstd-c-l1`, `zstd-c-l3`, `zstd-dict-l3`{}).\n- **Dictionary accounting:** `zstd-dict-*` trains up to a `32 KiB` dictionary via `ZDICT_trainFromBuffer` (charging `dict_bytes` in compressed size); steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput is reported in `Enc` / `Dec`, with one-time `ZDICT` training time reported separately in `Dict Train (ms)`.\n- **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window, single stream) quantifies the compression-ratio difference of removing `{}`-byte block boundaries.\n- Bold cells mark the best block-codec metric in each row (lowest block ratio, highest encode `GB/s`, highest decode `GB/s`).\n",
+        "\n- **Block-independent codecs (`{}`-byte blocks, random access = YES):** `VXG v4`, `liblz4 {lz}` (`lz4-c-a1`, `lz4-c-a4`{}), and `libzstd {zs}` (`zstd-c-l-3`, `zstd-c-l1`, `zstd-c-l3`, `zstd-dict-l3`{}).\n- **Dictionary accounting:** `zstd-dict-*` trains up to a `32 KiB` dictionary via `ZDICT_trainFromBuffer` (charging `dict_bytes` in compressed size); steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput is reported in `Enc` / `Dec`, with one-time `ZDICT` training time reported separately in `Dict Train (ms)`.\n- **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window, single stream) quantifies the compression-ratio difference of removing `{}`-byte block boundaries.\n- Bold cells mark the best block-codec metric in each row; codecs storing near-raw bytes (`ratio >= 0.90`, `< 10%` size reduction) are excluded from speed/trade-off bolding.\n",
         c.block_size,
         if has_heavy { ", `lz4hc-c-l9`" } else { "" },
         if has_heavy {
@@ -243,25 +263,30 @@ pub(super) fn write_markdown_report(
     )?;
     let write_env_row = |f: &mut fs::File, label: &str, v: CodecPoint, lc: CodecPoint, zc: CodecPoint, ac: CodecPoint| -> R<()> {
         let ratios = [v.ratio, lc.ratio, zc.ratio];
-        let encs = [v.enc, lc.enc, zc.enc];
-        let decs = [v.dec, lc.dec, zc.dec];
-        let vpis = [point_vpi(v), point_vpi(lc), point_vpi(zc), point_vpi(ac)];
+        let encs = [(v.enc, v.ratio), (lc.enc, lc.ratio), (zc.enc, zc.ratio)];
+        let decs = [(v.dec, v.ratio), (lc.dec, lc.ratio), (zc.dec, zc.ratio)];
+        let vpis = [
+            (point_vpi(v), v.ratio),
+            (point_vpi(lc), lc.ratio),
+            (point_vpi(zc), zc.ratio),
+            (point_vpi(ac), ac.ratio),
+        ];
         writeln!(
             f,
             "| {label} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             fmt_min(v.ratio, &ratios, 4),
             fmt_min(lc.ratio, &ratios, 4),
             fmt_min(zc.ratio, &ratios, 4),
-            fmt_max(v.enc, &encs, 3),
-            fmt_max(lc.enc, &encs, 3),
-            fmt_max(zc.enc, &encs, 3),
-            fmt_max(v.dec, &decs, 3),
-            fmt_max(lc.dec, &decs, 3),
-            fmt_max(zc.dec, &decs, 3),
-            fmt_max(point_vpi(v), &vpis, 1),
-            fmt_max(point_vpi(lc), &vpis, 1),
-            fmt_max(point_vpi(zc), &vpis, 1),
-            fmt_max(point_vpi(ac), &vpis, 1),
+            fmt_max_compressed(v.enc, v.ratio, &encs, 3),
+            fmt_max_compressed(lc.enc, lc.ratio, &encs, 3),
+            fmt_max_compressed(zc.enc, zc.ratio, &encs, 3),
+            fmt_max_compressed(v.dec, v.ratio, &decs, 3),
+            fmt_max_compressed(lc.dec, lc.ratio, &decs, 3),
+            fmt_max_compressed(zc.dec, zc.ratio, &decs, 3),
+            fmt_max_compressed(point_vpi(v), v.ratio, &vpis, 1),
+            fmt_max_compressed(point_vpi(lc), lc.ratio, &vpis, 1),
+            fmt_max_compressed(point_vpi(zc), zc.ratio, &vpis, 1),
+            fmt_max_compressed(point_vpi(ac), ac.ratio, &vpis, 1),
         )?;
         Ok(())
     };
@@ -313,55 +338,37 @@ pub(super) fn write_markdown_report(
         f,
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
     )?;
-    for s in summaries {
+    let write_idx_row = |f: &mut fs::File, label: &str, s: &DatasetSummary| -> R<()> {
         let vpis = [
-            point_vpi(s.vxg),
-            point_vpi(s.lz4_a1),
-            point_vpi(s.zstd_1),
-            point_vpi(s.zstd_dict_3),
+            (point_vpi(s.vxg), s.vxg.ratio),
+            (point_vpi(s.lz4_a1), s.lz4_a1.ratio),
+            (point_vpi(s.zstd_1), s.zstd_1.ratio),
+            (point_vpi(s.zstd_dict_3), s.zstd_dict_3.ratio),
         ];
         let bcis = [
-            point_bci(s.vxg),
-            point_bci(s.lz4_a1),
-            point_bci(s.zstd_dict_3),
-        ];
-        writeln!(
-            f,
-            "| **`{}`** | {} | {} | {} | {} | {} | {} | {} |",
-            short_name(&s.name),
-            fmt_max(point_vpi(s.vxg), &vpis, 1),
-            fmt_max(point_vpi(s.lz4_a1), &vpis, 1),
-            fmt_max(point_vpi(s.zstd_1), &vpis, 1),
-            fmt_max(point_vpi(s.zstd_dict_3), &vpis, 1),
-            fmt_max(point_bci(s.vxg), &bcis, 2),
-            fmt_max(point_bci(s.lz4_a1), &bcis, 2),
-            fmt_max(point_bci(s.zstd_dict_3), &bcis, 2),
-        )?;
-    }
-    for (label, grp) in &groups {
-        let gm = synth_geomean_summary(grp);
-        let vpis = [
-            point_vpi(gm.vxg),
-            point_vpi(gm.lz4_a1),
-            point_vpi(gm.zstd_1),
-            point_vpi(gm.zstd_dict_3),
-        ];
-        let bcis = [
-            point_bci(gm.vxg),
-            point_bci(gm.lz4_a1),
-            point_bci(gm.zstd_dict_3),
+            (point_bci(s.vxg), s.vxg.ratio),
+            (point_bci(s.lz4_a1), s.lz4_a1.ratio),
+            (point_bci(s.zstd_dict_3), s.zstd_dict_3.ratio),
         ];
         writeln!(
             f,
             "| {label} | {} | {} | {} | {} | {} | {} | {} |",
-            fmt_max(point_vpi(gm.vxg), &vpis, 1),
-            fmt_max(point_vpi(gm.lz4_a1), &vpis, 1),
-            fmt_max(point_vpi(gm.zstd_1), &vpis, 1),
-            fmt_max(point_vpi(gm.zstd_dict_3), &vpis, 1),
-            fmt_max(point_bci(gm.vxg), &bcis, 2),
-            fmt_max(point_bci(gm.lz4_a1), &bcis, 2),
-            fmt_max(point_bci(gm.zstd_dict_3), &bcis, 2),
+            fmt_max_compressed(point_vpi(s.vxg), s.vxg.ratio, &vpis, 1),
+            fmt_max_compressed(point_vpi(s.lz4_a1), s.lz4_a1.ratio, &vpis, 1),
+            fmt_max_compressed(point_vpi(s.zstd_1), s.zstd_1.ratio, &vpis, 1),
+            fmt_max_compressed(point_vpi(s.zstd_dict_3), s.zstd_dict_3.ratio, &vpis, 1),
+            fmt_max_compressed(point_bci(s.vxg), s.vxg.ratio, &bcis, 2),
+            fmt_max_compressed(point_bci(s.lz4_a1), s.lz4_a1.ratio, &bcis, 2),
+            fmt_max_compressed(point_bci(s.zstd_dict_3), s.zstd_dict_3.ratio, &bcis, 2),
         )?;
+        Ok(())
+    };
+    for s in summaries {
+        write_idx_row(&mut f, &format!("**`{}`**", short_name(&s.name)), s)?;
+    }
+    for (label, grp) in &groups {
+        let gm = synth_geomean_summary(grp);
+        write_idx_row(&mut f, label, &gm)?;
     }
 
     if summaries.iter().any(|s| s.vxg.enc_j_gb.is_some()) {
@@ -389,9 +396,9 @@ pub(super) fn write_markdown_report(
                 s.zstd_dict_3.dec_j_gb.unwrap_or(0.0),
             ];
             let gcis = [
-                point_gci(s.vxg).unwrap_or(0.0),
-                point_gci(s.lz4_a1).unwrap_or(0.0),
-                point_gci(s.zstd_dict_3).unwrap_or(0.0),
+                (point_gci(s.vxg).unwrap_or(0.0), s.vxg.ratio),
+                (point_gci(s.lz4_a1).unwrap_or(0.0), s.lz4_a1.ratio),
+                (point_gci(s.zstd_dict_3).unwrap_or(0.0), s.zstd_dict_3.ratio),
             ];
             writeln!(
                 f,
@@ -403,9 +410,9 @@ pub(super) fn write_markdown_report(
                 fmt_min(dj[0], &dj, 3),
                 fmt_min(dj[1], &dj, 3),
                 fmt_min(dj[2], &dj, 3),
-                fmt_max(gcis[0], &gcis, 1),
-                fmt_max(gcis[1], &gcis, 1),
-                fmt_max(gcis[2], &gcis, 1),
+                fmt_max_compressed(gcis[0].0, gcis[0].1, &gcis, 1),
+                fmt_max_compressed(gcis[1].0, gcis[1].1, &gcis, 1),
+                fmt_max_compressed(gcis[2].0, gcis[2].1, &gcis, 1),
             )?;
         }
     }

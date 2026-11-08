@@ -210,6 +210,15 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
         con = duckdb.connect()
         con.execute(f"SET threads TO {threads};")
 
+        # Measure pure Python + DuckDB parse/plan/fetch overhead (`SELECT 1` ad-hoc & prepared)
+        sel1_adhoc_ms, _ = bench_median_ms(
+            lambda: con.execute("SELECT 1").fetchall(), samples=11, warmups=3
+        )
+        con.execute("PREPARE sel1_stmt AS SELECT 1;")
+        sel1_prep_ms, _ = bench_median_ms(
+            lambda: con.execute("EXECUTE sel1_stmt").fetchall(), samples=11, warmups=3
+        )
+
         src_raw = (
             f"read_json_auto('{path}')"
             if kind == "ndjson"
@@ -224,7 +233,7 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
         src_pq_snap = f"read_parquet('{pq_snap_path}')"
 
         q_rows = []
-        for q in spec["queries"]:
+        for qi, q in enumerate(spec["queries"]):
             qtype = q["type"]
             label = q["label"]
 
@@ -321,10 +330,23 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
                 sql = q["sql"].format(tbl=tbl_src)
                 return bench_median_ms(lambda: con.execute(sql).fetchall(), samples=5, warmups=1)
 
+            def bench_duck_prepared(stmt_name: str, tbl_src: str):
+                sql = q["sql"].format(tbl=tbl_src)
+                con.execute(f"PREPARE {stmt_name} AS {sql};")
+                return bench_median_ms(
+                    lambda: con.execute(f"EXECUTE {stmt_name}").fetchall(), samples=7, warmups=2
+                )
+
             raw_ms, d_raw = bench_duck(src_raw)
             zst_ms, d_zst = bench_duck(src_zst)
             pq_snap_ms_q, d_pq_s = bench_duck(src_pq_snap)
             pq_zstd_ms_q, d_pq_z = bench_duck(src_pq_zstd)
+            pq_snap_prep_ms, d_pq_sp = bench_duck_prepared(f"pqs_{qi}", src_pq_snap)
+            pq_zstd_prep_ms, d_pq_zp = bench_duck_prepared(f"pqz_{qi}", src_pq_zstd)
+            if qtype == "group_by":
+                assert sorted(d_pq_s) == sorted(d_pq_sp) and sorted(d_pq_z) == sorted(d_pq_zp)
+            else:
+                assert d_pq_s == d_pq_sp and d_pq_z == d_pq_zp
 
             # Strict semantic equivalence check between VXG and DuckDB!
             if qtype == "count_where":
@@ -355,18 +377,27 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
                     "duck_raw_ms": raw_ms,
                     "duck_zst_ms": zst_ms,
                     "duck_pq_snap_ms": pq_snap_ms_q,
+                    "duck_pq_snap_prep_ms": pq_snap_prep_ms,
                     "duck_pq_zstd_ms": pq_zstd_ms_q,
+                    "duck_pq_zstd_prep_ms": pq_zstd_prep_ms,
                     "duck_pq_zstd_mrows_s": mrows / (pq_zstd_ms_q / 1000.0),
+                    "duck_pq_zstd_prep_mrows_s": mrows / (pq_zstd_prep_ms / 1000.0),
                 }
             )
             print(
-                f"  [{name} {threads}T] {label:44s}  VXG={vxg_ms:6.2f}ms ({mrows/(vxg_ms/1000.0):6.1f} Mrow/s) | "
+                f"  [{name} {threads}T sel1={sel1_adhoc_ms:.2f}/{sel1_prep_ms:.2f}ms] {label:44s}  "
+                f"VXG={vxg_ms:6.2f}ms ({mrows/(vxg_ms/1000.0):6.1f} Mrow/s) | "
                 f"DuckRaw={raw_ms:6.2f}ms | DuckZst={zst_ms:6.2f}ms | "
-                f"DuckParqSnap={pq_snap_ms_q:6.2f}ms | DuckParqZstd={pq_zstd_ms_q:6.2f}ms",
+                f"ParqSnap={pq_snap_ms_q:5.2f}ms(prep {pq_snap_prep_ms:5.2f}) | "
+                f"ParqZstd={pq_zstd_ms_q:5.2f}ms(prep {pq_zstd_prep_ms:5.2f})",
                 flush=True,
             )
 
-        results_by_threads[str(threads)] = q_rows
+        results_by_threads[str(threads)] = {
+            "duck_select_1_adhoc_ms": sel1_adhoc_ms,
+            "duck_select_1_prepared_ms": sel1_prep_ms,
+            "queries": q_rows,
+        }
 
     return {"name": name, "category": spec["category"], "storage": storage, "threads": results_by_threads}
 
