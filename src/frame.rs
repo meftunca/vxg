@@ -14,11 +14,14 @@ pub const VERSION_V3: u16 = 3;
 /// payload offsets are implied by the canonical block order, so random access
 /// stays O(1) after one prefix-sum pass in `Frame::parse`.
 pub const VERSION_V4: u16 = 4;
-/// Version emitted by default.
+/// v5 extends v4 with an optional frame-shared prefix dictionary (`FLAG_FRAME_DICT = 0x02`)
+/// and optional variable-size record-aligned block directory (`FLAG_VAR_RAW = 0x04`).
+pub const VERSION_V5: u16 = 5;
+/// Version emitted by default when neither frame dictionary nor record-aligned variable blocks are active.
 pub const VERSION_RELEASE: u16 = VERSION_V4;
 pub const ENTRY_SIZE_V4: usize = 8;
 const MIN_VERSION: u16 = 1;
-const MAX_VERSION: u16 = VERSION_V4;
+const MAX_VERSION: u16 = VERSION_V5;
 const V4_SIZE_MASK: u32 = 0x3fff_ffff;
 
 /// Directory entry size for a given frame version.
@@ -92,6 +95,7 @@ pub(crate) struct WorkerSlice<'a> {
 #[derive(Debug)]
 pub struct Frame<'a> {
     pub(crate) blocks: Vec<Block<'a>>,
+    pub(crate) dict: Vec<u8>,
     pub(crate) raw_size: usize,
     pub(crate) block_size: usize,
     pub(crate) checksummed: bool,
@@ -149,58 +153,46 @@ pub(crate) fn parse_header_only(
     src: &[u8],
     max_output: usize,
 ) -> Result<(usize, usize, usize, u16, bool, usize)> {
-    if src.len() < HEADER_SIZE {
-        return Err(Error::Truncated);
+    let hdr = v5::parse_v1_to_v5_header(src, max_output)?;
+    Ok((
+        hdr.raw_size,
+        hdr.block_size,
+        hdr.count,
+        hdr.version,
+        hdr.checksummed,
+        hdr.payload_start,
+    ))
+}
+
+#[inline]
+pub(crate) fn valid_kind_and_size(version: u16, kind: u32, cn: usize, rn: usize) -> bool {
+    match kind {
+        block::RAW => cn == rn,
+        block::LZ => cn < rn && cn >= block::BLOCK_PREFIX,
+        block::COLUMN => version >= 3 && cn >= 2 && cn < rn,
+        block::DICT_LZ => version >= VERSION_V5 && cn >= 2 && cn < rn,
+        _ => false,
     }
-    let version = u16::from_le_bytes(src[4..6].try_into().unwrap());
-    if &src[..4] != MAGIC || !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-        return Err(Error::InvalidFrame("magic/version"));
-    }
-    let flags = u16::from_le_bytes(src[6..8].try_into().unwrap());
-    if flags & !1 != 0 || read_u64(src, 24)? != 0 {
-        return Err(Error::InvalidFrame("unknown flags/reserved data"));
-    }
-    let raw64 = read_u64(src, 8)?;
-    if raw64 > max_output as u64 {
-        return Err(Error::OutputLimit {
-            requested: raw64,
-            limit: max_output,
-        });
-    }
-    let raw_size = usize::try_from(raw64).map_err(|_| Error::SizeOverflow)?;
-    let block_size = read_u32(src, 16)? as usize;
-    check_block_size(block_size).map_err(|_| Error::InvalidFrame("block size"))?;
-    let count = read_u32(src, 20)? as usize;
-    let expected_count = raw_size / block_size + usize::from(raw_size % block_size != 0);
-    if count != expected_count {
-        return Err(Error::InvalidFrame("block count"));
-    }
-    let esize = entry_size(version);
-    let dir_end = count
-        .checked_mul(esize)
-        .and_then(|v| v.checked_add(HEADER_SIZE))
-        .ok_or(Error::SizeOverflow)?;
-    Ok((raw_size, block_size, count, version, flags != 0, dir_end))
 }
 
 /// Validates the header and directory prefix of `src` and returns `(frame_compressed_size, raw_size)`.
 pub(crate) fn parse_header_and_dir(src: &[u8], max_output: usize) -> Result<(usize, usize)> {
-    let (raw_size, block_size, count, version, checksummed, dir_end) =
-        parse_header_only(src, max_output)?;
-    if src.len() < dir_end {
+    let hdr = v5::parse_v1_to_v5_header(src, max_output)?;
+    if src.len() < hdr.payload_start {
         return Err(Error::Truncated);
     }
-    let esize = entry_size(version);
-    let mut next_payload = dir_end;
+    let esize = entry_size(hdr.version);
+    let mut next_payload = hdr.payload_start;
     let mut next_raw = 0usize;
-    for i in 0..count {
+    for i in 0..hdr.count {
         let p = HEADER_SIZE + i * esize;
-        let (raw_offset, payload_offset, rn, cn, checksum, kind) = if version >= VERSION_V4 {
+        let expected_rn = v5::block_raw_size(src, &hdr, i, next_raw)?;
+        let (raw_offset, payload_offset, rn, cn, checksum, kind) = if hdr.version >= VERSION_V4 {
             let word = read_u32(src, p)?;
             (
                 next_raw,
                 next_payload,
-                block_size.min(raw_size - next_raw),
+                expected_rn,
                 (word & V4_SIZE_MASK) as usize,
                 read_u32(src, p + 4)?,
                 word >> 30,
@@ -215,84 +207,48 @@ pub(crate) fn parse_header_and_dir(src: &[u8], max_output: usize) -> Result<(usi
                 read_u32(src, p + 28)?,
             )
         };
-        if raw_offset != next_raw
-            || payload_offset != next_payload
-            || rn != block_size.min(raw_size - next_raw)
-        {
+        if raw_offset != next_raw || payload_offset != next_payload || rn != expected_rn {
             return Err(Error::InvalidFrame("non-canonical directory"));
         }
-        let kind_size_ok = match kind {
-            block::RAW => cn == rn,
-            block::LZ => cn < rn && cn >= block::BLOCK_PREFIX,
-            block::COLUMN => version >= 3 && cn >= 2 && cn < rn,
-            _ => false,
-        };
-        if !kind_size_ok {
+        if !valid_kind_and_size(hdr.version, kind, cn, rn) {
             return Err(Error::InvalidFrame("block kind/size"));
         }
-        if !checksummed && checksum != 0 {
+        if !hdr.checksummed && checksum != 0 {
             return Err(Error::InvalidFrame("checksum without flag"));
         }
         next_payload = payload_offset.checked_add(cn).ok_or(Error::SizeOverflow)?;
         next_raw += rn;
     }
-    if next_raw != raw_size {
+    if next_raw != hdr.raw_size {
         return Err(Error::InvalidFrame("trailing bytes or incorrect total"));
     }
-    Ok((next_payload, raw_size))
+    Ok((next_payload, hdr.raw_size))
 }
 impl<'a> Frame<'a> {
     /// Validates the header and directory before any output allocation.
     /// Command validation is fused with CPU decoding, or explicitly requested by GPU callers.
     pub fn parse(src: &'a [u8], max_output: usize) -> Result<Self> {
-        if src.len() < HEADER_SIZE {
+        let hdr = v5::parse_v1_to_v5_header(src, max_output)?;
+        if hdr.payload_start > src.len() {
             return Err(Error::Truncated);
         }
-        let version = u16::from_le_bytes(src[4..6].try_into().unwrap());
-        if &src[..4] != MAGIC || !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(Error::InvalidFrame("magic/version"));
-        }
-        let flags = u16::from_le_bytes(src[6..8].try_into().unwrap());
-        if flags & !1 != 0 || read_u64(src, 24)? != 0 {
-            return Err(Error::InvalidFrame("unknown flags/reserved data"));
-        }
-        let raw64 = read_u64(src, 8)?;
-        if raw64 > max_output as u64 {
-            return Err(Error::OutputLimit {
-                requested: raw64,
-                limit: max_output,
-            });
-        }
-        let raw_size = usize::try_from(raw64).map_err(|_| Error::SizeOverflow)?;
-        let block_size = read_u32(src, 16)? as usize;
-        check_block_size(block_size).map_err(|_| Error::InvalidFrame("block size"))?;
-        let count = read_u32(src, 20)? as usize;
-        let expected_count = raw_size / block_size + usize::from(raw_size % block_size != 0);
-        if count != expected_count {
-            return Err(Error::InvalidFrame("block count"));
-        }
-        let esize = entry_size(version);
-        let dir_end = count
-            .checked_mul(esize)
-            .and_then(|v| v.checked_add(HEADER_SIZE))
-            .ok_or(Error::SizeOverflow)?;
-        if dir_end > src.len() {
-            return Err(Error::Truncated);
-        }
+        let dict = v5::decode_header_dict(src, &hdr)?;
+        let esize = entry_size(hdr.version);
         let mut blocks = Vec::new();
         blocks
-            .try_reserve_exact(count)
+            .try_reserve_exact(hdr.count)
             .map_err(|_| Error::SizeOverflow)?;
-        let mut next_payload = dir_end;
+        let mut next_payload = hdr.payload_start;
         let mut next_raw = 0;
-        for i in 0..count {
+        for i in 0..hdr.count {
             let p = HEADER_SIZE + i * esize;
-            let (raw_offset, payload_offset, rn, cn, checksum, kind) = if version >= VERSION_V4 {
+            let expected_rn = v5::block_raw_size(src, &hdr, i, next_raw)?;
+            let (raw_offset, payload_offset, rn, cn, checksum, kind) = if hdr.version >= VERSION_V4 {
                 let word = read_u32(src, p)?;
                 (
                     next_raw,
                     next_payload,
-                    block_size.min(raw_size - next_raw),
+                    expected_rn,
                     (word & V4_SIZE_MASK) as usize,
                     read_u32(src, p + 4)?,
                     word >> 30,
@@ -307,22 +263,13 @@ impl<'a> Frame<'a> {
                     read_u32(src, p + 28)?,
                 )
             };
-            if raw_offset != next_raw
-                || payload_offset != next_payload
-                || rn != block_size.min(raw_size - next_raw)
-            {
+            if raw_offset != next_raw || payload_offset != next_payload || rn != expected_rn {
                 return Err(Error::InvalidFrame("non-canonical directory"));
             }
-            let kind_size_ok = match kind {
-                block::RAW => cn == rn,
-                block::LZ => cn < rn && cn >= block::BLOCK_PREFIX,
-                block::COLUMN => version >= 3 && cn >= 2 && cn < rn,
-                _ => false,
-            };
-            if !kind_size_ok {
+            if !valid_kind_and_size(hdr.version, kind, cn, rn) {
                 return Err(Error::InvalidFrame("block kind/size"));
             }
-            if flags == 0 && checksum != 0 {
+            if !hdr.checksummed && checksum != 0 {
                 return Err(Error::InvalidFrame("checksum without flag"));
             }
             let end = payload_offset.checked_add(cn).ok_or(Error::SizeOverflow)?;
@@ -341,15 +288,16 @@ impl<'a> Frame<'a> {
             next_raw += rn;
             next_payload = end;
         }
-        if next_raw != raw_size || next_payload != src.len() {
+        if next_raw != hdr.raw_size || next_payload != src.len() {
             return Err(Error::InvalidFrame("trailing bytes or incorrect total"));
         }
         Ok(Self {
             blocks,
-            raw_size,
-            block_size,
-            checksummed: flags != 0,
-            version,
+            dict,
+            raw_size: hdr.raw_size,
+            block_size: hdr.block_size,
+            checksummed: hdr.checksummed,
+            version: hdr.version,
         })
     }
     /// Parses one `VXG1` frame or a concatenated sequence of `VXG1` frames.
@@ -386,9 +334,20 @@ impl<'a> Frame<'a> {
     pub fn blocks(&self) -> impl ExactSizeIterator<Item = BlockInfo> + '_ {
         self.blocks.iter().map(|b| b.info)
     }
+    /// Shared prefix dictionary bytes attached to this frame (`empty` when none).
+    #[inline]
+    pub fn dict(&self) -> &[u8] {
+        &self.dict
+    }
     pub fn validate_commands(&self) -> Result<()> {
         for b in &self.blocks {
-            block::validate(b.payload, b.info.kind, b.info.raw_size, self.version >= 2)?;
+            block::validate_with_dict(
+                b.payload,
+                b.info.kind,
+                b.info.raw_size,
+                self.version >= 2,
+                &self.dict,
+            )?;
         }
         Ok(())
     }
@@ -440,12 +399,13 @@ impl<'a> Frame<'a> {
             });
         }
         let dst = &mut out[..b.info.raw_size];
-        block::decode(
+        block::decode_with_dict(
             b.payload,
             b.info.kind,
             dst,
             Engine::new(options.simd)?,
             self.version >= 2,
+            &self.dict,
         )?;
         if self.checksummed && options.verify_checksum && crc32c(dst) != b.info.checksum {
             return Err(Error::Checksum { block: index });
@@ -473,6 +433,7 @@ impl<'a> ValidatedFrame<'a> {
 
 mod assemble;
 mod decode;
+pub(crate) mod v5;
 
 pub(crate) use assemble::{assemble, parallel_encode_assemble, AssembleDest, Part};
 use decode::decode_frame_into;

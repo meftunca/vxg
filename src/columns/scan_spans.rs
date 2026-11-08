@@ -174,31 +174,66 @@ fn slice_eq_fast(a: &[u8], b: &[u8]) -> bool {
 /// them is 100% equivalent to `parse_record(record)` producing identical
 /// segments. We verify this clean-segment property once via `template_is_clean`.
 #[inline(always)]
+fn scan_clean_json_seg_keys(seg: &[u8], mut p: usize, depth: &mut usize) -> bool {
+    loop {
+        if seg.get(p) != Some(&b'"') {
+            return false;
+        }
+        let Some(end_key) = scan_string(seg, p) else {
+            return false;
+        };
+        if seg.get(end_key) != Some(&b':') {
+            return false;
+        }
+        p = end_key + 1;
+        if p == seg.len() {
+            return true;
+        }
+        if seg.get(p) == Some(&b'{') && *depth < 4 {
+            *depth += 1;
+            p += 1;
+            continue;
+        }
+        return false;
+    }
+}
+
+#[inline(always)]
 fn template_is_clean(segments: &[&[u8]]) -> bool {
     let slots = segments.len().saturating_sub(1);
     if slots == 0 {
         return false;
     }
     let first = segments[0];
-    if first.first() != Some(&b'{') || first.last() != Some(&b':') {
+    if first.first() != Some(&b'{') {
         return false;
     }
-    if scan_string(first, 1) != Some(first.len() - 1) {
+    let mut depth = 1usize;
+    if !scan_clean_json_seg_keys(first, 1, &mut depth) {
         return false;
     }
     for seg in &segments[1..slots] {
-        if seg.first() != Some(&b',') || seg.last() != Some(&b':') {
+        let mut p = 0usize;
+        while seg.get(p) == Some(&b'}') {
+            if depth <= 1 {
+                return false;
+            }
+            depth -= 1;
+            p += 1;
+        }
+        if seg.get(p) != Some(&b',') {
             return false;
         }
-        if scan_string(seg, 1) != Some(seg.len() - 1) {
+        if !scan_clean_json_seg_keys(seg, p + 1, &mut depth) {
             return false;
         }
     }
     let last = segments[slots];
-    match last {
-        b"}" | b"}\n" | b"}\r\n" => true,
-        _ => false,
-    }
+    let body = last
+        .strip_suffix(b"\r\n")
+        .or_else(|| last.strip_suffix(b"\n"))
+        .unwrap_or(last);
+    body.len() == depth && body.iter().all(|&b| b == b'}')
 }
 
 #[inline(always)]

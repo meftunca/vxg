@@ -3,7 +3,8 @@
 use crate::{Error, Result};
 
 use super::line::{
-    encode_json_str, scan_json_str_end, scan_json_val_end, unescape_json_str, ColTarget,
+    encode_json_str, find_json_obj_path_span, scan_json_str_end, scan_json_val_end,
+    unescape_json_str, ColTarget,
 };
 
 pub(crate) fn validate_projection_cols(cols: &[ColTarget<'_>]) -> Result<()> {
@@ -60,6 +61,7 @@ pub fn project_line(line: &[u8], cols: &[ColTarget<'_>], dst: &mut Vec<u8>) -> b
         (b"", line.len())
     };
     let mut spans: [Option<(usize, usize)>; 128] = [None; 128];
+    let mut exact_matched: [bool; 128] = [false; 128];
     match cols[0] {
         ColTarget::JsonKey(_) => {
             let mut pos = 0usize;
@@ -90,13 +92,29 @@ pub fn project_line(line: &[u8], cols: &[ColTarget<'_>], dst: &mut Vec<u8>) -> b
                     return false;
                 };
                 if let Some(k_dec) = unescape_json_str(&line[k_start..k_end]) {
+                    let kb = k_dec.as_ref();
                     for (j, &col) in cols.iter().enumerate() {
-                        if spans[j].is_none() {
-                            let ColTarget::JsonKey(tk) = col else {
-                                return false;
-                            };
-                            if k_dec.as_ref() == tk.as_bytes() {
+                        let ColTarget::JsonKey(tk) = col else {
+                            return false;
+                        };
+                        let tkb = tk.as_bytes();
+                        if kb == tkb {
+                            if !exact_matched[j] {
                                 spans[j] = Some((v_start, v_end));
+                                exact_matched[j] = true;
+                            }
+                        } else if spans[j].is_none()
+                            && line.get(v_start) == Some(&b'{')
+                            && tkb.len() > kb.len()
+                            && tkb.starts_with(kb)
+                            && tkb[kb.len()] == b'.'
+                        {
+                            if let Some((ss, se)) = find_json_obj_path_span(
+                                &line[v_start..v_end],
+                                &tkb[kb.len() + 1..],
+                                false,
+                            ) {
+                                spans[j] = Some((v_start + ss, v_start + se));
                             }
                         }
                     }

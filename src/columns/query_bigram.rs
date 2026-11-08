@@ -214,7 +214,9 @@ fn timestamp_can_contain(mut c: Cursor<'_>, needle: &[u8]) -> Result<bool> {
     if needle.len() > 22 || needle.iter().any(|&b| b >= 128) {
         return Ok(false);
     }
-    let year = c.u16()?;
+    let raw_year = c.u16()?;
+    let unquoted = (raw_year & 0x8000) != 0;
+    let year = raw_year & 0x7fff;
     if year > 9999 {
         return Err(invalid("column timestamp year"));
     }
@@ -267,10 +269,14 @@ fn timestamp_can_contain(mut c: Cursor<'_>, needle: &[u8]) -> Result<bool> {
         pm[COMP_POS[i]] = tens;
         pm[COMP_POS[i] + 1] = ones_m;
     }
-    let max_start = 22 - needle.len();
+    let active_pm = if unquoted { &pm[1..21] } else { &pm[..] };
+    if needle.len() > active_pm.len() {
+        return Ok(false);
+    }
+    let max_start = active_pm.len() - needle.len();
     'start: for start in 0..=max_start {
         for (k, &b) in needle.iter().enumerate() {
-            if (pm[start + k] & (1u128 << b)) == 0 {
+            if (active_pm[start + k] & (1u128 << b)) == 0 {
                 continue 'start;
             }
         }

@@ -5,6 +5,8 @@ pub const RAW: u32 = 0;
 pub const LZ: u32 = 1;
 /// Structured-column payload built by the block-local packet encoder.
 pub const COLUMN: u32 = 2;
+/// High-density LZ77 + repcode + canonical Huffman payload (optionally referencing a frame-shared 32 KiB prefix dictionary).
+pub const DICT_LZ: u32 = 3;
 #[cfg(all(feature = "hash13", feature = "hash15"))]
 compile_error!("hash13 and hash15 benchmark features are mutually exclusive");
 #[cfg(feature = "hash13")]
@@ -387,7 +389,9 @@ pub(crate) fn encode<const STATS: bool>(
 }
 
 mod decode;
-pub(crate) use decode::{decode, decode_validated, validate};
+pub(crate) use decode::{
+    decode_validated_with_dict, decode_with_dict, validate, validate_with_dict,
+};
 #[cfg(feature = "bench")]
 pub(crate) use decode::{Command, Parser};
 

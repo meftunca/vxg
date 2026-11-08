@@ -10,7 +10,13 @@ fn json_single_line_template_slot(segs: &[&[u8]], target_key: &[u8]) -> Option<O
     if slots == 0 {
         return None;
     }
-    let mut matched_slot = None;
+    let mut path = [0u8; 512];
+    let mut path_len = 0usize;
+    let mut depth_lens = [0usize; 16];
+    let mut depth = 0usize;
+    let mut top_exact_slot = None;
+    let mut nested_slot = None;
+    let mut has_prefix_slot = false;
     for s in 0..slots {
         let seg = segs[s];
         if seg.contains(&b'\n') {
@@ -18,26 +24,83 @@ fn json_single_line_template_slot(segs: &[&[u8]], target_key: &[u8]) -> Option<O
         }
         let mut p = 0usize;
         skip_space(seg, &mut p);
-        if seg.get(p) != Some(if s == 0 { &b'{' } else { &b',' }) {
-            return None;
+        if s == 0 {
+            if seg.get(p) != Some(&b'{') {
+                return None;
+            }
+            p += 1;
+            depth = 1;
+            depth_lens[0] = 0;
+        } else {
+            while seg.get(p) == Some(&b'}') {
+                if depth <= 1 {
+                    return None;
+                }
+                depth -= 1;
+                path_len = depth_lens[depth - 1];
+                p += 1;
+                skip_space(seg, &mut p);
+            }
+            if seg.get(p) != Some(&b',') {
+                return None;
+            }
+            p += 1;
         }
-        p += 1;
-        skip_space(seg, &mut p);
-        let (k_start, k_end) = (p, scan_string(seg, p)?);
-        p = k_end;
-        skip_space(seg, &mut p);
-        if seg.get(p) != Some(&b':') {
-            return None;
-        }
-        p += 1;
-        skip_space(seg, &mut p);
-        if p != seg.len() {
-            return None;
-        }
-        if matched_slot.is_none()
-            && crate::ops::unescape_json_str(&seg[k_start..k_end])?.as_ref() == target_key
-        {
-            matched_slot = Some(s);
+        loop {
+            skip_space(seg, &mut p);
+            let (k_start, k_end) = (p, scan_string(seg, p)?);
+            p = k_end;
+            let k_dec = crate::ops::unescape_json_str(&seg[k_start..k_end])?;
+            let kb = k_dec.as_ref();
+            skip_space(seg, &mut p);
+            if seg.get(p) != Some(&b':') {
+                return None;
+            }
+            p += 1;
+            skip_space(seg, &mut p);
+            if seg.get(p) == Some(&b'{') {
+                if (depth == 1 && kb == target_key)
+                    || (path_len > 0
+                        && path_len + kb.len() == target_key.len()
+                        && target_key.starts_with(&path[..path_len])
+                        && &target_key[path_len..] == kb)
+                {
+                    return None;
+                }
+                if depth >= 16 || path_len + kb.len() + 1 > path.len() {
+                    return None;
+                }
+                path[path_len..path_len + kb.len()].copy_from_slice(kb);
+                path[path_len + kb.len()] = b'.';
+                path_len += kb.len() + 1;
+                depth_lens[depth] = path_len;
+                depth += 1;
+                p += 1;
+                continue;
+            }
+            if p != seg.len() {
+                return None;
+            }
+            if depth == 1 && kb == target_key {
+                if top_exact_slot.is_none() {
+                    top_exact_slot = Some(s);
+                }
+            } else if path_len > 0
+                && path_len + kb.len() == target_key.len()
+                && target_key.starts_with(&path[..path_len])
+                && &target_key[path_len..] == kb
+            {
+                if nested_slot.is_none() {
+                    nested_slot = Some(s);
+                }
+            } else if path_len + kb.len() < target_key.len()
+                && target_key.starts_with(&path[..path_len])
+                && target_key[path_len..].starts_with(kb)
+                && target_key[path_len + kb.len()] == b'.'
+            {
+                has_prefix_slot = true;
+            }
+            break;
         }
     }
     let last_body = segs[slots]
@@ -48,17 +111,28 @@ fn json_single_line_template_slot(segs: &[&[u8]], target_key: &[u8]) -> Option<O
         return None;
     }
     let mut lp = 0usize;
-    skip_space(last_body, &mut lp);
-    if last_body.get(lp) != Some(&b'}') {
-        return None;
+    for _ in 0..depth {
+        skip_space(last_body, &mut lp);
+        if last_body.get(lp) != Some(&b'}') {
+            return None;
+        }
+        lp += 1;
     }
-    lp += 1;
     skip_space(last_body, &mut lp);
     if last_body.get(lp) == Some(&b',') {
         lp += 1;
         skip_space(last_body, &mut lp);
     }
-    (lp == last_body.len()).then_some(matched_slot)
+    if lp != last_body.len() {
+        return None;
+    }
+    if let Some(s) = top_exact_slot {
+        Some(Some(s))
+    } else if has_prefix_slot {
+        None
+    } else {
+        Some(nested_slot)
+    }
 }
 
 fn resolve_template_slot(
@@ -78,11 +152,14 @@ fn resolve_template_slot(
             if !can_template_match_fast(segs, col_slices, b"{")? {
                 return Ok(SlotLookup::Absent);
             }
-            if !key.is_empty()
-                && !key.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20)
-                && !can_template_match_fast(segs, col_slices, key.as_bytes())?
-            {
-                return Ok(SlotLookup::Absent);
+            if !key.is_empty() && !key.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20) {
+                for part in key.split('.') {
+                    if !part.is_empty()
+                        && !can_template_match_fast(segs, col_slices, part.as_bytes())?
+                    {
+                        return Ok(SlotLookup::Absent);
+                    }
+                }
             }
             Ok(SlotLookup::Fallback)
         }
@@ -177,8 +254,12 @@ fn col_bytes_alphabet_mask(col_bytes: &[u8]) -> Result<Option<[u64; 4]>> {
                 add_bytes_to_mask(&mut m, b"\"");
             }
         }
-        MODEL_TIMESTAMP => add_bytes_to_mask(&mut m, b"\"0123456789-:TZ"),
+        MODEL_TIMESTAMP => {
+            let unquoted = (c.u16()? & 0x8000) != 0;
+            add_bytes_to_mask(&mut m, if unquoted { b"0123456789-:TZ" } else { b"\"0123456789-:TZ" });
+        }
         MODEL_PATTERN => pattern_col_alphabet(&mut c, &mut m)?,
+        MODEL_SCALED_DECIMAL => scaled_dec_col_alphabet(&mut c, &mut m)?,
         _ => return Ok(None),
     }
     Ok(Some(m))
@@ -228,7 +309,23 @@ fn can_col_match_pred_fast(
     }
     match pred.pred {
         crate::ops::ValuePred::Num(cmp) => {
+            if col_bytes.first() == Some(&MODEL_SCALED_DECIMAL)
+                && col_bytes.get(1).copied().unwrap_or(0) > 0
+            {
+                return Ok(false);
+            }
             if !can_numeric_col_match_fast(col_bytes, ones, cmp) {
+                return Ok(false);
+            }
+            if let Some(m) = col_bytes_alphabet_mask(col_bytes)? {
+                if !(b'0'..=b'9').any(|d| mask_has_byte(&m, d)) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        crate::ops::ValuePred::Dec(dcmp) => {
+            if dec_col_zone_truth(col_bytes, ones, dcmp) == Some(TemplateTruth::AlwaysFalse) {
                 return Ok(false);
             }
             if let Some(m) = col_bytes_alphabet_mask(col_bytes)? {
@@ -366,8 +463,31 @@ fn eval_col_pred_on_slot<'a>(
         }
     }
 
-    if let crate::ops::ValuePred::Num(cmp) = pred.pred {
-        if matches!(col.const_lead, LeadValue::Empty) && col.const_trail.is_empty() {
+    let u64_dom = match pred.pred {
+        crate::ops::ValuePred::Num(c) => Some(crate::ops::dec_num::U64DomainCmp::Cmp(c)),
+        crate::ops::ValuePred::Dec(dc) => Some(dc.to_u64_domain()),
+        crate::ops::ValuePred::Str(_) => None,
+    };
+    if let Some(dom) = u64_dom {
+        if matches!(col.const_lead, LeadValue::Empty)
+            && col.const_trail.is_empty()
+            && matches!(
+                col.stream,
+                ColumnStream::DecimalSmall { .. }
+                    | ColumnStream::DecimalValues { .. }
+                    | ColumnStream::DecimalAffineSmall { .. }
+                    | ColumnStream::DecimalAffine { .. }
+                    | ColumnStream::DecimalPacked { .. }
+            )
+        {
+            let cmp = match dom {
+                crate::ops::dec_num::U64DomainCmp::AlwaysFalse => return Ok((Some(col), hits)),
+                crate::ops::dec_num::U64DomainCmp::AlwaysTrue => {
+                    hits.extend(0..ones.min(rem));
+                    return Ok((Some(col), hits));
+                }
+                crate::ops::dec_num::U64DomainCmp::Cmp(c) => c,
+            };
             match col.stream {
                 ColumnStream::DecimalSmall { u16_offset } => {
                     for t in 0..ones {

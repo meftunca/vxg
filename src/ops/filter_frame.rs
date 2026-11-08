@@ -208,17 +208,12 @@ pub(super) fn filter_frame_expr_impl(
             } else if let Some(ref pre) = meta[b].decoded_raw {
                 crc32c(pre)
             } else {
-                query::decode_block_into(
-                    ib.f_bytes,
-                    ib.local_blk,
-                    ib.info.raw_size,
-                    &dec_eff,
-                    &mut crc_buf,
-                )?;
+                ib.decode_into(&dec_eff, &mut crc_buf)?;
                 crc32c(&crc_buf)
             };
             ready.push(ReadyBlock {
                 payload: BytesRef::Borrowed(ib.payload),
+                dict: ib.dict,
                 kind: ib.info.kind,
                 raw_size: ib.info.raw_size,
                 checksum: csum,

@@ -280,7 +280,7 @@ fn spliced_project_frame_preserves_column_blocks_and_supports_chained_analytics(
     let parsed_frames = Frame::parse_all(&projected_frame, usize::MAX).unwrap();
     assert!(!parsed_frames.is_empty());
     for pf in &parsed_frames {
-        assert_eq!(pf.version(), 4);
+        assert!(matches!(pf.version(), 4 | 5));
         for b in pf.blocks() {
             assert_eq!(b.kind, BLOCK_COLUMN);
         }

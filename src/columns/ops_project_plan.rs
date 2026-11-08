@@ -36,8 +36,10 @@ fn plan_template_projection(
                     let crate::ops::ColTarget::JsonKey(k) = col else {
                         unreachable!();
                     };
-                    if let Some(Some(s)) = json_single_line_template_slot(segs, k.as_bytes()) {
-                        present.push((k, s));
+                    match json_single_line_template_slot(segs, k.as_bytes()) {
+                        Some(Some(s)) => present.push((k, s)),
+                        Some(None) => {}
+                        None => return Ok(None),
                     }
                 }
                 if present.is_empty() {

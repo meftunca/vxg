@@ -1,12 +1,12 @@
 fn format_agg_stats_text(st: &vxg::AggStats) -> String {
     if let Some(avg) = st.avg() {
+        let sum_d = st.sum_dec();
+        let min_d = st.min_dec().unwrap_or(vxg::DecNum::from_u64(0));
+        let max_d = st.max_dec().unwrap_or(vxg::DecNum::from_u64(0));
         format!(
-            "rows={} count={} sum={} avg={avg:.4} min={} max={}",
+            "rows={} count={} sum={sum_d} avg={avg:.4} min={min_d} max={max_d}",
             st.row_count,
             st.num_count,
-            st.sum,
-            st.min.unwrap_or(0),
-            st.max.unwrap_or(0)
         )
     } else {
         format!(
@@ -18,13 +18,13 @@ fn format_agg_stats_text(st: &vxg::AggStats) -> String {
 
 fn format_agg_stats_json_fields(st: &vxg::AggStats) -> String {
     if let Some(avg) = st.avg() {
+        let sum_d = st.sum_dec();
+        let min_d = st.min_dec().unwrap_or(vxg::DecNum::from_u64(0));
+        let max_d = st.max_dec().unwrap_or(vxg::DecNum::from_u64(0));
         format!(
-            "\"rows\":{},\"count\":{},\"sum\":{},\"avg\":{avg:.6},\"min\":{},\"max\":{}",
+            "\"rows\":{},\"count\":{},\"sum\":{sum_d},\"avg\":{avg:.6},\"min\":{min_d},\"max\":{max_d}",
             st.row_count,
             st.num_count,
-            st.sum,
-            st.min.unwrap_or(0),
-            st.max.unwrap_or(0)
         )
     } else {
         format!(
@@ -123,7 +123,7 @@ fn sort_group_rows(rows: &mut [vxg::GroupRow], field: AggSortField, dir: vxg::So
                 }
             }
             AggSortField::Sum => {
-                let ord = a.stats.sum.cmp(&b.stats.sum);
+                let ord = a.stats.sum_dec().cmp(&b.stats.sum_dec());
                 if dir == vxg::SortDir::Asc {
                     ord
                 } else {
@@ -143,8 +143,8 @@ fn sort_group_rows(rows: &mut [vxg::GroupRow], field: AggSortField, dir: vxg::So
                     }
                 }
             },
-            AggSortField::Min => cmp_opt_nulls_last(a.stats.min, b.stats.min, dir),
-            AggSortField::Max => cmp_opt_nulls_last(a.stats.max, b.stats.max, dir),
+            AggSortField::Min => cmp_opt_nulls_last(a.stats.min_dec(), b.stats.min_dec(), dir),
+            AggSortField::Max => cmp_opt_nulls_last(a.stats.max_dec(), b.stats.max_dec(), dir),
         };
         primary.then_with(|| a.key.cmp(&b.key))
     });

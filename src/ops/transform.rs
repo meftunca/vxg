@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::{checksum::crc32c, query, simd, DecodeOptions, Frame, Options, Result, BLOCK_COLUMN};
+use crate::{checksum::crc32c, simd, DecodeOptions, Frame, Options, Result, BLOCK_COLUMN};
 
 use super::emit::{emit_ready_blocks, encode_raw_chunks, BytesRef, ReadyBlock};
 use super::line::{apply_line_col_op, ColOp, ColPred, ColTarget};
@@ -101,17 +101,12 @@ fn process_one_block<'a>(
                 } else if ib.frame_checksummed {
                     ib.info.checksum
                 } else {
-                    query::decode_block_into(
-                        ib.f_bytes,
-                        ib.local_blk,
-                        ib.info.raw_size,
-                        dec_options,
-                        crc_buf,
-                    )?;
+                    ib.decode_into(dec_options, crc_buf)?;
                     crc32c(crc_buf)
                 };
                 out_ready.push(ReadyBlock {
                     payload: BytesRef::Borrowed(ib.payload),
+                    dict: ib.dict,
                     kind: ib.info.kind,
                     raw_size: ib.info.raw_size,
                     checksum: csum,
@@ -131,6 +126,7 @@ fn process_one_block<'a>(
                 };
                 out_ready.push(ReadyBlock {
                     payload: BytesRef::Owned(payload),
+                    dict: &[],
                     kind: BLOCK_COLUMN,
                     raw_size: new_raw_len,
                     checksum: csum,
@@ -139,13 +135,7 @@ fn process_one_block<'a>(
             }
             crate::columns::GrammarRewrite::Fallback => {
                 let mut raw_vec = Vec::new();
-                query::decode_block_into(
-                    ib.f_bytes,
-                    ib.local_blk,
-                    ib.info.raw_size,
-                    dec_options,
-                    &mut raw_vec,
-                )?;
+                ib.decode_into(dec_options, &mut raw_vec)?;
                 fallback_raw = Some(raw_vec);
             }
         }
@@ -189,6 +179,7 @@ fn process_one_block<'a>(
         };
         out_ready.push(ReadyBlock {
             payload: BytesRef::Borrowed(ib.payload),
+            dict: ib.dict,
             kind: ib.info.kind,
             raw_size: ib.info.raw_size,
             checksum: csum,

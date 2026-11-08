@@ -53,18 +53,20 @@ fn raw_packet(data: &[u8]) -> Vec<u8> {
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn has_structured_line_near(
     data: &[u8],
     probe_base: usize,
     skip_first_partial: bool,
     max_lines: usize,
+    max_window_bytes: usize,
     hits: &mut usize,
     prev_slots: &mut Option<usize>,
     probe_spans: &mut [(u32, u32); MAX_SLOTS],
     probe_overflow: &mut Vec<(u32, u32)>,
 ) -> bool {
     let mut pos = if skip_first_partial {
-        let Some(nl) = find_byte(b'\n', &data[probe_base..data.len().min(probe_base + 4096)])
+        let Some(nl) = find_byte(b'\n', &data[probe_base..data.len().min(probe_base + 1024)])
         else {
             return false;
         };
@@ -72,8 +74,10 @@ fn has_structured_line_near(
     } else {
         probe_base
     };
-    for _ in 0..max_lines {
-        if pos >= data.len() {
+    let start_pos = pos;
+    let mut unmatched = 0usize;
+    for line_idx in 0..max_lines {
+        if pos >= data.len() || (line_idx >= 2 && pos - start_pos > max_window_bytes) {
             break;
         }
         let Some(nl) = find_byte(b'\n', &data[pos..data.len().min(pos + 4096)]) else {
@@ -91,14 +95,20 @@ fn has_structured_line_near(
             }
             if *prev_slots == Some(slots) {
                 *hits += 1;
-                if *hits >= 2 {
+                let need = if slots >= 4 { 2 } else { 3 };
+                if *hits >= need {
                     return true;
                 }
             } else {
                 *prev_slots = Some(slots);
-                if *hits == 0 {
-                    *hits = 1;
-                }
+                *hits = 1;
+            }
+        } else if line_idx > 0 {
+            *prev_slots = None;
+            *hits = 0;
+            unmatched += 1;
+            if unmatched >= 2 {
+                return false;
             }
         }
         pos = end;
@@ -160,7 +170,17 @@ pub(crate) fn encode_grammar_block_into_with_carry(
     match pack_grammar_into(data, leading_carry, out) {
         Ok(true) => {
             let len = out.len() - start;
-            if len < raw_len && (len * 4 < data.len() * 3 || data.len() < 512) {
+            if len < raw_len && (len * 3 <= data.len() || data.len() < 512) {
+                return Ok(Some((start, len)));
+            }
+            if len < raw_len && len * 5 < data.len() * 4 {
+                let mut lz = Vec::with_capacity(len);
+                if pack_fast_lz_into(data, &mut lz).is_some() && lz.len() + (data.len() >> 6) < len
+                {
+                    out.truncate(start);
+                    out.extend_from_slice(&lz);
+                    return Ok(Some((start, lz.len())));
+                }
                 return Ok(Some((start, len)));
             }
             out.truncate(start);
@@ -192,6 +212,41 @@ pub(crate) fn encode_grammar_block_into_with_carry(
         let lz_len = out.len() - start;
         if lz_len < raw_len {
             return Ok(Some((start, lz_len)));
+        }
+        out.truncate(start);
+    }
+    Ok(None)
+}
+
+/// Try only structured `GRAMMAR_PACKET` or strong `STRIDE_PACKET` without running `FAST_LZ_PACKET`,
+/// used when `BLOCK_DICT_LZ` will serve as the general-purpose LZ + entropy stage.
+pub(crate) fn encode_structured_only_into(
+    data: &[u8],
+    leading_carry: bool,
+    out: &mut Vec<u8>,
+) -> Result<Option<(usize, usize)>> {
+    if data.is_empty() || data.len() > MAX_BLOCK_SIZE {
+        return Ok(None);
+    }
+    let start = out.len();
+    match pack_grammar_into(data, leading_carry, out) {
+        Ok(true) => {
+            let len = out.len() - start;
+            if len < data.len() && len * 5 < data.len() * 4 {
+                return Ok(Some((start, len)));
+            }
+            out.truncate(start);
+        }
+        Ok(false) => out.truncate(start),
+        Err(err) => {
+            out.truncate(start);
+            return Err(err);
+        }
+    }
+    if pack_stride_into(data, out).is_some() {
+        let s_len = out.len() - start;
+        if s_len * 4 <= data.len() {
+            return Ok(Some((start, s_len)));
         }
         out.truncate(start);
     }
@@ -292,8 +347,8 @@ pub fn evaluate(input: &[u8], block_size: usize) -> Result<Evaluation> {
         template_count: 0,
         template_rows: 0,
         raw_rows: 0,
-        model_counts: [0; 14],
-        model_bytes: [0; 14],
+        model_counts: [0; 15],
+        model_bytes: [0; 15],
         columns: Vec::new(),
         pack_ns: None,
         unpack_ns: None,
@@ -436,6 +491,7 @@ impl Evaluation {
             ModelKind::SegmentDict,
             ModelKind::DecimalDelta,
             ModelKind::Pattern,
+            ModelKind::ScaledDecimal,
         ];
         for (index, kind) in model_kinds.into_iter().enumerate() {
             writeln!(out, "    {{\"model\":\"{}\",\"columns\":{},\"payload_bytes\":{}}}{}", kind.name(), self.model_counts[kind.index()], self.model_bytes[kind.index()], if index + 1 == model_kinds.len() { "" } else { "," }).unwrap();

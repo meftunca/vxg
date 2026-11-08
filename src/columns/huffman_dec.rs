@@ -123,7 +123,7 @@ fn huf_decode_tail(
     bp <= slen * 8 && bp + 8 > slen * 8
 }
 
-fn huf_decode(blob: &[u8], dst: &mut [u8]) -> Result<()> {
+pub(crate) fn huf_decode(blob: &[u8], dst: &mut [u8]) -> Result<()> {
     #[cfg(target_arch = "x86_64")]
     {
         #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]

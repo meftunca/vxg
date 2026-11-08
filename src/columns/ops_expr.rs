@@ -221,6 +221,23 @@ fn precheck_expr_on_template(
             SlotLookup::Absent => Ok(Some(TemplateTruth::AlwaysFalse)),
             SlotLookup::Fallback => Ok(None),
             SlotLookup::Slot(s) => {
+                if !matches!(
+                    p.col,
+                    crate::ops::ColTarget::Delimited { delim, .. } if delim.is_ascii_digit()
+                ) {
+                    let zt = match p.pred {
+                        crate::ops::ValuePred::Num(cmp) => {
+                            numeric_col_zone_truth(col_slices[s], ones, cmp)
+                        }
+                        crate::ops::ValuePred::Dec(dcmp) => {
+                            dec_col_zone_truth(col_slices[s], ones, dcmp)
+                        }
+                        crate::ops::ValuePred::Str(_) => None,
+                    };
+                    if let Some(t) = zt {
+                        return Ok(Some(t));
+                    }
+                }
                 if !can_col_match_pred_fast(col_slices[s], ones, p)? {
                     Ok(Some(TemplateTruth::AlwaysFalse))
                 } else {
@@ -295,6 +312,13 @@ fn eval_col_pred_mask(
     slice_mark: usize,
     scratch: &mut DecodeScratch,
 ) -> Result<TplMask> {
+    let mut active = TplMask::All;
+    if try_eval_decimal_packed_masked(col_bytes, ones, pred, &mut active)?
+        || try_eval_scaled_dec_masked(col_bytes, ones, pred, &mut active)?
+        || try_eval_dict_masked(col_bytes, ones, pred, &mut active)?
+    {
+        return Ok(active);
+    }
     if !can_col_match_pred_fast(col_bytes, ones, pred)? {
         return Ok(TplMask::Empty);
     }
@@ -367,8 +391,34 @@ fn eval_col_pred_mask(
         }
     }
 
-    if let crate::ops::ValuePred::Num(cmp) = pred.pred {
-        if matches!(col.const_lead, LeadValue::Empty) && col.const_trail.is_empty() {
+    let u64_dom = match pred.pred {
+        crate::ops::ValuePred::Num(c) => Some(crate::ops::dec_num::U64DomainCmp::Cmp(c)),
+        crate::ops::ValuePred::Dec(dc) => Some(dc.to_u64_domain()),
+        crate::ops::ValuePred::Str(_) => None,
+    };
+    if let Some(dom) = u64_dom {
+        if matches!(col.const_lead, LeadValue::Empty)
+            && col.const_trail.is_empty()
+            && matches!(
+                col.stream,
+                ColumnStream::DecimalSmall { .. }
+                    | ColumnStream::DecimalValues { .. }
+                    | ColumnStream::DecimalAffineSmall { .. }
+                    | ColumnStream::DecimalAffine { .. }
+                    | ColumnStream::DecimalPacked { .. }
+            )
+        {
+            let cmp = match dom {
+                crate::ops::dec_num::U64DomainCmp::AlwaysFalse => {
+                    reset_scratch_to(scratch, raw_mark, slice_mark);
+                    return Ok(TplMask::Empty);
+                }
+                crate::ops::dec_num::U64DomainCmp::AlwaysTrue => {
+                    reset_scratch_to(scratch, raw_mark, slice_mark);
+                    return Ok(TplMask::All);
+                }
+                crate::ops::dec_num::U64DomainCmp::Cmp(c) => c,
+            };
             match col.stream {
                 ColumnStream::DecimalSmall { u16_offset } => {
                     let vals = &scratch.u16_arena[u16_offset..u16_offset + ones];
@@ -461,56 +511,6 @@ fn eval_col_pred_mask(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn eval_row_contains_mask(
-    segs: &[&[u8]],
-    col_slices: &[&[u8]],
-    ones: usize,
-    needle: &[u8],
-    hdr_raw_len: usize,
-    raw_mark: usize,
-    slice_mark: usize,
-    scratch: &mut DecodeScratch,
-) -> Result<TplMask> {
-    match precheck_template_substr(segs, col_slices, ones, needle)? {
-        TemplatePreCheck::Never => Ok(TplMask::Empty),
-        TemplatePreCheck::Always => Ok(TplMask::All),
-        TemplatePreCheck::SingleSlot(s) => {
-            ensure_col_raw_arena(col_slices[s], hdr_raw_len, &mut scratch.raw_arena);
-            let (_, hits) = eval_substr_on_single_slot(col_slices[s], ones, ones, needle, scratch)?;
-            reset_scratch_to(scratch, raw_mark, slice_mark);
-            Ok(TplMask::from_hits(&hits, ones))
-        }
-        TemplatePreCheck::CheckTemplate => {
-            ensure_full_raw_arena(hdr_raw_len, &mut scratch.raw_arena);
-            let slots = col_slices.len();
-            let mut cols_uninit = core::mem::MaybeUninit::<[PreparedColumn; MAX_SLOTS]>::uninit();
-            let cols: &mut [PreparedColumn; MAX_SLOTS] = unsafe { cols_uninit.assume_init_mut() };
-            for s in 0..slots {
-                cols[s] = PreparedColumn::parse_and_validate(col_slices[s], ones, scratch)?;
-            }
-            let unbound = UnboundTemplate::build(segs, &cols[..slots], scratch);
-            let n_exec = scratch.unbound_col_arena.len();
-            scratch.exec_col_arena.reserve(n_exec);
-            let mut tpl = unbound.bind(scratch);
-            let mut row_buf = vec![0u8; tpl.row_budget.max(4096) + 64];
-            let mut bs = RowBitset::all_zeros(ones);
-            for t in 0..ones {
-                let written = unsafe {
-                    let sp = row_buf.as_mut_ptr();
-                    let ep = tpl.emit_row(sp);
-                    ep.offset_from(sp) as usize
-                };
-                if contains_subslice(&row_buf[..written], needle) {
-                    bs.set(t);
-                }
-            }
-            reset_scratch_to(scratch, raw_mark, slice_mark);
-            Ok(TplMask::normalize(bs, ones))
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 fn eval_expr_on_template(
     segs: &[&[u8]],
     col_slices: &[&[u8]],
@@ -557,19 +557,12 @@ fn eval_expr_inner(
             segs, col_slices, ones, inner, hdr_raw_len, raw_mark, slice_mark, scratch,
         )?
         .map(|m| m.invert(ones))),
-        crate::ops::PredExpr::All(children) => {
+        crate::ops::PredExpr::All(_) => {
             let mut acc = TplMask::All;
-            for c in children {
-                if matches!(acc, TplMask::Empty) {
-                    break;
-                }
-                let Some(cm) = eval_expr_inner(
-                    segs, col_slices, ones, c, hdr_raw_len, raw_mark, slice_mark, scratch,
-                )?
-                else {
-                    return Ok(None);
-                };
-                acc = acc.bitand(cm, ones);
+            if !eval_expr_into_and(
+                segs, col_slices, ones, expr, hdr_raw_len, raw_mark, slice_mark, scratch, &mut acc,
+            )? {
+                return Ok(None);
             }
             Ok(Some(acc))
         }

@@ -12,33 +12,31 @@ fn digits(value: &[u8]) -> Option<u16> {
 }
 
 #[inline(always)]
-fn parse_timestamp(value: &[u8]) -> Option<Timestamp> {
-    if value.len() != 22
-        || value[0] != b'"'
-        || value[21] != b'"'
-        || value[5] != b'-'
-        || value[8] != b'-'
-        || value[11] != b'T'
-        || value[14] != b':'
-        || value[17] != b':'
-        || value[20] != b'Z'
+fn parse_timestamp_core20(core: &[u8]) -> Option<Timestamp> {
+    if core.len() != 20
+        || core[4] != b'-'
+        || core[7] != b'-'
+        || core[10] != b'T'
+        || core[13] != b':'
+        || core[16] != b':'
+        || core[19] != b'Z'
     {
         return None;
     }
-    let y0 = value[1].wrapping_sub(b'0');
-    let y1 = value[2].wrapping_sub(b'0');
-    let y2 = value[3].wrapping_sub(b'0');
-    let y3 = value[4].wrapping_sub(b'0');
+    let y0 = core[0].wrapping_sub(b'0');
+    let y1 = core[1].wrapping_sub(b'0');
+    let y2 = core[2].wrapping_sub(b'0');
+    let y3 = core[3].wrapping_sub(b'0');
     if y0 > 9 || y1 > 9 || y2 > 9 || y3 > 9 {
         return None;
     }
     let year =
         u16::from(y0) * 1000 + u16::from(y1) * 100 + u16::from(y2) * 10 + u16::from(y3);
-    let month = digits(&value[6..8])? as u8;
-    let day = digits(&value[9..11])? as u8;
-    let hour = digits(&value[12..14])? as u8;
-    let minute = digits(&value[15..17])? as u8;
-    let second = digits(&value[18..20])? as u8;
+    let month = digits(&core[5..7])? as u8;
+    let day = digits(&core[8..10])? as u8;
+    let hour = digits(&core[11..13])? as u8;
+    let minute = digits(&core[14..16])? as u8;
+    let second = digits(&core[17..19])? as u8;
     if !(1..=12).contains(&month)
         || !(1..=31).contains(&day)
         || hour >= 24
@@ -58,13 +56,34 @@ fn parse_timestamp(value: &[u8]) -> Option<Timestamp> {
 }
 
 #[inline(always)]
+fn parse_timestamp(value: &[u8]) -> Option<Timestamp> {
+    if value.len() != 22 || value[0] != b'"' || value[21] != b'"' {
+        return None;
+    }
+    parse_timestamp_core20(&value[1..21])
+}
+
+#[inline(always)]
 fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
+    pack_timestamp_model_ext(values, limit, false)
+}
+
+#[inline(always)]
+fn pack_timestamp_model_ext(values: &[&[u8]], limit: usize, unquoted: bool) -> Option<Vec<u8>> {
     let n = values.len();
     if n < 2 || 13 >= limit {
         return None;
     }
+    let req_len = if unquoted { 20 } else { 22 };
     let v0 = values[0];
-    let first = parse_timestamp(v0)?;
+    if v0.len() != req_len {
+        return None;
+    }
+    let first = if unquoted {
+        parse_timestamp_core20(v0)?
+    } else {
+        parse_timestamp(v0)?
+    };
     let year = first.year;
     MODEL_SCRATCH.with(|cell| {
         let mut sc = cell.borrow_mut();
@@ -78,11 +97,30 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
                 | ((ts.minute as u64) << 24)
                 | ((ts.second as u64) << 32)
         };
-        let mut prev_w0 = unsafe { v0.as_ptr().cast::<u64>().read_unaligned() };
+        #[inline(always)]
+        unsafe fn load_ts_words(ptr: *const u8, unquoted: bool) -> (u64, u64, u64) {
+            let w0 = ptr.cast::<u64>().read_unaligned();
+            if unquoted {
+                let w6 = ptr.add(5).cast::<u64>().read_unaligned();
+                let w14 =
+                    (ptr.add(12).cast::<u64>().read_unaligned() >> 8) | 0x2200_0000_0000_0000;
+                (w0, w6, w14)
+            } else {
+                let w6 = ptr.add(6).cast::<u64>().read_unaligned();
+                let w14 = ptr.add(14).cast::<u64>().read_unaligned();
+                (w0, w6, w14)
+            }
+        }
+        let (mut prev_w0, mut prev_w6, mut prev_w14) =
+            unsafe { load_ts_words(v0.as_ptr(), unquoted) };
         #[allow(unused_variables)]
-        let first_w0_low48 = prev_w0 & 0x0000_ffff_ffff_ffff;
-        let mut prev_w6 = unsafe { v0.as_ptr().add(6).cast::<u64>().read_unaligned() };
-        let mut prev_w14 = unsafe { v0.as_ptr().add(14).cast::<u64>().read_unaligned() };
+        let w0_prefix_mask: u64 = if unquoted {
+            0x0000_00ff_ffff_ffff
+        } else {
+            0x0000_ffff_ffff_ffff
+        };
+        #[allow(unused_variables)]
+        let first_w0_low48 = prev_w0 & w0_prefix_mask;
         let mut prev_packed = pack_ts(first);
         unsafe {
             *parsed_ptr = prev_packed;
@@ -93,13 +131,10 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
             let mut min_v = vcreate_u8(prev_packed);
             let mut max_v = min_v;
             for (idx, &val) in values.iter().enumerate().skip(1) {
-                if val.len() != 22 {
+                if val.len() != req_len {
                     return None;
                 }
-                let ptr = val.as_ptr();
-                let w0 = ptr.cast::<u64>().read_unaligned();
-                let w6 = ptr.add(6).cast::<u64>().read_unaligned();
-                let w14 = ptr.add(14).cast::<u64>().read_unaligned();
+                let (w0, w6, w14) = load_ts_words(val.as_ptr(), unquoted);
                 if w6 == prev_w6 && w0 == prev_w0 {
                     if w14 == prev_w14 {
                         *parsed_ptr.add(idx) = prev_packed;
@@ -125,7 +160,7 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
                     *parsed_ptr.add(idx) = prev_packed;
                     continue;
                 }
-                if (w0 & 0x0000_ffff_ffff_ffff) != first_w0_low48 {
+                if (w0 & w0_prefix_mask) != first_w0_low48 {
                     return None;
                 }
                 let d6 = w6 ^ 0x3030_5430_302d_3030;
@@ -174,13 +209,10 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
             let mut min_v = _mm_cvtsi64_si128(prev_packed as i64);
             let mut max_v = min_v;
             for (idx, &val) in values.iter().enumerate().skip(1) {
-                if val.len() != 22 {
+                if val.len() != req_len {
                     return None;
                 }
-                let ptr = val.as_ptr();
-                let w0 = ptr.cast::<u64>().read_unaligned();
-                let w6 = ptr.add(6).cast::<u64>().read_unaligned();
-                let w14 = ptr.add(14).cast::<u64>().read_unaligned();
+                let (w0, w6, w14) = load_ts_words(val.as_ptr(), unquoted);
                 if w6 == prev_w6 && w0 == prev_w0 {
                     if w14 == prev_w14 {
                         *parsed_ptr.add(idx) = prev_packed;
@@ -206,7 +238,7 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
                     *parsed_ptr.add(idx) = prev_packed;
                     continue;
                 }
-                if (w0 & 0x0000_ffff_ffff_ffff) != first_w0_low48 {
+                if (w0 & w0_prefix_mask) != first_w0_low48 {
                     return None;
                 }
                 let d6 = w6 ^ 0x3030_5430_302d_3030;
@@ -254,20 +286,21 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
             let mut mins = [first.month, first.day, first.hour, first.minute, first.second];
             let mut maxs = mins;
             for (idx, &val) in values.iter().enumerate().skip(1) {
-                if val.len() != 22 {
+                if val.len() != req_len {
                     return None;
                 }
-                let ptr = val.as_ptr();
-                let w0 = unsafe { ptr.cast::<u64>().read_unaligned() };
-                let w6 = unsafe { ptr.add(6).cast::<u64>().read_unaligned() };
-                let w14 = unsafe { ptr.add(14).cast::<u64>().read_unaligned() };
+                let (w0, w6, w14) = unsafe { load_ts_words(val.as_ptr(), unquoted) };
                 if w0 == prev_w0 && w6 == prev_w6 && w14 == prev_w14 {
                     unsafe {
                         *parsed_ptr.add(idx) = prev_packed;
                     }
                     continue;
                 }
-                let ts = parse_timestamp(val)?;
+                let ts = if unquoted {
+                    parse_timestamp_core20(val)?
+                } else {
+                    parse_timestamp(val)?
+                };
                 if ts.year != year {
                     return None;
                 }
@@ -304,9 +337,10 @@ fn pack_timestamp_model(values: &[&[u8]], limit: usize) -> Option<Vec<u8>> {
         if size >= limit {
             return None;
         }
+        let wire_year = if unquoted { year | 0x8000 } else { year };
         let mut out = take_model_buf(size);
         out.push(MODEL_TIMESTAMP);
-        out.extend_from_slice(&year.to_le_bytes());
+        out.extend_from_slice(&wire_year.to_le_bytes());
         for (base, width) in &plans {
             out.extend_from_slice(&[*base, *width]);
         }
@@ -347,6 +381,7 @@ const fn canonical_model_rank(kind: ModelKind) -> u8 {
         ModelKind::SegmentDict => 11,
         ModelKind::DecimalDelta => 12,
         ModelKind::Pattern => 13,
+        ModelKind::ScaledDecimal => 14,
     }
 }
 
@@ -366,3 +401,66 @@ fn pack_model_v3(values: &[&[u8]]) -> (Vec<u8>, ModelKind) {
     pack_model_mode(values, true)
 }
 
+
+/// Detect whether `line0` is an identifier header row (`VendorID,pickup_ts,...`) followed by
+/// a typed data row `line1` (`2,2024-01-01T00:57:55Z,...`) on `,`, `\t`, or `|` delimited text.
+fn looks_like_delimited_header(data: &[u8], first_nl: usize) -> bool {
+    if first_nl == 0 || first_nl >= data.len() {
+        return false;
+    }
+    fn trim_nl(s: &[u8]) -> &[u8] {
+        s.strip_suffix(b"\r\n")
+            .or_else(|| s.strip_suffix(b"\n"))
+            .unwrap_or(s)
+    }
+    let line0 = trim_nl(&data[..first_nl]);
+    if line0.is_empty() || matches!(line0[0], b'{' | b'[' | b'#') {
+        return false;
+    }
+    let rem = &data[first_nl..];
+    let second_len = find_byte(b'\n', rem).map_or(rem.len(), |i| i + 1);
+    let line1 = trim_nl(&rem[..second_len]);
+    if line1.is_empty() {
+        return false;
+    }
+    for delim in [b',', b'\t', b'|'] {
+        if !line0.contains(&delim) {
+            continue;
+        }
+        let mut it0 = line0.split(|&b| b == delim);
+        let mut it1 = line1.split(|&b| b == delim);
+        let mut cols = 0usize;
+        let mut all_hdr_ident = true;
+        let mut any_data_num = false;
+        loop {
+            match (it0.next(), it1.next()) {
+                (Some(f0), Some(f1)) => {
+                    cols += 1;
+                    let f0_t = f0.strip_prefix(b"\"").and_then(|s| s.strip_suffix(b"\"")).unwrap_or(f0);
+                    if f0_t.is_empty()
+                        || !(f0_t[0].is_ascii_alphabetic() || f0_t[0] == b'_')
+                        || !f0_t.iter().all(|&b| {
+                            b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b' ' | b'.' | b'/')
+                        })
+                    {
+                        all_hdr_ident = false;
+                        break;
+                    }
+                    let f1_t = f1.strip_prefix(b"\"").and_then(|s| s.strip_suffix(b"\"")).unwrap_or(f1);
+                    if f1_t.first().is_some_and(|&b| b.is_ascii_digit() || b == b'-') {
+                        any_data_num = true;
+                    }
+                }
+                (None, None) => break,
+                _ => {
+                    all_hdr_ident = false;
+                    break;
+                }
+            }
+        }
+        if cols >= 2 && all_hdr_ident && any_data_num {
+            return true;
+        }
+    }
+    false
+}

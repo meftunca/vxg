@@ -54,6 +54,27 @@ fn fmt_min(val: f64, peers: &[f64], prec: usize) -> String {
     }
 }
 
+/// Formats energy (`J/GB`), refusing to bold codecs with near-raw storage (`ratio >= 0.90`).
+fn fmt_min_compressed(val: f64, ratio: f64, peers: &[(f64, f64)], prec: usize) -> String {
+    if val <= 0.0 {
+        return "—".into();
+    }
+    if ratio >= 0.90 {
+        return format!("{val:.prec$}");
+    }
+    let best = peers
+        .iter()
+        .copied()
+        .filter(|&(v, r)| v > 0.0 && r > 0.0 && r < 0.90)
+        .map(|(v, _)| v)
+        .fold(f64::INFINITY, f64::min);
+    if best.is_finite() && (val - best).abs() <= 1e-9 {
+        format!("**{val:.prec$}**")
+    } else {
+        format!("{val:.prec$}")
+    }
+}
+
 /// Formats throughput or composite score, refusing to bold codecs with near-raw storage
 /// (`ratio >= 0.90`, i.e. `< 10%` compression) when comparing speed/trade-off winners.
 fn fmt_max_compressed(val: f64, ratio: f64, peers: &[(f64, f64)], prec: usize) -> String {
@@ -203,7 +224,7 @@ pub(super) fn write_markdown_report(
     let has_heavy = summaries.iter().any(|s| s.lz4hc_9.ratio > 0.0);
     writeln!(
         f,
-        "## VXG v4 Comparative Benchmark Report (`{}` / `{}`, SIMD=`{:?}`, threads=`{}`, block=`{}`)",
+        "## VXG v4/v5 Comparative Benchmark Report (`{}` / `{}`, SIMD=`{:?}`, threads=`{}`, block=`{}`)",
         env::consts::OS,
         env::consts::ARCH,
         simd,
@@ -212,7 +233,7 @@ pub(super) fn write_markdown_report(
     )?;
     writeln!(
         f,
-        "\n- **Block-independent codecs (`{}`-byte blocks, random access = YES):** `VXG v4`, `liblz4 {lz}` (`lz4-c-a1`, `lz4-c-a4`{}), and `libzstd {zs}` (`zstd-c-l-3`, `zstd-c-l1`, `zstd-c-l3`, `zstd-dict-l3`{}).\n- **Dictionary accounting:** `zstd-dict-*` trains up to a `32 KiB` dictionary via `ZDICT_trainFromBuffer` (charging `dict_bytes` in compressed size); steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput is reported in `Enc` / `Dec`, with one-time `ZDICT` training time reported separately in `Dict Train (ms)`.\n- **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window, single stream) quantifies the compression-ratio difference of removing `{}`-byte block boundaries.\n- Bold cells mark the best block-codec metric in each row; codecs storing near-raw bytes (`ratio >= 0.90`, `< 10%` size reduction) are excluded from speed/trade-off bolding.\n",
+        "\n- **Block-independent codecs (`{}`-byte blocks, random access = YES):** `VXG v4/v5`, `liblz4 {lz}` (`lz4-c-a1`, `lz4-c-a4`{}), and `libzstd {zs}` (`zstd-c-l-3`, `zstd-c-l1`, `zstd-c-l3`, `zstd-dict-l3`{}).\n- **Dictionary accounting:** `zstd-dict-*` trains up to a `32 KiB` dictionary via `ZDICT_trainFromBuffer` (charging `dict_bytes` in compressed size); steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput is reported in `Enc` / `Dec`, with one-time `ZDICT` training time reported separately in `Dict Train (ms)`. `VXG v5` embeds its self-trained `<= 32 KiB` prefix dictionary inside the `.vxg` frame itself, and `VXG Enc` / `Dec` include full dictionary training and parsing time.\n- **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window, single stream) quantifies the compression-ratio difference of removing `{}`-byte block boundaries.\n- Bold cells mark the best block-codec metric in each row; codecs storing near-raw bytes (`ratio >= 0.90`, `< 10%` size reduction) are excluded from speed/trade-off/energy bolding.\n",
         c.block_size,
         if has_heavy { ", `lz4hc-c-l9`" } else { "" },
         if has_heavy {
@@ -386,14 +407,14 @@ pub(super) fn write_markdown_report(
         )?;
         for s in summaries {
             let ej = [
-                s.vxg.enc_j_gb.unwrap_or(0.0),
-                s.lz4_a1.enc_j_gb.unwrap_or(0.0),
-                s.zstd_dict_3.enc_j_gb.unwrap_or(0.0),
+                (s.vxg.enc_j_gb.unwrap_or(0.0), s.vxg.ratio),
+                (s.lz4_a1.enc_j_gb.unwrap_or(0.0), s.lz4_a1.ratio),
+                (s.zstd_dict_3.enc_j_gb.unwrap_or(0.0), s.zstd_dict_3.ratio),
             ];
             let dj = [
-                s.vxg.dec_j_gb.unwrap_or(0.0),
-                s.lz4_a1.dec_j_gb.unwrap_or(0.0),
-                s.zstd_dict_3.dec_j_gb.unwrap_or(0.0),
+                (s.vxg.dec_j_gb.unwrap_or(0.0), s.vxg.ratio),
+                (s.lz4_a1.dec_j_gb.unwrap_or(0.0), s.lz4_a1.ratio),
+                (s.zstd_dict_3.dec_j_gb.unwrap_or(0.0), s.zstd_dict_3.ratio),
             ];
             let gcis = [
                 (point_gci(s.vxg).unwrap_or(0.0), s.vxg.ratio),
@@ -404,12 +425,12 @@ pub(super) fn write_markdown_report(
                 f,
                 "| **`{}`** | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 short_name(&s.name),
-                fmt_min(ej[0], &ej, 3),
-                fmt_min(ej[1], &ej, 3),
-                fmt_min(ej[2], &ej, 3),
-                fmt_min(dj[0], &dj, 3),
-                fmt_min(dj[1], &dj, 3),
-                fmt_min(dj[2], &dj, 3),
+                fmt_min_compressed(ej[0].0, ej[0].1, &ej, 3),
+                fmt_min_compressed(ej[1].0, ej[1].1, &ej, 3),
+                fmt_min_compressed(ej[2].0, ej[2].1, &ej, 3),
+                fmt_min_compressed(dj[0].0, dj[0].1, &dj, 3),
+                fmt_min_compressed(dj[1].0, dj[1].1, &dj, 3),
+                fmt_min_compressed(dj[2].0, dj[2].1, &dj, 3),
                 fmt_max_compressed(gcis[0].0, gcis[0].1, &gcis, 1),
                 fmt_max_compressed(gcis[1].0, gcis[1].1, &gcis, 1),
                 fmt_max_compressed(gcis[2].0, gcis[2].1, &gcis, 1),

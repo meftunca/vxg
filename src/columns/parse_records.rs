@@ -189,50 +189,7 @@ fn parse_record_spans(
         }
         return None;
     }
-    pos += 1;
-    let mut count = 0usize;
-    overflow.clear();
-    loop {
-        skip_space(data, &mut pos);
-        if data.get(pos) == Some(&b'}') {
-            pos += 1;
-            break;
-        }
-        pos = scan_string(data, pos)?;
-        skip_space(data, &mut pos);
-        if data.get(pos) != Some(&b':') {
-            return None;
-        }
-        pos += 1;
-        skip_space(data, &mut pos);
-        let start = pos;
-        let end = scan_value(data, pos)?;
-        if count < MAX_SLOTS {
-            spans[count] = (start as u32, end as u32);
-        } else {
-            overflow.push((start as u32, end as u32));
-        }
-        count += 1;
-        pos = end;
-        skip_space(data, &mut pos);
-        match data.get(pos) {
-            Some(b',') => pos += 1,
-            Some(b'}') => {
-                pos += 1;
-                break;
-            }
-            _ => return None,
-        }
-    }
-    skip_space(data, &mut pos);
-    if data.get(pos) == Some(&b',') {
-        pos += 1;
-        skip_space(data, &mut pos);
-    }
-    if pos != data.len() {
-        return None;
-    }
-    (count > 0).then_some(count)
+    parse_json_record_spans(data, pos, spans, overflow)
 }
 
 #[inline(always)]

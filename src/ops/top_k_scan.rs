@@ -55,10 +55,11 @@ pub(crate) fn scan_frame_into_heap(
         let step = if nb >= workers * 8 { 4 } else { 1 };
         let k = heap.capacity_k();
         let dir = heap.dir();
+        let skip_row_0 = heap.skip_row_0();
 
         let run_worker = |wid: usize| {
             let mut dec_buf = Vec::new();
-            let mut local_heap = TopKHeap::with_floor(k, dir, seed_floor.clone());
+            let mut local_heap = TopKHeap::with_floor(k, dir, skip_row_0, seed_floor.clone());
             loop {
                 if failed.load(AtomicOrdering::Relaxed) {
                     break;
@@ -249,6 +250,7 @@ pub(super) fn top_k_by_impl(
     order_col: ColTarget<'_>,
     dir: SortDir,
     limit: usize,
+    skip_row_0: bool,
     options: &DecodeOptions,
 ) -> Result<Vec<RowMatch>> {
     options.validate()?;
@@ -257,6 +259,7 @@ pub(super) fn top_k_by_impl(
         return Ok(Vec::new());
     }
     let mut heap = TopKHeap::new(limit, dir);
+    heap.set_skip_row_0(skip_row_0);
     scan_frame_into_heap(
         frame_bytes,
         0,
@@ -270,6 +273,7 @@ pub(super) fn top_k_by_impl(
     Ok(heap.into_sorted_matches())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn select_top_k_by_impl(
     frame_bytes: &[u8],
     where_expr: Option<&PredExpr<'_>>,
@@ -277,6 +281,7 @@ pub(super) fn select_top_k_by_impl(
     order_col: ColTarget<'_>,
     dir: SortDir,
     limit: usize,
+    skip_row_0: bool,
     options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
     options.validate()?;
@@ -286,6 +291,7 @@ pub(super) fn select_top_k_by_impl(
         return Ok(Vec::new());
     }
     let mut heap = TopKHeap::new(limit, dir);
+    heap.set_skip_row_0(skip_row_0);
     scan_frame_into_heap(
         frame_bytes,
         0,

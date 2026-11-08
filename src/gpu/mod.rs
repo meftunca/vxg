@@ -344,9 +344,13 @@ impl GpuCodec {
             let mut gpu_indices = Vec::with_capacity(blocks.len());
             let mut n = 0usize;
             for (i, b) in blocks.iter().enumerate() {
-                if b.info.kind == block::COLUMN {
+                if b.info.kind == block::COLUMN || b.info.kind == block::DICT_LZ {
                     let dst = &mut out[b.info.raw_offset..b.info.raw_offset + b.info.raw_size];
-                    crate::columns::decode_block_into(b.payload, dst)?;
+                    if b.info.kind == block::COLUMN {
+                        crate::columns::decode_block_into(b.payload, dst)?;
+                    } else {
+                        crate::dict_lz::decode_dict_block(b.payload, frame.dict(), dst)?;
+                    }
                     if frame.checksummed()
                         && options.verify_checksum
                         && crc32c(dst) != b.info.checksum

@@ -69,6 +69,24 @@ pub(crate) type FxBuildHasher = BuildHasherDefault<FxHasher>;
 pub(crate) struct GroupMap {
     str_groups: HashMap<Vec<u8>, AggStats, FxBuildHasher>,
     raw_json_groups: HashMap<Vec<u8>, AggStats, FxBuildHasher>,
+    u64_small_used: u64,
+    u64_small: Option<Box<[AggStats; 64]>>,
+    u64_overflow: HashMap<u64, AggStats, FxBuildHasher>,
+    u64_is_str: bool,
+}
+
+#[inline]
+fn fmt_u64_ascii(mut val: u64, buf: &mut [u8; 20]) -> &[u8] {
+    let mut pos = 20usize;
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (val % 10) as u8;
+        val /= 10;
+        if val == 0 {
+            break;
+        }
+    }
+    &buf[pos..]
 }
 
 impl GroupMap {
@@ -94,22 +112,82 @@ impl GroupMap {
         if delta.row_count == 0 {
             return;
         }
-        let mut buf = [0u8; 20];
-        let mut pos = 20usize;
-        let mut n = val;
-        loop {
-            pos -= 1;
-            buf[pos] = b'0' + (n % 10) as u8;
-            n /= 10;
-            if n == 0 {
-                break;
-            }
+        self.u64_is_str = matches!(col, ColTarget::Delimited { .. });
+        if val < 64 {
+            let arr = self
+                .u64_small
+                .get_or_insert_with(|| Box::new([AggStats::default(); 64]));
+            self.u64_small_used |= 1u64 << val;
+            arr[val as usize].merge(delta);
+        } else {
+            self.u64_overflow.entry(val).or_default().merge(delta);
         }
-        let is_str = matches!(col, ColTarget::Delimited { .. });
-        self.merge_decoded(is_str, &buf[pos..], delta);
+    }
+
+    #[inline]
+    pub(crate) fn add_u64_num(&mut self, col: ColTarget<'_>, val: u64, num: u64) {
+        self.u64_is_str = matches!(col, ColTarget::Delimited { .. });
+        if val < 64 {
+            let arr = self
+                .u64_small
+                .get_or_insert_with(|| Box::new([AggStats::default(); 64]));
+            self.u64_small_used |= 1u64 << val;
+            arr[val as usize].add_num(num);
+        } else {
+            self.u64_overflow.entry(val).or_default().add_num(num);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add_u64_dec(&mut self, col: ColTarget<'_>, val: u64, dec: super::dec_num::DecNum) {
+        self.u64_is_str = matches!(col, ColTarget::Delimited { .. });
+        if val < 64 {
+            let arr = self
+                .u64_small
+                .get_or_insert_with(|| Box::new([AggStats::default(); 64]));
+            self.u64_small_used |= 1u64 << val;
+            arr[val as usize].add_dec(dec);
+        } else {
+            self.u64_overflow.entry(val).or_default().add_dec(dec);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add_u64_row_only(&mut self, col: ColTarget<'_>, val: u64) {
+        self.u64_is_str = matches!(col, ColTarget::Delimited { .. });
+        if val < 64 {
+            let arr = self
+                .u64_small
+                .get_or_insert_with(|| Box::new([AggStats::default(); 64]));
+            self.u64_small_used |= 1u64 << val;
+            arr[val as usize].add_rows_only(1);
+        } else {
+            self.u64_overflow.entry(val).or_default().add_rows_only(1);
+        }
     }
 
     pub(crate) fn merge_map(&mut self, other: Self) {
+        if other.u64_small_used != 0 {
+            self.u64_is_str = other.u64_is_str;
+            let dst = self
+                .u64_small
+                .get_or_insert_with(|| Box::new([AggStats::default(); 64]));
+            if let Some(src) = other.u64_small {
+                let mut m = other.u64_small_used;
+                while m != 0 {
+                    let i = m.trailing_zeros() as usize;
+                    dst[i].merge(&src[i]);
+                    m &= m - 1;
+                }
+                self.u64_small_used |= other.u64_small_used;
+            }
+        }
+        if !other.u64_overflow.is_empty() {
+            self.u64_is_str = other.u64_is_str;
+            for (k, st) in other.u64_overflow {
+                self.u64_overflow.entry(k).or_default().merge(&st);
+            }
+        }
         for (k, st) in other.str_groups {
             if let Some(ex) = self.str_groups.get_mut(&k) {
                 ex.merge(&st);
@@ -126,7 +204,28 @@ impl GroupMap {
         }
     }
 
-    pub(crate) fn into_sorted_rows(self) -> Vec<GroupRow> {
+    fn flush_u64(&mut self) {
+        let is_str = self.u64_is_str;
+        let mut buf = [0u8; 20];
+        if let Some(arr) = self.u64_small.take() {
+            let mut m = self.u64_small_used;
+            self.u64_small_used = 0;
+            while m != 0 {
+                let i = m.trailing_zeros() as usize;
+                let s = fmt_u64_ascii(i as u64, &mut buf);
+                self.merge_decoded(is_str, s, &arr[i]);
+                m &= m - 1;
+            }
+        }
+        let ov = std::mem::take(&mut self.u64_overflow);
+        for (k, st) in ov {
+            let s = fmt_u64_ascii(k, &mut buf);
+            self.merge_decoded(is_str, s, &st);
+        }
+    }
+
+    pub(crate) fn into_sorted_rows(mut self) -> Vec<GroupRow> {
+        self.flush_u64();
         let mut out = Vec::with_capacity(self.str_groups.len() + self.raw_json_groups.len());
         for (k, stats) in self.str_groups {
             out.push(GroupRow {

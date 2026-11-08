@@ -1,24 +1,25 @@
-pub(crate) fn count_grammar_block_expr(
-    payload: &[u8],
-    had_in_carry: bool,
-    expr: &crate::ops::PredExpr<'_>,
-) -> Result<Option<u64>> {
-    let mut dummy: Option<Vec<u8>> = had_in_carry.then(Vec::new);
-    count_grammar_block_expr_inner(payload, &mut dummy, false, expr)
-}
-
 pub(crate) fn count_grammar_block_expr_seq(
     payload: &[u8],
     carry: &mut Option<Vec<u8>>,
     expr: &crate::ops::PredExpr<'_>,
 ) -> Result<Option<u64>> {
-    count_grammar_block_expr_inner(payload, carry, true, expr)
+    count_grammar_block_expr_inner(payload, carry, true, true, expr)
+}
+
+pub(crate) fn count_grammar_block_expr_chunk(
+    payload: &[u8],
+    carry: &mut Option<Vec<u8>>,
+    eval_in_carry: bool,
+    expr: &crate::ops::PredExpr<'_>,
+) -> Result<Option<u64>> {
+    count_grammar_block_expr_inner(payload, carry, eval_in_carry, true, expr)
 }
 
 fn count_grammar_block_expr_inner(
     payload: &[u8],
     carry: &mut Option<Vec<u8>>,
     eval_carry: bool,
+    save_out_carry: bool,
     expr: &crate::ops::PredExpr<'_>,
 ) -> Result<Option<u64>> {
     let Some(mut hdr) = parse_grammar_for_ops(payload)? else {
@@ -91,7 +92,7 @@ fn count_grammar_block_expr_inner(
             let (p, l) = scratch.slice_arena[raw_slice_offset + raw_end - 1];
             let s = unsafe { std::slice::from_raw_parts(p, l) };
             if !s.ends_with(b"\n") {
-                if eval_carry {
+                if save_out_carry {
                     *carry = Some(s.to_vec());
                 }
                 raw_end -= 1;
@@ -109,32 +110,49 @@ fn count_grammar_block_expr_inner(
 }
 
 enum SlotNumView {
-    Const(Option<u64>),
+    Const(ParsedSlotNum),
     U16 { u16_offset: usize },
     U64 { u64_offset: usize },
     Affine { first: u64, step: u64 },
+    ScaledI64 { scale: u8, min_v: i64, u64_offset: usize },
     Dict {
         u8_offset: usize,
-        lut: Box<[Option<u64>; 256]>,
+        lut: Box<[ParsedSlotNum; 256]>,
         entries: usize,
     },
-    PerRow(Vec<Option<u64>>),
+    PerRow(Vec<ParsedSlotNum>),
 }
 
 impl SlotNumView {
     #[inline(always)]
-    fn get(&self, idx: usize, scratch: &DecodeScratch) -> Option<u64> {
+    fn get(&self, idx: usize, scratch: &DecodeScratch) -> ParsedSlotNum {
         match *self {
             Self::Const(v) => v,
-            Self::U16 { u16_offset } => Some(u64::from(scratch.u16_arena[u16_offset + idx])),
-            Self::U64 { u64_offset } => Some(scratch.u64_arena[u64_offset + idx]),
+            Self::U16 { u16_offset } => ParsedSlotNum::U64(u64::from(scratch.u16_arena[u16_offset + idx])),
+            Self::U64 { u64_offset } => ParsedSlotNum::U64(scratch.u64_arena[u64_offset + idx]),
             Self::Affine { first, step } => {
-                Some(first.wrapping_add(step.wrapping_mul(idx as u64)))
+                ParsedSlotNum::U64(first.wrapping_add(step.wrapping_mul(idx as u64)))
             }
+            Self::ScaledI64 {
+                scale,
+                min_v,
+                u64_offset,
+            } => ParsedSlotNum::Dec(crate::ops::DecNum::new(
+                (min_v as i128) + (scratch.u64_arena[u64_offset + idx] as i128),
+                scale,
+            )),
             Self::Dict {
                 u8_offset, ref lut, ..
             } => lut[scratch.u8_arena[u8_offset + idx] as usize],
             Self::PerRow(ref v) => v[idx],
+        }
+    }
+
+    #[inline(always)]
+    fn get_u64(&self, idx: usize, scratch: &DecodeScratch) -> u64 {
+        match self.get(idx, scratch) {
+            ParsedSlotNum::U64(v) => v,
+            _ => unreachable!(),
         }
     }
 }
@@ -150,27 +168,33 @@ fn build_slot_num_view(
         target_col,
         crate::ops::ColTarget::Delimited { delim, .. } if delim.is_ascii_digit()
     );
+    if let Some((scale, min_v, opt_off)) =
+        try_unpack_scaled_dec_view(col_bytes, ones, digit_delim, &mut scratch.u64_arena)?
+    {
+        return Ok(match opt_off {
+            Some(u64_offset) => SlotNumView::ScaledI64 {
+                scale,
+                min_v,
+                u64_offset,
+            },
+            None => SlotNumView::Const(ParsedSlotNum::Dec(crate::ops::DecNum::new(
+                min_v as i128,
+                scale,
+            ))),
+        });
+    }
     ensure_col_raw_arena(col_bytes, hdr_raw_len, &mut scratch.raw_arena);
     let col = PreparedColumn::parse_and_validate(col_bytes, ones, scratch)?;
     match col.const_full {
-        ConstValue::Slice(s) => {
-            let v = if digit_delim {
-                None
-            } else {
-                crate::ops::parse_canonical_u64(s)
-            };
-            return Ok(SlotNumView::Const(v));
-        }
+        ConstValue::Slice(s) => return Ok(SlotNumView::Const(parse_slot_num_bytes(s, digit_delim))),
         ConstValue::Inline { ref buf, len } => {
-            let v = if digit_delim {
-                None
-            } else {
-                crate::ops::parse_canonical_u64(&buf[..len as usize])
-            };
-            return Ok(SlotNumView::Const(v));
+            return Ok(SlotNumView::Const(parse_slot_num_bytes(
+                &buf[..len as usize],
+                digit_delim,
+            )));
         }
         ConstValue::QuotedDecimal { .. } => {
-            return Ok(SlotNumView::Const(None));
+            return Ok(SlotNumView::Const(ParsedSlotNum::None));
         }
         ConstValue::None => {}
     }
@@ -206,11 +230,11 @@ fn build_slot_num_view(
         if let ColumnStream::Dictionary { u8_offset, .. } = col.stream {
             if let Some((slice_off, entries)) = col.dict_slices {
                 if entries <= 256 {
-                    let mut lut = Box::new([None; 256]);
+                    let mut lut = Box::new([ParsedSlotNum::None; 256]);
                     for e in 0..entries {
                         let (ptr, len) = scratch.slice_arena[slice_off + e];
                         let s = unsafe { std::slice::from_raw_parts(ptr, len) };
-                        lut[e] = crate::ops::parse_canonical_u64(s);
+                        lut[e] = parse_slot_num_bytes(s, false);
                     }
                     return Ok(SlotNumView::Dict {
                         u8_offset,
@@ -220,15 +244,15 @@ fn build_slot_num_view(
                 }
             }
         }
-        // Quoted strings / timestamps / hex with non-digit lead or trail can never be canonical u64.
-        let lead_non_digit = match col.const_lead {
+        let is_num_b = |&b: &u8| b.is_ascii_digit() || b == b'-' || b == b'.';
+        let lead_non_num = match col.const_lead {
             LeadValue::Empty => false,
             LeadValue::QuoteOnly | LeadValue::QuotePrefix(_) => true,
-            LeadValue::Slice(s) => !s.iter().all(u8::is_ascii_digit),
-            LeadValue::Inline { ref buf, len } => !buf[..len as usize].iter().all(u8::is_ascii_digit),
+            LeadValue::Slice(s) => !s.iter().all(is_num_b),
+            LeadValue::Inline { ref buf, len } => !buf[..len as usize].iter().all(is_num_b),
         };
-        if lead_non_digit || !col.const_trail.iter().all(u8::is_ascii_digit) {
-            return Ok(SlotNumView::Const(None));
+        if lead_non_num || !col.const_trail.iter().all(is_num_b) {
+            return Ok(SlotNumView::Const(ParsedSlotNum::None));
         }
     }
 
@@ -244,12 +268,7 @@ fn build_slot_num_view(
             let ep = tpl.emit_row(sp);
             ep.offset_from(sp) as usize
         };
-        let v = if !digit_delim {
-            crate::ops::parse_canonical_u64(&val_buf[..written])
-        } else {
-            None
-        };
-        vals.push(v);
+        vals.push(parse_slot_num_bytes(&val_buf[..written], digit_delim));
     }
     Ok(SlotNumView::PerRow(vals))
 }
@@ -270,13 +289,15 @@ fn aggregate_slot_with_mask(
     if pop == 0 {
         return Ok(());
     }
+    if try_agg_decimal_packed_fast(col_bytes, ones, mask, target_col, stats)?
+        || try_agg_scaled_dec_fast(col_bytes, ones, mask, target_col, stats)?
+    {
+        return Ok(());
+    }
     let view = build_slot_num_view(col_bytes, ones, target_col, hdr_raw_len, scratch)?;
     match (&view, mask) {
-        (SlotNumView::Const(Some(v)), _) => {
-            stats.add_const_num(*v, pop as u64);
-        }
-        (SlotNumView::Const(None), _) => {
-            stats.add_rows_only(pop as u64);
+        (SlotNumView::Const(p), _) => {
+            add_parsed_slot_num(stats, *p, pop as u64);
         }
         (SlotNumView::Affine { first, step }, TplMask::All) => {
             stats.add_affine_all(*first, *step, ones);
@@ -293,6 +314,30 @@ fn aggregate_slot_with_mask(
             }
             stats.row_count += ones as u64;
             stats.num_count += ones as u64;
+            stats.sum += u128::from(sum);
+            let lo64 = u64::from(lo);
+            let hi64 = u64::from(hi);
+            stats.min = Some(stats.min.map_or(lo64, |m| m.min(lo64)));
+            stats.max = Some(stats.max.map_or(hi64, |m| m.max(hi64)));
+        }
+        (SlotNumView::U16 { u16_offset }, TplMask::Bits(bs, _)) => {
+            let slice = &scratch.u16_arena[*u16_offset..*u16_offset + ones];
+            let mut sum = 0u64;
+            let mut lo = u16::MAX;
+            let mut hi = 0u16;
+            for (wi, &word0) in bs.words().iter().enumerate() {
+                let mut w = word0;
+                let base = wi << 6;
+                while w != 0 {
+                    let v = slice[base + w.trailing_zeros() as usize];
+                    sum += u64::from(v);
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                    w &= w - 1;
+                }
+            }
+            stats.row_count += pop as u64;
+            stats.num_count += pop as u64;
             stats.sum += u128::from(sum);
             let lo64 = u64::from(lo);
             let hi64 = u64::from(hi);
@@ -345,24 +390,12 @@ fn aggregate_slot_with_mask(
                 TplMask::Empty => unreachable!(),
             }
             for e in 0..*entries {
-                let c = u64::from(freq[e]);
-                if c == 0 {
-                    continue;
-                }
-                if let Some(v) = lut[e] {
-                    stats.add_const_num(v, c);
-                } else {
-                    stats.add_rows_only(c);
-                }
+                add_parsed_slot_num(stats, lut[e], u64::from(freq[e]));
             }
         }
         (_, TplMask::All) => {
             for idx in 0..ones {
-                if let Some(v) = view.get(idx, scratch) {
-                    stats.add_num(v);
-                } else {
-                    stats.add_rows_only(1);
-                }
+                add_parsed_slot_num(stats, view.get(idx, scratch), 1);
             }
         }
         (_, TplMask::Bits(bs, _)) => {
@@ -371,11 +404,7 @@ fn aggregate_slot_with_mask(
                 let base = wi << 6;
                 while w != 0 {
                     let idx = base + w.trailing_zeros() as usize;
-                    if let Some(v) = view.get(idx, scratch) {
-                        stats.add_num(v);
-                    } else {
-                        stats.add_rows_only(1);
-                    }
+                    add_parsed_slot_num(stats, view.get(idx, scratch), 1);
                     w &= w - 1;
                 }
             }
@@ -386,29 +415,30 @@ fn aggregate_slot_with_mask(
     Ok(())
 }
 
-pub(crate) fn aggregate_grammar_block(
-    payload: &[u8],
-    had_in_carry: bool,
-    where_expr: Option<&crate::ops::PredExpr<'_>>,
-    agg_col: crate::ops::ColTarget<'_>,
-) -> Result<Option<crate::ops::AggStats>> {
-    let mut dummy: Option<Vec<u8>> = had_in_carry.then(Vec::new);
-    aggregate_grammar_block_inner(payload, &mut dummy, false, where_expr, agg_col)
-}
-
 pub(crate) fn aggregate_grammar_block_seq(
     payload: &[u8],
     carry: &mut Option<Vec<u8>>,
     where_expr: Option<&crate::ops::PredExpr<'_>>,
     agg_col: crate::ops::ColTarget<'_>,
 ) -> Result<Option<crate::ops::AggStats>> {
-    aggregate_grammar_block_inner(payload, carry, true, where_expr, agg_col)
+    aggregate_grammar_block_inner(payload, carry, true, true, where_expr, agg_col)
+}
+
+pub(crate) fn aggregate_grammar_block_chunk(
+    payload: &[u8],
+    carry: &mut Option<Vec<u8>>,
+    eval_in_carry: bool,
+    where_expr: Option<&crate::ops::PredExpr<'_>>,
+    agg_col: crate::ops::ColTarget<'_>,
+) -> Result<Option<crate::ops::AggStats>> {
+    aggregate_grammar_block_inner(payload, carry, eval_in_carry, true, where_expr, agg_col)
 }
 
 fn aggregate_grammar_block_inner(
     payload: &[u8],
     carry: &mut Option<Vec<u8>>,
     eval_carry: bool,
+    save_out_carry: bool,
     where_expr: Option<&crate::ops::PredExpr<'_>>,
     agg_col: crate::ops::ColTarget<'_>,
 ) -> Result<Option<crate::ops::AggStats>> {
@@ -507,7 +537,7 @@ fn aggregate_grammar_block_inner(
             let (p, l) = scratch.slice_arena[raw_slice_offset + raw_end - 1];
             let s = unsafe { std::slice::from_raw_parts(p, l) };
             if !s.ends_with(b"\n") {
-                if eval_carry {
+                if save_out_carry {
                     *carry = Some(s.to_vec());
                 }
                 raw_end -= 1;

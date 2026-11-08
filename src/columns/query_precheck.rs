@@ -65,7 +65,9 @@ const fn build_ts_bigrams() -> [u64; 64] {
 const DIGIT_CHAR_MASK: [u64; 4] = build_charset_mask(b"0123456789");
 const HEX_CHAR_MASK: [u64; 4] = build_charset_mask(b"0123456789abcdefABCDEF");
 const TS_CHAR_MASK: [u64; 4] = build_charset_mask(b"\"0123456789-:TZ");
+const TS_UNQ_CHAR_MASK: [u64; 4] = build_charset_mask(b"0123456789-:TZ");
 const QUOTE_SINGLE_MASK: [u64; 4] = build_charset_mask(b"\"");
+const Z_SINGLE_MASK: [u64; 4] = build_charset_mask(b"Z");
 const DIGIT_BIGRAMS: [u64; 64] = build_all_pairs_bigrams(b"0123456789");
 const HEX_BIGRAMS: [u64; 64] = build_all_pairs_bigrams(b"0123456789abcdefABCDEF");
 const TS_BIGRAMS: [u64; 64] = build_ts_bigrams();
@@ -545,11 +547,20 @@ fn feed_col_into_bigram_state(col_bytes: &[u8], st: &mut BigramState) -> Result<
             }
         }
         MODEL_TIMESTAMP => {
-            st.feed_class(&TS_CHAR_MASK, &QUOTE_SINGLE_MASK, &QUOTE_SINGLE_MASK, &TS_BIGRAMS);
+            if (c.u16()? & 0x8000) != 0 {
+                st.feed_class(&TS_UNQ_CHAR_MASK, &DIGIT_CHAR_MASK, &Z_SINGLE_MASK, &TS_BIGRAMS);
+            } else {
+                st.feed_class(&TS_CHAR_MASK, &QUOTE_SINGLE_MASK, &QUOTE_SINGLE_MASK, &TS_BIGRAMS);
+            }
         }
         MODEL_PATTERN => {
             let mut m = [0u64; 4];
             pattern_col_alphabet(&mut c, &mut m)?;
+            st.feed_arbitrary_mask(&m, false);
+        }
+        MODEL_SCALED_DECIMAL => {
+            let mut m = [0u64; 4];
+            scaled_dec_col_alphabet(&mut c, &mut m)?;
             st.feed_arbitrary_mask(&m, false);
         }
         _ => {

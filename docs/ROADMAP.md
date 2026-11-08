@@ -12,8 +12,8 @@ VXG is an adaptive block-independent lossless codec and compressed-domain execut
 | **6** | Compressed-domain `ORDER BY` / `Top-K` heap queries (`top_k_by`, `select_top_k_by`, `*_stream`), expanded zero-overhead C/FFI analytics ABI, and interactive VitePress benchmark charts | **Completed in `v0.4.4`** |
 | **7** | Dependency-free in-browser WebAssembly (`vxg.wasm`) live playground & compressed-domain query sandbox | **Completed** ([Live Playground](./playground.md)) |
 | **8** | `vxg-tensor` (`.vxt` `VXT1`) Compressed-Domain AI Model Codec (`Lossless-BP16`, `CB4/CB3+Outlier`, `WHT2+Outlier`) & 1-Command-Buffer Fused Apple Metal GPU / SIMD LLM Inference Engine | **Completed** ([AI Tensor Spec & Benchmarks](./TENSOR.md)) |
-| **9 (`v0.5`)** | Hybrid `BLOCK_ZSTD_DICT` per-block fallback (bounding unstructured/CLF/nested-JSON block ratios by `Zstd + Trained Dict`), stack-bucket numeric `GROUP BY` + short-circuit `BitSet` mask propagation in compound `WHERE`, and out-of-cache `40M+`-row full-year NYC TLC benchmark vs. `DuckDB + Parquet` | **Planned for `v0.5`** |
-| **10** | Continuous correctness hardening (randomized differential fuzzing, sanitizers, `x86_64` / `aarch64` parity) | Ongoing ([Testing](./TESTING.md)) |
+| **9 (`v0.5.0`)** | Format `v5` self-contained frame dictionary + `BLOCK_DICT_LZ` (`kind = 3`, pure Rust / `wasm32`), `--record-aligned` (`FLAG_VAR_RAW`), `MODEL_SCALED_DECIMAL`, CSV header resolution + 1st-level nested JSON flattening, `DenseRange` `GROUP BY` + short-circuit `RowBitset` `WHERE`, `vxg sql` / `vxg_sql_alloc` frontend, and out-of-cache `10M–40M`-row full-year NYC TLC scale benchmark vs. `DuckDB 2.0 + Parquet` | **Completed in `v0.5.0`** ([Scale & Sweep Benchmarks](./CHIMERA_BENCHMARKS.md)) |
+| **10** | Block-group zone-map directory index for sub-millisecond `10M+`-row NDJSON selective pruning, deep (`>= 2`-level) recursive JSON array/tree columnization, and continuous randomized differential fuzzing | Ongoing ([Testing](./TESTING.md)) |
 
 ## Engineering Rules
 

@@ -17,6 +17,23 @@ fn group_by_template_resolved<'a>(
     if pop == 0 {
         return Ok(());
     }
+    if try_group_by_dict_packed_fast(g_col_bytes, a_slot_bytes, ones, mask, group_col, out_map)? {
+        return Ok(());
+    }
+    if try_group_by_decimal_packed_fast(
+        g_col_bytes,
+        a_slot_bytes,
+        ones,
+        mask,
+        group_col,
+        out_map,
+        hdr_raw_len,
+        raw_mark,
+        slice_mark,
+        scratch,
+    )? {
+        return Ok(());
+    }
 
     ensure_col_raw_arena(g_col_bytes, hdr_raw_len, &mut scratch.raw_arena);
     let g_col = PreparedColumn::parse_and_validate(g_col_bytes, ones, scratch)?;
@@ -135,11 +152,7 @@ fn group_by_template_resolved<'a>(
                         (_, TplMask::All) => {
                             for idx in 0..ones {
                                 let id = scratch.u8_arena[g_u8_off + idx] as usize;
-                                if let Some(v) = a_view.get(idx, scratch) {
-                                    buckets[id].add_num(v);
-                                } else {
-                                    buckets[id].add_rows_only(1);
-                                }
+                                add_parsed_slot_num(&mut buckets[id], a_view.get(idx, scratch), 1);
                             }
                         }
                         (_, TplMask::Bits(bs, _)) => {
@@ -149,11 +162,7 @@ fn group_by_template_resolved<'a>(
                                 while w != 0 {
                                     let idx = base + w.trailing_zeros() as usize;
                                     let id = scratch.u8_arena[g_u8_off + idx] as usize;
-                                    if let Some(v) = a_view.get(idx, scratch) {
-                                        buckets[id].add_num(v);
-                                    } else {
-                                        buckets[id].add_rows_only(1);
-                                    }
+                                    add_parsed_slot_num(&mut buckets[id], a_view.get(idx, scratch), 1);
                                     w &= w - 1;
                                 }
                             }
@@ -238,24 +247,18 @@ fn group_by_template_resolved<'a>(
             } else {
                 None
             };
-            let mut u64_buckets: std::collections::HashMap<
-                u64,
-                crate::ops::AggStats,
-                crate::ops::agg::FxBuildHasher,
-            > = std::collections::HashMap::default();
             match mask {
                 TplMask::All => {
                     for idx in 0..ones {
-                        let gk = g_view.get(idx, scratch).unwrap();
-                        let entry = u64_buckets.entry(gk).or_default();
+                        let gk = g_view.get_u64(idx, scratch);
                         if let Some(ref av) = a_view {
-                            if let Some(v) = av.get(idx, scratch) {
-                                entry.add_num(v);
-                            } else {
-                                entry.add_rows_only(1);
+                            match av.get(idx, scratch) {
+                                ParsedSlotNum::U64(v) => out_map.add_u64_num(group_col, gk, v),
+                                ParsedSlotNum::Dec(d) => out_map.add_u64_dec(group_col, gk, d),
+                                ParsedSlotNum::None => out_map.add_u64_row_only(group_col, gk),
                             }
                         } else {
-                            entry.add_rows_only(1);
+                            out_map.add_u64_row_only(group_col, gk);
                         }
                     }
                 }
@@ -265,25 +268,21 @@ fn group_by_template_resolved<'a>(
                         let base = wi << 6;
                         while w != 0 {
                             let idx = base + w.trailing_zeros() as usize;
-                            let gk = g_view.get(idx, scratch).unwrap();
-                            let entry = u64_buckets.entry(gk).or_default();
+                            let gk = g_view.get_u64(idx, scratch);
                             if let Some(ref av) = a_view {
-                                if let Some(v) = av.get(idx, scratch) {
-                                    entry.add_num(v);
-                                } else {
-                                    entry.add_rows_only(1);
+                                match av.get(idx, scratch) {
+                                    ParsedSlotNum::U64(v) => out_map.add_u64_num(group_col, gk, v),
+                                    ParsedSlotNum::Dec(d) => out_map.add_u64_dec(group_col, gk, d),
+                                    ParsedSlotNum::None => out_map.add_u64_row_only(group_col, gk),
                                 }
                             } else {
-                                entry.add_rows_only(1);
+                                out_map.add_u64_row_only(group_col, gk);
                             }
                             w &= w - 1;
                         }
                     }
                 }
                 TplMask::Empty => unreachable!(),
-            }
-            for (gk, st) in u64_buckets {
-                out_map.merge_u64_key(group_col, gk, &st);
             }
             reset_scratch_to(scratch, raw_mark, slice_mark);
             return Ok(());
@@ -327,11 +326,7 @@ fn group_by_template_resolved<'a>(
         };
         let mut st = crate::ops::AggStats::default();
         if let Some(ref av) = a_view {
-            if let Some(v) = av.get(idx, scratch) {
-                st.add_num(v);
-            } else {
-                st.add_rows_only(1);
-            }
+            add_parsed_slot_num(&mut st, av.get(idx, scratch), 1);
         } else {
             st.add_rows_only(1);
         }
@@ -360,26 +355,6 @@ fn group_by_template_resolved<'a>(
     Ok(())
 }
 
-pub(crate) fn group_by_grammar_block(
-    payload: &[u8],
-    had_in_carry: bool,
-    where_expr: Option<&crate::ops::PredExpr<'_>>,
-    group_col: crate::ops::ColTarget<'_>,
-    agg_col: Option<crate::ops::ColTarget<'_>>,
-    out_map: &mut crate::ops::agg::GroupMap,
-) -> Result<bool> {
-    let mut dummy: Option<Vec<u8>> = had_in_carry.then(Vec::new);
-    group_by_grammar_block_inner(
-        payload,
-        &mut dummy,
-        false,
-        where_expr,
-        group_col,
-        agg_col,
-        out_map,
-    )
-}
-
 pub(crate) fn group_by_grammar_block_seq(
     payload: &[u8],
     carry: &mut Option<Vec<u8>>,
@@ -388,13 +363,36 @@ pub(crate) fn group_by_grammar_block_seq(
     agg_col: Option<crate::ops::ColTarget<'_>>,
     out_map: &mut crate::ops::agg::GroupMap,
 ) -> Result<bool> {
-    group_by_grammar_block_inner(payload, carry, true, where_expr, group_col, agg_col, out_map)
+    group_by_grammar_block_inner(payload, carry, true, true, where_expr, group_col, agg_col, out_map)
 }
 
+pub(crate) fn group_by_grammar_block_chunk(
+    payload: &[u8],
+    carry: &mut Option<Vec<u8>>,
+    eval_in_carry: bool,
+    where_expr: Option<&crate::ops::PredExpr<'_>>,
+    group_col: crate::ops::ColTarget<'_>,
+    agg_col: Option<crate::ops::ColTarget<'_>>,
+    out_map: &mut crate::ops::agg::GroupMap,
+) -> Result<bool> {
+    group_by_grammar_block_inner(
+        payload,
+        carry,
+        eval_in_carry,
+        true,
+        where_expr,
+        group_col,
+        agg_col,
+        out_map,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn group_by_grammar_block_inner(
     payload: &[u8],
     carry: &mut Option<Vec<u8>>,
     eval_carry: bool,
+    save_out_carry: bool,
     where_expr: Option<&crate::ops::PredExpr<'_>>,
     group_col: crate::ops::ColTarget<'_>,
     agg_col: Option<crate::ops::ColTarget<'_>>,
@@ -521,7 +519,7 @@ fn group_by_grammar_block_inner(
             let (p, l) = scratch.slice_arena[raw_slice_offset + raw_end - 1];
             let s = unsafe { std::slice::from_raw_parts(p, l) };
             if !s.ends_with(b"\n") {
-                if eval_carry {
+                if save_out_carry {
                     *carry = Some(s.to_vec());
                 }
                 raw_end -= 1;

@@ -204,7 +204,7 @@ fn select_columns_parallel(
     Ok(out)
 }
 
-pub(super) fn select_columns_impl(
+pub(crate) fn select_columns_impl(
     frame_bytes: &[u8],
     where_expr: Option<&PredExpr<'_>>,
     cols: &[ColTarget<'_>],
@@ -511,6 +511,7 @@ pub(super) fn project_frame_impl(
                 }
                 ready.push(ReadyBlock {
                     payload: BytesRef::Owned(payload),
+                    dict: &[],
                     kind: BLOCK_COLUMN,
                     raw_size: new_raw_len,
                     checksum: crc,

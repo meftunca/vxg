@@ -3,11 +3,15 @@
 use crate::{DecodeOptions, Options, Result, RowMatch};
 
 pub(crate) mod agg;
+pub(crate) mod csv_header;
+pub(crate) mod dec_num;
 pub(crate) mod emit;
 pub(crate) mod expr;
 mod filter_col;
 mod filter_frame;
 pub(crate) mod line;
+pub(crate) mod multi_agg;
+pub(crate) mod par_chunk;
 pub(crate) mod par_meta;
 mod parse_expr;
 pub(crate) mod project;
@@ -21,6 +25,7 @@ pub(super) use par_meta::{
 };
 
 pub use agg::{agg_line, decode_group_token_ref, AggStats, GroupKey, GroupRow};
+pub use dec_num::{format_scaled_i128, DecCmp, DecNum};
 pub use expr::{line_matches_expr, PredExpr};
 pub(crate) use line::parse_canonical_u64;
 pub use line::{
@@ -44,6 +49,25 @@ pub fn filter_column(
     limit: usize,
     options: &DecodeOptions,
 ) -> Result<Vec<RowMatch>> {
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, None, &[pred.col], options)?
+    {
+        let mp = ColPred {
+            col: hdr.resolve_col(pred.col).unwrap_or(pred.col),
+            pred: pred.pred,
+        };
+        if !line_matches_col_pred(&hdr.header_line, &mp) {
+            return filter_col::filter_column_impl(frame_bytes, &mp, limit, options);
+        }
+        if limit == 0 {
+            return filter_col::filter_column_impl(frame_bytes, &mp, 0, options);
+        }
+        let mut rows =
+            filter_col::filter_column_impl(frame_bytes, &mp, limit.saturating_add(1), options)?;
+        rows.retain(|r| r.global_row_index != 0);
+        rows.truncate(limit);
+        return Ok(rows);
+    }
     filter_col::filter_column_impl(frame_bytes, pred, limit, options)
 }
 
@@ -55,6 +79,19 @@ pub fn filter_frame(
     enc_options: &Options,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, None, &[pred.col], dec_options)?
+    {
+        let mp = ColPred {
+            col: hdr.resolve_col(pred.col).unwrap_or(pred.col),
+            pred: pred.pred,
+        };
+        if line_matches_col_pred(&hdr.header_line, &mp) {
+            let stripped = csv_header::strip_delim_header_bytes(frame_bytes, &hdr, dec_options)?;
+            return filter_frame::filter_frame_impl(&stripped, &mp, enc_options, dec_options);
+        }
+        return filter_frame::filter_frame_impl(frame_bytes, &mp, enc_options, dec_options);
+    }
     filter_frame::filter_frame_impl(frame_bytes, pred, enc_options, dec_options)
 }
 
@@ -98,6 +135,15 @@ pub fn count_where(
     expr: &PredExpr<'_>,
     dec_options: &DecodeOptions,
 ) -> Result<u64> {
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, Some(expr), &[], dec_options)?
+    {
+        let mapped = csv_header::MappedExpr::from_expr(expr, &hdr);
+        return mapped.with_pred_expr(|me| {
+            let cnt = expr::count_where_impl(frame_bytes, me, dec_options)?;
+            Ok(cnt.saturating_sub(u64::from(line_matches_expr(&hdr.header_line, me))))
+        });
+    }
     expr::count_where_impl(frame_bytes, expr, dec_options)
 }
 
@@ -109,6 +155,21 @@ pub fn filter_where(
     limit: usize,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<RowMatch>> {
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, Some(expr), &[], dec_options)?
+    {
+        let mapped = csv_header::MappedExpr::from_expr(expr, &hdr);
+        return mapped.with_pred_expr(|me| {
+            if !line_matches_expr(&hdr.header_line, me) || limit == 0 {
+                return expr::filter_where_impl(frame_bytes, me, limit, dec_options);
+            }
+            let mut rows =
+                expr::filter_where_impl(frame_bytes, me, limit.saturating_add(1), dec_options)?;
+            rows.retain(|r| r.global_row_index != 0);
+            rows.truncate(limit);
+            Ok(rows)
+        });
+    }
     expr::filter_where_impl(frame_bytes, expr, limit, dec_options)
 }
 
@@ -120,6 +181,19 @@ pub fn filter_frame_where(
     enc_options: &Options,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, Some(expr), &[], dec_options)?
+    {
+        let mapped = csv_header::MappedExpr::from_expr(expr, &hdr);
+        return mapped.with_pred_expr(|me| {
+            if line_matches_expr(&hdr.header_line, me) {
+                let stripped =
+                    csv_header::strip_delim_header_bytes(frame_bytes, &hdr, dec_options)?;
+                return filter_frame::filter_frame_expr_impl(&stripped, me, enc_options, dec_options);
+            }
+            filter_frame::filter_frame_expr_impl(frame_bytes, me, enc_options, dec_options)
+        });
+    }
     filter_frame::filter_frame_expr_impl(frame_bytes, expr, enc_options, dec_options)
 }
 
@@ -131,6 +205,17 @@ pub fn aggregate_column(
     agg_col: ColTarget<'_>,
     dec_options: &DecodeOptions,
 ) -> Result<AggStats> {
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, where_expr, &[agg_col], dec_options)?
+    {
+        let m_col = hdr.resolve_col(agg_col).unwrap_or(agg_col);
+        let m_where = where_expr.map(|w| csv_header::MappedExpr::from_expr(w, &hdr));
+        return csv_header::with_opt_mapped_expr(m_where.as_ref(), |mw| {
+            let mut st = agg::aggregate_column_impl(frame_bytes, mw, m_col, dec_options)?;
+            csv_header::subtract_header_agg(&hdr, mw, m_col, &mut st);
+            Ok(st)
+        });
+    }
     agg::aggregate_column_impl(frame_bytes, where_expr, agg_col, dec_options)
 }
 
@@ -143,6 +228,28 @@ pub fn group_by(
     agg_col: Option<ColTarget<'_>>,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<GroupRow>> {
+    let mut extras = [group_col, group_col];
+    let n_ext = if let Some(ac) = agg_col {
+        extras[1] = ac;
+        2
+    } else {
+        1
+    };
+    if let Some(hdr) = csv_header::resolve_header_for_targets(
+        frame_bytes,
+        where_expr,
+        &extras[..n_ext],
+        dec_options,
+    )? {
+        let m_gcol = hdr.resolve_col(group_col).unwrap_or(group_col);
+        let m_acol = agg_col.map(|ac| hdr.resolve_col(ac).unwrap_or(ac));
+        let m_where = where_expr.map(|w| csv_header::MappedExpr::from_expr(w, &hdr));
+        return csv_header::with_opt_mapped_expr(m_where.as_ref(), |mw| {
+            let mut rows = agg::group_by_impl(frame_bytes, mw, m_gcol, m_acol, dec_options)?;
+            csv_header::subtract_header_group_by(&hdr, mw, m_gcol, &mut rows);
+            Ok(rows)
+        });
+    }
     agg::group_by_impl(frame_bytes, where_expr, group_col, agg_col, dec_options)
 }
 
@@ -154,6 +261,34 @@ pub fn select_columns(
     limit: usize,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, where_expr, cols, dec_options)?
+    {
+        let m_cols: Vec<ColTarget<'_>> = cols
+            .iter()
+            .map(|&c| hdr.resolve_col(c).unwrap_or(c))
+            .collect();
+        let m_where = where_expr.map(|w| csv_header::MappedExpr::from_expr(w, &hdr));
+        return csv_header::with_opt_mapped_expr(m_where.as_ref(), |mw| {
+            let hdr_matches = mw.is_none_or(|w| line_matches_expr(&hdr.header_line, w));
+            if !hdr_matches || limit == 0 {
+                return project::select_columns_impl(frame_bytes, mw, &m_cols, limit, dec_options);
+            }
+            let mut out = project::select_columns_impl(
+                frame_bytes,
+                mw,
+                &m_cols,
+                limit.saturating_add(1),
+                dec_options,
+            )?;
+            if let Some(nl) = out.iter().position(|&b| b == b'\n') {
+                out.drain(..=nl);
+            } else {
+                out.clear();
+            }
+            Ok(out)
+        });
+    }
     project::select_columns_impl(frame_bytes, where_expr, cols, limit, dec_options)
 }
 
@@ -165,6 +300,29 @@ pub fn project_frame(
     enc_options: &Options,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, where_expr, cols, dec_options)?
+    {
+        let m_cols: Vec<ColTarget<'_>> = cols
+            .iter()
+            .map(|&c| hdr.resolve_col(c).unwrap_or(c))
+            .collect();
+        let m_where = where_expr.map(|w| csv_header::MappedExpr::from_expr(w, &hdr));
+        return csv_header::with_opt_mapped_expr(m_where.as_ref(), |mw| {
+            if mw.is_some_and(|w| line_matches_expr(&hdr.header_line, w)) {
+                let stripped =
+                    csv_header::strip_delim_header_bytes(frame_bytes, &hdr, dec_options)?;
+                return project::project_frame_impl(
+                    &stripped,
+                    mw,
+                    &m_cols,
+                    enc_options,
+                    dec_options,
+                );
+            }
+            project::project_frame_impl(frame_bytes, mw, &m_cols, enc_options, dec_options)
+        });
+    }
     project::project_frame_impl(frame_bytes, where_expr, cols, enc_options, dec_options)
 }
 
@@ -179,7 +337,16 @@ pub fn top_k_by(
     limit: usize,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<RowMatch>> {
-    top_k::top_k_by_impl(frame_bytes, where_expr, order_col, dir, limit, dec_options)
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, where_expr, &[order_col], dec_options)?
+    {
+        let m_ocol = hdr.resolve_col(order_col).unwrap_or(order_col);
+        let m_where = where_expr.map(|w| csv_header::MappedExpr::from_expr(w, &hdr));
+        return csv_header::with_opt_mapped_expr(m_where.as_ref(), |mw| {
+            top_k::top_k_by_impl(frame_bytes, mw, m_ocol, dir, limit, true, dec_options)
+        });
+    }
+    top_k::top_k_by_impl(frame_bytes, where_expr, order_col, dir, limit, false, dec_options)
 }
 
 /// Project `cols` across the global `Top-K` (`SELECT cols WHERE ... ORDER BY order_col [ASC|DESC] LIMIT limit`)
@@ -193,6 +360,31 @@ pub fn select_top_k_by(
     limit: usize,
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
+    let mut extras = Vec::with_capacity(cols.len() + 1);
+    extras.extend_from_slice(cols);
+    extras.push(order_col);
+    if let Some(hdr) =
+        csv_header::resolve_header_for_targets(frame_bytes, where_expr, &extras, dec_options)?
+    {
+        let m_cols: Vec<ColTarget<'_>> = cols
+            .iter()
+            .map(|&c| hdr.resolve_col(c).unwrap_or(c))
+            .collect();
+        let m_ocol = hdr.resolve_col(order_col).unwrap_or(order_col);
+        let m_where = where_expr.map(|w| csv_header::MappedExpr::from_expr(w, &hdr));
+        return csv_header::with_opt_mapped_expr(m_where.as_ref(), |mw| {
+            top_k::select_top_k_by_impl(
+                frame_bytes,
+                mw,
+                &m_cols,
+                m_ocol,
+                dir,
+                limit,
+                true,
+                dec_options,
+            )
+        });
+    }
     top_k::select_top_k_by_impl(
         frame_bytes,
         where_expr,
@@ -200,6 +392,7 @@ pub fn select_top_k_by(
         order_col,
         dir,
         limit,
+        false,
         dec_options,
     )
 }

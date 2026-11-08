@@ -72,109 +72,33 @@ fn count_where_parallel(
     options: &DecodeOptions,
 ) -> Result<Option<u64>> {
     let in_blocks = collect_par_blocks(frame_bytes, frames);
-    let nb = in_blocks.len();
-    if nb <= 1 {
+    if in_blocks.len() <= 1 {
         return Ok(None);
     }
-    let (meta, boundary_lines) = build_par_meta_and_boundary(&in_blocks, options)?;
-    let mut boundary_hits = 0u64;
-    for bl in boundary_lines.iter() {
-        if line_matches_expr(bl.bytes, expr) {
-            boundary_hits += 1;
-        }
-    }
-
-    let workers = options.threads.min(nb.max(1));
-    let next = AtomicUsize::new(0);
-    let failed = AtomicBool::new(false);
-    let worker_counts: Vec<SyncCell<Result<u64>>> =
-        (0..workers).map(|_| SyncCell::new(Ok(0))).collect();
-    let step = if nb >= workers * 8 { 4 } else { 1 };
-
-    let run_worker = |wid: usize| {
-        let mut dec_buf = Vec::new();
-        let mut local_sum = 0u64;
-        loop {
-            if failed.load(Ordering::Relaxed) {
-                break;
+    let total = super::par_chunk::parallel_reduce_blocks(
+        &in_blocks,
+        options,
+        |payload, carry, eval_in_carry, acc: &mut u64| {
+            if let Some(cnt) =
+                crate::columns::count_grammar_block_expr_chunk(payload, carry, eval_in_carry, expr)?
+            {
+                *acc += cnt;
+                Ok(true)
+            } else {
+                Ok(false)
             }
-            let base = next.fetch_add(step, Ordering::Relaxed);
-            if base >= nb {
-                break;
+        },
+        |line, acc: &mut u64| {
+            if line_matches_expr(line, expr) {
+                *acc += 1;
             }
-            let end = (base + step).min(nb);
-            for b in base..end {
-                let mb = &meta[b];
-                if mb.row_count == 0 {
-                    continue;
-                }
-                let ib = &in_blocks[b];
-                let res: Result<u64> = (|| {
-                    if mb.decoded_raw.is_none() {
-                        if let Some(cnt) = crate::columns::count_grammar_block_expr(
-                            ib.payload,
-                            mb.had_in_carry,
-                            expr,
-                        )? {
-                            return Ok(cnt);
-                        }
-                    }
-                    let raw: &[u8] = if let Some(ref pre) = mb.decoded_raw {
-                        pre
-                    } else {
-                        query::decode_block_into(
-                            ib.f_bytes,
-                            ib.local_blk,
-                            ib.info.raw_size,
-                            options,
-                            &mut dec_buf,
-                        )?;
-                        &dec_buf
-                    };
-                    if raw.is_empty() {
-                        return Ok(0);
-                    }
-                    let lines: Vec<&[u8]> = raw.split_inclusive(|&c| c == b'\n').collect();
-                    let start_i = usize::from(mb.had_in_carry);
-                    let end_i = lines.len()
-                        - usize::from(lines.last().is_some_and(|l| !l.ends_with(b"\n")));
-                    let mut c = 0u64;
-                    for &lb in lines.iter().take(end_i).skip(start_i) {
-                        if line_matches_expr(lb, expr) {
-                            c += 1;
-                        }
-                    }
-                    Ok(c)
-                })();
-                match res {
-                    Ok(c) => local_sum += c,
-                    Err(e) => {
-                        unsafe {
-                            *worker_counts[wid].get() = Err(e);
-                        }
-                        failed.store(true, Ordering::Relaxed);
-                        return;
-                    }
-                }
-            }
-        }
-        unsafe {
-            *worker_counts[wid].get() = Ok(local_sum);
-        }
-    };
-
-    crate::pool::parallel_run(workers, run_worker);
-
-    let mut total = boundary_hits;
-    for slot in worker_counts {
-        total = total
-            .checked_add(slot.into_inner()?)
-            .ok_or(Error::SizeOverflow)?;
-    }
+        },
+        |dst, src| *dst += src,
+    )?;
     Ok(Some(total))
 }
 
-pub(super) fn count_where_impl(
+pub(crate) fn count_where_impl(
     frame_bytes: &[u8],
     expr: &PredExpr<'_>,
     options: &DecodeOptions,
@@ -405,7 +329,7 @@ fn filter_where_parallel(
     Ok(Some(out))
 }
 
-pub(super) fn filter_where_impl(
+pub(crate) fn filter_where_impl(
     frame_bytes: &[u8],
     expr: &PredExpr<'_>,
     limit: usize,

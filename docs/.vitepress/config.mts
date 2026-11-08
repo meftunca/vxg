@@ -19,10 +19,10 @@ export default defineConfig({
     ['meta', { name: 'theme-color', content: '#10b981' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:title', content: 'VXG — Vectorized Execution Grammar Codec' }],
-    ['meta', { name: 'og:description', content: 'Store raw NDJSON/CSV as-is (14x-21x faster than Parquet ETL), 1.18x-1.32x smaller than Zstd+Dict on flat tabular records at LZ4-class speed, SQL on compressed blocks, 100% byte-exact reversible.' }]
+    ['meta', { name: 'og:description', content: 'Store raw NDJSON/CSV verbatim (2.4x-16.7x faster than Parquet ETL), 1.17x-1.32x smaller than Zstd+Dict on flat tabular records, beat Zstd-9 on the 6-dataset real geomean (0.1231), SQL on 40M+ compressed rows, 100% byte-exact reversible.' }]
   ],
   themeConfig: {
-    siteTitle: 'VXG v0.4.7',
+    siteTitle: 'VXG v0.5.0',
     nav: [
       { text: 'Playground (WASM)', link: '/playground' },
       { text: 'AI Tensor (.vxt)', link: '/TENSOR' },
@@ -34,7 +34,7 @@ export default defineConfig({
       {
         text: 'Specifications',
         items: [
-          { text: 'Wire Format (v1–v4)', link: '/FORMAT' },
+          { text: 'Wire Format (v1–v5)', link: '/FORMAT' },
           { text: 'Column Models (v3/v4)', link: '/FORMAT_V3' },
           { text: 'AI Tensor Codec (VXT1)', link: '/TENSOR' },
           { text: 'Mathematical Proofs', link: '/PROOFS' },
@@ -62,7 +62,7 @@ export default defineConfig({
         text: 'Benchmarks & Energy',
         items: [
           { text: 'Cross-Platform Benchmarks', link: '/BENCHMARKS' },
-          { text: 'Competitor Sweep & DuckDB', link: '/CHIMERA_BENCHMARKS' },
+          { text: 'Competitor Sweep & 40M DuckDB', link: '/CHIMERA_BENCHMARKS' },
           { text: 'Energy & Composite Indices (VPI / GCI)', link: '/ENERGY_BENCHMARKS' },
           { text: 'Validation & Reproducibility', link: '/VALIDATION' }
         ]
@@ -70,7 +70,7 @@ export default defineConfig({
       {
         text: 'Wire Format & Proofs',
         items: [
-          { text: 'VXG1 Wire Specification (v1–v4)', link: '/FORMAT' },
+          { text: 'VXG1 Wire Specification (v1–v5)', link: '/FORMAT' },
           { text: 'Structured Column Models', link: '/FORMAT_V3' },
           { text: 'Mathematical Contracts & Proofs', link: '/PROOFS' },
           { text: 'Safety & Security Boundary', link: '/SAFETY' },

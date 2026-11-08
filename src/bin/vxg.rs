@@ -13,16 +13,16 @@ type R<T> = Result<T, Box<dyn std::error::Error>>;
 const VERSION_STR: &str = concat!(
     "vxg ",
     env!("CARGO_PKG_VERSION"),
-    " (format v4, default block 65536)"
+    " (format v4/v5, default block 65536)"
 );
-const HELP: &str = r#"VXG — adaptive independent-block lossless codec (format v4)
+const HELP: &str = r#"VXG — adaptive independent-block lossless codec & compressed SQL engine (format v4/v5)
 
 Usage:
   vxg c|compress   INPUT OUTPUT [--backend cpu|metal|vulkan|cuda] [--threads N|auto]
                                 [--block-size BYTES] [--acceleration 1..64]
                                 [--simd auto|scalar|sse2|avx2|avx512|neon]
-                                [--no-checksum] [--legacy] [--stream] [--no-mmap]
-                                [--gpu-batch BYTES] [--force|-f] [--quiet|-q]
+                                [--record-aligned] [--no-checksum] [--legacy] [--stream]
+                                [--no-mmap] [--gpu-batch BYTES] [--force|-f] [--quiet|-q]
   vxg d|decompress INPUT OUTPUT [--backend cpu|metal|vulkan|cuda] [--threads N|auto]
                                 [--simd MODE] [--max-output BYTES]
                                 [--no-checksum|--no-verify-checksum] [--stream] [--no-mmap]
@@ -38,6 +38,7 @@ Usage:
   vxg agg          FRAME        [--group-by GCOL] [--col ACOL] [--where EXPR]
                                 [--order-by key|rows|count|sum|avg|min|max [--desc|--asc]]
                                 [--limit N] [--json] [--stream] [--no-mmap] [-t N|auto]
+  vxg sql          FRAME "SELECT ..." [--json|--csv] [--no-header] [--stream] [--no-mmap] [-t N|auto]
   vxg project      INPUT OUTPUT --cols COL1,COL2,... [--where EXPR] [--stream] [--no-mmap] [-t N|auto] [-f] [-q]
   vxg filter-frame INPUT OUTPUT --where EXPR [--block-size BYTES] [--no-checksum] [--stream] [--no-mmap] [-f] [-q]
   vxg update       INPUT OUTPUT --where SPEC --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [--stream] [--no-mmap] [-f] [-q]
@@ -170,6 +171,7 @@ fn run_args(args: &[String]) -> R<()> {
             let mut raw_blocks = 0usize;
             let mut lz_blocks = 0usize;
             let mut col_blocks = 0usize;
+            let mut dict_lz_blocks = 0usize;
             let mut total_raw = 0usize;
             let mut total_blocks = 0usize;
             for f in &frames {
@@ -183,6 +185,7 @@ fn run_args(args: &[String]) -> R<()> {
                         0 => raw_blocks += 1,
                         1 => lz_blocks += 1,
                         2 => col_blocks += 1,
+                        3 => dict_lz_blocks += 1,
                         _ => {}
                     }
                 }
@@ -194,7 +197,7 @@ fn run_args(args: &[String]) -> R<()> {
                 bytes.len() as f64 / total_raw as f64
             };
             println!(
-                "version={} raw={} encoded={} ratio={:.4} blocks={} block_size={} checksum={} frames={} kinds=RAW:{},LZ:{},COLUMN:{}",
+                "version={} raw={} encoded={} ratio={:.4} blocks={} block_size={} checksum={} frames={} kinds=RAW:{},LZ:{},COLUMN:{},DICT_LZ:{}",
                 f0.version(),
                 total_raw,
                 bytes.len(),
@@ -205,7 +208,8 @@ fn run_args(args: &[String]) -> R<()> {
                 frames.len(),
                 raw_blocks,
                 lz_blocks,
-                col_blocks
+                col_blocks,
+                dict_lz_blocks
             );
             if !summary_only && frames.len() == 1 {
                 for (i, b) in f0.blocks().enumerate() {
@@ -219,6 +223,7 @@ fn run_args(args: &[String]) -> R<()> {
                             0 => "RAW",
                             1 => "LZ",
                             2 => "COLUMN",
+                            3 => "DICT_LZ",
                             _ => "UNKNOWN",
                         }
                     );
@@ -342,6 +347,7 @@ fn run_args(args: &[String]) -> R<()> {
         }
         "q" | "query" => return run_query_cmd(args),
         "agg" | "group-by" => return run_agg_cmd(args),
+        "sql" => return run_sql_cmd(args),
         "filter-frame" | "project" | "update" | "map" => return run_ops_cmd(args),
         "c" | "compress" | "d" | "decompress" => {}
         _ => return Err(format!("unknown command: {cmd}\n{HELP}").into()),
@@ -391,7 +397,8 @@ fn run_args(args: &[String]) -> R<()> {
                 dec.verify_checksum = false;
                 gpu.checksum = false;
             }
-            "--v3" | "--v4" => {} // unified adaptive v4 pipeline is the default
+            "--v3" | "--v4" | "--v5" => {} // unified adaptive v4/v5 pipeline is the default
+            "--record-aligned" => enc.record_aligned = true,
             "--legacy" => enc.legacy_v2 = true,
             "--max-output" => {
                 let n = val(args, &mut i)?.parse()?;
@@ -526,57 +533,8 @@ fn run_args(args: &[String]) -> R<()> {
     }
     Ok(())
 }
-fn gpu_check(backend: Backend) -> R<()> {
-    let mut device = GpuCodec::new(backend)?;
-    println!("device: {}", device.device_name());
-    let gpu = GpuOptions {
-        block_size: 4096,
-        batch_bytes: 8192,
-        ..GpuOptions::default()
-    };
-    let cpu = Options {
-        block_size: 4096,
-        ..Options::default()
-    };
-    let mut count = 0;
-    for n in [0, 1, 7, 31, 127, 4095, 4096, 4097, 16391] {
-        for period in [0, 1, 2, 3, 4, 7, 8, 17, 65] {
-            let mut seed = 0x123456789abcdefu64;
-            let mut random = || {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                seed as u8
-            };
-            let pat: Vec<u8> = (0..period.max(1)).map(|_| random()).collect();
-            let data: Vec<u8> = (0..n)
-                .map(|i| {
-                    if period == 0 {
-                        random()
-                    } else {
-                        pat[i % period]
-                    }
-                })
-                .collect();
-            let cpu_frame = vxg::compress(&data, &cpu)?;
-            let (gpu_frame, _) = device.compress(&data, &gpu)?;
-            if vxg::decompress(&gpu_frame, &DecodeOptions::default())? != data {
-                return Err("GPU encoder -> CPU decoder mismatch".into());
-            }
-            if device.decompress(&cpu_frame, &gpu)?.0 != data {
-                return Err("CPU encoder -> GPU decoder mismatch".into());
-            }
-            if device.decompress(&gpu_frame, &gpu)?.0 != data {
-                return Err("GPU encoder -> GPU decoder mismatch".into());
-            }
-            count += 1;
-        }
-    }
-    println!("PASS: {count} three-way CPU/GPU conformance cases");
-    Ok(())
-}
-
 include!("cli_support/ops.rs");
 include!("cli_support/query.rs");
 include!("cli_support/agg.rs");
+include!("cli_support/sql.rs");
 include!("cli_support/tests.rs");

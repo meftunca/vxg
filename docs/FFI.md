@@ -45,7 +45,7 @@ To achieve multi-GB/s throughput across language boundaries without heap-allocat
 
 | Function | Signature | Description |
 | :--- | :--- | :--- |
-| `vxg_version_string` | `const char* vxg_version_string(void)` | Returns null-terminated version string (`"0.4.7"`). |
+| `vxg_version_string` | `const char* vxg_version_string(void)` | Returns null-terminated version string (`"0.5.0"`). |
 | `vxg_error_message` | `const char* vxg_error_message(vxg_ssize_t code)` | Returns static human-readable message for `< 0` error codes. |
 | `vxg_compress_bound` | `vxg_ssize_t vxg_compress_bound(size_t raw_len, size_t block_size)` | Worst-case compressed byte size (`block_size = 0` uses default `65536`). |
 | `vxg_frame_raw_size` | `vxg_ssize_t vxg_frame_raw_size(const uint8_t* src, size_t src_len)` | $O(1)$ header inspection (or multi-frame sum) returning exact uncompressed size in bytes. |
@@ -67,7 +67,8 @@ To achieve multi-GB/s throughput across language boundaries without heap-allocat
 | `vxg_aggregate_col` | `int32_t vxg_aggregate_col(const uint8_t* src, size_t src_len, const char* col_spec, const char* where_expr, size_t threads, vxg_agg_stats_t* out_stats)` | Compressed-domain `COUNT` / `SUM` (`u128` via `sum_lo`/`sum_hi`) / `MIN` / `MAX` into 64-byte `vxg_agg_stats_t`. |
 | `vxg_group_by_alloc` | `uint8_t* vxg_group_by_alloc(const uint8_t* src, size_t src_len, const char* group_col_spec, const char* agg_col_spec, const char* where_expr, size_t threads, size_t* out_len)` | Compressed-domain `GROUP BY` (`group_col_spec`) + optional numeric `COUNT`/`SUM`/`MIN`/`MAX` (`agg_col_spec`), returning `key\trow_count\tcount\tsum\tmin\tmax\n` lines. Free with `vxg_free(ptr, out_len)`. |
 | `vxg_select_alloc` | `uint8_t* vxg_select_alloc(const uint8_t* src, size_t src_len, const char* cols_csv, const char* where_expr, const char* order_by_col, int32_t order_desc, size_t limit, size_t threads, size_t* out_len)` | Compressed-domain `SELECT` (`cols_csv` or `NULL` for full rows) + optional `WHERE` + optional `ORDER BY` Top-K (`limit = 0` means unlimited). Free with `vxg_free(ptr, out_len)`. |
-| `vxg_project_frame_alloc` | `uint8_t* vxg_project_frame_alloc(const uint8_t* src, size_t src_len, const char* cols_csv, const char* where_expr, size_t threads, int32_t checksum, size_t* out_len)` | Zero-reencode `VXG -> VXG` column splicing (`project_frame`) with optional `WHERE`. Free with `vxg_free(ptr, out_len)`. |
+| `vxg_project_frame_alloc` | `uint8_t* vxg_project_frame_alloc(const uint8_t* src, size_t src_len, const char* cols_csv, const char* where_expr, size_t threads, size_t* out_len)` | Zero-reencode `VXG -> VXG` column splicing (`project_frame`) with optional `WHERE`. Free with `vxg_free(ptr, out_len)`. |
+| `vxg_sql_alloc` | `uint8_t* vxg_sql_alloc(const uint8_t* src, size_t src_len, const char* query_cstr, int32_t format, int32_t no_header, size_t threads, size_t* out_len)` | Executes a compressed-domain SQL `SELECT` query (`WHERE`, multi-key/multi-agg `GROUP BY`, `ORDER BY`, `LIMIT`, CSV header names, and dotted nested JSON keys) directly on `src`; `format` = `0` (TSV), `1` (CSV), or `2` (NDJSON). Free with `vxg_free(ptr, out_len)`. |
 | `vxg_alloc` / `vxg_compress_alloc` / `vxg_decompress_alloc` / `vxg_free` | `uint8_t* ...` | Convenience heap-allocated wrappers and WebAssembly linear-memory helpers. |
 
 ### Compressed-Domain SQL Analytics & `Top-K` from C (`vxg_agg_stats_t` & `vxg_select_alloc`)

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 
 use crate::{query::NumCmp, Error, Result};
 
+use super::dec_num::{DecCmp, DecNum};
 use super::expr::PredExpr;
 use super::line::{ColPred, ColTarget, StrCmp, ValuePred};
 
@@ -95,6 +96,7 @@ enum OwnedPred {
     StrSuffix(Vec<u8>),
     StrContains(Vec<u8>),
     Num(NumCmp),
+    Dec(DecCmp),
 }
 
 impl OwnedPred {
@@ -106,6 +108,7 @@ impl OwnedPred {
             Self::StrSuffix(b) => ValuePred::Str(StrCmp::Suffix(b)),
             Self::StrContains(b) => ValuePred::Str(StrCmp::Contains(b)),
             Self::Num(c) => ValuePred::Num(*c),
+            Self::Dec(c) => ValuePred::Dec(*c),
         }
     }
 }
@@ -241,14 +244,20 @@ fn parse_u64_rhs(s: &str) -> Result<u64> {
         .map_err(|_| Error::InvalidOption("expected unsigned 64-bit integer in predicate"))
 }
 
-fn parse_canonical_cli_u64(s: &str) -> Option<u64> {
-    if s.is_empty() || s.len() > 20 || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+fn parse_dec_rhs(s: &str) -> Result<DecNum> {
+    let t = s.trim();
+    if let Some(d) = DecNum::parse(t.as_bytes()) {
+        return Ok(d);
     }
-    if s.len() > 1 && s.starts_with('0') {
-        return None;
+    if let Ok(u) = t.parse::<u64>() {
+        return Ok(DecNum::from_u64(u));
     }
-    s.parse().ok()
+    if let Ok(i) = t.parse::<i64>() {
+        return Ok(DecNum::from_i64(i));
+    }
+    Err(Error::InvalidOption(
+        "expected integer or fixed-point decimal in predicate",
+    ))
 }
 
 fn parse_auto_eq_pred(rhs: &str, is_eq: bool) -> OwnedPred {
@@ -256,8 +265,8 @@ fn parse_auto_eq_pred(rhs: &str, is_eq: bool) -> OwnedPred {
     let is_quoted = t.len() >= 2
         && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')));
     if !is_quoted {
-        if let Some(n) = parse_canonical_cli_u64(t) {
-            return OwnedPred::Num(if is_eq { NumCmp::Eq(n) } else { NumCmp::Ne(n) });
+        if let Some(d) = DecNum::parse(t.as_bytes()) {
+            return OwnedPred::Dec(if is_eq { DecCmp::Eq(d) } else { DecCmp::Ne(d) });
         }
     }
     let bytes = unquote_opt(rhs).to_vec();
@@ -270,13 +279,13 @@ fn parse_auto_eq_pred(rhs: &str, is_eq: bool) -> OwnedPred {
 
 fn parse_where_spec_owned(spec: &str) -> Result<ParsedColPred> {
     for (op_tok, ctor) in [
-        (">=", (|n| NumCmp::Ge(n)) as fn(u64) -> NumCmp),
-        ("<=", |n| NumCmp::Le(n)),
+        (">=", (|n| DecCmp::Ge(n)) as fn(DecNum) -> DecCmp),
+        ("<=", |n| DecCmp::Le(n)),
     ] {
         if let Some((lhs, rhs)) = spec.split_once(op_tok) {
             return Ok(ParsedColPred {
                 target: OwnedTarget::from_col_target(parse_col_target(lhs.trim())?),
-                pred: OwnedPred::Num(ctor(parse_u64_rhs(rhs)?)),
+                pred: OwnedPred::Dec(ctor(parse_dec_rhs(rhs)?)),
             });
         }
     }
@@ -321,27 +330,29 @@ fn parse_where_spec_owned(spec: &str) -> Result<ParsedColPred> {
             OwnedPred::Num(NumCmp::Eq(parse_u64_rhs(v)?))
         } else if let Some(v) = rhs.strip_prefix("num-ne:") {
             OwnedPred::Num(NumCmp::Ne(parse_u64_rhs(v)?))
+        } else if let Some(v) = rhs.strip_prefix("dec:") {
+            OwnedPred::Dec(DecCmp::Eq(parse_dec_rhs(v)?))
         } else if let Some(v) = rhs.strip_prefix("gt:") {
-            OwnedPred::Num(NumCmp::Gt(parse_u64_rhs(v)?))
+            OwnedPred::Dec(DecCmp::Gt(parse_dec_rhs(v)?))
         } else if let Some(v) = rhs.strip_prefix("ge:") {
-            OwnedPred::Num(NumCmp::Ge(parse_u64_rhs(v)?))
+            OwnedPred::Dec(DecCmp::Ge(parse_dec_rhs(v)?))
         } else if let Some(v) = rhs.strip_prefix("lt:") {
-            OwnedPred::Num(NumCmp::Lt(parse_u64_rhs(v)?))
+            OwnedPred::Dec(DecCmp::Lt(parse_dec_rhs(v)?))
         } else if let Some(v) = rhs.strip_prefix("le:") {
-            OwnedPred::Num(NumCmp::Le(parse_u64_rhs(v)?))
+            OwnedPred::Dec(DecCmp::Le(parse_dec_rhs(v)?))
         } else {
             parse_auto_eq_pred(rhs, true)
         };
         return Ok(ParsedColPred { target, pred });
     }
     for (op_ch, ctor) in [
-        ('>', (|n| NumCmp::Gt(n)) as fn(u64) -> NumCmp),
-        ('<', |n| NumCmp::Lt(n)),
+        ('>', (|n| DecCmp::Gt(n)) as fn(DecNum) -> DecCmp),
+        ('<', |n| DecCmp::Lt(n)),
     ] {
         if let Some((lhs, rhs)) = spec.split_once(op_ch) {
             return Ok(ParsedColPred {
                 target: OwnedTarget::from_col_target(parse_col_target(lhs.trim())?),
-                pred: OwnedPred::Num(ctor(parse_u64_rhs(rhs)?)),
+                pred: OwnedPred::Dec(ctor(parse_dec_rhs(rhs)?)),
             });
         }
     }

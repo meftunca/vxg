@@ -15,6 +15,7 @@ pub mod baselines;
 mod block;
 pub mod checksum;
 pub mod columns;
+pub(crate) mod dict_lz;
 mod encode;
 mod error;
 pub mod ffi;
@@ -31,9 +32,12 @@ pub(crate) mod pool;
 mod proofs;
 pub mod query;
 pub mod simd;
+pub mod sql;
 pub mod stream;
 pub mod stream_ops;
-pub use block::{WorkStats, COLUMN as BLOCK_COLUMN, LZ as BLOCK_LZ, RAW as BLOCK_RAW};
+pub use block::{
+    WorkStats, COLUMN as BLOCK_COLUMN, DICT_LZ as BLOCK_DICT_LZ, LZ as BLOCK_LZ, RAW as BLOCK_RAW,
+};
 pub use error::{Error, Result};
 pub use frame::{max_compressed_size, BlockInfo, Frame, ValidatedFrame};
 pub use mmap::{
@@ -44,13 +48,17 @@ pub use ops::{
     aggregate_column, count_where, filter_column, filter_frame, filter_frame_where, filter_where,
     group_by, map_column, parse_col_list, parse_col_target, project_frame, select_columns,
     select_top_k_by, top_k_by, update_column, with_opt_where, AggStats, ColOp, ColPred, ColTarget,
-    GroupKey, GroupRow, ParsedColPred, ParsedWhere, PredExpr, SortDir, SortKey, StrCmp, ValuePred,
+    DecCmp, DecNum, GroupKey, GroupRow, ParsedColPred, ParsedWhere, PredExpr, SortDir, SortKey,
+    StrCmp, ValuePred,
 };
 pub use query::{
     block_row_count, extract_block_row, extract_block_row_range, extract_row, extract_row_range,
     filter_json_u64, filter_rows, find_first, frame_row_count, NumCmp, RowMatch,
 };
 pub use simd::Simd;
+pub use sql::{
+    execute_sql, execute_sql_stream, execute_sql_table, SqlFormat, SqlQuery, SqlTable, SqlVal,
+};
 pub use stream::{compress_stream, decompress_stream, StreamDecoder, StreamEncoder};
 pub use stream_ops::{
     aggregate_column_stream, count_where_stream, filter_frame_where_stream, filter_where_stream,
@@ -71,6 +79,9 @@ pub struct Options {
     /// release pipeline (v4: structured-column / stride / fast-LZ router with
     /// compact 8-byte directory). Off by default; v1..v3 frames remain readable.
     pub legacy_v2: bool,
+    /// Snap block split points backward to newline (`\n`) boundaries when possible (`VERSION_V5`
+    /// `FLAG_VAR_RAW`), eliminating cross-block partial rows on multi-GB tabular/NDJSON frames.
+    pub record_aligned: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -81,6 +92,7 @@ impl Default for Options {
             acceleration: 1,
             simd: Simd::Auto,
             legacy_v2: false,
+            record_aligned: false,
         }
     }
 }
@@ -134,32 +146,72 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
     options.validate()?;
     max_compressed_size(input.len(), options.block_size)?;
     let engine = simd::Engine::new(options.simd)?;
-    let count = input.len().div_ceil(options.block_size);
+    let ranges = frame::v5::compute_block_ranges(
+        input,
+        options.block_size,
+        options.record_aligned && !options.legacy_v2,
+    );
+    let count = ranges
+        .as_ref()
+        .map_or_else(|| input.len().div_ceil(options.block_size), Vec::len);
     let workers = options.threads.min(count.max(1));
     let version = if options.legacy_v2 {
         frame::VERSION
     } else {
         frame::VERSION_RELEASE
     };
-    if workers == 1 {
-        return encode::encode_single_into(input, out, options, engine, count, version);
+    let prep_dict = if !options.legacy_v2 {
+        dict_lz::prepare_frame_dict(input, options.block_size)
+    } else {
+        None
+    };
+
+    let run = |out_buf: &mut [u8], dict_ref: Option<&dict_lz::PreparedDict>| -> Result<usize> {
+        if workers == 1 {
+            return encode::encode_single_into(
+                input,
+                out_buf,
+                options,
+                engine,
+                count,
+                version,
+                ranges.as_deref(),
+                dict_ref,
+            );
+        }
+        let next_idx = std::sync::atomic::AtomicUsize::new(0);
+        let (written, _) = frame::parallel_encode_assemble(
+            workers,
+            input.len(),
+            count,
+            options.block_size,
+            options.checksum,
+            version,
+            ranges.is_some(),
+            dict_ref.map(|d| (d.wire_payload.as_slice(), d.raw.len())),
+            frame::AssembleDest::Slice(out_buf),
+            |worker, finish| {
+                encode::encode_worker_tls::<false, _>(
+                    input,
+                    options,
+                    engine,
+                    count,
+                    ranges.as_deref(),
+                    dict_ref,
+                    worker,
+                    workers,
+                    &next_idx,
+                    finish,
+                )
+            },
+        )?;
+        Ok(written)
+    };
+
+    match run(out, prep_dict.as_ref()) {
+        Err(Error::InvalidFrame("dict_expansion")) => run(out, None),
+        res => res,
     }
-    let next_idx = std::sync::atomic::AtomicUsize::new(0);
-    let (written, _) = frame::parallel_encode_assemble(
-        workers,
-        input.len(),
-        count,
-        options.block_size,
-        options.checksum,
-        version,
-        frame::AssembleDest::Slice(out),
-        |worker, finish| {
-            encode::encode_worker_tls::<false, _>(
-                input, options, engine, worker, workers, &next_idx, finish,
-            )
-        },
-    )?;
-    Ok(written)
 }
 
 fn compress_inner<const STATS: bool>(
@@ -169,33 +221,72 @@ fn compress_inner<const STATS: bool>(
     options.validate()?;
     max_compressed_size(input.len(), options.block_size)?;
     let engine = simd::Engine::new(options.simd)?;
-    let count = input.len().div_ceil(options.block_size);
+    let ranges = frame::v5::compute_block_ranges(
+        input,
+        options.block_size,
+        options.record_aligned && !options.legacy_v2,
+    );
+    let count = ranges
+        .as_ref()
+        .map_or_else(|| input.len().div_ceil(options.block_size), Vec::len);
     let workers = options.threads.min(count.max(1));
     let version = if options.legacy_v2 {
         frame::VERSION
     } else {
         frame::VERSION_RELEASE
     };
-    if workers == 1 {
-        return encode::encode_single_worker::<STATS>(input, options, engine, count, version);
+    let prep_dict = if !options.legacy_v2 {
+        dict_lz::prepare_frame_dict(input, options.block_size)
+    } else {
+        None
+    };
+
+    let run = |dict_ref: Option<&dict_lz::PreparedDict>| -> Result<(Vec<u8>, WorkStats)> {
+        if workers == 1 {
+            return encode::encode_single_worker::<STATS>(
+                input,
+                options,
+                engine,
+                count,
+                version,
+                ranges.as_deref(),
+                dict_ref,
+            );
+        }
+        let next_idx = std::sync::atomic::AtomicUsize::new(0);
+        let mut out = Vec::new();
+        let (_, stats) = frame::parallel_encode_assemble(
+            workers,
+            input.len(),
+            count,
+            options.block_size,
+            options.checksum,
+            version,
+            ranges.is_some(),
+            dict_ref.map(|d| (d.wire_payload.as_slice(), d.raw.len())),
+            frame::AssembleDest::Alloc(&mut out),
+            |worker, finish| {
+                encode::encode_worker_tls::<STATS, _>(
+                    input,
+                    options,
+                    engine,
+                    count,
+                    ranges.as_deref(),
+                    dict_ref,
+                    worker,
+                    workers,
+                    &next_idx,
+                    finish,
+                )
+            },
+        )?;
+        Ok((out, stats))
+    };
+
+    match run(prep_dict.as_ref()) {
+        Err(Error::InvalidFrame("dict_expansion")) => run(None),
+        res => res,
     }
-    let next_idx = std::sync::atomic::AtomicUsize::new(0);
-    let mut out = Vec::new();
-    let (_, stats) = frame::parallel_encode_assemble(
-        workers,
-        input.len(),
-        count,
-        options.block_size,
-        options.checksum,
-        version,
-        frame::AssembleDest::Alloc(&mut out),
-        |worker, finish| {
-            encode::encode_worker_tls::<STATS, _>(
-                input, options, engine, worker, workers, &next_idx, finish,
-            )
-        },
-    )?;
-    Ok((out, stats))
 }
 
 pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
@@ -216,9 +307,12 @@ pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     if raw_size > isize::MAX as usize {
         return Err(Error::SizeOverflow);
     }
+    let has_var_raw =
+        version >= frame::VERSION_V5 && (src[6] & (frame::v5::FLAG_VAR_RAW as u8)) != 0;
     if options.threads == 1
-        || version < frame::VERSION_V4
-        || (count <= frame::MAX_STACK_DIR_BLOCKS && src.len() <= u32::MAX as usize)
+        || (!has_var_raw
+            && (version < frame::VERSION_V4
+                || (count <= frame::MAX_STACK_DIR_BLOCKS && src.len() <= u32::MAX as usize)))
     {
         let mut out = vec![0u8; raw_size];
         if options.threads == 1 {
@@ -280,8 +374,11 @@ pub fn decompress_into(src: &[u8], out: &mut [u8], options: &DecodeOptions) -> R
             options,
         );
     }
-    if version < frame::VERSION_V4
-        || (count <= frame::MAX_STACK_DIR_BLOCKS && src.len() <= u32::MAX as usize)
+    let has_var_raw =
+        version >= frame::VERSION_V5 && (src[6] & (frame::v5::FLAG_VAR_RAW as u8)) != 0;
+    if !has_var_raw
+        && (version < frame::VERSION_V4
+            || (count <= frame::MAX_STACK_DIR_BLOCKS && src.len() <= u32::MAX as usize))
     {
         return frame::decode_validated_dir_multi_thread(
             src,

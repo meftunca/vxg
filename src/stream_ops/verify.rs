@@ -127,6 +127,7 @@ fn verify_single_parsed_frame(
     let verify_csum = parsed.checksummed && options.verify_checksum;
     let short_distance = parsed.version >= 2;
     let max_blk = parsed.block_size;
+    let dict_ref = parsed.dict.as_slice();
     let workers = options.threads.min(blocks.len());
 
     if workers <= 1 {
@@ -141,7 +142,14 @@ fn verify_single_parsed_frame(
                 }
             } else {
                 let dst = &mut scratch[..b.info.raw_size];
-                block::decode(b.payload, b.info.kind, dst, engine, short_distance)?;
+                block::decode_with_dict(
+                    b.payload,
+                    b.info.kind,
+                    dst,
+                    engine,
+                    short_distance,
+                    dict_ref,
+                )?;
                 if verify_csum && crc32c(dst) != b.info.checksum {
                     return Err(Error::Checksum { block: idx });
                 }
@@ -180,9 +188,14 @@ fn verify_single_parsed_frame(
                     }
                 } else {
                     let dst = &mut scratch[..b.info.raw_size];
-                    if let Err(e) =
-                        block::decode(b.payload, b.info.kind, dst, engine, short_distance)
-                    {
+                    if let Err(e) = block::decode_with_dict(
+                        b.payload,
+                        b.info.kind,
+                        dst,
+                        engine,
+                        short_distance,
+                        dict_ref,
+                    ) {
                         aborted.store(true, Ordering::Relaxed);
                         return Err(e);
                     }

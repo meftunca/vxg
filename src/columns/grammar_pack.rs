@@ -57,7 +57,8 @@ fn pack_grammar_into_impl(data: &[u8], leading_carry: bool, out: &mut Vec<u8>) -
                 data,
                 probe_start,
                 false,
-                8,
+                6,
+                1024,
                 &mut hits,
                 &mut prev_slots,
                 &mut probe_spans,
@@ -69,7 +70,7 @@ fn pack_grammar_into_impl(data: &[u8], leading_carry: bool, out: &mut Vec<u8>) -
                     data.len() >= 4096
                 } else {
                     data.len() >= 4096
-                        && find_byte(b'\n', &data[mid..data.len().min(mid + 4096)])
+                        && find_byte(b'\n', &data[mid..data.len().min(mid + 1024)])
                             .is_some_and(|nl| data.get(mid + nl + 1) == Some(&b'{'))
                 };
                 if !try_mid
@@ -77,7 +78,8 @@ fn pack_grammar_into_impl(data: &[u8], leading_carry: bool, out: &mut Vec<u8>) -
                         data,
                         mid,
                         true,
-                        6,
+                        5,
+                        1024,
                         &mut hits,
                         &mut prev_slots,
                         &mut probe_spans,

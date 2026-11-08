@@ -7,6 +7,7 @@ pub(crate) struct FastGrammarBoundary<'a> {
 pub(crate) struct IndepGrammarBoundary<'a> {
     pub row_count: usize,
     pub first_is_raw: bool,
+    pub first_seg_byte: Option<u8>,
     pub first_raw: Option<std::borrow::Cow<'a, [u8]>>,
     pub last_unterminated_raw: Option<std::borrow::Cow<'a, [u8]>>,
 }
@@ -40,8 +41,14 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
         return Err(invalid("column segment dictionary count"));
     }
     let mut seg_ends_nl_inline = [false; 128];
+    let mut seg_first_b_inline = [0u8; 128];
     let mut seg_ends_nl_overflow = if dictionary_len > 128 {
         vec![false; dictionary_len]
+    } else {
+        Vec::new()
+    };
+    let mut seg_first_b_overflow = if dictionary_len > 128 {
+        vec![0u8; dictionary_len]
     } else {
         Vec::new()
     };
@@ -50,8 +57,13 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
     } else {
         &mut seg_ends_nl_overflow[..dictionary_len]
     };
+    let seg_first_b: &mut [u8] = if dictionary_len <= 128 {
+        &mut seg_first_b_inline[..dictionary_len]
+    } else {
+        &mut seg_first_b_overflow[..dictionary_len]
+    };
     let mut prev_seg: Option<&[u8]> = None;
-    for flag in seg_ends_nl.iter_mut() {
+    for (flag, fb) in seg_ends_nl.iter_mut().zip(seg_first_b.iter_mut()) {
         let len = cursor.uleb()?;
         let seg = cursor.take(len)?;
         if prev_seg.is_some_and(|p| p >= seg) {
@@ -59,6 +71,11 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
         }
         prev_seg = Some(seg);
         *flag = seg.last() == Some(&b'\n');
+        *fb = seg
+            .iter()
+            .copied()
+            .find(|&b| !matches!(b, b' ' | b'\t'))
+            .unwrap_or(0);
     }
     let mut slot_counts = [0usize; 16];
     for slot_out in slot_counts.iter_mut().take(template_count) {
@@ -73,6 +90,7 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
         return Err(invalid("column segment selector width"));
     }
     let mut packed_slices = [&[][..]; 16];
+    let mut tpl_first_b = [0u8; 16];
     for t_idx in 0..template_count {
         let slots = slot_counts[t_idx];
         let packed_len = bit_bytes(slots + 1, segment_width)?;
@@ -84,11 +102,21 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
         }
         packed_slices[t_idx] = packed_slice;
         let mut rdr = FastBitReader::new_validated(packed_slice, slots + 1, segment_width)?;
-        rdr.skip(slots);
-        let last_idx = rdr.next_u64() as usize;
-        if last_idx >= dictionary_len {
+        let first_idx = rdr.next_u64() as usize;
+        if first_idx >= dictionary_len {
             return Err(invalid("column segment dictionary index"));
         }
+        tpl_first_b[t_idx] = seg_first_b[first_idx];
+        let last_idx = if slots == 0 {
+            first_idx
+        } else {
+            rdr.skip(slots - 1);
+            let li = rdr.next_u64() as usize;
+            if li >= dictionary_len {
+                return Err(invalid("column segment dictionary index"));
+            }
+            li
+        };
         if !seg_ends_nl[last_idx] {
             return Ok(None);
         }
@@ -108,25 +136,30 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
         return Ok(Some(IndepGrammarBoundary {
             row_count: 0,
             first_is_raw: false,
+            first_seg_byte: None,
             first_raw: None,
             last_unterminated_raw: None,
         }));
     }
-    let (raw_count, first_is_raw, last_is_raw) = if template_count == 1 {
+    let (raw_count, first_is_raw, last_is_raw, first_sel) = if template_count == 1 {
         let _ = FastBitReader::new_validated(selector_slice, row_count, 1)?;
         let ones: usize = selector_slice.iter().map(|b| b.count_ones() as usize).sum();
         let f_raw = (selector_slice[0] & 1) == 0;
         let l_raw = ((selector_slice[(row_count - 1) >> 3] >> ((row_count - 1) & 7)) & 1) == 0;
-        (row_count - ones, f_raw, l_raw)
+        (row_count - ones, f_raw, l_raw, usize::from(!f_raw))
     } else {
         let mut rdr = FastBitReader::new_validated(selector_slice, row_count, selector_width)?;
         let mut r_cnt = 0usize;
         let mut f_raw = false;
         let mut l_raw = false;
+        let mut f_sel = 0usize;
         for i in 0..row_count {
             let sel = rdr.next_u64() as usize;
             if sel > template_count {
                 return Err(invalid("column row selector index"));
+            }
+            if i == 0 {
+                f_sel = sel;
             }
             if sel == 0 {
                 r_cnt += 1;
@@ -138,12 +171,14 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
                 }
             }
         }
-        (r_cnt, f_raw, l_raw)
+        (r_cnt, f_raw, l_raw, f_sel)
     };
+    let first_seg_byte = (first_sel > 0).then(|| tpl_first_b[first_sel - 1]);
     if (!first_is_raw && !last_is_raw) || raw_count == 0 {
         return Ok(Some(IndepGrammarBoundary {
             row_count,
             first_is_raw,
+            first_seg_byte,
             first_raw: None,
             last_unterminated_raw: None,
         }));
@@ -170,6 +205,7 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
         return Ok(Some(IndepGrammarBoundary {
             row_count,
             first_is_raw,
+            first_seg_byte,
             first_raw,
             last_unterminated_raw,
         }));
@@ -202,6 +238,7 @@ pub(crate) fn peek_grammar_boundary_indep<'a>(
         Ok(Some(IndepGrammarBoundary {
             row_count,
             first_is_raw,
+            first_seg_byte,
             first_raw,
             last_unterminated_raw,
         }))

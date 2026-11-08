@@ -231,26 +231,40 @@ fn huf_lengths(freq: &[u32; 256], max_sym: usize, max_freq: u32) -> [u8; 256] {
 }
 
 /// Append a Huffman blob for `src` to `out` if it is strictly smaller than `limit` bytes.
-fn huf_encode(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
+pub(crate) fn huf_encode(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
+    huf_encode_min(src, out, limit, HUF_MIN)
+}
+
+pub(crate) fn huf_encode_min(
+    src: &[u8],
+    out: &mut Vec<u8>,
+    limit: usize,
+    min_len: usize,
+) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         #[target_feature(enable = "avx2,ssse3,sse4.1,popcnt,bmi1,bmi2")]
-        unsafe fn huf_encode_x86_v3(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
-            huf_encode_impl(src, out, limit)
+        unsafe fn huf_encode_x86_v3(
+            src: &[u8],
+            out: &mut Vec<u8>,
+            limit: usize,
+            min_len: usize,
+        ) -> bool {
+            huf_encode_impl(src, out, limit, min_len)
         }
         if std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("bmi2")
         {
-            return unsafe { huf_encode_x86_v3(src, out, limit) };
+            return unsafe { huf_encode_x86_v3(src, out, limit, min_len) };
         }
     }
-    huf_encode_impl(src, out, limit)
+    huf_encode_impl(src, out, limit, min_len)
 }
 
 #[inline(always)]
-fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize) -> bool {
+fn huf_encode_impl(src: &[u8], out: &mut Vec<u8>, limit: usize, min_len: usize) -> bool {
     let n = src.len();
-    if n < HUF_MIN {
+    if n < min_len {
         return false;
     }
     let mut freq = [0u32; 256];

@@ -1,6 +1,6 @@
 use crate::{simd::Engine, Error, Result};
 
-use super::{COLUMN, LZ, RAW};
+use super::{COLUMN, DICT_LZ, LZ, RAW};
 
 #[cfg_attr(not(feature = "parser-no-inline"), inline(always))]
 fn u32_at(src: &[u8], pos: &mut usize) -> Result<u32> {
@@ -395,6 +395,15 @@ impl<'a> Parser<'a> {
     }
 }
 pub(crate) fn validate(src: &[u8], kind: u32, raw_len: usize, short_distance: bool) -> Result<()> {
+    validate_with_dict(src, kind, raw_len, short_distance, &[])
+}
+pub(crate) fn validate_with_dict(
+    src: &[u8],
+    kind: u32,
+    raw_len: usize,
+    short_distance: bool,
+    dict: &[u8],
+) -> Result<()> {
     if kind == RAW {
         if src.len() != raw_len {
             return Err(Error::InvalidFrame("RAW size"));
@@ -402,10 +411,11 @@ pub(crate) fn validate(src: &[u8], kind: u32, raw_len: usize, short_distance: bo
         return Ok(());
     }
     if kind == COLUMN {
-        // The structured decoder checks every bound, count and ordering rule,
-        // so a trial decode into a scratch buffer is an exact validation.
         let mut tmp = vec![0u8; raw_len];
         return crate::columns::decode_block_into(src, &mut tmp);
+    }
+    if kind == DICT_LZ {
+        return crate::dict_lz::validate_dict_block(src, dict, raw_len);
     }
     if kind != LZ {
         return Err(Error::InvalidFrame("block kind"));
@@ -414,12 +424,13 @@ pub(crate) fn validate(src: &[u8], kind: u32, raw_len: usize, short_distance: bo
     while parser.next()?.is_some() {}
     Ok(())
 }
-pub(crate) fn decode(
+pub(crate) fn decode_with_dict(
     src: &[u8],
     kind: u32,
     out: &mut [u8],
     engine: Engine,
     short_distance: bool,
+    dict: &[u8],
 ) -> Result<()> {
     if kind == RAW {
         if src.len() != out.len() {
@@ -431,6 +442,9 @@ pub(crate) fn decode(
     if kind == COLUMN {
         crate::columns::decode_block_into(src, out)?;
         return Ok(());
+    }
+    if kind == DICT_LZ {
+        return crate::dict_lz::decode_dict_block(src, dict, out);
     }
     if kind != LZ {
         return Err(Error::InvalidFrame("block kind"));
@@ -463,24 +477,27 @@ pub(crate) fn decode(
     Ok(())
 }
 
-/// Decode a payload that has first passed `validate` without repeating
+/// Decode a payload that has first passed `validate_with_dict` without repeating
 /// per-command checks on its fixed-size v2 opcode-7 fast path.
 ///
 /// # Safety
 /// The exact `src`, `kind`, output length, and `short_distance` mode must have
-/// passed `validate` successfully and the payload must remain immutable since
+/// passed `validate_with_dict` successfully and the payload must remain immutable since
 /// that check. `out` must have the validated raw length. Violating this
 /// contract can make the opcode-7 path perform unchecked reads or writes.
-pub(crate) unsafe fn decode_validated(
+pub(crate) unsafe fn decode_validated_with_dict(
     src: &[u8],
     kind: u32,
     out: &mut [u8],
     engine: Engine,
     short_distance: bool,
+    dict: &[u8],
 ) -> Result<()> {
     if kind == COLUMN {
-        // The column decoder is always fully checked; no unchecked fast path.
         return crate::columns::decode_block_into(src, out);
+    }
+    if kind == DICT_LZ {
+        return crate::dict_lz::decode_dict_block(src, dict, out);
     }
     if kind == RAW {
         engine.copy(out, src);

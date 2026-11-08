@@ -136,6 +136,7 @@ pub unsafe extern "C" fn vxg_compress_file(
             acceleration: 1,
             simd: Simd::Auto,
             legacy_v2: false,
+            record_aligned: false,
         };
         match compress_file(in_p, out_p, &opt, force != 0) {
             Ok((_, out_bytes)) => isize::try_from(out_bytes).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),
@@ -297,7 +298,11 @@ pub unsafe extern "C" fn vxg_aggregate_col(
         let c_st = vxg_agg_stats_t {
             row_count: st.row_count,
             num_count: st.num_count,
-            sum: st.sum as f64,
+            sum: if st.has_signed_or_dec {
+                st.sum_dec().to_f64()
+            } else {
+                st.sum as f64
+            },
             sum_lo: st.sum as u64,
             sum_hi: (st.sum >> 64) as u64,
             min_val: st.min.unwrap_or(0),
@@ -524,6 +529,53 @@ pub unsafe extern "C" fn vxg_group_by_alloc(
             out.extend_from_slice(line.as_bytes());
         }
         into_ffi_buf(out, out_len)
+    }));
+    res.unwrap_or(std::ptr::null_mut())
+}
+
+/// Executes a compressed-domain SQL `SELECT` statement (`query_cstr`) directly on `frame_ptr[..frame_len]`.
+/// - `format`: `0` = TSV, `1` = CSV, `2` = NDJSON (`SqlFormat`).
+/// - `no_header`: non-zero omits the header line on TSV/CSV output.
+/// Free the returned pointer with `vxg_free(ptr, *out_len)`. Returns `NULL` on error.
+#[no_mangle]
+pub unsafe extern "C" fn vxg_sql_alloc(
+    frame_ptr: *const u8,
+    frame_len: usize,
+    query_cstr: *const c_char,
+    format: i32,
+    no_header: i32,
+    threads: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if out_len.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Some(frame) = (unsafe { slice_from_raw(frame_ptr, frame_len) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(sql_s) = (unsafe { cstr_req(query_cstr) }) else {
+        return std::ptr::null_mut();
+    };
+    let fmt = match format {
+        0 => crate::SqlFormat::Tsv,
+        1 => crate::SqlFormat::Csv,
+        2 => crate::SqlFormat::Json,
+        _ => return std::ptr::null_mut(),
+    };
+    let res = catch_unwind(AssertUnwindSafe(|| -> *mut u8 {
+        let Ok(q) = crate::SqlQuery::parse(sql_s) else {
+            return std::ptr::null_mut();
+        };
+        let dec = DecodeOptions {
+            threads: resolve_threads(threads),
+            simd: Simd::Auto,
+            max_output: usize::MAX,
+            verify_checksum: true,
+        };
+        match crate::execute_sql(frame, &q, fmt, no_header != 0, &dec) {
+            Ok(bytes) => into_ffi_buf(bytes, out_len),
+            Err(_) => std::ptr::null_mut(),
+        }
     }));
     res.unwrap_or(std::ptr::null_mut())
 }

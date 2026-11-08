@@ -28,9 +28,12 @@ fn ref_cmp_keys(
         _ => {
             let base = match (a, b) {
                 (SortKey::Num(x), SortKey::Num(y)) => x.cmp(y),
+                (SortKey::Dec(x), SortKey::Dec(y)) => x.cmp(y),
+                (SortKey::Num(x), SortKey::Dec(y)) => vxg::DecNum::from_u64(*x).cmp(y),
+                (SortKey::Dec(x), SortKey::Num(y)) => x.cmp(&vxg::DecNum::from_u64(*y)),
                 (SortKey::Str(x), SortKey::Str(y)) => x.cmp(y),
-                (SortKey::Num(_), SortKey::Str(_)) => Ordering::Less,
-                (SortKey::Str(_), SortKey::Num(_)) => Ordering::Greater,
+                (SortKey::Num(_) | SortKey::Dec(_), SortKey::Str(_)) => Ordering::Less,
+                (SortKey::Str(_), SortKey::Num(_) | SortKey::Dec(_)) => Ordering::Greater,
                 _ => unreachable!(),
             };
             if base == Ordering::Equal {

@@ -270,6 +270,7 @@ impl<'a> PreparedColumn<'a> {
             MODEL_SEGMENT_DICT => Self::parse_segment_dict(cursor, count, scratch),
             MODEL_GF2_AFFINE => Self::parse_gf2_affine(cursor, count, scratch),
             MODEL_PATTERN => Self::parse_pattern(cursor, count, scratch),
+            MODEL_SCALED_DECIMAL => Self::parse_scaled_decimal(cursor, count, scratch),
             _ => Err(invalid("column model selector")),
         }
     }

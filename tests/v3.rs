@@ -171,7 +171,7 @@ fn release_malformed_frames_are_rejected() {
     }
     // Unknown future versions are rejected.
     let mut future = frame.clone();
-    future[4..6].copy_from_slice(&5u16.to_le_bytes());
+    future[4..6].copy_from_slice(&6u16.to_le_bytes());
     assert!(Frame::parse(&future, 1 << 30).is_err());
     // Unknown block kind (3) in the compact directory is rejected.
     let mut bad_kind = frame.clone();

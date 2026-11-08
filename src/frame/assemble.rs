@@ -2,11 +2,11 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::thread::Thread;
 
-use crate::{block::WorkStats, pool, Error, Result};
+use crate::{block, block::WorkStats, pool, Error, Result};
 
 use super::{
-    entry_size, max_compressed_size, write_entry, ArenaPart, WorkerSlice, HEADER_SIZE, MAGIC,
-    VERSION_RELEASE,
+    entry_size, max_compressed_size, v5, write_entry, ArenaPart, WorkerSlice, HEADER_SIZE, MAGIC,
+    VERSION_RELEASE, VERSION_V4, VERSION_V5,
 };
 
 pub(crate) struct Part {
@@ -78,6 +78,7 @@ impl Drop for DoneGuard<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_assembly_plan(
     slots: &[SyncCell<Option<WorkerMeta>>],
     n: usize,
@@ -85,12 +86,16 @@ fn build_assembly_plan(
     block_size: usize,
     checksummed: bool,
     version: u16,
+    has_var_raw: bool,
+    opt_dict: Option<(&[u8], usize)>,
+    bound: usize,
     dest: &mut AssembleDest<'_>,
 ) -> Result<(usize, usize, Vec<usize>, WorkStats)> {
     let mut ordered: Vec<Option<ArenaPart>> = vec![None; count];
     let mut total_payload_len = 0usize;
     let mut total_stats = WorkStats::default();
     let mut seen = 0usize;
+    let mut any_dict_lz = false;
     for slot in slots {
         let Some(w_meta) = (unsafe { *slot.0.get() }) else {
             return Err(Error::WorkerPanic);
@@ -109,6 +114,9 @@ fn build_assembly_plan(
             if part.index >= count || ordered[part.index].is_some() {
                 return Err(Error::InvalidFrame("encoder block order"));
             }
+            if part.kind == block::DICT_LZ {
+                any_dict_lz = true;
+            }
             total_payload_len = total_payload_len
                 .checked_add(part.len)
                 .ok_or(Error::SizeOverflow)?;
@@ -119,13 +127,34 @@ fn build_assembly_plan(
     if seen != count {
         return Err(Error::InvalidFrame("encoder block order"));
     }
-    let esize = entry_size(version);
-    let table_end = HEADER_SIZE
+    let active_dict = if any_dict_lz { opt_dict } else { None };
+    let actual_version = if version < VERSION_V4 {
+        version
+    } else if active_dict.is_some() || has_var_raw {
+        VERSION_V5
+    } else {
+        VERSION_V4
+    };
+    let esize = entry_size(actual_version);
+    let base_dir_end = HEADER_SIZE
         .checked_add(esize.checked_mul(count).ok_or(Error::SizeOverflow)?)
+        .ok_or(Error::SizeOverflow)?;
+    let var_raw_bytes = if has_var_raw {
+        count.checked_mul(4).ok_or(Error::SizeOverflow)?
+    } else {
+        0
+    };
+    let dict_wire_bytes = active_dict.map_or(0, |(w, _)| w.len());
+    let table_end = base_dir_end
+        .checked_add(var_raw_bytes)
+        .and_then(|x| x.checked_add(dict_wire_bytes))
         .ok_or(Error::SizeOverflow)?;
     let exact_len = table_end
         .checked_add(total_payload_len)
         .ok_or(Error::SizeOverflow)?;
+    if active_dict.is_some() && exact_len > bound {
+        return Err(Error::InvalidFrame("dict_expansion"));
+    }
     let header_slice: &mut [u8] = match dest {
         AssembleDest::Alloc(vec) => {
             vec.clear();
@@ -144,13 +173,16 @@ fn build_assembly_plan(
             &mut slice[..table_end]
         }
     };
-    header_slice[0..4].copy_from_slice(MAGIC);
-    header_slice[4..6].copy_from_slice(&version.to_le_bytes());
-    header_slice[6..8].copy_from_slice(&(u16::from(checksummed)).to_le_bytes());
-    header_slice[8..16].copy_from_slice(&(n as u64).to_le_bytes());
-    header_slice[16..20].copy_from_slice(&(block_size as u32).to_le_bytes());
-    header_slice[20..24].copy_from_slice(&(count as u32).to_le_bytes());
-    header_slice[24..32].copy_from_slice(&0u64.to_le_bytes());
+    v5::write_header_bytes(
+        header_slice,
+        actual_version,
+        checksummed,
+        has_var_raw,
+        active_dict,
+        n,
+        block_size,
+        count,
+    );
     let mut dst_offsets = Vec::with_capacity(count);
     let mut raw_offset = 0usize;
     let mut payload_offset = table_end;
@@ -159,7 +191,7 @@ fn build_assembly_plan(
         write_entry(
             header_slice,
             HEADER_SIZE + i * esize,
-            version,
+            actual_version,
             raw_offset,
             payload_offset,
             part.raw_size,
@@ -167,6 +199,10 @@ fn build_assembly_plan(
             part.checksum,
             part.kind,
         );
+        if has_var_raw {
+            let vr_pos = base_dir_end + i * 4;
+            header_slice[vr_pos..vr_pos + 4].copy_from_slice(&(part.raw_size as u32).to_le_bytes());
+        }
         dst_offsets.push(payload_offset);
         raw_offset = raw_offset
             .checked_add(part.raw_size)
@@ -174,6 +210,10 @@ fn build_assembly_plan(
         payload_offset = payload_offset
             .checked_add(part.len)
             .ok_or(Error::SizeOverflow)?;
+    }
+    if let Some((wire, _)) = active_dict {
+        let d_pos = base_dir_end + var_raw_bytes;
+        header_slice[d_pos..d_pos + wire.len()].copy_from_slice(wire);
     }
     if raw_offset != n {
         return Err(Error::InvalidFrame("encoder total"));
@@ -211,6 +251,8 @@ pub(crate) fn parallel_encode_assemble<F>(
     block_size: usize,
     checksummed: bool,
     version: u16,
+    has_var_raw: bool,
+    opt_dict: Option<(&[u8], usize)>,
     dest: AssembleDest<'_>,
     encode_fn: F,
 ) -> Result<(usize, WorkStats)>
@@ -264,6 +306,9 @@ where
                         block_size,
                         checksummed,
                         version,
+                        has_var_raw,
+                        opt_dict,
+                        bound,
                         dest_mut,
                     ) {
                         Ok(plan_tuple) => {

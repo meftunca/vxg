@@ -321,6 +321,31 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
         if is_all_decimal && best_bytes.is_some() && allow_v3_ext && dups16 < 8 && n > 64 {
             skip_dictionary = true;
         }
+        if allow_v3_ext
+            && !is_all_decimal
+            && first_slice.len() == 20
+            && first_slice[19] == b'Z'
+            && first_slice[4] == b'-'
+        {
+            try_model!(
+                |limit| pack_timestamp_model_ext(values, limit, true),
+                ModelKind::Timestamp
+            );
+            if best_kind == ModelKind::Timestamp {
+                return (best_bytes.unwrap(), best_kind);
+            }
+        }
+        if allow_v3_ext
+            && !is_all_decimal
+            && first_slice.len() <= 21
+            && (first_slice[0] == b'-' || first_slice[0].is_ascii_digit())
+            && first_slice.last().is_some_and(u8::is_ascii_digit)
+        {
+            try_model!(|limit| pack_scaled_decimal_model(values, limit), ModelKind::ScaledDecimal);
+            if best_kind == ModelKind::ScaledDecimal && dups16 < 8 && n > 64 {
+                skip_dictionary = true;
+            }
+        }
         let unquoted_const_hint = !skip_dictionary
             && (n <= 64
                 || (dups16 >= 2 && !same_pat_lits)

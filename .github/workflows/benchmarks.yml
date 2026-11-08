@@ -2,9 +2,6 @@ name: cross-platform-benchmarks
 on:
   push:
     branches: [main]
-    tags: ["v*"]
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       size_mib:
@@ -26,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -52,9 +49,12 @@ jobs:
         run: cargo build --release --features bench --bins
 
       - name: Verify CLI hardware report
-        run: cargo run --release --bin vxg -- hardware
+        shell: bash
+        run: |
+          mkdir -p reports
+          cargo run --release --bin vxg -- hardware | tee "reports/hardware-${{ matrix.os }}.txt"
 
-      - name: Run VXG v4 multi-format benchmark suite
+      - name: Run VXG multi-format benchmark suite (1T & multi-thread)
         shell: bash
         run: |
           SIZE="${{ inputs.size_mib || '16' }}"
@@ -62,17 +62,40 @@ jobs:
           SAMPLES="${{ inputs.samples || '3' }}"
           cargo run --release --features bench --bin vxg-bench -- \
             --suite v4 \
+            --threads 1 \
             --size-mib "$SIZE" \
             --seconds "$SECS" \
             --samples "$SAMPLES" \
             --csv "reports/benchmark-${{ matrix.os }}.csv" \
             --markdown "reports/benchmark-${{ matrix.os }}.md"
-          cat "reports/benchmark-${{ matrix.os }}.md" >> "$GITHUB_STEP_SUMMARY"
+          cargo run --release --features bench --bin vxg-bench -- \
+            --suite v4 \
+            --threads auto \
+            --fast-baselines \
+            --size-mib "$SIZE" \
+            --seconds "$SECS" \
+            --samples "$SAMPLES" \
+            --csv "reports/benchmark-${{ matrix.os }}-mt.csv" \
+            --markdown "reports/benchmark-${{ matrix.os }}-mt.md"
+          {
+            echo "### Hardware (${{ matrix.os }})"
+            echo '```'
+            cat "reports/hardware-${{ matrix.os }}.txt"
+            echo '```'
+            echo "### 1T Full Sweep (${{ matrix.os }})"
+            cat "reports/benchmark-${{ matrix.os }}.md"
+            echo ""
+            echo "### Multi-Thread Auto (${{ matrix.os }})"
+            cat "reports/benchmark-${{ matrix.os }}-mt.md"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark CSV and Markdown table
         uses: actions/upload-artifact@v4
         with:
           name: benchmarks-${{ matrix.os }}
           path: |
+            reports/hardware-${{ matrix.os }}.txt
             reports/benchmark-${{ matrix.os }}.csv
             reports/benchmark-${{ matrix.os }}.md
+            reports/benchmark-${{ matrix.os }}-mt.csv
+            reports/benchmark-${{ matrix.os }}-mt.md

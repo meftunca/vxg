@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 
+use super::dec_num::{DecCmp, DecNum};
 use crate::query::NumCmp;
 
 /// Identifies a structured column inside flat JSON/NDJSON objects or delimited (CSV/TSV/PSV) rows.
@@ -47,11 +48,12 @@ impl<'a> StrCmp<'a> {
     }
 }
 
-/// Column predicate: either a string comparison or an unsigned-integer comparison.
+/// Column predicate: string, unsigned `u64`, or signed/decimal [`DecCmp`] comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValuePred<'a> {
     Str(StrCmp<'a>),
     Num(NumCmp),
+    Dec(DecCmp),
 }
 
 /// A column-addressed predicate (`WHERE col <op> val`).
@@ -79,6 +81,14 @@ impl<'a> ColPred<'a> {
     }
 
     #[inline]
+    pub const fn json_dec(key: &'a str, cmp: DecCmp) -> Self {
+        Self {
+            col: ColTarget::JsonKey(key),
+            pred: ValuePred::Dec(cmp),
+        }
+    }
+
+    #[inline]
     pub const fn delimited_str(delim: u8, index: usize, cmp: StrCmp<'a>) -> Self {
         Self {
             col: ColTarget::Delimited { delim, index },
@@ -91,6 +101,14 @@ impl<'a> ColPred<'a> {
         Self {
             col: ColTarget::Delimited { delim, index },
             pred: ValuePred::Num(cmp),
+        }
+    }
+
+    #[inline]
+    pub const fn delimited_dec(delim: u8, index: usize, cmp: DecCmp) -> Self {
+        Self {
+            col: ColTarget::Delimited { delim, index },
+            pred: ValuePred::Dec(cmp),
         }
     }
 }
@@ -287,6 +305,7 @@ pub fn format_col_str(col: ColTarget<'_>, s: &[u8]) -> Vec<u8> {
 pub fn eval_token_pred(col: ColTarget<'_>, raw_tok: &[u8], pred: ValuePred<'_>) -> bool {
     match pred {
         ValuePred::Num(cmp) => parse_canonical_u64(raw_tok).is_some_and(|v| cmp.test(v)),
+        ValuePred::Dec(cmp) => DecNum::parse(raw_tok).is_some_and(|d| cmp.test(d)),
         ValuePred::Str(sc) => match col {
             ColTarget::JsonKey(_) => unescape_json_str(raw_tok).is_some_and(|s| sc.test(&s)),
             ColTarget::Delimited { .. } => decode_delim_str(raw_tok).is_some_and(|s| sc.test(&s)),
@@ -397,58 +416,7 @@ pub(crate) fn scan_json_val_end(data: &[u8], start: usize) -> Option<usize> {
     }
 }
 
-/// Locate the byte span `(start, end)` of the first top-level `"key":` value in a valid
-/// top-level JSON object record `line`.
-pub fn find_json_key_span(line: &[u8], key: &[u8]) -> Option<(usize, usize)> {
-    let mut pos = 0usize;
-    skip_json_ws(line, &mut pos);
-    if line.get(pos) != Some(&b'{') {
-        return None;
-    }
-    pos += 1;
-    let mut found: Option<(usize, usize)> = None;
-    loop {
-        skip_json_ws(line, &mut pos);
-        if line.get(pos) == Some(&b'}') {
-            pos += 1;
-            break;
-        }
-        let k_start = pos;
-        let k_end = scan_json_str_end(line, pos)?;
-        pos = k_end;
-        skip_json_ws(line, &mut pos);
-        if line.get(pos) != Some(&b':') {
-            return None;
-        }
-        pos += 1;
-        skip_json_ws(line, &mut pos);
-        let v_start = pos;
-        let v_end = scan_json_val_end(line, pos)?;
-        if found.is_none() {
-            if let Some(k_decoded) = unescape_json_str(&line[k_start..k_end]) {
-                if k_decoded.as_ref() == key {
-                    found = Some((v_start, v_end));
-                }
-            }
-        }
-        pos = v_end;
-        skip_json_ws(line, &mut pos);
-        match line.get(pos) {
-            Some(b',') => pos += 1,
-            Some(b'}') => {
-                pos += 1;
-                break;
-            }
-            _ => return None,
-        }
-    }
-    skip_json_ws(line, &mut pos);
-    if line.get(pos) == Some(&b',') {
-        pos += 1;
-        skip_json_ws(line, &mut pos);
-    }
-    (pos == line.len()).then_some(found).flatten()
-}
+include!("json_path.rs");
 
 /// Locate the byte span `(start, end)` of zero-based field `index` in a `delim`-delimited record `line`
 /// (requiring at least 2 fields and the same quoting/byte rules as `parse_delimited_spans`).

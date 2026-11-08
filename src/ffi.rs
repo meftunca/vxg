@@ -120,16 +120,10 @@ pub unsafe extern "C" fn vxg_frame_raw_size(src: *const u8, src_len: usize) -> i
     let Some(bytes) = (unsafe { slice_from_raw(src, src_len) }) else {
         return VXG_ERR_NULL_PTR;
     };
-    if bytes.len() < 32 {
-        return VXG_ERR_CORRUPT_DATA;
-    }
-    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if &bytes[..4] != b"VXG1" || !(1..=4).contains(&version) {
-        return VXG_ERR_CORRUPT_DATA;
-    }
-    let raw = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-    let Ok(single_raw) = usize::try_from(raw) else {
-        return VXG_ERR_BUFFER_TOO_SMALL;
+    let hdr = match crate::frame::v5::parse_v1_to_v5_header(bytes, usize::MAX) {
+        Ok(h) => h,
+        Err(crate::Error::SizeOverflow) => return VXG_ERR_BUFFER_TOO_SMALL,
+        Err(_) => return VXG_ERR_CORRUPT_DATA,
     };
     if let Ok((frame_len, _)) = crate::frame::parse_header_and_dir(bytes, usize::MAX) {
         if frame_len < bytes.len() && bytes[frame_len..].starts_with(b"VXG1") {
@@ -141,7 +135,7 @@ pub unsafe extern "C" fn vxg_frame_raw_size(src: *const u8, src_len: usize) -> i
             };
         }
     }
-    isize::try_from(single_raw).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
+    isize::try_from(hdr.raw_size).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
 }
 
 /// Inspects the header and directory prefix of a VXG frame and returns its exact
@@ -164,15 +158,12 @@ pub unsafe extern "C" fn vxg_frame_block_count(src: *const u8, src_len: usize) -
     let Some(bytes) = (unsafe { slice_from_raw(src, src_len) }) else {
         return VXG_ERR_NULL_PTR;
     };
-    if bytes.len() < 32 {
-        return VXG_ERR_CORRUPT_DATA;
-    }
-    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if &bytes[..4] != b"VXG1" || !(1..=4).contains(&version) {
-        return VXG_ERR_CORRUPT_DATA;
-    }
-    let count = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
-    isize::try_from(count).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
+    let hdr = match crate::frame::v5::parse_v1_to_v5_header(bytes, usize::MAX) {
+        Ok(h) => h,
+        Err(crate::Error::SizeOverflow) => return VXG_ERR_BUFFER_TOO_SMALL,
+        Err(_) => return VXG_ERR_CORRUPT_DATA,
+    };
+    isize::try_from(hdr.count).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
 }
 
 /// Returns the uncompressed byte size of `block_index` in $O(1)$ time from the frame header,
@@ -186,27 +177,30 @@ pub unsafe extern "C" fn vxg_frame_block_raw_size(
     let Some(bytes) = (unsafe { slice_from_raw(src, src_len) }) else {
         return VXG_ERR_NULL_PTR;
     };
-    if bytes.len() < 32 {
-        return VXG_ERR_CORRUPT_DATA;
-    }
-    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if &bytes[..4] != b"VXG1" || !(1..=4).contains(&version) {
-        return VXG_ERR_CORRUPT_DATA;
-    }
-    let raw_size = match usize::try_from(u64::from_le_bytes(bytes[8..16].try_into().unwrap())) {
-        Ok(v) => v,
-        Err(_) => return VXG_ERR_BUFFER_TOO_SMALL,
+    let hdr = match crate::frame::v5::parse_v1_to_v5_header(bytes, usize::MAX) {
+        Ok(h) => h,
+        Err(crate::Error::SizeOverflow) => return VXG_ERR_BUFFER_TOO_SMALL,
+        Err(_) => return VXG_ERR_CORRUPT_DATA,
     };
-    let block_size = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
-    let count = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
-    if block_index >= count || block_size == 0 {
+    if block_index >= hdr.count || hdr.block_size == 0 {
         return VXG_ERR_INVALID_OPTION;
     }
-    let start = block_index.saturating_mul(block_size);
-    if start >= raw_size {
+    if hdr.has_var_raw {
+        let off = hdr.var_raw_offset + block_index * 4;
+        let Some(s) = bytes.get(off..off + 4) else {
+            return VXG_ERR_CORRUPT_DATA;
+        };
+        let rn = u32::from_le_bytes(s.try_into().unwrap()) as usize;
+        if rn == 0 || rn > hdr.block_size {
+            return VXG_ERR_CORRUPT_DATA;
+        }
+        return isize::try_from(rn).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL);
+    }
+    let start = block_index.saturating_mul(hdr.block_size);
+    if start >= hdr.raw_size {
         return VXG_ERR_CORRUPT_DATA;
     }
-    let rn = block_size.min(raw_size - start);
+    let rn = hdr.block_size.min(hdr.raw_size - start);
     isize::try_from(rn).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL)
 }
 
@@ -239,6 +233,7 @@ pub unsafe extern "C" fn vxg_compress_into(
             acceleration: 1,
             simd: Simd::Auto,
             legacy_v2: false,
+            record_aligned: false,
         };
         match compress_into(input, output, &opt) {
             Ok(written) => isize::try_from(written).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),
@@ -351,6 +346,7 @@ pub unsafe extern "C" fn vxg_compress_alloc(
             acceleration: 1,
             simd: Simd::Auto,
             legacy_v2: false,
+            record_aligned: false,
         };
         let Ok(encoded) = compress(input, &opt) else {
             return std::ptr::null_mut();

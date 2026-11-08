@@ -276,6 +276,18 @@ fn scan_order_slot_cands(
         order_col,
         crate::ops::ColTarget::Delimited { delim, .. } if delim.is_ascii_digit()
     );
+    if try_scan_scaled_dec_topk(
+        order_col_bytes,
+        ones,
+        mask,
+        row_map,
+        base_row,
+        digit_delim,
+        outer,
+        cands,
+    )? {
+        return Ok(());
+    }
     if !digit_delim {
         if let Some(tag @ (MODEL_DECIMAL_PACKED | MODEL_DECIMAL_AFFINE)) =
             order_col_bytes.first().copied()
@@ -421,7 +433,7 @@ fn scan_order_slot_cands(
                     let (ptr, len) = scratch.slice_arena[slice_off + e];
                     let raw_tok = unsafe { std::slice::from_raw_parts(ptr, len) };
                     let dk = extract_token_sort_key(order_col, raw_tok);
-                    if outer.can_accept_key(dk.as_ref(), base_row) {
+                    if outer.can_accept_key_from(dk.as_ref(), base_row) {
                         *slot_alive = true;
                         any_alive = true;
                     }

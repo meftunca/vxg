@@ -36,4 +36,4 @@ vxg.vxg_free(dstPtr, bound)
 ### Supported In-Browser C ABI Calls
 - **Encode / Decode / Verify**: `vxg_compress_into`, `vxg_decompress_into`, `vxg_verify_frame`
 - **$O(1)$ Random Block Extraction**: `vxg_frame_block_count`, `vxg_frame_block_raw_size`, `vxg_extract_block_into`
-- **Compressed-Domain SQL, `Top-K` & Splicing**: `vxg_count_where_str`, `vxg_select_alloc`, `vxg_aggregate_col`, `vxg_project_frame_alloc`
+- **Compressed-Domain SQL, `Top-K` & Splicing**: `vxg_sql_alloc`, `vxg_group_by_alloc`, `vxg_count_where_str`, `vxg_select_alloc`, `vxg_aggregate_col`, `vxg_project_frame_alloc`

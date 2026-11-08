@@ -1,8 +1,8 @@
 use crate::{block, checksum::crc32c, simd::Engine, DecodeOptions, Error, Result};
 
 use super::{
-    check_block_size, entry_size, read_u32, read_u64, Block, Frame, ValidatedCommandStreams,
-    HEADER_SIZE, MAGIC, MAX_VERSION, MIN_VERSION, V4_SIZE_MASK, VERSION_V4,
+    entry_size, read_u32, read_u64, v5, valid_kind_and_size, Block, Frame, ValidatedCommandStreams,
+    HEADER_SIZE, V4_SIZE_MASK, VERSION_V4,
 };
 
 pub(super) fn decode_frame_into(
@@ -31,11 +31,21 @@ pub(super) fn decode_frame_into(
     let workers = options.threads.min(frame.blocks.len());
     let verify = frame.checksummed && options.verify_checksum;
     let short_distance = frame.version >= 2;
+    let dict_ref = frame.dict.as_slice();
     if workers == 1 {
         return if let Some(proof) = proof {
-            decode_validated_group(&frame.blocks, out, engine, verify, 0, short_distance, proof)
+            decode_validated_group(
+                &frame.blocks,
+                out,
+                engine,
+                verify,
+                0,
+                short_distance,
+                dict_ref,
+                proof,
+            )
         } else {
-            decode_group(&frame.blocks, out, engine, verify, 0, short_distance)
+            decode_group(&frame.blocks, out, engine, verify, 0, short_distance, dict_ref)
         };
     }
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -74,16 +84,24 @@ pub(super) fn decode_frame_into(
                 };
                 let res = if let Some(_proof) = proof {
                     unsafe {
-                        block::decode_validated(
+                        block::decode_validated_with_dict(
                             b.payload,
                             b.info.kind,
                             target,
                             engine,
                             short_distance,
+                            dict_ref,
                         )
                     }
                 } else {
-                    block::decode(b.payload, b.info.kind, target, engine, short_distance)
+                    block::decode_with_dict(
+                        b.payload,
+                        b.info.kind,
+                        target,
+                        engine,
+                        short_distance,
+                        dict_ref,
+                    )
                 };
                 if let Err(e) = res {
                     aborted.store(true, Ordering::Relaxed);
@@ -112,58 +130,31 @@ pub(crate) fn validate_header_and_directory_with_offsets(
     max_output: usize,
     mut v4_offsets: Option<&mut [core::mem::MaybeUninit<u32>; MAX_STACK_DIR_BLOCKS + 1]>,
 ) -> Result<(usize, usize, usize, u16, bool)> {
-    if src.len() < HEADER_SIZE {
+    let hdr = v5::parse_v1_to_v5_header(src, max_output)?;
+    if hdr.payload_start > src.len() {
         return Err(Error::Truncated);
     }
-    let version = u16::from_le_bytes(src[4..6].try_into().unwrap());
-    if &src[..4] != MAGIC || !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-        return Err(Error::InvalidFrame("magic/version"));
-    }
-    let flags = u16::from_le_bytes(src[6..8].try_into().unwrap());
-    if flags & !1 != 0 || read_u64(src, 24)? != 0 {
-        return Err(Error::InvalidFrame("unknown flags/reserved data"));
-    }
-    let raw64 = read_u64(src, 8)?;
-    if raw64 > max_output as u64 {
-        return Err(Error::OutputLimit {
-            requested: raw64,
-            limit: max_output,
-        });
-    }
-    let raw_size = usize::try_from(raw64).map_err(|_| Error::SizeOverflow)?;
-    let block_size = read_u32(src, 16)? as usize;
-    check_block_size(block_size).map_err(|_| Error::InvalidFrame("block size"))?;
-    let count = read_u32(src, 20)? as usize;
-    let expected_count = raw_size / block_size + usize::from(raw_size % block_size != 0);
-    if count != expected_count {
-        return Err(Error::InvalidFrame("block count"));
-    }
-    let esize = entry_size(version);
-    let dir_end = count
-        .checked_mul(esize)
-        .and_then(|v| v.checked_add(HEADER_SIZE))
-        .ok_or(Error::SizeOverflow)?;
-    if dir_end > src.len() {
-        return Err(Error::Truncated);
-    }
-    let record_v4 = version >= VERSION_V4
-        && count <= MAX_STACK_DIR_BLOCKS
+    let esize = entry_size(hdr.version);
+    let record_v4 = hdr.version >= VERSION_V4
+        && !hdr.has_var_raw
+        && hdr.count <= MAX_STACK_DIR_BLOCKS
         && src.len() <= u32::MAX as usize;
     if record_v4 {
         if let Some(ref mut offs) = v4_offsets {
-            offs[0].write(dir_end as u32);
+            offs[0].write(hdr.payload_start as u32);
         }
     }
-    let mut next_payload = dir_end;
+    let mut next_payload = hdr.payload_start;
     let mut next_raw = 0usize;
-    for i in 0..count {
+    for i in 0..hdr.count {
         let p = HEADER_SIZE + i * esize;
-        let (raw_offset, payload_offset, rn, cn, checksum, kind) = if version >= VERSION_V4 {
+        let expected_rn = v5::block_raw_size(src, &hdr, i, next_raw)?;
+        let (raw_offset, payload_offset, rn, cn, checksum, kind) = if hdr.version >= VERSION_V4 {
             let word = read_u32(src, p)?;
             (
                 next_raw,
                 next_payload,
-                block_size.min(raw_size - next_raw),
+                expected_rn,
                 (word & V4_SIZE_MASK) as usize,
                 read_u32(src, p + 4)?,
                 word >> 30,
@@ -178,22 +169,13 @@ pub(crate) fn validate_header_and_directory_with_offsets(
                 read_u32(src, p + 28)?,
             )
         };
-        if raw_offset != next_raw
-            || payload_offset != next_payload
-            || rn != block_size.min(raw_size - next_raw)
-        {
+        if raw_offset != next_raw || payload_offset != next_payload || rn != expected_rn {
             return Err(Error::InvalidFrame("non-canonical directory"));
         }
-        let kind_size_ok = match kind {
-            block::RAW => cn == rn,
-            block::LZ => cn < rn && cn >= block::BLOCK_PREFIX,
-            block::COLUMN => version >= 3 && cn >= 2 && cn < rn,
-            _ => false,
-        };
-        if !kind_size_ok {
+        if !valid_kind_and_size(hdr.version, kind, cn, rn) {
             return Err(Error::InvalidFrame("block kind/size"));
         }
-        if flags == 0 && checksum != 0 {
+        if !hdr.checksummed && checksum != 0 {
             return Err(Error::InvalidFrame("checksum without flag"));
         }
         let end = payload_offset.checked_add(cn).ok_or(Error::SizeOverflow)?;
@@ -208,10 +190,16 @@ pub(crate) fn validate_header_and_directory_with_offsets(
             }
         }
     }
-    if next_raw != raw_size || next_payload != src.len() {
+    if next_raw != hdr.raw_size || next_payload != src.len() {
         return Err(Error::InvalidFrame("trailing bytes or incorrect total"));
     }
-    Ok((raw_size, block_size, count, version, flags != 0))
+    Ok((
+        hdr.raw_size,
+        hdr.block_size,
+        hdr.count,
+        hdr.version,
+        hdr.checksummed,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -249,6 +237,9 @@ pub(crate) fn decode_validated_dir_multi_thread(
             options,
         );
     }
+    let hdr = v5::parse_v1_to_v5_header(src, usize::MAX)?;
+    let dict = v5::decode_header_dict(src, &hdr)?;
+    let dict_ref = dict.as_slice();
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let next_idx = AtomicUsize::new(0);
     let aborted = AtomicBool::new(false);
@@ -314,7 +305,9 @@ pub(crate) fn decode_validated_dir_multi_thread(
                 let target = unsafe {
                     std::slice::from_raw_parts_mut((out_addr + raw_offset) as *mut u8, rn)
                 };
-                if let Err(e) = block::decode(payload, kind, target, engine, short_distance) {
+                if let Err(e) =
+                    block::decode_with_dict(payload, kind, target, engine, short_distance, dict_ref)
+                {
                     aborted.store(true, Ordering::Relaxed);
                     return Err(e);
                 }
@@ -334,14 +327,24 @@ pub(crate) fn extract_block_validated_into(
     options: &DecodeOptions,
 ) -> Result<usize> {
     options.validate()?;
-    let (raw_size, block_size, count, version, checksummed) =
+    let (_raw_size, block_size, count, version, checksummed) =
         validate_header_and_directory(src, usize::MAX)?;
     if block_index >= count {
         return Err(Error::InvalidOption("block index"));
     }
+    let hdr = v5::parse_v1_to_v5_header(src, usize::MAX)?;
     let esize = entry_size(version);
-    let raw_offset = block_index * block_size;
-    let rn = block_size.min(raw_size - raw_offset);
+    let mut raw_offset = 0usize;
+    let rn = if hdr.has_var_raw {
+        for i in 0..block_index {
+            raw_offset += v5::block_raw_size(src, &hdr, i, raw_offset)?;
+        }
+        v5::block_raw_size(src, &hdr, block_index, raw_offset)?
+    } else {
+        raw_offset = block_index * block_size;
+        block_size.min(hdr.raw_size - raw_offset)
+    };
+    let _ = raw_offset;
     if rn > options.max_output {
         return Err(Error::OutputLimit {
             requested: rn as u64,
@@ -355,7 +358,7 @@ pub(crate) fn extract_block_validated_into(
         });
     }
     let (payload_offset, cn, checksum, kind) = if version >= VERSION_V4 {
-        let mut p_off = HEADER_SIZE + count * esize;
+        let mut p_off = hdr.payload_start;
         for i in 0..block_index {
             let p = HEADER_SIZE + i * esize;
             let word = unsafe {
@@ -389,12 +392,18 @@ pub(crate) fn extract_block_validated_into(
     };
     let payload = unsafe { src.get_unchecked(payload_offset..payload_offset + cn) };
     let dst = &mut out[..rn];
-    block::decode(
+    let dict = if kind == block::DICT_LZ && hdr.has_dict {
+        v5::decode_header_dict(src, &hdr)?
+    } else {
+        Vec::new()
+    };
+    block::decode_with_dict(
         payload,
         kind,
         dst,
         Engine::new(options.simd)?,
         version >= 2,
+        &dict,
     )?;
     if checksummed && options.verify_checksum && crc32c(dst) != checksum {
         return Err(Error::Checksum { block: block_index });
@@ -422,11 +431,15 @@ pub(crate) fn decode_validated_dir_single_thread(
     if count == 0 {
         return Ok(());
     }
+    let hdr = v5::parse_v1_to_v5_header(src, usize::MAX)?;
+    let dict = v5::decode_header_dict(src, &hdr)?;
+    let dict_ref = dict.as_slice();
     let esize = entry_size(version);
     let verify = checksummed && options.verify_checksum;
     let short_distance = version >= 2;
-    let mut next_payload = HEADER_SIZE + count * esize;
+    let mut next_payload = hdr.payload_start;
     let mut next_raw = 0usize;
+    let _ = block_size;
     for i in 0..count {
         let p = HEADER_SIZE + i * esize;
         let (rn, cn, checksum, kind) = if version >= VERSION_V4 {
@@ -437,7 +450,7 @@ pub(crate) fn decode_validated_dir_single_thread(
                 u32::from_le_bytes(src.get_unchecked(p + 4..p + 8).try_into().unwrap())
             };
             (
-                block_size.min(raw_size - next_raw),
+                v5::block_raw_size(src, &hdr, i, next_raw)?,
                 (word & V4_SIZE_MASK) as usize,
                 csum,
                 word >> 30,
@@ -459,7 +472,7 @@ pub(crate) fn decode_validated_dir_single_thread(
         };
         let payload = unsafe { src.get_unchecked(next_payload..next_payload + cn) };
         let target = unsafe { out.get_unchecked_mut(next_raw..next_raw + rn) };
-        block::decode(payload, kind, target, engine, short_distance)?;
+        block::decode_with_dict(payload, kind, target, engine, short_distance, dict_ref)?;
         if verify && crc32c(target) != checksum {
             return Err(Error::Checksum { block: i });
         }
@@ -476,11 +489,12 @@ fn decode_group(
     verify: bool,
     first: usize,
     short_distance: bool,
+    dict: &[u8],
 ) -> Result<()> {
     let mut offset = 0;
     for (i, b) in blocks.iter().enumerate() {
         let target = &mut out[offset..offset + b.info.raw_size];
-        block::decode(b.payload, b.info.kind, target, engine, short_distance)?;
+        block::decode_with_dict(b.payload, b.info.kind, target, engine, short_distance, dict)?;
         if verify && crc32c(target) != b.info.checksum {
             return Err(Error::Checksum { block: first + i });
         }
@@ -496,17 +510,21 @@ fn decode_validated_group(
     verify: bool,
     first: usize,
     short_distance: bool,
+    dict: &[u8],
     _proof: &ValidatedCommandStreams,
 ) -> Result<()> {
     let mut offset = 0;
     for (i, b) in blocks.iter().enumerate() {
         let target = &mut out[offset..offset + b.info.raw_size];
-        // SAFETY: `_proof` can only be constructed by `Frame::into_validated`
-        // after it validates every immutable payload in this frame. `blocks`
-        // comes directly from that same frame and `target` has the recorded
-        // raw length, so the contract of `block::decode_validated` holds.
         unsafe {
-            block::decode_validated(b.payload, b.info.kind, target, engine, short_distance)?;
+            block::decode_validated_with_dict(
+                b.payload,
+                b.info.kind,
+                target,
+                engine,
+                short_distance,
+                dict,
+            )?;
         }
         if verify && crc32c(target) != b.info.checksum {
             return Err(Error::Checksum { block: first + i });

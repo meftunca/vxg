@@ -8,6 +8,7 @@ fn unpack_model_ext(
         MODEL_PATTERN => {
             pattern_decode(cursor, count, &mut |row| values.push_slice(row))?;
         }
+        MODEL_SCALED_DECIMAL => unpack_scaled_decimal_oracle(cursor, count, values)?,
         MODEL_DECIMAL_DELTA => {
             if count < 2 {
                 return Err(invalid("column decimal delta count"));

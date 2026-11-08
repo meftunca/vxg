@@ -291,3 +291,53 @@ fn run_ops_cmd(args: &[String]) -> R<()> {
     }
     Ok(())
 }
+
+fn gpu_check(backend: Backend) -> R<()> {
+    let mut device = GpuCodec::new(backend)?;
+    println!("device: {}", device.device_name());
+    let gpu = GpuOptions {
+        block_size: 4096,
+        batch_bytes: 8192,
+        ..GpuOptions::default()
+    };
+    let cpu = Options {
+        block_size: 4096,
+        ..Options::default()
+    };
+    let mut count = 0;
+    for n in [0, 1, 7, 31, 127, 4095, 4096, 4097, 16391] {
+        for period in [0, 1, 2, 3, 4, 7, 8, 17, 65] {
+            let mut seed = 0x123456789abcdefu64;
+            let mut random = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            };
+            let pat: Vec<u8> = (0..period.max(1)).map(|_| random()).collect();
+            let data: Vec<u8> = (0..n)
+                .map(|i| {
+                    if period == 0 {
+                        random()
+                    } else {
+                        pat[i % period]
+                    }
+                })
+                .collect();
+            let cpu_frame = vxg::compress(&data, &cpu)?;
+            let (gpu_frame, _) = device.compress(&data, &gpu)?;
+            if vxg::decompress(&gpu_frame, &DecodeOptions::default())? != data {
+                return Err("GPU encoder -> CPU decoder mismatch".into());
+            }
+            if device.decompress(&cpu_frame, &gpu)?.0 != data {
+                return Err("CPU encoder -> GPU decoder mismatch".into());
+            }
+            if device.decompress(&gpu_frame, &gpu)?.0 != data {
+                return Err("GPU encoder -> GPU decoder mismatch".into());
+            }
+            count += 1;
+        }
+    }
+    println!("PASS: {count} three-way CPU/GPU conformance cases");
+    Ok(())
+}

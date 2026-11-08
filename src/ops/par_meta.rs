@@ -32,9 +32,36 @@ impl<T> SyncCell<T> {
 pub(crate) struct ParInBlock<'a> {
     pub(crate) f_bytes: &'a [u8],
     pub(crate) local_blk: usize,
+    pub(crate) version: u16,
     pub(crate) frame_checksummed: bool,
+    pub(crate) dict: &'a [u8],
     pub(crate) info: frame::BlockInfo,
     pub(crate) payload: &'a [u8],
+}
+
+impl ParInBlock<'_> {
+    #[inline]
+    pub(crate) fn decode_into(&self, options: &DecodeOptions, buf: &mut Vec<u8>) -> Result<()> {
+        buf.clear();
+        buf.resize(self.info.raw_size, 0);
+        crate::block::decode_with_dict(
+            self.payload,
+            self.info.kind,
+            buf,
+            crate::simd::Engine::new(options.simd)?,
+            self.version >= 2,
+            self.dict,
+        )?;
+        if self.frame_checksummed
+            && options.verify_checksum
+            && crate::checksum::crc32c(buf) != self.info.checksum
+        {
+            return Err(crate::Error::Checksum {
+                block: self.local_blk,
+            });
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct ParMeta<'a> {
@@ -86,17 +113,21 @@ impl BoundarySet {
 
 pub(crate) fn collect_par_blocks<'a>(
     frame_bytes: &'a [u8],
-    frames: &[Frame<'a>],
+    frames: &'a [Frame<'a>],
 ) -> Vec<ParInBlock<'a>> {
     let total_blocks: usize = frames.iter().map(|f| f.blocks.len()).sum();
     let mut in_blocks = Vec::with_capacity(total_blocks);
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, frames) {
         let csum = parsed.checksummed();
+        let ver = parsed.version();
+        let dict = parsed.dict();
         for (local_blk, info) in parsed.blocks().enumerate() {
             in_blocks.push(ParInBlock {
                 f_bytes,
                 local_blk,
+                version: ver,
                 frame_checksummed: csum,
+                dict,
                 info,
                 payload: &f_bytes[info.payload_offset..info.payload_offset + info.payload_size],
             });
@@ -200,13 +231,7 @@ pub(crate) fn inspect_par_meta<'a>(
                             }
                         }
                         let mut raw_vec = Vec::new();
-                        query::decode_block_into(
-                            ib.f_bytes,
-                            ib.local_blk,
-                            ib.info.raw_size,
-                            options,
-                            &mut raw_vec,
-                        )?;
+                        ib.decode_into(options, &mut raw_vec)?;
                         let (rc, ends_nl) = count_raw_rows(&raw_vec);
                         Ok(IndepBlock::Decoded {
                             raw_vec,
@@ -268,13 +293,7 @@ pub(crate) fn inspect_par_meta<'a>(
                 IndepBlock::Grammar(_) => {
                     let ib = &in_blocks[b];
                     let mut raw_vec = Vec::new();
-                    query::decode_block_into(
-                        ib.f_bytes,
-                        ib.local_blk,
-                        ib.info.raw_size,
-                        options,
-                        &mut raw_vec,
-                    )?;
+                    ib.decode_into(options, &mut raw_vec)?;
                     let (rc, ends_nl) = count_raw_rows(&raw_vec);
                     if rc > 0 {
                         cur_global += rc - usize::from(had_in);
@@ -325,13 +344,7 @@ pub(crate) fn inspect_par_meta<'a>(
             }
         }
         let mut raw_vec = Vec::new();
-        query::decode_block_into(
-            ib.f_bytes,
-            ib.local_blk,
-            ib.info.raw_size,
-            options,
-            &mut raw_vec,
-        )?;
+        ib.decode_into(options, &mut raw_vec)?;
         let (rc, ends_nl) = count_raw_rows(&raw_vec);
         if rc > 0 {
             cur_global += rc - usize::from(had_in);

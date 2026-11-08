@@ -60,7 +60,9 @@ fn grammar_from_block_mode_impl<'a>(
     let mut overflow_spans = Vec::new();
     let mut line_start = 0usize;
     let total_len = data.len();
-    if leading_carry && first_nl < total_len {
+    if (leading_carry || (allow_early_abort && looks_like_delimited_header(data, first_nl)))
+        && first_nl < total_len
+    {
         rows.push(Row::Raw(&data[..first_nl]));
         raw_rows = 1;
         raw_bytes = first_nl;
@@ -286,8 +288,8 @@ fn grammar_from_block_mode_impl<'a>(
                         }
                         segments.push(&record[prev..]);
                         let is_single_clean = template_is_clean(&segments);
-                        let is_clean_nl = is_single_clean
-                            && matches!(segments.last().copied(), Some(b"}\n" | b"}\r\n"));
+                        let is_clean_nl =
+                            is_single_clean && segments.last().is_some_and(|s| s.ends_with(b"\n"));
                         let is_clean =
                             is_single_clean || template_is_clean_multiline_json(&segments);
                         let delim_opt = delimited_template_delim(&segments);

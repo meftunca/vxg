@@ -11,7 +11,9 @@ impl<'a> PreparedColumn<'a> {
                 if count < 2 {
                     return Err(invalid("column timestamp count"));
                 }
-                let year = cursor.u16()?;
+                let raw_year = cursor.u16()?;
+                let unquoted = (raw_year & 0x8000) != 0;
+                let year = raw_year & 0x7fff;
                 if year > 9999 {
                     return Err(invalid("column timestamp year"));
                 }
@@ -39,8 +41,8 @@ impl<'a> PreparedColumn<'a> {
                 if !cursor.done() {
                     return Err(invalid("column model trailing bytes"));
                 }
+                let trail: &'static [u8] = if unquoted { b"Z" } else { b"Z\"" };
                 if (widths[0] | widths[1] | widths[2]) == 0 {
-                    // Validate zero-width slices 0..3:
                     for i in 0..3 {
                         if !slices[i].is_empty() {
                             return Err(Error::Truncated);
@@ -52,7 +54,9 @@ impl<'a> PreparedColumn<'a> {
                         }
                         let mut buf = [0u8; 24];
                         let mut v = Vec::with_capacity(22);
-                        v.push(b'"');
+                        if !unquoted {
+                            v.push(b'"');
+                        }
                         write_four_digits(&mut v, year);
                         v.push(b'-');
                         write_two_digits(&mut v, bases[0]);
@@ -64,10 +68,14 @@ impl<'a> PreparedColumn<'a> {
                         write_two_digits(&mut v, bases[3]);
                         v.push(b':');
                         write_two_digits(&mut v, bases[4]);
-                        v.extend_from_slice(b"Z\"");
-                        buf[..22].copy_from_slice(&v);
+                        v.extend_from_slice(trail);
+                        let clen = v.len();
+                        buf[..clen].copy_from_slice(&v);
                         return Ok(Self {
-                            const_full: ConstValue::Inline { buf, len: 22 },
+                            const_full: ConstValue::Inline {
+                                buf,
+                                len: clen as u8,
+                            },
                             const_lead: LeadValue::Empty,
                             const_trail: b"",
                             dict_slices: None,
@@ -94,25 +102,31 @@ impl<'a> PreparedColumn<'a> {
                         &mut scratch.u8_arena,
                     )?;
                     let mut lead = [0u8; 16];
-                    lead[0] = b'"';
-                    lead[1] = b'0' + (year / 1000) as u8;
-                    lead[2] = b'0' + (year / 100 % 10) as u8;
-                    lead[3] = b'0' + (year / 10 % 10) as u8;
-                    lead[4] = b'0' + (year % 10) as u8;
-                    lead[5] = b'-';
-                    lead[6] = b'0' + bases[0] / 10;
-                    lead[7] = b'0' + bases[0] % 10;
-                    lead[8] = b'-';
-                    lead[9] = b'0' + bases[1] / 10;
-                    lead[10] = b'0' + bases[1] % 10;
-                    lead[11] = b'T';
-                    lead[12] = b'0' + bases[2] / 10;
-                    lead[13] = b'0' + bases[2] % 10;
-                    lead[14] = b':';
+                    let off = usize::from(!unquoted);
+                    if !unquoted {
+                        lead[0] = b'"';
+                    }
+                    lead[off] = b'0' + (year / 1000) as u8;
+                    lead[off + 1] = b'0' + (year / 100 % 10) as u8;
+                    lead[off + 2] = b'0' + (year / 10 % 10) as u8;
+                    lead[off + 3] = b'0' + (year % 10) as u8;
+                    lead[off + 4] = b'-';
+                    lead[off + 5] = b'0' + bases[0] / 10;
+                    lead[off + 6] = b'0' + bases[0] % 10;
+                    lead[off + 7] = b'-';
+                    lead[off + 8] = b'0' + bases[1] / 10;
+                    lead[off + 9] = b'0' + bases[1] % 10;
+                    lead[off + 10] = b'T';
+                    lead[off + 11] = b'0' + bases[2] / 10;
+                    lead[off + 12] = b'0' + bases[2] % 10;
+                    lead[off + 13] = b':';
                     return Ok(Self {
                         const_full: ConstValue::None,
-                        const_lead: LeadValue::Inline { buf: lead, len: 15 },
-                        const_trail: b"Z\"",
+                        const_lead: LeadValue::Inline {
+                            buf: lead,
+                            len: (off + 14) as u8,
+                        },
+                        const_trail: trail,
                         dict_slices: None,
                         max_emit_len: 5,
                         stream: ColumnStream::TimestampMinSec {
@@ -136,16 +150,22 @@ impl<'a> PreparedColumn<'a> {
                     }
                 }
                 let mut lead = [0u8; 16];
-                lead[0] = b'"';
-                lead[1] = b'0' + (year / 1000) as u8;
-                lead[2] = b'0' + (year / 100 % 10) as u8;
-                lead[3] = b'0' + (year / 10 % 10) as u8;
-                lead[4] = b'0' + (year % 10) as u8;
-                lead[5] = b'-';
+                let off = usize::from(!unquoted);
+                if !unquoted {
+                    lead[0] = b'"';
+                }
+                lead[off] = b'0' + (year / 1000) as u8;
+                lead[off + 1] = b'0' + (year / 100 % 10) as u8;
+                lead[off + 2] = b'0' + (year / 10 % 10) as u8;
+                lead[off + 3] = b'0' + (year % 10) as u8;
+                lead[off + 4] = b'-';
                 Ok(Self {
                     const_full: ConstValue::None,
-                    const_lead: LeadValue::Inline { buf: lead, len: 6 },
-                    const_trail: b"Z\"",
+                    const_lead: LeadValue::Inline {
+                        buf: lead,
+                        len: (off + 5) as u8,
+                    },
+                    const_trail: trail,
                     dict_slices: None,
                     max_emit_len: 14,
                     stream: ColumnStream::TimestampFull {

@@ -13,7 +13,7 @@ fn unpack_model_mode(bytes: &[u8], count: usize, strict: bool) -> Result<FlatVal
     let tag = cursor.byte()?;
     let per_value = match tag {
         MODEL_HEX_SUFFIX | MODEL_EPOCH_COUNTER | MODEL_PERIODIC_HEX | MODEL_PERIODIC_STRING
-        | MODEL_GF2_AFFINE | MODEL_PATTERN => 24,
+        | MODEL_GF2_AFFINE | MODEL_PATTERN | MODEL_SCALED_DECIMAL => 24,
         MODEL_SEGMENT_DICT => 48,
         _ => 8,
     };
@@ -256,7 +256,9 @@ fn unpack_model_mode(bytes: &[u8], count: usize, strict: bool) -> Result<FlatVal
             if count < 2 {
                 return Err(invalid("column timestamp count"));
             }
-            let year = cursor.u16()?;
+            let raw_year = cursor.u16()?;
+            let unquoted = (raw_year & 0x8000) != 0;
+            let year = raw_year & 0x7fff;
             if year > 9999 {
                 return Err(invalid("column timestamp year"));
             }
@@ -300,7 +302,9 @@ fn unpack_model_mode(bytes: &[u8], count: usize, strict: bool) -> Result<FlatVal
                     return Err(invalid("column timestamp component"));
                 }
                 let start = values.begin();
-                values.bytes.push(b'"');
+                if !unquoted {
+                    values.bytes.push(b'"');
+                }
                 write_four_digits(&mut values.bytes, year);
                 values.bytes.push(b'-');
                 write_two_digits(&mut values.bytes, month);
@@ -312,7 +316,10 @@ fn unpack_model_mode(bytes: &[u8], count: usize, strict: bool) -> Result<FlatVal
                 write_two_digits(&mut values.bytes, minute);
                 values.bytes.push(b':');
                 write_two_digits(&mut values.bytes, second);
-                values.bytes.extend_from_slice(b"Z\"");
+                values.bytes.push(b'Z');
+                if !unquoted {
+                    values.bytes.push(b'"');
+                }
                 values.finish(start);
             }
         }

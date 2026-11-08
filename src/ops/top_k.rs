@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOr
 
 use crate::{query, DecodeOptions, Frame, NumCmp, Result, RowMatch, BLOCK_COLUMN};
 
+use super::dec_num::{DecCmp, DecNum, U64DomainCmp};
 use super::expr::{line_matches_expr, PredExpr};
 use super::line::{
     decode_delim_str, find_line_col_span, parse_canonical_u64, scan_json_val_end,
@@ -28,6 +29,8 @@ pub enum SortDir {
 pub enum SortKey {
     /// Canonical unsigned 64-bit integer (`9 < 10 < 100`).
     Num(u64),
+    /// Canonical signed integer or fixed-scale decimal (`-10 < -2.5 < 0 < 19.99`).
+    Dec(DecNum),
     /// Logical string bytes (JSON-unescaped or CSV-decoded) or non-integer literal.
     Str(Vec<u8>),
     /// Column absent on record, empty delimited field, or JSON `null` (`NULLS LAST`).
@@ -37,6 +40,7 @@ pub enum SortKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SortKeyRef<'a> {
     Num(u64),
+    Dec(DecNum),
     Str(&'a [u8]),
     Missing,
 }
@@ -46,6 +50,7 @@ impl SortKey {
     pub(crate) fn as_ref(&self) -> SortKeyRef<'_> {
         match self {
             Self::Num(n) => SortKeyRef::Num(*n),
+            Self::Dec(d) => SortKeyRef::Dec(*d),
             Self::Str(b) => SortKeyRef::Str(b.as_slice()),
             Self::Missing => SortKeyRef::Missing,
         }
@@ -57,6 +62,7 @@ impl SortKeyRef<'_> {
     pub(crate) fn to_owned_key(self) -> SortKey {
         match self {
             Self::Num(n) => SortKey::Num(n),
+            Self::Dec(d) => SortKey::Dec(d),
             Self::Str(b) => SortKey::Str(b.to_vec()),
             Self::Missing => SortKey::Missing,
         }
@@ -79,9 +85,12 @@ pub(crate) fn cmp_key_ref(
         _ => {
             let base = match (a, b) {
                 (SortKeyRef::Num(x), SortKeyRef::Num(y)) => x.cmp(&y),
+                (SortKeyRef::Dec(x), SortKeyRef::Dec(y)) => x.cmp(&y),
+                (SortKeyRef::Num(x), SortKeyRef::Dec(y)) => DecNum::from_u64(x).cmp(&y),
+                (SortKeyRef::Dec(x), SortKeyRef::Num(y)) => x.cmp(&DecNum::from_u64(y)),
                 (SortKeyRef::Str(x), SortKeyRef::Str(y)) => x.cmp(y),
-                (SortKeyRef::Num(_), SortKeyRef::Str(_)) => Ordering::Less,
-                (SortKeyRef::Str(_), SortKeyRef::Num(_)) => Ordering::Greater,
+                (SortKeyRef::Num(_) | SortKeyRef::Dec(_), SortKeyRef::Str(_)) => Ordering::Less,
+                (SortKeyRef::Str(_), SortKeyRef::Num(_) | SortKeyRef::Dec(_)) => Ordering::Greater,
                 _ => unreachable!(),
             };
             if base == Ordering::Equal {
@@ -107,6 +116,8 @@ pub(crate) fn extract_token_sort_key(col: ColTarget<'_>, raw_tok: &[u8]) -> Sort
                 SortKey::Missing
             } else if let Some(v) = parse_canonical_u64(raw_tok) {
                 SortKey::Num(v)
+            } else if let Some(d) = DecNum::parse(raw_tok) {
+                SortKey::Dec(d)
             } else if raw_tok.first() == Some(&b'"') {
                 match unescape_json_str(raw_tok) {
                     Some(s) => SortKey::Str(s.into_owned()),
@@ -122,6 +133,9 @@ pub(crate) fn extract_token_sort_key(col: ColTarget<'_>, raw_tok: &[u8]) -> Sort
             if !delim.is_ascii_digit() {
                 if let Some(v) = parse_canonical_u64(raw_tok) {
                     return SortKey::Num(v);
+                }
+                if let Some(d) = DecNum::parse(raw_tok) {
+                    return SortKey::Dec(d);
                 }
             }
             match decode_delim_str(raw_tok) {
@@ -147,6 +161,8 @@ pub(crate) fn extract_token_sort_key_ref<'a>(
                 Some(SortKeyRef::Missing)
             } else if let Some(v) = parse_canonical_u64(raw_tok) {
                 Some(SortKeyRef::Num(v))
+            } else if let Some(d) = DecNum::parse(raw_tok) {
+                Some(SortKeyRef::Dec(d))
             } else if raw_tok.first() == Some(&b'"') {
                 if raw_tok.len() >= 2
                     && raw_tok.last() == Some(&b'"')
@@ -168,6 +184,9 @@ pub(crate) fn extract_token_sort_key_ref<'a>(
             if !delim.is_ascii_digit() {
                 if let Some(v) = parse_canonical_u64(raw_tok) {
                     return Some(SortKeyRef::Num(v));
+                }
+                if let Some(d) = DecNum::parse(raw_tok) {
+                    return Some(SortKeyRef::Dec(d));
                 }
             }
             if raw_tok.len() >= 2 && raw_tok.first() == Some(&b'"') && raw_tok.last() == Some(&b'"')
@@ -231,6 +250,7 @@ impl Ord for HeapEntry {
 pub(crate) struct TopKHeap {
     k: usize,
     dir: SortDir,
+    skip_row_0: bool,
     floor: Option<(SortKey, usize)>,
     heap: BinaryHeap<HeapEntry>,
 }
@@ -240,18 +260,35 @@ impl TopKHeap {
         Self {
             k,
             dir,
+            skip_row_0: false,
             floor: None,
             heap: BinaryHeap::with_capacity(k.min(1024)),
         }
     }
 
-    pub(crate) fn with_floor(k: usize, dir: SortDir, floor: Option<(SortKey, usize)>) -> Self {
+    pub(crate) fn with_floor(
+        k: usize,
+        dir: SortDir,
+        skip_row_0: bool,
+        floor: Option<(SortKey, usize)>,
+    ) -> Self {
         Self {
             k,
             dir,
+            skip_row_0,
             floor,
             heap: BinaryHeap::with_capacity(k.min(1024)),
         }
+    }
+
+    #[inline]
+    pub(crate) fn set_skip_row_0(&mut self, skip: bool) {
+        self.skip_row_0 = skip;
+    }
+
+    #[inline]
+    pub(crate) fn skip_row_0(&self) -> bool {
+        self.skip_row_0
     }
 
     #[inline]
@@ -276,9 +313,22 @@ impl TopKHeap {
 
     #[inline]
     pub(crate) fn can_accept_key(&self, key: SortKeyRef<'_>, global_row: usize) -> bool {
+        if self.k == 0 || (self.skip_row_0 && global_row == 0) {
+            return false;
+        }
+        self.can_accept_key_at(key, global_row)
+    }
+
+    #[inline]
+    pub(crate) fn can_accept_key_from(&self, key: SortKeyRef<'_>, min_global_row: usize) -> bool {
         if self.k == 0 {
             return false;
         }
+        self.can_accept_key_at(key, min_global_row.max(usize::from(self.skip_row_0)))
+    }
+
+    #[inline]
+    fn can_accept_key_at(&self, key: SortKeyRef<'_>, global_row: usize) -> bool {
         if let Some((ref fk, f_row)) = self.floor {
             if cmp_key_ref(key, global_row, fk.as_ref(), f_row, self.dir) != Ordering::Less {
                 return false;
@@ -299,7 +349,7 @@ impl TopKHeap {
 
     #[inline]
     pub(crate) fn push_entry(&mut self, entry: HeapEntry) {
-        if self.k == 0 {
+        if self.k == 0 || (self.skip_row_0 && entry.global_row_index == 0) {
             return;
         }
         if let Some((ref fk, f_row)) = self.floor {
@@ -367,33 +417,64 @@ impl TopKHeap {
         if self.k == 0 {
             return None;
         }
+        let min_global_row = min_global_row.max(usize::from(self.skip_row_0));
         if self.dir == SortDir::Desc {
-            if let Some((SortKey::Str(_), _)) = self.active_worst() {
-                return None;
-            }
             let mut lo = shared.map_or(0, |a| a.load(AtomicOrdering::Relaxed));
-            if let Some((b, w_row)) = self.worst_num_bound() {
-                if min_global_row > w_row {
-                    if b == u64::MAX {
-                        return None;
+            match self.active_worst() {
+                Some((SortKey::Str(_), _)) => return None,
+                Some((&SortKey::Num(b), w_row)) => {
+                    if min_global_row > w_row {
+                        if b == u64::MAX {
+                            return None;
+                        }
+                        lo = lo.max(b + 1);
+                    } else {
+                        lo = lo.max(b);
                     }
-                    lo = lo.max(b + 1);
-                } else {
-                    lo = lo.max(b);
                 }
+                Some((&SortKey::Dec(d), w_row)) => {
+                    let dc = if min_global_row > w_row {
+                        DecCmp::Gt(d)
+                    } else {
+                        DecCmp::Ge(d)
+                    };
+                    match dc.to_u64_domain() {
+                        U64DomainCmp::AlwaysFalse => return None,
+                        U64DomainCmp::AlwaysTrue => {}
+                        U64DomainCmp::Cmp(NumCmp::Ge(b)) => lo = lo.max(b),
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
             Some(NumCmp::Ge(lo))
         } else {
             let mut hi = shared.map_or(u64::MAX, |a| a.load(AtomicOrdering::Relaxed));
-            if let Some((b, w_row)) = self.worst_num_bound() {
-                if min_global_row > w_row {
-                    if b == 0 {
-                        return None;
+            match self.active_worst() {
+                Some((&SortKey::Num(b), w_row)) => {
+                    if min_global_row > w_row {
+                        if b == 0 {
+                            return None;
+                        }
+                        hi = hi.min(b - 1);
+                    } else {
+                        hi = hi.min(b);
                     }
-                    hi = hi.min(b - 1);
-                } else {
-                    hi = hi.min(b);
                 }
+                Some((&SortKey::Dec(d), w_row)) => {
+                    let dc = if min_global_row > w_row {
+                        DecCmp::Lt(d)
+                    } else {
+                        DecCmp::Le(d)
+                    };
+                    match dc.to_u64_domain() {
+                        U64DomainCmp::AlwaysFalse => return None,
+                        U64DomainCmp::AlwaysTrue => {}
+                        U64DomainCmp::Cmp(NumCmp::Le(b)) => hi = hi.min(b),
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
             Some(NumCmp::Le(hi))
         }

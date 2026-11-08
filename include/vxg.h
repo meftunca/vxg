@@ -1,5 +1,5 @@
 /*
- * VXG v0.4.7 — Unified Adaptive Multi-Format Lossless Block Codec (Format v4)
+ * VXG v0.5.0 — Unified Adaptive Multi-Format Lossless Block Codec & SQL Engine (Format v4/v5)
  * Official C99 / C++11 Header for Static (`libvxg.a` / `vxg.lib`) and Dynamic
  * (`libvxg.dylib` / `libvxg.so` / `vxg.dll`) Library Integration.
  *
@@ -35,7 +35,7 @@ extern "C" {
 #define VXG_ERR_INTERNAL           ((vxg_ssize_t)-7)
 
 /**
- * Returns the null-terminated library version string (e.g. "0.4.7").
+ * Returns the null-terminated library version string (e.g. "0.5.0").
  */
 const char *vxg_version_string(void);
 
@@ -345,6 +345,24 @@ uint8_t *vxg_group_by_alloc(
     const char *group_col_cstr,
     const char *agg_col_cstr,
     const char *where_cstr,
+    size_t threads,
+    size_t *out_len
+);
+
+/**
+ * Executes a compressed-domain SQL `SELECT` query (`query_cstr`, supporting `WHERE`,
+ * multi-key / multi-agg `GROUP BY`, `ORDER BY`, `LIMIT`, CSV header column names, and
+ * dotted nested JSON paths) directly on `frame_ptr[0..frame_len]`.
+ * - `format`: `0` = TSV, `1` = CSV, `2` = NDJSON.
+ * - `no_header`: non-zero omits the header row on TSV/CSV output.
+ * Free the returned buffer with `vxg_free(ptr, *out_len)`. Returns `NULL` on error.
+ */
+uint8_t *vxg_sql_alloc(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *query_cstr,
+    int32_t format,
+    int32_t no_header,
     size_t threads,
     size_t *out_len
 );
