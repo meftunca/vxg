@@ -1,13 +1,13 @@
-# VXG 0.4.5 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
+# VXG 0.4.6 — Unified Adaptive Multi-Format Lossless Block Codec & Compressed-Domain Engine (Format v4)
 
 [![CI — Source Validation](https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/ci.yml)
 [![CI — Cross-Platform Benchmarks](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml)
-[![Release v0.4.5](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.5)
+[![Release v0.4.6](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases/tag/v0.4.6)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**High-throughput Rust CPU (SIMD/SWAR) codec & compressed-domain execution engine combining an adaptive structured-column engine (NDJSON / CSV / TSV / PSV / Logfmt / CLF), a 2D/Stride pixel engine (24-bpp & 32-bpp BMP), and a const-generic Fast-LZ + 4-stream canonical Huffman engine — with SQL-grade compressed-domain `SELECT` / `WHERE` / `ORDER BY Top-K` / `GROUP BY` / `UPDATE` / zero-reencode column splicing, zero-overhead C ABI (`staticlib` / `cdylib`), and native Metal / CUDA / Vulkan sources.**
+**High-throughput Rust CPU (SIMD/SWAR) codec & compressed-domain execution engine delivering `LZ4`-class multi-GB/s speed, `1.2×–3.2×` smaller `64 KiB` independent blocks than `Zstd L9` / `Zstd + Trained Dictionary` on structured tabular & multi-template log streams, $O(1)$ random block access, and millisecond-latency SQL queries (`SELECT`, `WHERE`, `ORDER BY Top-K`, `GROUP BY`, `SUM`, zero-reencode splicing) directly on compressed files without lossy Parquet ETL.**
 
-VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the optimal lossless representation (`BLOCK_COLUMN`, `BLOCK_LZ`, or `BLOCK_RAW`). Every block is self-contained, enabling **$O(1)$ random-access block extraction** and **linear multi-core scaling** without cross-block decompression dependencies.
+VXG `v4` inspects each independent `64 KiB` block at runtime and routes it by exact byte budget to `BLOCK_COLUMN` (grammar + typed column models), `BLOCK_LZ` (2D stride/pixel planes or 4-stream canonical Huffman + `Fast-LZ`), or `BLOCK_RAW`. Every block is self-contained, enabling **$O(1)$ random-access block extraction** and **multi-core scaling** without cross-block decompression dependencies.
 
 ---
 
@@ -17,7 +17,7 @@ VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the 
 | :--- | :--- |
 | **Format v4 Wire Layout** | Compact 8-byte per-block directory (`payload_size \| kind << 30`, `crc32c`); full backward read compatibility with `v1`–`v3` frames |
 | **Structured Column Engine** | Automatic schema & delimiter discovery for **NDJSON, Pretty-Printed JSON, CSV, TSV, PSV, CLF/Bracketed Logs, and Logfmt**; 11 specialized models including `Dictionary`, `DecimalDelta`, `DecimalSuffix`, `Timestamp` (SWAR+SIMD), `HexSuffix` (quoted & unquoted SIMD hex), `EpochCounter`, `SegmentDictionary`, `FrontCodedDict`, and `Pattern` (`MODEL_PATTERN` SWAR + `Copy16`) |
-| **Compressed-Domain SQL & Splicing** | Execute compound boolean `WHERE` (`&&` / `\|\|` / `!`), `SELECT` column projection, `ORDER BY` / `Top-K` heap queries (`37–97 GB/s`), `SUM`/`MIN`/`MAX`/`AVG` + `GROUP BY` analytics (`33–99 GB/s`), `UPDATE`/`MAP` mutations, and **zero-reencode `VXG -> VXG` column splicing** directly on compressed blocks (`10–99 GB/s`, `25x–160x` faster than naive decode + scan) |
+| **Compressed-Domain SQL & Splicing** | Execute compound boolean `WHERE` (`&&` / `\|\|` / `!`), `SELECT` projection, `ORDER BY` / `Top-K`, `SUM`/`MIN`/`MAX`/`AVG` + `GROUP BY`, `UPDATE`/`MAP` mutations, and **zero-reencode `VXG -> VXG` column splicing** directly on compressed blocks (`0.42–6.95 ms` / `30–710 M rows/s` on `200k–300k` rows; `21×–181×` faster than `DuckDB` on raw/`.zst` while preserving 100% byte-exact original files) |
 | **Image & Stride Engine** | 24-bpp / 32-bpp BMP and multi-stride (`1, 2, 3, 4, 8`) byte-plane transpose + `Subtract-Green` (`R-G`, `B-G`) color decorrelation + 2-level 64-bit hierarchical zero-mask & per-plane `Fast-LZ` |
 | **Prose & Source Code** | Const-generic `Fast-LZ` matcher paired with a 4-stream interleaved canonical Huffman coder |
 | **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning, 64-byte `FastPiece` unaligned `u128` row assembly, and SIMD prefix-sum plane interleaving |
@@ -26,46 +26,69 @@ VXG `v4` inspects each independent 64 KiB block at runtime and routes it to the 
 
 ---
 
-## Local Apple Silicon Benchmark, Composite Index & Energy Highlights (1-Thread & 8-Thread, 16 MiB, 64 KiB Blocks)
+## 1. Real-World Public & System Corpora (`64 KiB` Blocks vs. `Zstd + Trained Dict` & `zstd -19 --long`)
 
-Measured via `vxg-bench --suite v4 --size-mib 16 --samples 5 --seconds 0.08` against native C `liblz4` (`lz4-c-a1`) and `libzstd` (`zstd-c-l1`) on Apple Silicon (`aarch64` NEON):
-- **VXG Performance Index (`VPI`):** $\text{VPI} = \frac{\sqrt{\text{Encode}_{\text{GB/s}} \cdot \text{Decode}_{\text{GB/s}}}}{\text{Ratio}}$ (higher is better).
-- **Green Codec Index (`GCI`):** $\text{GCI} = \frac{\text{VPI}}{\sqrt{J_{\text{enc}} \cdot J_{\text{dec}}}}$ using per-process kernel hardware energy (`proc_pid_rusage` `RUSAGE_INFO_V6` `ri_energy_nj` in `J/GB`, see [`docs/ENERGY_BENCHMARKS.md`](docs/ENERGY_BENCHMARKS.md)).
+Measured via `vxg-bench` (`Apple Silicon aarch64 NEON`, `64 KiB` independent blocks, `liblz4 1.10.0`, `libzstd 1.5.7`, checksums off; fetched reproducibly via [`scripts/fetch_real_corpora.py`](scripts/fetch_real_corpora.py)).
+- **`Zstd + Dict` (`zstd-dict-l3` / `zstd-dict-l9`):** Trains up to a `32 KiB` dictionary per dataset (`ZDICT_trainFromBuffer`) and charges `dict_bytes` in compressed size; `Enc`/`Dec` measure steady-state `ZSTD_CDict`/`ZSTD_DDict` throughput.
+- **Whole-file `zstd -19 --long` (`128 MiB` window, single stream, `random access = NO`):** Reference column quantifying the exact compression-ratio cost of `64 KiB` block independence.
+- **Reading the tables:** Bold cells mark **only the actual per-row winner** on each metric (lowest `64 KiB` block ratio, fastest encode `GB/s`, fastest decode `GB/s`). Full `1T` & `8T` tables and parameter sweeps: **[`docs/CHIMERA_BENCHMARKS.md`](docs/CHIMERA_BENCHMARKS.md)**, [`reports/real-public-1t.md`](reports/real-public-1t.md), and [`reports/real-public-8t.md`](reports/real-public-8t.md).
 
-| Dataset | VXG v4 Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG 1T Enc / Dec (`GB/s`) | VXG 8T Enc / Dec (`GB/s`) | VXG 1T / 8T `VPI` (`vs LZ4`) | VXG 1T Enc / Dec (`J/GB`) | VXG 1T `GCI` (`vs LZ4` / `Zstd-1`) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`telemetry.csv`** | **0.0407** | 0.1994 | 0.0841 | 1.704 / 9.420 | **11.122 / 47.196** | **98.4 / 562.4** (`5.20x` / `4.84x`) | 2.921 / 0.671 | **70.2** (`3.53x` / `10.80x`) |
-| **`events.tsv`** | **0.0334** | 0.2223 | 0.0741 | 1.686 / 9.441 | **9.919 / 45.716** | **119.5 / 637.7** (`9.03x` / `8.28x`) | 2.952 / 0.653 | **86.0** (`8.27x` / `8.69x`) |
-| **`app-logs.logfmt`** | **0.0353** | 0.2007 | 0.0695 | 1.861 / 10.725 | **11.470 / 49.538** | **126.6 / 675.3** (`7.30x` / `7.52x`) | 2.683 / 0.590 | **100.6** (`5.47x` / `9.86x`) |
-| **`json-records.ndjson`** | **0.0227** | 0.1497 | 0.0542 | 2.202 / 12.531 | **13.772 / 54.798** | **231.8 / 1212.0** (`7.61x` / `8.08x`) | 2.108 / **0.466** | **233.9** (`5.86x` / `10.73x`) |
-| **`field-order-optional-escaping.ndjson`** | **0.0445** | 0.2132 | 0.1043 | 1.322 / 5.583 | **6.190 / 30.762** | **61.1 / 310.2** (`5.28x` / `4.90x`) | 3.777 / **0.900** | **33.1** (`4.19x` / `8.95x`) |
-| **`event-mix-identifiers.ndjson`** | **0.0248** | 0.1545 | 0.0779 | 1.756 / 8.807 | **10.532 / 44.595** | **158.4 / 872.9** (`7.35x` / `7.29x`) | 2.711 / **0.614** | **122.8** (`6.64x` / `15.54x`) |
-| **`bursty-variable-records.ndjson`** | **0.0480** | 0.2065 | 0.1196 | 1.154 / 4.523 | **7.789 / 27.442** | **47.6 / 304.5** (`4.02x` / `3.97x`) | 3.914 / 1.169 | **22.2** (`2.85x` / `8.54x`) |
-| **`source-and-docs.txt`** | **0.2698** | 0.3777 | 0.2713 | **0.592 / 2.468** | **4.306 / 16.844** | **4.5 / 31.6** (`1.02x` / `1.05x`) | **6.887 / 1.718** | **1.3** (`0.68x` / `2.17x`) |
-| **`ui-render-32bpp.bmp`** | **0.0048** | 0.0140 | 0.0091 | 9.533 / 14.246 | **36.922 / 63.932** | **2435.3 / 10153.2** (`2.09x` / `2.47x`) | 0.562 / 0.345 | **5530.4** (`1.22x` / `5.24x`) |
-| **`rgb-frame-24bpp.bmp`** | **0.0012** | 0.0227 | 0.0119 | 8.793 / 14.846 | **35.666 / 64.509** | **9206.1 / 38648.9** (`19.42x` / `19.56x`) | 0.631 / 0.368 | **19116.6** (`13.67x` / `17.18x`) |
-| **10-Dataset Geometric Mean** | **0.0250** | 0.1272 | 0.0607 | **2.094 / 8.211** | **11.750 / 41.545** | **165.9 / 883.8** (`5.27x` / `5.29x`) | **2.333 / 0.665** | **133.2** (`3.92x` / `8.59x`) |
+| Real Public / OS Corpus (`8T`, `64 KiB` blocks) | Size | VXG Ratio | LZ4 (`a1`) | Zstd-9 | Zstd+Dict-9 | `zstd -19 --long` *(whole)* | VXG Enc / Dec (`GB/s`) | LZ4 (`a1`) Enc / Dec | Zstd-1 Enc / Dec | Zstd+D3 Enc / Dec |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`nyc-taxi-2024-01.ndjson`** *(NYC TLC, 200k trips)* | 52.3 MB | **0.0592** | 0.1899 | 0.0823 | 0.0783 | 0.0554 | **10.20 / 34.69** | 6.54 / 19.97 | 6.72 / 10.13 | 2.93 / 6.92 |
+| **`nyc-taxi-2024-01.csv`** *(NYC TLC, 300k trips)* | 23.0 MB | **0.1807** | 0.4241 | 0.2194 | 0.2132 | 0.1617 | 1.34 / 3.10 | **1.59 / 4.63** | 0.90 / 1.72 | 0.48 / 1.77 |
+| **`gharchive-2025-01-15.ndjson`** *(12k nested GitHub API)* | 50.3 MB | 0.1985 | 0.2256 | 0.1414 | **0.1150** | 0.0633 | 1.97 / 5.46 | **2.45 / 9.41** | 1.87 / 4.31 | 1.22 / 3.37 |
+| **`apache-access.clf`** *(Elastic real HTTP CLF)* | 2.4 MB | 0.1198 | 0.1730 | 0.1062 | **0.0878** | 0.0535 | 0.62 / 1.62 | 0.94 / 1.46 | **1.05 / 1.97** | 0.51 / 1.23 |
+| **`macos-install.log`** *(OS free-text multi-line log)* | 34.2 MB | 0.0948 | 0.1249 | 0.0770 | **0.0484** | 0.0278 | **8.80** / 22.43 | 8.59 / **25.44** | 6.14 / 11.23 | 2.18 / 8.15 |
+| **`pg100-shakespeare.txt`** *(Gutenberg English prose)* | 5.6 MB | 0.4424 | 0.6223 | 0.3918 | **0.3745** | 0.3000 | **2.48** / 11.10 | 2.12 / **11.33** | 1.91 / 5.22 | 0.74 / 3.56 |
+| **`kodak-truecolor-16.bmp`** *(16 real camera photos)* | 18.9 MB | 0.9256 | 0.8732 | 0.7494 | **0.7452** | 0.5656 | **3.58 / 19.61** | 1.62 / 6.24 | 1.36 / 2.48 | 0.41 / 3.29 |
+| **Text & Structured Geomean (6)** | — | 0.1484 | 0.2500 | 0.1419 | **0.1205** | 0.0795 | 2.67 / 7.86 | **2.76 / 8.46** | 2.28 / 4.53 | 1.06 / 3.37 |
 
-### "Chimera Envelope" Showdown (`VXG v4` vs Impossible Best-of-Competitor Composites)
-
-Even if a competitor could simultaneously achieve its **maximum-compression ratio** (`LZ4-HC L9` or `Zstd L9`) and its **fastest preset throughput** (`LZ4-fast a1/a4` or `Zstd -3`) on every single dataset (`vxg-bench` Chimera Envelope, see [`docs/CHIMERA_BENCHMARKS.md`](docs/CHIMERA_BENCHMARKS.md), [`reports/v4-chimera-8t.md`](reports/v4-chimera-8t.md), and [`reports/real-chimera-8t.md`](reports/real-chimera-8t.md)):
-
-| Benchmark (`8T`, `64 KiB` blocks) | **VXG v4 Ratio** | `LZ4 Chimera` (`HC-L9` + `fast`) | `Zstd Chimera` (`L9` + `-3`) | `All-Rivals Chimera` (`Zstd-9` + `LZ4-fast`) | **VXG `VPI` Advantage** |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **`v4` 10-Dataset Geomean (`16 MiB`)** | **`0.0252` (`39.7:1`)** | `0.1011` · `6.55 / 24.71 GB/s` | `0.0557` · `5.16 / 10.11 GB/s` | `0.0557` · `6.55 / 24.71 GB/s` | **`4.09x` vs LZ4 Chimera · `3.97x` vs Zstd Chimera · `2.18x` vs All-Rivals** (`VXG: 7.05 / 23.82 GB/s`, `GCI 1.36x` greener) |
-| **`telemetry.csv` (`16 MiB`)** | **`0.0407`** | `0.1654` · `8.00 / 34.36 GB/s` | `0.0797` · `5.45 / 11.64 GB/s` | `0.0797` · `8.00 / 34.36 GB/s` | **Wins all 3 axes (`Ratio` + `9.14 GB/s` Enc + `40.04 GB/s` Dec) vs All-Rivals (`2.26x` VPI)** |
-| **`events.tsv` (`16 MiB`)** | **`0.0326`** | `0.1515` · `2.86 / 33.96 GB/s` | `0.0683` · `5.61 / 10.16 GB/s` | `0.0683` · `5.61 / 33.96 GB/s` | **Wins all 3 axes (`Ratio` + `8.55 GB/s` Enc + `42.33 GB/s` Dec) vs All-Rivals (`2.88x` VPI)** |
-| **`ndjson_varied.ndjson` (`56.5 MB` real)** | **`0.0914`** | `0.2180` · `3.82 / 17.55 GB/s` | `0.1480` · `4.74 / 9.49 GB/s` | `0.1480` · `4.74 / 17.55 GB/s` | **Wins all 3 axes vs LZ4 Chimera (`2.39x` smaller, `4.69 / 28.60 GB/s`) · `2.05x` vs All-Rivals** |
+**Summary of Real-World Trade-Offs:**
+- **Flat & multi-template structured tables/logs (`nyc-taxi.ndjson`, `nyc-taxi.csv`):** `VXG v4` achieves the smallest `64 KiB` blocks (`1.18×–1.32×` smaller than `Zstd + Trained Dict L9`, `2.35×–3.21×` smaller than `LZ4`, and within `6.9%–11.8%` of non-random-access whole-file `zstd -19 --long`). On `nyc-taxi.ndjson`, `VXG` leads `LZ4 (a1)` on both `1T` (`1.65 / 4.99` vs `1.29 / 4.36 GB/s`) and `8T` (`10.20 / 34.69` vs `6.54 / 19.97 GB/s`; `LZ4 a4` peaks at `41.55 GB/s` decode), while on `nyc-taxi.csv`, `LZ4` decodes `1.49×–1.97×` faster.
+- **Deeply nested JSON trees, unstructured multi-line logs & literary prose (`gharchive`, `macos-install.log`, `apache-access.clf`, `pg100-shakespeare.txt`):** `Zstd + Trained Dict` (`0.1205` geomean) beats both plain `Zstd` (`0.1620`) and `VXG` (`0.1484`) on `64 KiB` block ratio, `LZ4` leads raw decode speed, and `zstd -19 --long` (`0.0795`) shows the `1.52×` ratio cost of `64 KiB` random-access block boundaries.
+- **Real camera photography (`kodak-truecolor-16.bmp`):** Optical sensor noise limits lossless compression across general-purpose codecs to `0.5656` (`zstd -19 --long`) – `0.7452` (`Zstd+Dict-9`) – `0.9256` (`VXG` at `19.61 GB/s` decode), unlike procedural UI framebuffers (`Section 3`).
 
 ---
 
-## Cross-Platform CI Benchmark Results — VXG `v0.4.1` (`macos-14`, `ubuntu-latest`, `windows-latest`)
+## 2. Analytical Queries: `VXG` vs. `DuckDB 2.0.0` (`Raw`, `.zst`, `Parquet-Snappy`, `Parquet-Zstd`)
 
-All benchmarks below are executed automatically on GitHub Actions via [`.github/workflows/benchmarks.yml`](.github/workflows/benchmarks.yml) against native C **`liblz4`** (`lz4-c-a1`) and **`libzstd`** (`zstd-c-l1`) on `65,536`-byte independent blocks (`16 MiB` per dataset, single thread, checksums off).
-- **Compression Ratio:** `compressed_bytes / raw_bytes` (**lower is smaller**).
-- **Throughput:** Decimal `GB/s` (`10^9` uncompressed bytes/second; **higher is faster**).
-- **VXG Performance Index (`VPI`):** `sqrt(Encode_GB/s * Decode_GB/s) / Ratio` (**higher is better**).
-- Full CSV and Markdown artifacts: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) and [`reports/ci-v0.4.1/`](reports/ci-v0.4.1/).
+Measured in-process (`libvxg.dylib` vs `duckdb 2.0.0`, warm OS cache, median of 5–7 runs, **100% result equality verified** via [`scripts/bench_vs_duckdb.py`](scripts/bench_vs_duckdb.py); full results in [`docs/CHIMERA_BENCHMARKS.md#duckdb`](docs/CHIMERA_BENCHMARKS.md#duckdb) and [`reports/duckdb-vs-vxg.json`](reports/duckdb-vs-vxg.json)). Metrics are reported in **wall-clock latency (`ms`)** and **rows/sec (`M rows/s`)**:
+
+| Corpus & Storage / Query (`8T`) | **VXG `.vxg`** | DuckDB Raw | DuckDB `.zst` | DuckDB `Parquet-Snappy` | DuckDB `Parquet-Zstd` |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **`nyc-taxi-2024-01.ndjson` (`52.3 MB` real, `200k` rows)** | **`3.10 MB` (`10.1 ms` enc, lossless=YES)** | `52.33 MB` (`0 ms`, YES) | `4.92 MB` (`66.2 ms`, YES) | `3.94 MB` (`124.3 ms` ETL, **NO**) | **`2.96 MB`** (`111.9 ms` ETL, **NO**) |
+| ↳ `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | `4.57 ms` (`43.8 M rows/s`) | `99.26 ms` | `175.60 ms` | `2.94 ms` | **`2.11 ms` (`95.0 M rows/s`)** |
+| ↳ `SUM/MIN/MAX(total_cents)` *(all 200k rows)* | **`1.32 ms` (`151.6 M rows/s`)** | `80.98 ms` | `178.79 ms` | `4.89 ms` | `3.17 ms` (`63.1 M rows/s`) |
+| ↳ `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | **`1.42 ms` (`140.7 M rows/s`)** | `84.06 ms` | `230.27 ms` | `6.52 ms` | `8.56 ms` (`23.4 M rows/s`) |
+| ↳ `GROUP BY payment_type: COUNT(*), SUM(total)` | `6.95 ms` (`1T`: **`3.46 ms`**) | `83.38 ms` | `153.13 ms` | `4.65 ms` | **`4.36 ms`** (`1T`: `4.38 ms`) |
+| ↳ `ORDER BY total_cents DESC LIMIT 10` | **`4.64 ms` (`43.1 M rows/s`)** | `95.67 ms` | `214.98 ms` | `9.11 ms` | `21.02 ms` (`9.5 M rows/s`) |
+| ↳ `SELECT 4 cols WHERE tip_cents >= 2500` | **`2.37 ms` (`84.5 M rows/s`)** | `97.92 ms` | `180.60 ms` | `12.68 ms` | `11.76 ms` (`17.0 M rows/s`) |
+| **`nyc-taxi-2024-01.csv` (`23.0 MB` real, `300k` rows)** | **`4.16 MB` (`12.2 ms` enc, lossless=YES)** | `23.00 MB` (`0 ms`, YES) | `5.01 MB` (`62.7 ms`, YES) | `5.86 MB` (`178.3 ms` ETL, **NO**) | `4.39 MB` (`200.4 ms` ETL, **NO**) |
+| ↳ `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | **`2.41 ms`** (`1T`: **`1.97 ms` / `152.6 M/s`**) | `81.76 ms` | `154.56 ms` | `6.02 ms` | `11.02 ms` (`1T`: `4.41 ms`) |
+| ↳ `SUM/MIN/MAX(total_cents)` *(all 300k rows)* | **`0.42 ms` (`710.7 M rows/s`)** | `76.06 ms` | `138.42 ms` | `2.90 ms` | `2.86 ms` (`104.7 M rows/s`) |
+| **`ndjson_varied.ndjson` (`56.5 MB` synthetic, `300k` rows)** | **`5.17 MB` (`17.8 ms` enc, lossless=YES)** | `56.50 MB` (`0 ms`, YES) | `9.86 MB` (`143.1 ms`, YES) | `9.70 MB` (`151.0 ms` ETL, **NO**) | `5.56 MB` (`184.7 ms` ETL, **NO**) |
+| ↳ `GROUP BY service: COUNT(*), SUM(bytes)` | **`1.51 ms` (`198.2 M rows/s`)** | `86.63 ms` | `188.65 ms` | `4.82 ms` | `11.50 ms` (`26.1 M rows/s`) |
+| ↳ `ORDER BY latency_ms DESC LIMIT 10` | **`1.32 ms` (`227.5 M rows/s`)** | `76.98 ms` | `193.82 ms` | `11.85 ms` | `11.83 ms` (`25.4 M rows/s`) |
+
+---
+
+## 3. Synthetic & Procedural Qualification Suites (`--suite v4` & Multi-Template Generators)
+
+> **Important:** All datasets below (`--suite v4`, `scripts/gen_varied_ndjson.py`, `scripts/gen_format_bench.py`) are **synthetic / procedurally generated** qualification workloads. The two `.bmp` files in `--suite v4` are procedural flat-shaded UI/gradient framebuffers (`208:1`–`833:1`) and are separated from the 8 text/structured datasets below (`reports/synthetic-v4-{1t,8t}.md`, `reports/synthetic-multitpl-{1t,8t}.md`).
+
+| Synthetic Suite (`64 KiB` blocks) | **VXG v4 Ratio** | LZ4 (`a1`) | Zstd-9 | Zstd+Dict-9 | `zstd -19 --long` *(whole)* | `1T` VXG vs LZ4 (`Enc / Dec GB/s`) | `8T` VXG vs `LZ4 Sweep` (`Enc / Dec GB/s`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`v4` Text & Structured Geomean (8 sets, `16 MiB`)** | **0.0451** | 0.2103 | 0.0857 | 0.0845 | 0.0080 | `1.27` / **`6.41`** vs **`1.38`** / `5.31` | `3.16 / 9.89` vs **`3.35 / 11.77`** |
+| **`v4` Procedural UI BMP Geomean (2 sets, `16 MiB`)** | **0.0024** | 0.0178 | 0.0103 | 0.0111 | 0.0010 | `6.74 / 10.20` vs **`8.15 / 11.66`** | **`42.36 / 57.96`** vs `29.03 / 47.34` |
+| **Synthetic Multi-Template (`ndjson_varied`, `56.5 MB`)** | **0.0914** | 0.2898 | 0.1480 | 0.1452 | 0.1198 | `0.93` / **`5.51`** vs **`1.05`** / `4.29` | `3.08 / 16.38` vs **`7.73 / 31.81`** |
+| **Synthetic Delimited (`data.csv` / `data.clf`, `31 MB`)** | **0.1796 / 0.0980** | 0.4458 / 0.2843 | 0.2651 / 0.1504 | 0.2606 / 0.1454 | 0.2257 / 0.1225 | `0.65 / 2.14` · `0.59 / 2.45` (`LZ4` faster) | **`1.95`**`/5.13` · `1.85/5.62` (`LZ4` faster dec) |
+
+---
+
+## Cross-Platform CI Benchmark Results — VXG `v0.4.1` (`--suite v4` Synthetic Suite on `macos-14`, `ubuntu-latest`, `windows-latest`)
+
+Executed automatically on GitHub Actions via [`.github/workflows/benchmarks.yml`](.github/workflows/benchmarks.yml) against native C **`liblz4`** (`lz4-c-a1`) and **`libzstd`** (`zstd-c-l1`) on `65,536`-byte independent blocks (`16 MiB` per synthetic `--suite v4` dataset, single thread, checksums off). Full artifacts: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) and [`reports/ci-v0.4.1/`](reports/ci-v0.4.1/).
 
 ### 1. macOS (`macos-14` / Apple Silicon `aarch64` NEON)
 
@@ -77,11 +100,11 @@ All benchmarks below are executed automatically on GitHub Actions via [`.github/
 | **`json-records.ndjson`** | 16 MiB | **0.0227** | 0.1497 | 0.0542 | **1.618 GB/s** | 1.437 GB/s | 0.917 GB/s | **9.242 GB/s** | 6.288 GB/s | 2.811 GB/s | **170.6** (`8.50x` / `5.77x`) |
 | **`field-order-optional-escaping.ndjson`** | 16 MiB | **0.0445** | 0.2132 | 0.1043 | **1.175 GB/s** | 0.873 GB/s | 0.616 GB/s | **4.980 GB/s** | 3.274 GB/s | 1.348 GB/s | **54.4** (`6.86x` / `6.22x`) |
 | **`event-mix-identifiers.ndjson`** | 16 MiB | **0.0248** | 0.1545 | 0.0779 | **1.281 GB/s** | 1.260 GB/s | 0.770 GB/s | **5.830 GB/s** | 4.055 GB/s | 1.597 GB/s | **110.1** (`7.52x` / `7.73x`) |
-| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | **0.940 GB/s** | 0.985 GB/s | 0.671 GB/s | **3.503 GB/s** | 3.411 GB/s | 1.467 GB/s | **37.8** (`4.26x` / `4.56x`) |
-| **`source-and-docs.txt`** | 16 MiB | **0.2702** | 0.3778 | 0.2714 | **0.374 GB/s** | 0.496 GB/s | 0.390 GB/s | **1.696 GB/s** | 3.200 GB/s | 1.084 GB/s | **2.9** (`0.88x` / `1.23x`) |
-| **`ui-render-32bpp.bmp`** | 16 MiB | **0.0048** | 0.0140 | 0.0091 | **6.423 GB/s** | 3.846 GB/s | 2.456 GB/s | **9.170 GB/s** | 14.402 GB/s | 2.719 GB/s | **1603.8** (`3.02x` / `5.66x`) |
-| **`rgb-frame-24bpp.bmp`** | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **6.025 GB/s** | 4.357 GB/s | 3.669 GB/s | **9.611 GB/s** | 8.715 GB/s | 5.913 GB/s | **6131.5** (`22.59x` / `15.71x`) |
-| **Geometric Mean** | — | **0.0249** | 0.1270 | 0.0607 | **1.554 GB/s** | 1.307 GB/s | 0.920 GB/s | **5.896 GB/s** | 5.205 GB/s | 1.990 GB/s | **121.4** (`5.91x` / `5.45x`) |
+| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | 0.940 GB/s | **0.985 GB/s** | 0.671 GB/s | **3.503 GB/s** | 3.411 GB/s | 1.467 GB/s | **37.8** (`4.26x` / `4.56x`) |
+| **`source-and-docs.txt`** | 16 MiB | **0.2702** | 0.3778 | 0.2714 | 0.374 GB/s | **0.496 GB/s** | 0.390 GB/s | 1.696 GB/s | **3.200 GB/s** | 1.084 GB/s | 2.9 (`0.88x` / `1.23x`) |
+| **`ui-render-32bpp.bmp`** *(procedural)* | 16 MiB | **0.0048** | 0.0140 | 0.0091 | **6.423 GB/s** | 3.846 GB/s | 2.456 GB/s | 9.170 GB/s | **14.402 GB/s** | 2.719 GB/s | **1603.8** (`3.02x` / `5.66x`) |
+| **`rgb-frame-24bpp.bmp`** *(procedural)* | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **6.025 GB/s** | 4.357 GB/s | 3.669 GB/s | **9.611 GB/s** | 8.715 GB/s | 5.913 GB/s | **6131.5** (`22.59x` / `15.71x`) |
+| **All-10 Geometric Mean** | — | **0.0249** | 0.1270 | 0.0607 | **1.554 GB/s** | 1.307 GB/s | 0.920 GB/s | **5.896 GB/s** | 5.205 GB/s | 1.990 GB/s | **121.4** (`5.91x` / `5.45x`) |
 
 ### 2. Linux (`ubuntu-latest` / `x86_64` AVX2+SSE2)
 
@@ -90,14 +113,14 @@ All benchmarks below are executed automatically on GitHub Actions via [`.github/
 | **`telemetry.csv`** | 16 MiB | **0.0407** | 0.1994 | 0.0841 | **1.706 GB/s** | 1.437 GB/s | 0.737 GB/s | **7.513 GB/s** | 7.170 GB/s | 2.395 GB/s | **87.9** (`5.46x` / `5.56x`) |
 | **`events.tsv`** | 16 MiB | **0.0334** | 0.2223 | 0.0741 | **1.460 GB/s** | 1.281 GB/s | 1.034 GB/s | **6.709 GB/s** | 4.957 GB/s | 3.155 GB/s | **93.7** (`8.27x` / `3.84x`) |
 | **`app-logs.logfmt`** | 16 MiB | **0.0353** | 0.2007 | 0.0695 | **1.885 GB/s** | 1.871 GB/s | 1.219 GB/s | **8.434 GB/s** | 7.626 GB/s | 3.201 GB/s | **113.0** (`6.00x` / `3.98x`) |
-| **`json-records.ndjson`** | 16 MiB | **0.0227** | 0.1497 | 0.0542 | **2.474 GB/s** | 2.484 GB/s | 1.650 GB/s | **10.906 GB/s** | 9.651 GB/s | 4.085 GB/s | **229.3** (`7.01x` / `4.79x`) |
+| **`json-records.ndjson`** | 16 MiB | **0.0227** | 0.1497 | 0.0542 | 2.474 GB/s | **2.484 GB/s** | 1.650 GB/s | **10.906 GB/s** | 9.651 GB/s | 4.085 GB/s | **229.3** (`7.01x` / `4.79x`) |
 | **`field-order-optional-escaping.ndjson`** | 16 MiB | **0.0445** | 0.2132 | 0.1043 | **1.377 GB/s** | 1.286 GB/s | 0.856 GB/s | **5.483 GB/s** | 4.587 GB/s | 2.113 GB/s | **61.8** (`5.42x` / `4.79x`) |
-| **`event-mix-identifiers.ndjson`** | 16 MiB | **0.0248** | 0.1545 | 0.0779 | **1.824 GB/s** | 1.836 GB/s | 1.145 GB/s | **7.681 GB/s** | 5.197 GB/s | 2.461 GB/s | **150.8** (`7.54x` / `7.00x`) |
-| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | **1.032 GB/s** | 1.300 GB/s | 0.801 GB/s | **3.772 GB/s** | 3.918 GB/s | 1.792 GB/s | **41.1** (`3.76x` / `4.10x`) |
-| **`source-and-docs.txt`** | 16 MiB | **0.2712** | 0.3785 | 0.2722 | **0.513 GB/s** | 0.661 GB/s | 0.416 GB/s | **2.205 GB/s** | 3.970 GB/s | 1.772 GB/s | **3.9** (`0.92x` / `1.24x`) |
-| **`ui-render-32bpp.bmp`** | 16 MiB | **0.0048** | 0.0140 | 0.0091 | **8.370 GB/s** | 9.805 GB/s | 5.723 GB/s | **14.818 GB/s** | 21.433 GB/s | 4.797 GB/s | **2327.3** (`2.25x` / `4.05x`) |
-| **`rgb-frame-24bpp.bmp`** | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **7.311 GB/s** | 7.260 GB/s | 5.124 GB/s | **9.078 GB/s** | 2.881 GB/s | 2.622 GB/s | **6564.0** (`32.59x` / `21.37x`) |
-| **Geometric Mean** | — | **0.0249** | 0.1270 | 0.0607 | **1.984 GB/s** | 2.038 GB/s | 1.308 GB/s | **6.822 GB/s** | 5.994 GB/s | 2.699 GB/s | **147.5** (`5.36x` / `4.76x`) |
+| **`event-mix-identifiers.ndjson`** | 16 MiB | **0.0248** | 0.1545 | 0.0779 | 1.824 GB/s | **1.836 GB/s** | 1.145 GB/s | **7.681 GB/s** | 5.197 GB/s | 2.461 GB/s | **150.8** (`7.54x` / `7.00x`) |
+| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | 1.032 GB/s | **1.300 GB/s** | 0.801 GB/s | 3.772 GB/s | **3.918 GB/s** | 1.792 GB/s | **41.1** (`3.76x` / `4.10x`) |
+| **`source-and-docs.txt`** | 16 MiB | **0.2712** | 0.3785 | 0.2722 | 0.513 GB/s | **0.661 GB/s** | 0.416 GB/s | 2.205 GB/s | **3.970 GB/s** | 1.772 GB/s | 3.9 (`0.92x` / `1.24x`) |
+| **`ui-render-32bpp.bmp`** *(procedural)* | 16 MiB | **0.0048** | 0.0140 | 0.0091 | 8.370 GB/s | **9.805 GB/s** | 5.723 GB/s | 14.818 GB/s | **21.433 GB/s** | 4.797 GB/s | **2327.3** (`2.25x` / `4.05x`) |
+| **`rgb-frame-24bpp.bmp`** *(procedural)* | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **7.311 GB/s** | 7.260 GB/s | 5.124 GB/s | **9.078 GB/s** | 2.881 GB/s | 2.622 GB/s | **6564.0** (`32.59x` / `21.37x`) |
+| **All-10 Geometric Mean** | — | **0.0249** | 0.1270 | 0.0607 | 1.984 GB/s | **2.038 GB/s** | 1.308 GB/s | **6.822 GB/s** | 5.994 GB/s | 2.699 GB/s | **147.5** (`5.36x` / `4.76x`) |
 
 ### 3. Windows (`windows-latest` / `x86_64` AVX2+SSE2)
 
@@ -109,31 +132,31 @@ All benchmarks below are executed automatically on GitHub Actions via [`.github/
 | **`json-records.ndjson`** | 16 MiB | **0.0227** | 0.1497 | 0.0542 | **2.748 GB/s** | 1.776 GB/s | 1.261 GB/s | **14.409 GB/s** | 11.171 GB/s | 3.658 GB/s | **277.7** (`9.33x` / `7.01x`) |
 | **`field-order-optional-escaping.ndjson`** | 16 MiB | **0.0445** | 0.2132 | 0.1043 | **1.519 GB/s** | 1.132 GB/s | 0.760 GB/s | **6.405 GB/s** | 4.697 GB/s | 1.946 GB/s | **70.1** (`6.48x` / `6.01x`) |
 | **`event-mix-identifiers.ndjson`** | 16 MiB | **0.0248** | 0.1545 | 0.0779 | **2.018 GB/s** | 1.513 GB/s | 0.995 GB/s | **9.347 GB/s** | 4.840 GB/s | 2.339 GB/s | **174.9** (`9.98x` / `8.93x`) |
-| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | **1.176 GB/s** | 1.178 GB/s | 0.733 GB/s | **4.472 GB/s** | 3.965 GB/s | 1.670 GB/s | **47.8** (`4.56x` / `5.16x`) |
-| **`source-and-docs.txt`** | 16 MiB | **0.2678** | 0.3721 | 0.2672 | **0.576 GB/s** | 0.735 GB/s | 0.522 GB/s | **2.962 GB/s** | 5.253 GB/s | 1.805 GB/s | **4.9** (`0.92x` / `1.34x`) |
-| **`ui-render-32bpp.bmp`** | 16 MiB | **0.0048** | 0.0140 | 0.0091 | **10.452 GB/s** | 3.523 GB/s | 3.133 GB/s | **17.003 GB/s** | 47.484 GB/s | 18.978 GB/s | **2785.9** (`3.02x` / `3.29x`) |
-| **`rgb-frame-24bpp.bmp`** | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **10.137 GB/s** | 3.554 GB/s | 2.892 GB/s | **11.329 GB/s** | 4.692 GB/s | 4.180 GB/s | **8634.5** (`48.02x` / `29.64x`) |
-| **Geometric Mean** | — | **0.0249** | 0.1268 | 0.0606 | **2.295 GB/s** | 1.520 GB/s | 1.110 GB/s | **8.362 GB/s** | 7.519 GB/s | 3.080 GB/s | **175.9** (`6.60x` / `5.76x`) |
+| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | 1.176 GB/s | **1.178 GB/s** | 0.733 GB/s | **4.472 GB/s** | 3.965 GB/s | 1.670 GB/s | **47.8** (`4.56x` / `5.16x`) |
+| **`source-and-docs.txt`** | 16 MiB | 0.2678 | 0.3721 | **0.2672** | 0.576 GB/s | **0.735 GB/s** | 0.522 GB/s | 2.962 GB/s | **5.253 GB/s** | 1.805 GB/s | 4.9 (`0.92x` / `1.34x`) |
+| **`ui-render-32bpp.bmp`** *(procedural)* | 16 MiB | **0.0048** | 0.0140 | 0.0091 | **10.452 GB/s** | 3.523 GB/s | 3.133 GB/s | 17.003 GB/s | **47.484 GB/s** | 18.978 GB/s | **2785.9** (`3.02x` / `3.29x`) |
+| **`rgb-frame-24bpp.bmp`** *(procedural)* | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **10.137 GB/s** | 3.554 GB/s | 2.892 GB/s | **11.329 GB/s** | 4.692 GB/s | 4.180 GB/s | **8634.5** (`48.02x` / `29.64x`) |
+| **All-10 Geometric Mean** | — | **0.0249** | 0.1268 | 0.0606 | **2.295 GB/s** | 1.520 GB/s | 1.110 GB/s | **8.362 GB/s** | 7.519 GB/s | 3.080 GB/s | **175.9** (`6.60x` / `5.76x`) |
 
 ---
 
-## Compressed-Domain Query, Analytics, Mutation & Projection (`v0.4.5`)
+## Compressed-Domain Mutations, Column Splicing & Pushdown (`vxg-query-real`)
 
-Measured on real multi-template **`ndjson_varied.ndjson`** (`56.50 MB` raw -> `5.17 MB` / `9.14%` VXG `v4`, `300,000` rows, `863` independent `64 KiB` blocks) and **`data.csv`** (`30.53 MB` -> `5.48 MB` / `17.96%`, `250,001` rows, Apple Silicon `aarch64` NEON, persistent worker pool, median of 5 runs via `vxg-query-real`). Every output is asserted 100% byte-for-byte identical to `decompress + raw op (+ compress)`:
+Measured on synthetic multi-template **`ndjson_varied.ndjson`** (`scripts/gen_varied_ndjson.py`, `56.50 MB` raw -> `5.17 MB` / `9.14%` VXG `v4`, `300,000` rows, `863` independent `64 KiB` blocks) and synthetic **`data.csv`** (`scripts/gen_format_bench.py`, `30.53 MB` -> `5.48 MB` / `17.96%`, `250,001` rows, Apple Silicon NEON, persistent worker pool, median of 5 runs via `vxg-query-real`). Every output is asserted 100% byte-for-byte identical to `decompress + raw op (+ compress)`:
 
-| Workload | `1T` VXG | `1T` Speedup (`GB/s`) | `8T` VXG | `8T` Speedup (`GB/s`) |
+| Workload (`300k` rows unless noted) | `1T` VXG (`ms` / `M rows/s`) | `1T` vs Naive Decode+Op | `8T` VXG (`ms` / `M rows/s`) | `8T` vs Naive Decode+Op |
 | :--- | :---: | :---: | :---: | :---: |
-| **`filter_column` (`level == "NOPE"`, 0-hit alphabet)** | `1.54 ms` | **`59.7x`** (`36.8 GB/s`) | **`0.80 ms`** | **`103.4x`** (**`70.3 GB/s`**) |
-| **`filter_column` (`bytes >= 50000`, zone-map skip)** | `2.36 ms` | **`42.8x`** (`23.9 GB/s`) | **`0.93 ms`** | **`100.6x`** (**`60.9 GB/s`**) |
-| **`top_k_by` (`ORDER BY latency_ms ASC LIMIT 10`)** | `1.45 ms` | **`63.2x`** (`39.0 GB/s`) | **`0.58 ms`** | **`138.9x`** (**`97.0 GB/s`**) |
-| **`agg SUM/MIN/MAX(bytes)` (all `300k` rows)** | `1.70 ms` | **`62.6x`** (`33.2 GB/s`) | **`0.57 ms`** | **`152.0x`** (**`98.9 GB/s`**) |
-| **`group_by(service) COUNT(*)` (`8` groups)** | `2.23 ms` | **`46.4x`** (`25.4 GB/s`) | **`1.35 ms`** | **`79.3x`** (**`41.9 GB/s`**) |
-| **`group_by(service) SUM/MIN/MAX(bytes)`** | `4.25 ms` | **`40.3x`** (`13.3 GB/s`) | **`1.00 ms`** | **`157.9x`** (**`56.4 GB/s`**) |
-| **`select [service,status,bytes]` (all `300k` -> `16.2 MB`)** | `8.61 ms` | **`15.0x`** (`6.6 GB/s`) | **`3.07 ms`** | **`42.2x`** (**`18.4 GB/s`**) |
-| **`filter_frame` (`status == 500` -> `.vxg`)** | `13.25 ms` | **`8.0x`** (`4.3 GB/s`) | **`2.18 ms`** | **`40.1x`** (**`26.0 GB/s`**) |
-| **`update_column WHERE latency_ms>=250 SET CRITICAL`** | `4.89 ms` | **`30.8x`** (`11.6 GB/s`) | **`1.40 ms`** | **`66.6x`** (**`40.2 GB/s`**) |
-| **`map_column bytes -> bytes + 100` (1-col numeric splice)** | `4.86 ms` | **`32.3x`** (`11.6 GB/s`) | **`1.66 ms`** | **`61.9x`** (**`34.0 GB/s`**) |
-| **`data.csv` `filter_col` / `update` / `map` (`30.5 MB` CSV)** | `0.58 / 1.96 / 2.32 ms` | **`113.7x / 71.2x / 62.9x`** (`52.8 / 15.6 / 13.2 GB/s`) | `2.48 / 2.89 / 3.25 ms` | **`21.8x–36.5x`** (`9.4–12.3 GB/s`) |
+| **`filter_column` (`level == "NOPE"`, 0-hit alphabet)** | `1.54 ms` (`194.8 M/s`) | `59.7×` | **`0.80 ms` (`375.0 M/s`)** | `103.4×` |
+| **`filter_column` (`bytes >= 50000`, zone-map skip)** | `2.36 ms` (`127.1 M/s`) | `42.8×` | **`0.93 ms` (`322.6 M/s`)** | `100.6×` |
+| **`top_k_by` (`ORDER BY latency_ms ASC LIMIT 10`)** | `1.45 ms` (`206.9 M/s`) | `63.2×` | **`0.58 ms` (`517.2 M/s`)** | `138.9×` |
+| **`agg SUM/MIN/MAX(bytes)` (all `300k` rows)** | `1.70 ms` (`176.5 M/s`) | `62.6×` | **`0.57 ms` (`526.3 M/s`)** | `152.0×` |
+| **`group_by(service) COUNT(*)` (`8` groups)** | `2.23 ms` (`134.5 M/s`) | `46.4×` | **`1.35 ms` (`222.2 M/s`)** | `79.3×` |
+| **`group_by(service) SUM/MIN/MAX(bytes)`** | `4.25 ms` (`70.6 M/s`) | `40.3×` | **`1.00 ms` (`300.0 M/s`)** | `157.9×` |
+| **`select [service,status,bytes]` (all `300k` -> `16.2 MB`)** | `8.61 ms` (`34.8 M/s`) | `15.0×` | **`3.07 ms` (`97.7 M/s`)** | `42.2×` |
+| **`filter_frame` (`status == 500` -> `.vxg`)** | `13.25 ms` (`22.6 M/s`) | `8.0×` | **`2.18 ms` (`137.6 M/s`)** | `40.1×` |
+| **`update_column WHERE latency_ms>=250 SET CRITICAL`** | `4.89 ms` (`61.3 M/s`) | `30.8×` | **`1.40 ms` (`214.3 M/s`)** | `66.6×` |
+| **`map_column bytes -> bytes + 100` (1-col numeric splice)** | `4.86 ms` (`61.7 M/s`) | `32.3×` | **`1.66 ms` (`180.7 M/s`)** | `61.9×` |
+| **`data.csv` `filter_col` / `update` / `map` (`250k` rows)** | `0.58 / 1.96 / 2.32 ms` (`431 / 128 / 108 M/s`) | `113.7× / 71.2× / 62.9×` | `2.48 / 2.89 / 3.25 ms` | `21.8×–36.5×` |
 
 ---
 

@@ -6,9 +6,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::{
     aggregate_column, compress_file, count_where, decompress_file, filter_frame_where,
-    filter_where, frame_row_count, parse_col_list, parse_col_target, project_frame, select_columns,
-    select_top_k_by, top_k_by, verify_file, verify_frame, with_opt_where, DecodeOptions, Options,
-    ParsedWhere, PredExpr, Simd, SortDir,
+    filter_where, frame_row_count, group_by, parse_col_list, parse_col_target, project_frame,
+    select_columns, select_top_k_by, top_k_by, verify_file, verify_frame, with_opt_where,
+    DecodeOptions, GroupKey, Options, ParsedWhere, PredExpr, Simd, SortDir,
 };
 
 use super::{
@@ -455,6 +455,75 @@ pub unsafe extern "C" fn vxg_project_frame_alloc(
             Ok(bytes) => into_ffi_buf(bytes, out_len),
             Err(_) => std::ptr::null_mut(),
         }
+    }));
+    res.unwrap_or(std::ptr::null_mut())
+}
+
+/// Compressed-domain `GROUP BY group_col` with optional `agg_col` (`SUM`/`MIN`/`MAX`) and optional
+/// `where_cstr`, returning a TSV byte buffer (`key\trow_count\tnum_count\tsum\tmin\tmax\n` per group).
+/// Free the returned pointer with `vxg_free(ptr, *out_len)`. Returns `NULL` on error.
+#[no_mangle]
+pub unsafe extern "C" fn vxg_group_by_alloc(
+    frame_ptr: *const u8,
+    frame_len: usize,
+    group_col_cstr: *const c_char,
+    agg_col_cstr: *const c_char,
+    where_cstr: *const c_char,
+    threads: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if out_len.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Some(frame) = (unsafe { slice_from_raw(frame_ptr, frame_len) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(gcol_s) = (unsafe { cstr_req(group_col_cstr) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(opt_acol_s) = (unsafe { cstr_opt(agg_col_cstr) }) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(opt_where_s) = (unsafe { cstr_opt(where_cstr) }) else {
+        return std::ptr::null_mut();
+    };
+    let res = catch_unwind(AssertUnwindSafe(|| -> *mut u8 {
+        let Ok(gcol) = parse_col_target(gcol_s.trim()) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(acol) = opt_acol_s.map(|s| parse_col_target(s.trim())).transpose() else {
+            return std::ptr::null_mut();
+        };
+        let Ok(pw) = opt_where_s.map(ParsedWhere::parse).transpose() else {
+            return std::ptr::null_mut();
+        };
+        let dec = DecodeOptions {
+            threads: resolve_threads(threads),
+            simd: Simd::Auto,
+            max_output: usize::MAX,
+            verify_checksum: true,
+        };
+        let Ok(groups) = with_opt_where(pw.as_ref(), |w| group_by(frame, w, gcol, acol, &dec))
+        else {
+            return std::ptr::null_mut();
+        };
+        let mut out = Vec::with_capacity(groups.len() * 48);
+        for g in groups {
+            let kb = match &g.key {
+                GroupKey::Str(b) | GroupKey::RawJson(b) => b.as_slice(),
+            };
+            out.extend_from_slice(kb);
+            let line = format!(
+                "\t{}\t{}\t{}\t{}\t{}\n",
+                g.stats.row_count,
+                g.stats.num_count,
+                g.stats.sum,
+                g.stats.min.unwrap_or(0),
+                g.stats.max.unwrap_or(0),
+            );
+            out.extend_from_slice(line.as_bytes());
+        }
+        into_ffi_buf(out, out_len)
     }));
     res.unwrap_or(std::ptr::null_mut())
 }

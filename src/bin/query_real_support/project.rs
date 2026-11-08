@@ -1,14 +1,14 @@
 fn run_project_suite(raw: &[u8], frame: &[u8], opts: &Options, dec: &DecodeOptions) {
     use vxg::{ColPred, ColTarget, PredExpr, StrCmp};
 
-    let gb = raw.len() as f64 / 1e9;
+    let mrows = raw.split_inclusive(|&b| b == b'\n').count() as f64 / 1e6;
     println!(
         "\n=== Stage 4 Compressed-Domain Column Projection (ndjson) — threads={}, median of 5 samples ===",
         dec.threads
     );
     println!(
         "{:<50} {:>10} {:>10} {:>9} {:>10}",
-        "projection", "naive ms", "vxg ms", "speedup", "vxg GB/s"
+        "projection", "naive ms", "vxg ms", "speedup", "M rows/s"
     );
 
     let naive_select =
@@ -44,7 +44,7 @@ fn run_project_suite(raw: &[u8], frame: &[u8], opts: &Options, dec: &DecodeOptio
                 tn * 1e3,
                 tv * 1e3,
                 tn / tv,
-                gb / tv,
+                mrows / tv,
                 got.len()
             );
         };
@@ -66,7 +66,7 @@ fn run_project_suite(raw: &[u8], frame: &[u8], opts: &Options, dec: &DecodeOptio
                 tn * 1e3,
                 tv * 1e3,
                 tn / tv,
-                gb / tv,
+                mrows / tv,
                 f_vxg.len(),
                 if r_vxg.is_empty() {
                     0.0

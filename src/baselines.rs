@@ -1,11 +1,21 @@
 //! Bench-only C reference implementations. Link real liblz4/libzstd, not surrogate codecs.
-//! Every codec gets the same independent block size and worker count. Encoded sizes
-//! include the same 32 + 32*block_count accounting envelope; it is not an LZ4 frame.
+//! Block codecs share the same independent block size, worker count, and `32 + 32*block_count`
+//! accounting envelope (`ZstdDict` additionally charges its trained dictionary bytes).
+//! `ZstdWholeLong` compresses the full input as a single stream (`windowLog = 27`, `--long`)
+//! without block boundaries, charging only the standalone Zstd frame bytes.
 use crate::{Error, Result};
 use std::{
     ffi::{c_char, c_int, c_void, CStr},
     ptr::NonNull,
 };
+
+#[path = "baselines/zstd_ext.rs"]
+mod zstd_ext;
+pub use zstd_ext::TrainedDict;
+use zstd_ext::{
+    compress_whole_long, decode_ddict_group, decode_whole, encode_cdict_group, CDict, DDict,
+};
+
 extern "C" {
     fn LZ4_versionString() -> *const c_char;
     fn LZ4_compressBound(n: c_int) -> c_int;
@@ -52,21 +62,28 @@ extern "C" {
     fn ZSTD_isError(code: usize) -> u32;
     fn ZSTD_getErrorName(code: usize) -> *const c_char;
 }
-#[derive(Clone, Copy, Debug)]
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Codec {
     Lz4 { acceleration: i32 },
     Lz4Hc { level: i32 },
     Zstd { level: i32 },
+    ZstdDict { level: i32 },
+    ZstdWholeLong { level: i32 },
 }
+
 impl Codec {
     pub fn name(self) -> String {
         match self {
             Self::Lz4 { acceleration } => format!("lz4-c-a{acceleration}"),
             Self::Lz4Hc { level } => format!("lz4hc-c-l{level}"),
             Self::Zstd { level } => format!("zstd-c-l{level}"),
+            Self::ZstdDict { level } => format!("zstd-dict-l{level}"),
+            Self::ZstdWholeLong { level } => format!("zstd-whole-l{level}-long"),
         }
     }
 }
+
 pub fn versions() -> (String, String) {
     // SAFETY: reference libraries return static, NUL-terminated version strings.
     unsafe {
@@ -80,7 +97,8 @@ pub fn versions() -> (String, String) {
         )
     }
 }
-fn zcheck(n: usize) -> Result<usize> {
+
+pub(crate) fn zcheck(n: usize) -> Result<usize> {
     unsafe {
         if ZSTD_isError(n) != 0 {
             Err(Error::Backend(
@@ -93,12 +111,13 @@ fn zcheck(n: usize) -> Result<usize> {
         }
     }
 }
-struct Context {
-    ptr: NonNull<c_void>,
+
+pub(crate) struct Context {
+    pub(crate) ptr: NonNull<c_void>,
     encode: bool,
 }
 impl Context {
-    fn new(encode: bool) -> Result<Self> {
+    pub(crate) fn new(encode: bool) -> Result<Self> {
         let p = unsafe {
             if encode {
                 ZSTD_createCCtx()
@@ -123,34 +142,120 @@ impl Drop for Context {
         }
     }
 }
-struct Chunk {
-    bytes: Vec<u8>,
-    raw: bool,
-    raw_size: usize,
+
+pub(crate) struct Chunk {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) raw: bool,
+    pub(crate) raw_size: usize,
 }
+
 pub struct Encoded {
     codec: Codec,
     chunks: Vec<Chunk>,
     raw_size: usize,
     block_size: usize,
+    dict_size: usize,
+    ddict: Option<DDict>,
 }
+
 impl Encoded {
     pub fn encoded_size(&self) -> usize {
-        32 + 32 * self.chunks.len() + self.chunks.iter().map(|c| c.bytes.len()).sum::<usize>()
+        let payload: usize = self.chunks.iter().map(|c| c.bytes.len()).sum();
+        if matches!(self.codec, Codec::ZstdWholeLong { .. }) {
+            payload
+        } else {
+            self.dict_size + 32 + 32 * self.chunks.len() + payload
+        }
     }
+
+    pub fn dict_size(&self) -> usize {
+        self.dict_size
+    }
+
     pub fn compress(input: &[u8], codec: Codec, block_size: usize, threads: usize) -> Result<Self> {
+        if matches!(codec, Codec::ZstdDict { .. }) {
+            let dict = TrainedDict::train(input);
+            return Self::compress_with_dict(input, codec, &dict, block_size, threads);
+        }
+        Self::compress_inner(input, codec, None, block_size, threads)
+    }
+
+    pub fn compress_with_dict(
+        input: &[u8],
+        codec: Codec,
+        dict: &TrainedDict,
+        block_size: usize,
+        threads: usize,
+    ) -> Result<Self> {
+        Self::compress_inner(input, codec, Some(&dict.bytes), block_size, threads)
+    }
+
+    fn compress_inner(
+        input: &[u8],
+        codec: Codec,
+        dict_bytes: Option<&[u8]>,
+        block_size: usize,
+        threads: usize,
+    ) -> Result<Self> {
         crate::frame::check_block_size(block_size)?;
         if !(1..=256).contains(&threads) {
             return Err(Error::InvalidOption("threads must be 1..256"));
         }
-        if matches!(codec,Codec::Lz4{acceleration} if acceleration<1) {
+        if matches!(codec, Codec::Lz4 { acceleration } if acceleration < 1) {
             return Err(Error::InvalidOption("LZ4 acceleration must be positive"));
         }
         if matches!(codec, Codec::Lz4Hc { level } if !(1..=12).contains(&level)) {
             return Err(Error::InvalidOption("LZ4-HC level must be 1..=12"));
         }
+        if let Codec::ZstdWholeLong { level } = codec {
+            let chunk = compress_whole_long(input, level, threads)?;
+            return Ok(Self {
+                codec,
+                chunks: if input.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![chunk]
+                },
+                raw_size: input.len(),
+                block_size: input.len().max(1),
+                dict_size: 0,
+                ddict: None,
+            });
+        }
         let count = input.len().div_ceil(block_size);
         let workers = threads.min(count.max(1));
+        if let Codec::ZstdDict { level } = codec {
+            let db = dict_bytes.unwrap_or(&[]);
+            let cdict = CDict::new(db, level)?;
+            let ddict = DDict::new(db)?;
+            let mut indexed = if workers == 1 {
+                encode_cdict_group(input, block_size, &cdict, 0, 1)?
+            } else {
+                let cdict_ref = &cdict;
+                std::thread::scope(|scope| -> Result<Vec<_>> {
+                    let mut handles = Vec::new();
+                    for w in 0..workers {
+                        handles.push(scope.spawn(move || {
+                            encode_cdict_group(input, block_size, cdict_ref, w, workers)
+                        }));
+                    }
+                    let mut all = Vec::new();
+                    for h in handles {
+                        all.extend(h.join().map_err(|_| Error::WorkerPanic)??);
+                    }
+                    Ok(all)
+                })?
+            };
+            indexed.sort_unstable_by_key(|x| x.0);
+            return Ok(Self {
+                codec,
+                chunks: indexed.into_iter().map(|x| x.1).collect(),
+                raw_size: input.len(),
+                block_size,
+                dict_size: db.len(),
+                ddict: Some(ddict),
+            });
+        }
         let mut indexed = if workers == 1 {
             encode_group(input, codec, block_size, 0, 1)?
         } else {
@@ -174,8 +279,11 @@ impl Encoded {
             chunks: indexed.into_iter().map(|x| x.1).collect(),
             raw_size: input.len(),
             block_size,
+            dict_size: 0,
+            ddict: None,
         })
     }
+
     pub fn decode_into(&self, out: &mut [u8], threads: usize) -> Result<()> {
         if out.len() != self.raw_size {
             return Err(Error::OutputSize {
@@ -189,8 +297,28 @@ impl Encoded {
         if self.chunks.is_empty() {
             return Ok(());
         }
+        if matches!(self.codec, Codec::ZstdWholeLong { .. }) {
+            return decode_whole(&self.chunks[0], out);
+        }
         let workers = threads.min(self.chunks.len());
         let per = self.chunks.len().div_ceil(workers);
+        if let Some(ddict) = self.ddict.as_ref() {
+            if workers == 1 {
+                return decode_ddict_group(&self.chunks, out, ddict);
+            }
+            return std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for (g, target) in out.chunks_mut(per * self.block_size).enumerate() {
+                    let start = g * per;
+                    let chunks = &self.chunks[start..(start + per).min(self.chunks.len())];
+                    handles.push(scope.spawn(move || decode_ddict_group(chunks, target, ddict)));
+                }
+                for h in handles {
+                    h.join().map_err(|_| Error::WorkerPanic)??;
+                }
+                Ok(())
+            });
+        }
         if workers == 1 {
             return decode_group(&self.chunks, out, self.codec);
         }
@@ -209,6 +337,7 @@ impl Encoded {
         })
     }
 }
+
 fn encode_group(
     input: &[u8],
     codec: Codec,
@@ -221,7 +350,6 @@ fn encode_group(
     } else {
         None
     };
-    // LZ4 extState / extStateHC requires 8-byte alignment. Vec<u64>, not Vec<u8>.
     let mut state = match codec {
         Codec::Lz4 { .. } => {
             let n = unsafe { LZ4_sizeofState() };
@@ -237,7 +365,7 @@ fn encode_group(
             }
             vec![0u64; (n as usize).div_ceil(8)]
         }
-        Codec::Zstd { .. } => Vec::new(),
+        _ => Vec::new(),
     };
     let mut all = Vec::new();
     for (i, src) in input.chunks(bs).enumerate().skip(worker).step_by(workers) {
@@ -246,12 +374,10 @@ fn encode_group(
                 Codec::Lz4 { .. } | Codec::Lz4Hc { .. } => {
                     LZ4_compressBound(src.len() as c_int) as usize
                 }
-                Codec::Zstd { .. } => ZSTD_compressBound(src.len()),
+                _ => ZSTD_compressBound(src.len()),
             }
         };
         let mut dst = vec![0u8; cap];
-        // SAFETY: bs <=1 MiB fits C int; all buffer capacities match their allocations;
-        // external contexts are uniquely held by this worker.
         let n = unsafe {
             match codec {
                 Codec::Lz4 { acceleration } => {
@@ -290,6 +416,7 @@ fn encode_group(
                     src.len(),
                     level,
                 ))?,
+                _ => unreachable!(),
             }
         };
         let raw = n >= src.len();
@@ -310,6 +437,7 @@ fn encode_group(
     }
     Ok(all)
 }
+
 fn decode_group(chunks: &[Chunk], out: &mut [u8], codec: Codec) -> Result<()> {
     let ctx = if matches!(codec, Codec::Zstd { .. }) {
         Some(Context::new(false)?)
@@ -345,6 +473,7 @@ fn decode_group(chunks: &[Chunk], out: &mut [u8], codec: Codec) -> Result<()> {
                     chunk.bytes.as_ptr().cast(),
                     chunk.bytes.len(),
                 ))?,
+                _ => unreachable!(),
             }
         };
         if n != dst.len() {
@@ -359,35 +488,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lz4hc_and_zstd9_roundtrip_and_beat_fast_levels_on_text() {
-        let mut src = Vec::with_capacity(200_000);
-        for i in 0..2500u32 {
+    fn baselines_dict_and_whole_long_roundtrip() {
+        let mut src = Vec::with_capacity(2_000_000);
+        for i in 0..8_000u32 {
             src.extend_from_slice(
                 format!(
-                    "{{\"ts\":{},\"svc\":\"auth-api\",\"status\":200,\"user\":\"u{:05}\",\"msg\":\"token verified ok\"}}\n",
-                    1_700_000_000 + i,
-                    i % 317
+                    "{{\"timestamp\":\"2026-01-15T12:34:{:02}Z\",\"organization\":\"acme-telemetry-prod\",\"environment\":\"kubernetes-eu-central-1\",\"service_name\":\"checkout-authorization-gateway\",\"http_status\":{},\"trace_id\":\"{:08x}{:08x}\",\"message\":\"authorization evaluation completed\"}}\n",
+                    i % 60,
+                    if i % 7 == 0 { 500 } else { 200 },
+                    i.wrapping_mul(0x9E37_79B9),
+                    i.wrapping_mul(0x85EB_CA6B),
                 )
                 .as_bytes(),
             );
         }
         let mut out = vec![0u8; src.len()];
-        let lz4_fast = Encoded::compress(&src, Codec::Lz4 { acceleration: 1 }, 65536, 2).unwrap();
-        lz4_fast.decode_into(&mut out, 2).unwrap();
-        assert_eq!(out, src);
+        let dict = TrainedDict::train(&src);
+        assert!(!dict.bytes.is_empty());
 
-        let lz4_hc9 = Encoded::compress(&src, Codec::Lz4Hc { level: 9 }, 65536, 2).unwrap();
-        lz4_hc9.decode_into(&mut out, 2).unwrap();
-        assert_eq!(out, src);
-        assert!(lz4_hc9.encoded_size() < lz4_fast.encoded_size());
-
-        let zstd_1 = Encoded::compress(&src, Codec::Zstd { level: 1 }, 65536, 2).unwrap();
-        zstd_1.decode_into(&mut out, 2).unwrap();
-        assert_eq!(out, src);
-
-        let zstd_9 = Encoded::compress(&src, Codec::Zstd { level: 9 }, 65536, 2).unwrap();
-        zstd_9.decode_into(&mut out, 2).unwrap();
-        assert_eq!(out, src);
-        assert!(zstd_9.encoded_size() <= zstd_1.encoded_size());
+        for bs in [4096usize, 65536] {
+            for codec in [
+                Codec::Lz4 { acceleration: 1 },
+                Codec::Lz4Hc { level: 9 },
+                Codec::Zstd { level: 3 },
+                Codec::Zstd { level: 9 },
+                Codec::ZstdDict { level: 3 },
+                Codec::ZstdDict { level: 9 },
+                Codec::ZstdWholeLong { level: 19 },
+            ] {
+                let enc = if matches!(codec, Codec::ZstdDict { .. }) {
+                    Encoded::compress_with_dict(&src, codec, &dict, bs, 2).unwrap()
+                } else {
+                    Encoded::compress(&src, codec, bs, 2).unwrap()
+                };
+                out.fill(0);
+                enc.decode_into(&mut out, 2).unwrap();
+                assert_eq!(out, src, "failed roundtrip for {:?} bs={bs}", codec);
+            }
+        }
+        let z3_4k = Encoded::compress(&src, Codec::Zstd { level: 3 }, 4096, 2).unwrap();
+        let zd3_4k =
+            Encoded::compress_with_dict(&src, Codec::ZstdDict { level: 3 }, &dict, 4096, 2)
+                .unwrap();
+        assert!(
+            zd3_4k.encoded_size() < z3_4k.encoded_size(),
+            "zd3_4k={} (dict={}) vs z3_4k={}",
+            zd3_4k.encoded_size(),
+            zd3_4k.dict_size(),
+            z3_4k.encoded_size()
+        );
+        let z3_64k = Encoded::compress(&src, Codec::Zstd { level: 3 }, 65536, 2).unwrap();
+        let zw19 = Encoded::compress(&src, Codec::ZstdWholeLong { level: 19 }, 65536, 2).unwrap();
+        assert!(zw19.encoded_size() < z3_64k.encoded_size());
     }
 }

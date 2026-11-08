@@ -6,7 +6,7 @@ use std::{
 };
 
 use vxg::{
-    baselines::{Codec, Encoded},
+    baselines::{Codec, Encoded, TrainedDict},
     gpu::{GpuCodec, GpuOptions},
     DecodeOptions,
 };
@@ -14,7 +14,7 @@ use vxg::{
 use super::{
     allocator_name,
     config::{CodecPoint, Config, DatasetSummary},
-    metrics::measure_op,
+    metrics::{measure_op, measure_op_ext},
     R,
 };
 
@@ -33,6 +33,14 @@ pub(super) fn evaluate_baselines_and_gpu(
     lz: &str,
     zs: &str,
 ) -> R<()> {
+    let trained_dict = TrainedDict::train(data);
+    ds_summary.dict_bytes = trained_dict.bytes.len();
+    ds_summary.dict_train_ms = trained_dict.train_ns / 1e6;
+    eprintln!(
+        "{name:22} zstd-dict      train      dict_bytes={} train_ms={:.2}",
+        ds_summary.dict_bytes, ds_summary.dict_train_ms
+    );
+
     let mut codecs = vec![
         Codec::Lz4 { acceleration: 1 },
         Codec::Lz4 { acceleration: 4 },
@@ -44,26 +52,64 @@ pub(super) fn evaluate_baselines_and_gpu(
         Codec::Zstd { level: -3 },
         Codec::Zstd { level: 1 },
         Codec::Zstd { level: 3 },
+        Codec::ZstdDict { level: 3 },
     ]);
     if !c.fast_baselines {
-        codecs.push(Codec::Zstd { level: 9 });
+        codecs.extend([
+            Codec::Zstd { level: 9 },
+            Codec::ZstdDict { level: 9 },
+            Codec::ZstdWholeLong { level: 19 },
+        ]);
     }
     for codec in codecs {
-        let compressed = Encoded::compress(data, codec, c.block_size, c.threads)?;
+        let is_whole = matches!(codec, Codec::ZstdWholeLong { .. });
+        let is_dict = matches!(codec, Codec::ZstdDict { .. });
+        let is_heavy_enc = matches!(
+            codec,
+            Codec::Lz4Hc { .. }
+                | Codec::Zstd { level: 9.. }
+                | Codec::ZstdDict { level: 9.. }
+                | Codec::ZstdWholeLong { .. }
+        );
+        let compressed = if is_dict {
+            Encoded::compress_with_dict(data, codec, &trained_dict, c.block_size, c.threads)?
+        } else {
+            Encoded::compress(data, codec, c.block_size, c.threads)?
+        };
         compressed.decode_into(out, c.threads)?;
         assert_eq!(out, data, "baseline correctness before timing");
-        let en = measure_op(c, data.len(), || {
-            let f = Encoded::compress(black_box(data), codec, c.block_size, c.threads)?;
+        let en = measure_op_ext(c, data.len(), is_heavy_enc, || {
+            let f = if is_dict {
+                Encoded::compress_with_dict(
+                    black_box(data),
+                    codec,
+                    &trained_dict,
+                    c.block_size,
+                    c.threads,
+                )?
+            } else {
+                Encoded::compress(black_box(data), codec, c.block_size, c.threads)?
+            };
             black_box(f);
             Ok(())
         })?;
+        let enc_profile = if is_whole {
+            "cpu_whole_file_encode"
+        } else {
+            "cpu_allocating_encode"
+        };
+        let dec_profile = if is_whole {
+            "cpu_whole_file_decode"
+        } else {
+            "cpu_preallocated_decode"
+        };
         row(
             csv,
             samples_csv,
             c,
             name,
             &codec.name(),
-            "cpu_allocating_encode",
+            enc_profile,
             "compress",
             data.len(),
             compressed.encoded_size(),
@@ -84,7 +130,7 @@ pub(super) fn evaluate_baselines_and_gpu(
             c,
             name,
             &codec.name(),
-            "cpu_preallocated_decode",
+            dec_profile,
             "decompress",
             data.len(),
             compressed.encoded_size(),
@@ -108,22 +154,25 @@ pub(super) fn evaluate_baselines_and_gpu(
             Codec::Zstd { level: 1 } => ds_summary.zstd_1 = pt,
             Codec::Zstd { level: 3 } => ds_summary.zstd_3 = pt,
             Codec::Zstd { level: 9 } => ds_summary.zstd_9 = pt,
+            Codec::ZstdDict { level: 3 } => ds_summary.zstd_dict_3 = pt,
+            Codec::ZstdDict { level: 9 } => ds_summary.zstd_dict_9 = pt,
+            Codec::ZstdWholeLong { level: 19 } => ds_summary.zstd_whole_19 = pt,
             _ => {}
         }
     }
-    let lc = ds_summary.lz4_chimera();
-    let zc = ds_summary.zstd_chimera();
-    let ac = ds_summary.all_rivals_chimera();
+    let lc = ds_summary.lz4_envelope();
+    let zc = ds_summary.zstd_block_envelope();
+    let ac = ds_summary.all_block_envelope();
     eprintln!(
-        "{name:22} CHIMERA-LZ4    envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [min-ratio + max-speed]",
+        "{name:22} SWEEP-LZ4      envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [min-ratio + max-speed]",
         lc.ratio, lc.enc, lc.dec
     );
     eprintln!(
-        "{name:22} CHIMERA-ZSTD   envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [min-ratio + max-speed]",
+        "{name:22} SWEEP-ZSTD+D   envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [min-ratio(incl dict) + max-speed]",
         zc.ratio, zc.enc, zc.dec
     );
     eprintln!(
-        "{name:22} CHIMERA-ALL    envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [VXG ratio={:.3} enc={:.3} dec={:.3}]",
+        "{name:22} SWEEP-ALL-BLK  envelope   ratio={:.3} enc={:7.3} dec={:7.3} GB/s [VXG ratio={:.3} enc={:.3} dec={:.3}]",
         ac.ratio, ac.enc, ac.dec, ds_summary.vxg.ratio, ds_summary.vxg.enc, ds_summary.vxg.dec
     );
     if let Some(device) = gpu.as_mut() {

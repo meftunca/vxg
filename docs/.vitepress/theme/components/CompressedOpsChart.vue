@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-type ViewMode = 'gbps' | 'ms'
+type ViewMode = 'ms' | 'mrows'
 type ThreadKey = '1t' | '8t'
 type CatKey = 'all' | 'query' | 'analytics' | 'mutate'
 
@@ -10,10 +10,10 @@ interface OpRow {
   cat: Exclude<CatKey, 'all'>
   name: string
   ms1: [number, number] // [vxgMs, naiveMs] 1T
-  ms8: [number, number] // [vxgMs, naiveMs] 8T (or 12T for projection)
+  ms8: [number, number] // [vxgMs, naiveMs] 8T
 }
 
-const RAW_GB = 0.056503837 // 56,503,837 bytes decimal GB
+const MROWS = 0.3 // 300,000 rows = 0.300 million rows
 
 const OPS: OpRow[] = [
   {
@@ -89,7 +89,7 @@ const OPS: OpRow[] = [
 ]
 
 const threads = ref<ThreadKey>('8t')
-const view = ref<ViewMode>('gbps')
+const view = ref<ViewMode>('ms')
 const cat = ref<CatKey>('all')
 
 const visibleRows = computed(() =>
@@ -101,7 +101,7 @@ function pairOf(r: OpRow): [number, number] {
 }
 
 function metricVal(ms: number): number {
-  return view.value === 'gbps' ? (RAW_GB / (ms / 1000)) : ms
+  return view.value === 'mrows' ? MROWS / (ms / 1000) : ms
 }
 
 const maxMetric = computed(() => {
@@ -118,26 +118,26 @@ function barPct(ms: number): string {
 }
 
 function fmtMetric(ms: number): string {
-  if (view.value === 'gbps') {
-    return `${(RAW_GB / (ms / 1000)).toFixed(2)} GB/s`
+  if (view.value === 'mrows') {
+    return `${(MROWS / (ms / 1000)).toFixed(1)} M rows/s`
   }
   return `${ms.toFixed(2)} ms`
 }
 
-const peakSpeedup = computed(() => {
-  let best = 0
+const minLatencyMs = computed(() => {
+  let best = Infinity
   for (const r of OPS) {
-    const [v, n] = pairOf(r)
-    best = Math.max(best, n / v)
+    const [v] = pairOf(r)
+    best = Math.min(best, v)
   }
   return best
 })
 
-const peakGbps = computed(() => {
+const peakMrows = computed(() => {
   let best = 0
   for (const r of OPS) {
     const [v] = pairOf(r)
-    best = Math.max(best, RAW_GB / (v / 1000))
+    best = Math.max(best, MROWS / (v / 1000))
   }
   return best
 })
@@ -147,10 +147,10 @@ const peakGbps = computed(() => {
   <div class="vxg-chart-card">
     <div class="vxg-chart-header">
       <div>
-        <h4 class="vxg-chart-title">Compressed-Domain Execution vs Naive Decompress + Scan/Encode</h4>
+        <h4 class="vxg-chart-title">Compressed-Domain Execution vs Full Decompress + Scan/Re-encode</h4>
         <p class="vxg-chart-subtitle">
-          <code>ndjson_varied.ndjson</code> (56.5 MB · 300,000 rows · 863 blocks · 9.14% VXG v4) ·
-          {{ view === 'gbps' ? 'Longer bar = higher effective GB/s' : 'Shorter bar = lower latency (ms)' }}
+          Synthetic multi-template <code>ndjson_varied.ndjson</code> (<code>gen_varied_ndjson.py</code> · 56.5 MB · 300,000 rows · 863 blocks · 9.14% VXG v4) ·
+          {{ view === 'mrows' ? 'Longer bar = higher million rows/s' : 'Shorter bar = lower wall-clock latency (ms)' }}
         </p>
       </div>
       <div class="vxg-pill-group" role="tablist" aria-label="Operation category">
@@ -163,11 +163,11 @@ const peakGbps = computed(() => {
 
     <div class="vxg-controls-bar">
       <div class="vxg-pill-group" role="tablist" aria-label="View">
-        <button type="button" class="vxg-pill" :class="{ 'is-active': view === 'gbps' }" @click="view = 'gbps'">
-          Effective Throughput (GB/s ↑)
-        </button>
         <button type="button" class="vxg-pill" :class="{ 'is-active': view === 'ms' }" @click="view = 'ms'">
-          Latency (ms ↓)
+          Wall-Clock Latency (ms ↓)
+        </button>
+        <button type="button" class="vxg-pill" :class="{ 'is-active': view === 'mrows' }" @click="view = 'mrows'">
+          Row Throughput (M rows/s ↑)
         </button>
       </div>
 
@@ -183,25 +183,25 @@ const peakGbps = computed(() => {
 
     <div class="vxg-kpi-grid">
       <div class="vxg-kpi-box">
-        <div class="vxg-kpi-label">Peak Speedup vs Naive</div>
-        <div class="vxg-kpi-value">{{ peakSpeedup.toFixed(1) }}× faster</div>
-        <div class="vxg-kpi-delta">100% byte-identical output verified</div>
+        <div class="vxg-kpi-label">Lowest Query Latency</div>
+        <div class="vxg-kpi-value">{{ minLatencyMs.toFixed(2) }} ms</div>
+        <div class="vxg-kpi-delta">300,000 rows · 100% byte-identical output</div>
       </div>
       <div class="vxg-kpi-box">
-        <div class="vxg-kpi-label">Peak Query Throughput</div>
-        <div class="vxg-kpi-value">{{ peakGbps.toFixed(1) }} GB/s</div>
+        <div class="vxg-kpi-label">Peak Row Scan Rate</div>
+        <div class="vxg-kpi-value">{{ peakMrows.toFixed(1) }} M rows/s</div>
         <div class="vxg-kpi-delta">Zone-map + single-slot columnar pushdown</div>
       </div>
       <div class="vxg-kpi-box">
         <div class="vxg-kpi-label">Zero-Reencode Splicing</div>
-        <div class="vxg-kpi-value">{{ (pairOf(OPS[7])[1] / pairOf(OPS[7])[0]).toFixed(1) }}× faster</div>
-        <div class="vxg-kpi-delta">Splices compressed columns directly to VXG1</div>
+        <div class="vxg-kpi-value">{{ pairOf(OPS[7])[0].toFixed(2) }} ms</div>
+        <div class="vxg-kpi-delta">{{ (pairOf(OPS[7])[1] / pairOf(OPS[7])[0]).toFixed(1) }}× vs decode + re-encode</div>
       </div>
     </div>
 
     <div class="vxg-legend">
       <span class="vxg-legend-item"><i class="vxg-swatch is-vxg" /> VXG Compressed-Domain</span>
-      <span class="vxg-legend-item"><i class="vxg-swatch is-naive" /> Naive (decompress + scan / re-encode)</span>
+      <span class="vxg-legend-item"><i class="vxg-swatch is-naive" /> Full Decompress + Scan / Re-encode</span>
     </div>
 
     <div class="vxg-rows">
@@ -210,7 +210,7 @@ const peakGbps = computed(() => {
           <span class="vxg-row-name">
             <span class="vxg-tag">{{ row.tag }}</span>{{ row.name }}
           </span>
-          <span class="vxg-badge">{{ (pairOf(row)[1] / pairOf(row)[0]).toFixed(1) }}× faster</span>
+          <span class="vxg-badge">{{ (pairOf(row)[1] / pairOf(row)[0]).toFixed(1) }}× vs naive</span>
         </div>
         <div class="vxg-bars">
           <div class="vxg-bar-line is-wide-label">
@@ -228,7 +228,7 @@ const peakGbps = computed(() => {
     </div>
 
     <p class="vxg-chart-footnote">
-      Effective GB/s = raw uncompressed bytes (56.50 MB) divided by end-to-end wall-clock query/transform latency.
+      Reported as wall-clock latency (<code>ms</code>) and rows processed per second (<code>M rows/s</code> = 300k rows / latency) rather than dividing uncompressed file size by single-column touch time. For head-to-head benchmarks against <strong>DuckDB 2.0 (<code>read_json_auto</code>, <code>.zst</code>, <code>Parquet-Snappy</code>, <code>Parquet-Zstd</code>)</strong> on real NYC TLC Taxi corpora, see <a href="CHIMERA_BENCHMARKS#duckdb">Competitor Sweep &amp; DuckDB</a>.
     </p>
   </div>
 </template>

@@ -10,6 +10,7 @@ export default defineConfig({
     /^https?:\/\/localhost/,
     /\.\.\/include\//,
     /\.\.\/src\//,
+    /\.\.\/scripts\//,
     /\.\.\/examples\//,
     /\.\.\/reports\//,
     /\.\.\/\.github\//
@@ -18,10 +19,10 @@ export default defineConfig({
     ['meta', { name: 'theme-color', content: '#10b981' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:title', content: 'VXG — Vectorized Execution Grammar Codec' }],
-    ['meta', { name: 'og:description', content: '5x smaller than LZ4, 2.4x smaller than Zstd, and up to 54 GB/s multi-threaded decompression with O(1) random block access.' }]
+    ['meta', { name: 'og:description', content: 'LZ4-class multi-GB/s throughput, 1.2x-3.2x smaller 64 KiB random-access blocks than Zstd on structured logs & tables, and millisecond SQL analytics without Parquet ETL.' }]
   ],
   themeConfig: {
-    siteTitle: 'VXG v0.4.5',
+    siteTitle: 'VXG v0.4.6',
     nav: [
       { text: 'Playground (WASM)', link: '/playground' },
       { text: 'AI Tensor (.vxt)', link: '/TENSOR' },
@@ -61,7 +62,7 @@ export default defineConfig({
         text: 'Benchmarks & Energy',
         items: [
           { text: 'Cross-Platform Benchmarks', link: '/BENCHMARKS' },
-          { text: 'Chimera Envelope Showdown', link: '/CHIMERA_BENCHMARKS' },
+          { text: 'Competitor Sweep & DuckDB', link: '/CHIMERA_BENCHMARKS' },
           { text: 'Energy & Composite Indices (VPI / GCI)', link: '/ENERGY_BENCHMARKS' },
           { text: 'Validation & Reproducibility', link: '/VALIDATION' }
         ]

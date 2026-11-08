@@ -1,14 +1,14 @@
 fn run_topk_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
     use vxg::{ColPred, ColTarget, PredExpr, SortDir, StrCmp};
 
-    let gb = raw.len() as f64 / 1e9;
+    let mrows = raw.split_inclusive(|&b| b == b'\n').count() as f64 / 1e6;
     println!(
         "\n=== Stage 6 Compressed-Domain ORDER BY / Top-K (ndjson) — threads={}, median of 5 samples ===",
         dec.threads
     );
     println!(
         "{:<54} {:>10} {:>10} {:>9} {:>10}",
-        "query", "naive ms", "vxg ms", "speedup", "vxg GB/s"
+        "query", "naive ms", "vxg ms", "speedup", "M rows/s"
     );
 
     let cmp_key = |ka: &vxg::SortKey, ia: usize, kb: &vxg::SortKey, ib: usize, dir: SortDir| {
@@ -102,7 +102,7 @@ fn run_topk_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
                 tn * 1e3,
                 tv * 1e3,
                 tn / tv,
-                gb / tv,
+                mrows / tv,
                 got_pairs.len()
             );
         };
@@ -124,7 +124,7 @@ fn run_topk_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
             tn * 1e3,
             tv * 1e3,
             tn / tv,
-            gb / tv,
+            mrows / tv,
             got.len()
         );
     };

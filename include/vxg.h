@@ -1,5 +1,5 @@
 /*
- * VXG v0.4.5 — Unified Adaptive Multi-Format Lossless Block Codec (Format v4)
+ * VXG v0.4.6 — Unified Adaptive Multi-Format Lossless Block Codec (Format v4)
  * Official C99 / C++11 Header for Static (`libvxg.a` / `vxg.lib`) and Dynamic
  * (`libvxg.dylib` / `libvxg.so` / `vxg.dll`) Library Integration.
  *
@@ -35,7 +35,7 @@ extern "C" {
 #define VXG_ERR_INTERNAL           ((vxg_ssize_t)-7)
 
 /**
- * Returns the null-terminated library version string (e.g. "0.4.5").
+ * Returns the null-terminated library version string (e.g. "0.4.6").
  */
 const char *vxg_version_string(void);
 
@@ -329,6 +329,21 @@ uint8_t *vxg_project_frame_alloc(
     const uint8_t *frame_ptr,
     size_t frame_len,
     const char *cols_cstr,
+    const char *where_cstr,
+    size_t threads,
+    size_t *out_len
+);
+
+/**
+ * Compressed-domain `GROUP BY group_col_cstr` with optional `agg_col_cstr` (`SUM`/`MIN`/`MAX`)
+ * and optional `where_cstr`, returning TSV lines (`key\trow_count\tnum_count\tsum\tmin\tmax\n`).
+ * Free the returned buffer with `vxg_free(ptr, *out_len)`. Returns `NULL` on error.
+ */
+uint8_t *vxg_group_by_alloc(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *group_col_cstr,
+    const char *agg_col_cstr,
     const char *where_cstr,
     size_t threads,
     size_t *out_len

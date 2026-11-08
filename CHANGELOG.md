@@ -1,19 +1,31 @@
 # Changelog
 
-## 0.4.5 — Persistent Lock-Free Worker Pool, Multi-Template SIMD, Compressed-Domain Speedups & "Chimera Envelope" Benchmarks
+## 0.4.6 — Trained-Dictionary & Whole-File `Zstd` Baselines, Real Public Corpora & `DuckDB + Parquet` Benchmarks
+
+- **Trained-Dictionary (`Zstd + Dict`) & Whole-File `zstd -19 --long` Baselines (`src/baselines/zstd_ext.rs`, `src/baselines.rs`, `vxg-bench`):**
+  - Added `TrainedDict::train` (`ZDICT_trainFromBuffer` up to `32 KiB`, recording one-time `train_ns`) and thread-safe `Codec::ZstdDict` (`zstd-dict-l3`, `zstd-dict-l9` via `ZSTD_CDict` / `ZSTD_DDict`) over `64 KiB` independent blocks, charging `dict_bytes` in `Encoded::encoded_size()`.
+  - Added whole-file `Codec::ZstdWholeLong` (`zstd-whole-l19-long`, `zstd -19 --long` with `128 MiB` window / `windowLog = 27`, single stream, `random access = NO`) to quantify the exact compression-ratio difference of `64 KiB` random-access block boundaries.
+  - Updated `vxg-bench` Markdown reporting (`src/bin/bench_support/report.rs`) to separate `Text & Structured Geomean` from `2D BMP Geomean` and bold only the actual per-row winner on each metric (`Ratio`, `Enc`, `Dec`).
+- **Real-World Public Corpora vs. Synthetic Qualification Separation (`scripts/fetch_real_corpora.py`, `docs/CHIMERA_BENCHMARKS.md`):**
+  - Added reproducible fetching and benchmarking over 7 non-synthetic public/OS corpora (`nyc-taxi-2024-01.{csv,ndjson}`, `gharchive-2025-01-15.ndjson`, `apache-access.clf`, `macos-install.log`, `pg100-shakespeare.txt`, and `kodak-truecolor-16.bmp` 16-photo camera mosaic), strictly separated from synthetic/procedural qualification suites (`--suite v4`, `gen_varied_ndjson.py`, `gen_format_bench.py`, procedural UI `.bmp` renders).
+- **Head-to-Head Analytical Benchmarks vs. `DuckDB 2.0.0` + `Parquet` & `vxg_group_by_alloc` C ABI (`src/ffi/analytics.rs`, `include/vxg.h`, `scripts/bench_vs_duckdb.py`):**
+  - Added `vxg_group_by_alloc` to the zero-overhead C ABI (`include/vxg.h`) for in-process `GROUP BY` + `COUNT/SUM/MIN/MAX` analytics.
+  - Replaced `"effective GB/s"` (`raw_bytes / query_time`) reporting in `vxg-query-real`, `CompressedOpsChart.vue`, and documentation with **wall-clock latency (`ms`)** and **million rows/sec (`M rows/s`)**, benchmarked directly against `DuckDB 2.0.0` (`read_json_auto` / `read_csv`, `.zst`, `Parquet-Snappy`, and `Parquet-Zstd`) with 100% result-equality assertions (`reports/duckdb-vs-vxg.json`).
+
+## 0.4.5 — Persistent Lock-Free Worker Pool, Multi-Template SIMD, Compressed-Domain Speedups & Competitor Sweep Baselines
 
 - **Persistent Lock-Free Worker Pool & Parallel Boundary Inspection (`src/pool.rs`, `src/ops/par_meta.rs`, `src/query/parallel.rs`):**
   - Replaced per-call `std::thread::scope` OS thread creation/teardown and cold TLS allocations across `encode`, `decode`, `query`, and `ops` with a cache-aligned persistent worker pool (`pool::parallel_run` / `parallel_try_run`) and parallel grammar boundary inspector (`inspect_grammar_boundary`), with graceful `wasm32` sequential fallback.
-  - Accelerated 8-thread compressed-domain analytics on `56.5 MB` (`300,000`-row) `ndjson_varied.ndjson`: `aggregate_column SUM/MIN/MAX(bytes)` **`6.13 ms -> 0.57 ms` (`98.91 GB/s`, `152.0x` vs naive — `10.8x` faster)**, `group_by(service) SUM/MIN/MAX(bytes)` **`5.22 ms -> 1.00 ms` (`56.38 GB/s`, `157.9x` — `5.2x` faster)**, and `top_k_by ORDER BY latency_ms ASC LIMIT 10` **`1.33 ms -> 0.58 ms` (`96.95 GB/s`, `138.9x` — `2.3x` faster)**.
+  - Accelerated 8-thread compressed-domain analytics on synthetic `56.5 MB` (`300,000`-row) `ndjson_varied.ndjson`: `aggregate_column SUM/MIN/MAX(bytes)` **`6.13 ms -> 0.57 ms` (`526.3 M rows/s`, `152.0x` vs naive — `10.8x` faster)**, `group_by(service) SUM/MIN/MAX(bytes)` **`5.22 ms -> 1.00 ms` (`300.0 M rows/s`, `157.9x` — `5.2x` faster)**, and `top_k_by ORDER BY latency_ms ASC LIMIT 10` **`1.33 ms -> 0.58 ms` (`517.2 M rows/s`, `138.9x` — `2.3x` faster)**.
 - **Cross-Block `leading_carry` Raw Boundary Routing & Zero-Alloc Multi-Template Ops (`src/encode.rs`, `src/columns/`):**
-  - Routed cross-block split-line leading fragments (`leading_carry`) directly to `Row::Raw(&data[..first_nl])`, eliminating bogus 1-row `Template 0` splits on 92% of CSV/TSV/logfmt blocks and preventing column-0 model poisoning (`events.tsv` `0.0334 -> 0.0326`, `data.csv` `0.1820 -> 0.1796`, CSV `1T` `filter_column` **`5.01 ms -> 0.58 ms` / `52.8 GB/s`**, `map_column` **`29.83 ms -> 2.92 ms` / `10.5 GB/s`**).
-  - Eliminated per-block heap allocations (`TplColSlices`) in `ops_search.rs` and `ops_pred.rs` and added compressed-domain multi-template `filter_frame` (`ops_filter_bytes.rs`, `8T` `4.24 ms -> 2.18 ms` / `26.0 GB/s`).
+  - Routed cross-block split-line leading fragments (`leading_carry`) directly to `Row::Raw(&data[..first_nl])`, eliminating bogus 1-row `Template 0` splits on 92% of CSV/TSV/logfmt blocks and preventing column-0 model poisoning (`events.tsv` `0.0334 -> 0.0326`, `data.csv` `0.1820 -> 0.1796`, CSV `1T` `filter_column` **`5.01 ms -> 0.58 ms`**, `map_column` **`29.83 ms -> 2.32 ms`**).
+  - Eliminated per-block heap allocations (`TplColSlices`) in `ops_search.rs` and `ops_pred.rs` and added compressed-domain multi-template `filter_frame` (`ops_filter_bytes.rs`, `8T` `4.24 ms -> 2.18 ms`).
 - **Multi-Template SIMD Stream Matcher, `FAST_LZ` Periodic Overlap SIMD & 6-Step 4-Stream Huffman (`Format v4` — 100% Wire Compatible):**
   - Added SIMD multi-template JSON stream matching (`grammar_multi.rs`), NEON 256-entry nibble LUT in `try_match_clf_stream`, early high-cardinality abort in `model_dict.rs`, and `u32` multiply-shift / single-digit-token fast paths in `prep_pattern.rs`.
   - Added `OVERLAP_SHUF16` + `copy16_periodic` (`vqtbl1q_u8` / `_mm_shuffle_epi8`) for periodic `offset < match_len` matches in `fast_lz_unpack.rs` and constant-offset 6-step (`max_len <= 9`) / 5-step (`max_len in 10..=11`) 4-stream Huffman decoding (`huffman_dec4.rs`).
   - Removed upfront `16+ MiB` zero-fill in `StreamEncoder::with_chunk_size` and added monotonic `out_len` buffer reuse in `StreamDecoder` (`src/stream.rs`).
-- **"Chimera Envelope" Benchmark Suite (`vxg-bench`, `docs/CHIMERA_BENCHMARKS.md`):**
-  - Added native C `lz4hc-c-l9` (`LZ4_compress_HC_extStateHC`) and `zstd-c-l9` baselines plus synthetic **`CHIMERA-LZ4`**, **`CHIMERA-ZSTD`**, and **`CHIMERA-ALL`** envelopes combining competitors' best high-compression ratio (`L9`) with their fastest preset encode/decode throughput (`LZ4-fast` / `Zstd -3`) simultaneously on every dataset (`VXG v4` `8T` 10-dataset geomean `VPI = 514.8`: **`4.09x` vs `LZ4 Chimera`, `3.97x` vs `Zstd Chimera`, `2.18x` vs `All-Rivals Chimera`**, and **`1.36x` higher `GCI`**).
+- **High-Effort Competitor Sweep Baselines (`vxg-bench`, `docs/CHIMERA_BENCHMARKS.md`):**
+  - Added native C `lz4hc-c-l9` (`LZ4_compress_HC_extStateHC`) and `zstd-c-l9` baselines plus parameter-sweep upper-bound envelopes (`min_ratio` + `max_speed`) across independent `64 KiB` blocks.
 
 ## 0.4.4 — Compressed-Domain `ORDER BY` / `Top-K`, Expanded C/FFI Analytics ABI & Interactive VitePress Charts
 

@@ -40,16 +40,55 @@ pub(super) fn process_energy_nj() -> Option<u64> {
     None
 }
 
-pub(super) fn measure_op<F>(c: &Config, raw_bytes: usize, mut f: F) -> R<MeasuredOp>
+pub(super) fn measure_op<F>(c: &Config, raw_bytes: usize, f: F) -> R<MeasuredOp>
 where
     F: FnMut() -> R<()>,
 {
+    measure_op_ext(c, raw_bytes, false, f)
+}
+
+pub(super) fn measure_op_ext<F>(
+    c: &Config,
+    raw_bytes: usize,
+    heavy_single_sample: bool,
+    mut f: F,
+) -> R<MeasuredOp>
+where
+    F: FnMut() -> R<()>,
+{
+    if heavy_single_sample {
+        let e0 = process_energy_nj();
+        let start = Instant::now();
+        f()?;
+        let elapsed_ns = start.elapsed().as_secs_f64() * 1e9;
+        let e1 = process_energy_nj();
+        let j_per_gb = match (e0, e1) {
+            (Some(b), Some(a)) if raw_bytes > 0 && elapsed_ns > 0.0 => {
+                let delta_nj = a.saturating_sub(b) as f64;
+                (delta_nj > 0.0).then_some(delta_nj / raw_bytes as f64)
+            }
+            _ => None,
+        };
+        return Ok(MeasuredOp {
+            ns_samples: vec![elapsed_ns],
+            j_per_gb,
+        });
+    }
+    let w0 = Instant::now();
     f()?;
-    f()?; // Warm-up, never included.
-    let mut ns_samples = Vec::with_capacity(c.samples);
-    let mut j_samples = Vec::with_capacity(c.samples);
+    let first_elapsed = w0.elapsed();
+    if first_elapsed < Duration::from_millis(250) {
+        f()?; // Second warm-up when single-call latency is short (< 250 ms).
+    }
+    let sample_count = if first_elapsed >= Duration::from_millis(500) {
+        c.samples.min(3)
+    } else {
+        c.samples
+    };
+    let mut ns_samples = Vec::with_capacity(sample_count);
+    let mut j_samples = Vec::with_capacity(sample_count);
     let duration = Duration::from_secs_f64(c.seconds);
-    for _ in 0..c.samples {
+    for _ in 0..sample_count {
         let e0 = process_energy_nj();
         let start = Instant::now();
         let mut n = 0u64;

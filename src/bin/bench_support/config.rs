@@ -35,7 +35,7 @@ pub(super) struct CodecPoint {
 }
 
 impl CodecPoint {
-    pub(super) fn chimera(points: &[Self]) -> Self {
+    pub(super) fn envelope(points: &[Self]) -> Self {
         let mut ratio = f64::INFINITY;
         let mut enc = 0.0f64;
         let mut dec = 0.0f64;
@@ -84,19 +84,35 @@ pub(super) struct DatasetSummary {
     pub(super) zstd_1: CodecPoint,
     pub(super) zstd_3: CodecPoint,
     pub(super) zstd_9: CodecPoint,
+    pub(super) zstd_dict_3: CodecPoint,
+    pub(super) zstd_dict_9: CodecPoint,
+    pub(super) zstd_whole_19: CodecPoint,
+    pub(super) dict_bytes: usize,
+    pub(super) dict_train_ms: f64,
 }
 
 impl DatasetSummary {
-    pub(super) fn lz4_chimera(&self) -> CodecPoint {
-        CodecPoint::chimera(&[self.lz4_a1, self.lz4_a4, self.lz4hc_9])
+    pub(super) fn is_bmp_2d(&self) -> bool {
+        self.name.ends_with(".bmp")
     }
 
-    pub(super) fn zstd_chimera(&self) -> CodecPoint {
-        CodecPoint::chimera(&[self.zstd_m3, self.zstd_1, self.zstd_3, self.zstd_9])
+    pub(super) fn lz4_envelope(&self) -> CodecPoint {
+        CodecPoint::envelope(&[self.lz4_a1, self.lz4_a4, self.lz4hc_9])
     }
 
-    pub(super) fn all_rivals_chimera(&self) -> CodecPoint {
-        CodecPoint::chimera(&[self.lz4_chimera(), self.zstd_chimera()])
+    pub(super) fn zstd_block_envelope(&self) -> CodecPoint {
+        CodecPoint::envelope(&[
+            self.zstd_m3,
+            self.zstd_1,
+            self.zstd_3,
+            self.zstd_9,
+            self.zstd_dict_3,
+            self.zstd_dict_9,
+        ])
+    }
+
+    pub(super) fn all_block_envelope(&self) -> CodecPoint {
+        CodecPoint::envelope(&[self.lz4_envelope(), self.zstd_block_envelope()])
     }
 }
 
@@ -168,7 +184,7 @@ impl Config {
                 "--v3" | "--v4" => {} // unified pipeline is the default; kept for script compatibility
                 "--legacy" => c.legacy_v2 = true,
                 "--help" => {
-                    println!("vxg-bench [--suite default|v4|all] [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1|auto] [--block-size 65536] [--simd auto] [--csv FILE] [--samples-csv FILE] [--markdown FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--fast-baselines] [--decode-only] [--validated-decode] [--legacy]\nAll CPU codecs use independent blocks, RAW fallback and no checksum. Baselines include LZ4 (a1, a4, HC-L9) and Zstd (-3, 1, 3, 9) plus impossible Chimera envelopes (L9 ratio + fastest encode/decode); pass --fast-baselines to skip L9 baselines during quick iteration. --suite v4 runs the 10-dataset multi-format v4 suite. --markdown writes a GitHub Markdown comparison table including Chimera envelopes.");
+                    println!("vxg-bench [--suite default|v4|all] [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1|auto] [--block-size 65536] [--simd auto] [--csv FILE] [--samples-csv FILE] [--markdown FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--fast-baselines] [--decode-only] [--validated-decode] [--legacy]\nBlock baselines use independent blocks, RAW fallback, and no checksum: LZ4 (a1, a4, HC-L9), Zstd (-3, 1, 3, 9), and Zstd+TrainedDict (L3, L9, charging dictionary size), plus whole-file zstd -19 --long as a non-random-access reference. Pass --fast-baselines to skip heavy presets (L9, dict-L9, whole-L19) during quick iteration.");
                     return Ok(None);
                 }
                 x => return Err(format!("unknown option {x}").into()),

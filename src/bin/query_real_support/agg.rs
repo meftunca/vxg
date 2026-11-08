@@ -2,14 +2,14 @@ fn run_agg_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
     use std::collections::BTreeMap;
     use vxg::{AggStats, ColPred, ColTarget, GroupKey, GroupRow, PredExpr, StrCmp};
 
-    let gb = raw.len() as f64 / 1e9;
+    let mrows = raw.split_inclusive(|&b| b == b'\n').count() as f64 / 1e6;
     println!(
         "\n=== Stage 3 Compressed-Domain Analytics (ndjson) — threads={}, median of 5 samples ===",
         dec.threads
     );
     println!(
         "{:<48} {:>10} {:>10} {:>9} {:>10}",
-        "query", "naive ms", "vxg ms", "speedup", "vxg GB/s"
+        "query", "naive ms", "vxg ms", "speedup", "M rows/s"
     );
 
     let naive_count = |expr: &PredExpr<'_>| -> u64 {
@@ -73,7 +73,7 @@ fn run_agg_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
         tn * 1e3,
         tv * 1e3,
         tn / tv,
-        gb / tv
+        mrows / tv
     );
 
     // 2. Compound filter_where (`(status==500 AND latency_ms>=220) OR bytes>=50000`)
@@ -100,7 +100,7 @@ fn run_agg_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
         tn * 1e3,
         tv * 1e3,
         tn / tv,
-        gb / tv,
+        mrows / tv,
         fv_rows.len()
     );
 
@@ -115,7 +115,7 @@ fn run_agg_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
         tn * 1e3,
         tv * 1e3,
         tn / tv,
-        gb / tv,
+        mrows / tv,
         av.sum
     );
 
@@ -131,7 +131,7 @@ fn run_agg_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
         tn * 1e3,
         tv * 1e3,
         tn / tv,
-        gb / tv,
+        mrows / tv,
         av2.row_count
     );
 
@@ -146,7 +146,7 @@ fn run_agg_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
         tn * 1e3,
         tv * 1e3,
         tn / tv,
-        gb / tv,
+        mrows / tv,
         gv1.len()
     );
 
@@ -161,7 +161,7 @@ fn run_agg_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
         tn * 1e3,
         tv * 1e3,
         tn / tv,
-        gb / tv,
+        mrows / tv,
         gv2.len()
     );
 
@@ -178,7 +178,7 @@ fn run_agg_suite(raw: &[u8], frame: &[u8], dec: &DecodeOptions) {
         tn * 1e3,
         tv * 1e3,
         tn / tv,
-        gb / tv,
+        mrows / tv,
         gv3.len()
     );
 }

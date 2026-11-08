@@ -162,14 +162,14 @@ fn naive_transform_frame(
 
 fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &DecodeOptions) {
     use vxg::{ColOp, ColPred, ColTarget, StrCmp};
-    let gb = raw.len() as f64 / 1e9;
+    let mrows = raw.split_inclusive(|&b| b == b'\n').count() as f64 / 1e6;
     println!(
         "\n=== Stage 2 Compressed-Domain Ops ({kind}) — threads={}, median of 5 samples ===",
         opts.threads
     );
     println!(
         "{:<44} {:>11} {:>11} {:>9} {:>11}",
-        "operation", "naive ms", "vxg ms", "speedup", "vxg GB/s"
+        "operation", "naive ms", "vxg ms", "speedup", "M rows/s"
     );
 
     let bench_filter = |label: &str, pred: ColPred<'_>| {
@@ -188,7 +188,7 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
             t_naive * 1e3,
             t_vxg * 1e3,
             t_naive / t_vxg,
-            gb / t_vxg,
+            mrows / t_vxg,
             got.len()
         );
     };
@@ -209,7 +209,7 @@ fn run_ops_suite(raw: &[u8], frame: &[u8], kind: &str, opts: &Options, dec: &Dec
                 t_naive * 1e3,
                 t_vxg * 1e3,
                 t_naive / t_vxg,
-                gb / t_vxg,
+                mrows / t_vxg,
                 if r_vxg.is_empty() {
                     0.0
                 } else {
@@ -492,10 +492,10 @@ fn main() {
         return;
     }
 
-    let gb = raw.len() as f64 / 1e9;
+    let mrows = rows as f64 / 1e6;
     println!(
-        "{:<28} {:>8} {:>12} {:>12} {:>8}",
-        "needle", "hits", "raw ms", "vxg ms", "speedup"
+        "{:<28} {:>8} {:>12} {:>12} {:>8} {:>12}",
+        "needle", "hits", "raw ms", "vxg ms", "speedup", "M rows/s"
     );
     for needle in &args[1..] {
         if let Some((key, cmp)) = parse_num_spec(needle) {
@@ -514,13 +514,13 @@ fn main() {
                 assert_eq!(rb, &m.bytes, "row bytes mismatch for {needle:?}");
             }
             println!(
-                "{:<28} {:>8} {:>12.3} {:>12.3} {:>7.1}x  [{:.1} GB/s]",
+                "{:<28} {:>8} {:>12.3} {:>12.3} {:>7.1}x {:>11.2}",
                 needle,
                 got.len(),
                 t_raw * 1e3,
                 t_vxg * 1e3,
                 t_raw / t_vxg,
-                gb / t_vxg
+                mrows / t_vxg
             );
             continue;
         }
@@ -543,13 +543,13 @@ fn main() {
             expected.first().map(|e| e.0)
         );
         println!(
-            "{:<28} {:>8} {:>12.3} {:>12.3} {:>7.1}x  [{:.1} GB/s]",
+            "{:<28} {:>8} {:>12.3} {:>12.3} {:>7.1}x {:>11.2}",
             format!("{:?}", needle),
             got.len(),
             t_raw * 1e3,
             t_vxg * 1e3,
             t_raw / t_vxg,
-            gb / t_vxg
+            mrows / t_vxg
         );
     }
 }

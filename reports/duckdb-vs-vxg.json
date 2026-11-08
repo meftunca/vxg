@@ -1,0 +1,369 @@
+{
+  "duckdb_version": "2.0.0",
+  "datasets": [
+    {
+      "name": "nyc-taxi-2024-01.ndjson",
+      "category": "Real Public Corpus (NYC TLC Jan 2024, 200k trips, 52.3 MB)",
+      "storage": {
+        "raw_bytes": 52326038,
+        "raw_mb": 52.326038,
+        "rows": 200000,
+        "vxg_bytes": 3099064,
+        "vxg_ratio": 0.05922603962486134,
+        "vxg_enc_1t_ms": 53.30091598443687,
+        "vxg_enc_8t_ms": 10.099750012159348,
+        "zst_bytes": 4918522,
+        "zst_ratio": 0.09399760020049674,
+        "zst_enc_8t_ms": 66.17991701932624,
+        "pq_zstd_bytes": 2961230,
+        "pq_zstd_ratio": 0.05659190172204515,
+        "pq_zstd_etl_8t_ms": 111.87154200160876,
+        "pq_snap_bytes": 3939342,
+        "pq_snap_ratio": 0.07528454571699084,
+        "pq_snap_etl_8t_ms": 124.34641597792506
+      },
+      "threads": {
+        "1": [
+          {
+            "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
+            "vxg_ms": 6.496540969237685,
+            "vxg_mrows_s": 30.785613597610904,
+            "duck_raw_ms": 154.96545901987702,
+            "duck_zst_ms": 136.105542012956,
+            "duck_pq_snap_ms": 1.973415957763791,
+            "duck_pq_zstd_ms": 2.4331670138053596,
+            "duck_pq_zstd_mrows_s": 82.19739905449785
+          },
+          {
+            "label": "SUM/MIN/MAX(total_cents) [all 200k rows]",
+            "vxg_ms": 1.8403329886496067,
+            "vxg_mrows_s": 108.67598485356464,
+            "duck_raw_ms": 90.37483396241441,
+            "duck_zst_ms": 191.63037504768,
+            "duck_pq_snap_ms": 3.8029170245863497,
+            "duck_pq_zstd_ms": 4.566207993775606,
+            "duck_pq_zstd_mrows_s": 43.800019682114474
+          },
+          {
+            "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
+            "vxg_ms": 4.594708967488259,
+            "vxg_mrows_s": 43.528328217343415,
+            "duck_raw_ms": 101.56837495742366,
+            "duck_zst_ms": 153.6023750086315,
+            "duck_pq_snap_ms": 2.174916968215257,
+            "duck_pq_zstd_ms": 2.5835420237854123,
+            "duck_pq_zstd_mrows_s": 77.41310114513233
+          },
+          {
+            "label": "GROUP BY payment_type: COUNT(*), SUM(total)",
+            "vxg_ms": 3.4648330183699727,
+            "vxg_mrows_s": 57.72283943833167,
+            "duck_raw_ms": 104.72900001332164,
+            "duck_zst_ms": 199.15850000688806,
+            "duck_pq_snap_ms": 3.7835840485058725,
+            "duck_pq_zstd_ms": 4.384332976769656,
+            "duck_pq_zstd_mrows_s": 45.61697322253989
+          },
+          {
+            "label": "ORDER BY total_cents DESC LIMIT 10",
+            "vxg_ms": 4.799457965418696,
+            "vxg_mrows_s": 41.67137235934774,
+            "duck_raw_ms": 148.58741703210399,
+            "duck_zst_ms": 239.4019999774173,
+            "duck_pq_snap_ms": 5.731332988943905,
+            "duck_pq_zstd_ms": 9.027958963997662,
+            "duck_pq_zstd_mrows_s": 22.153401538218578
+          },
+          {
+            "label": "SELECT 4 cols WHERE tip_cents >= 2500",
+            "vxg_ms": 4.13579196901992,
+            "vxg_mrows_s": 48.358331729000156,
+            "duck_raw_ms": 193.243166024331,
+            "duck_zst_ms": 233.8864579796791,
+            "duck_pq_snap_ms": 6.661207997240126,
+            "duck_pq_zstd_ms": 9.61549999192357,
+            "duck_pq_zstd_mrows_s": 20.799750420465678
+          }
+        ],
+        "8": [
+          {
+            "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
+            "vxg_ms": 4.569082986563444,
+            "vxg_mrows_s": 43.77245950405171,
+            "duck_raw_ms": 99.26141600590199,
+            "duck_zst_ms": 175.59695802628994,
+            "duck_pq_snap_ms": 2.9369169496931136,
+            "duck_pq_zstd_ms": 2.106166968587786,
+            "duck_pq_zstd_mrows_s": 94.95923304414121
+          },
+          {
+            "label": "SUM/MIN/MAX(total_cents) [all 200k rows]",
+            "vxg_ms": 1.3190829777158797,
+            "vxg_mrows_s": 151.6204843658277,
+            "duck_raw_ms": 80.97641699714586,
+            "duck_zst_ms": 178.79475001245737,
+            "duck_pq_snap_ms": 4.885374975856394,
+            "duck_pq_zstd_ms": 3.167749964632094,
+            "duck_pq_zstd_mrows_s": 63.136296182779134
+          },
+          {
+            "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
+            "vxg_ms": 1.420999993570149,
+            "vxg_mrows_s": 140.74595419069354,
+            "duck_raw_ms": 84.06058297259733,
+            "duck_zst_ms": 230.26591702364385,
+            "duck_pq_snap_ms": 6.51754200225696,
+            "duck_pq_zstd_ms": 8.555833017453551,
+            "duck_pq_zstd_mrows_s": 23.37586528301898
+          },
+          {
+            "label": "GROUP BY payment_type: COUNT(*), SUM(total)",
+            "vxg_ms": 6.949207978323102,
+            "vxg_mrows_s": 28.780258214154294,
+            "duck_raw_ms": 83.37966701947153,
+            "duck_zst_ms": 153.12687499681488,
+            "duck_pq_snap_ms": 4.6504579950124025,
+            "duck_pq_zstd_ms": 4.35670797014609,
+            "duck_pq_zstd_mrows_s": 45.906221250191706
+          },
+          {
+            "label": "ORDER BY total_cents DESC LIMIT 10",
+            "vxg_ms": 4.64141700649634,
+            "vxg_mrows_s": 43.09028896133893,
+            "duck_raw_ms": 95.66620801342651,
+            "duck_zst_ms": 214.97762500075623,
+            "duck_pq_snap_ms": 9.106249955948442,
+            "duck_pq_zstd_ms": 21.022374974563718,
+            "duck_pq_zstd_mrows_s": 9.513672943327881
+          },
+          {
+            "label": "SELECT 4 cols WHERE tip_cents >= 2500",
+            "vxg_ms": 2.36679200315848,
+            "vxg_mrows_s": 84.50256707522264,
+            "duck_raw_ms": 97.91583404876292,
+            "duck_zst_ms": 180.5985840037465,
+            "duck_pq_snap_ms": 12.675624981056899,
+            "duck_pq_zstd_ms": 11.761165980715305,
+            "duck_pq_zstd_mrows_s": 17.005116697437867
+          }
+        ]
+      }
+    },
+    {
+      "name": "nyc-taxi-2024-01.csv",
+      "category": "Real Public Corpus (NYC TLC Jan 2024 CSV, 300k trips, 23.0 MB)",
+      "storage": {
+        "raw_bytes": 22995343,
+        "raw_mb": 22.995343,
+        "rows": 300000,
+        "vxg_bytes": 4155787,
+        "vxg_ratio": 0.18072298377980273,
+        "vxg_enc_1t_ms": 64.11800003843382,
+        "vxg_enc_8t_ms": 12.171458976808935,
+        "zst_bytes": 5009054,
+        "zst_ratio": 0.21782906217141446,
+        "zst_enc_8t_ms": 62.65633302973583,
+        "pq_zstd_bytes": 4391579,
+        "pq_zstd_ratio": 0.19097688605905988,
+        "pq_zstd_etl_8t_ms": 200.3921249997802,
+        "pq_snap_bytes": 5862734,
+        "pq_snap_ratio": 0.2549531007213069,
+        "pq_snap_etl_8t_ms": 178.2883339910768
+      },
+      "threads": {
+        "1": [
+          {
+            "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
+            "vxg_ms": 1.966125040780753,
+            "vxg_mrows_s": 152.5843950804214,
+            "duck_raw_ms": 94.23829097067937,
+            "duck_zst_ms": 157.04154199920595,
+            "duck_pq_snap_ms": 3.5068329889327288,
+            "duck_pq_zstd_ms": 4.407875007018447,
+            "duck_pq_zstd_mrows_s": 68.06000613046524
+          },
+          {
+            "label": "SUM/MIN/MAX(total_cents) [all 300k rows]",
+            "vxg_ms": 0.6872079684399068,
+            "vxg_mrows_s": 436.549070699889,
+            "duck_raw_ms": 118.91562503296882,
+            "duck_zst_ms": 151.64337499300018,
+            "duck_pq_snap_ms": 2.3288329830393195,
+            "duck_pq_zstd_ms": 3.1349590281024575,
+            "duck_pq_zstd_mrows_s": 95.69503056044256
+          },
+          {
+            "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
+            "vxg_ms": 0.8834999753162265,
+            "vxg_mrows_s": 339.5585833407891,
+            "duck_raw_ms": 87.7039170009084,
+            "duck_zst_ms": 136.0787499579601,
+            "duck_pq_snap_ms": 2.6431669830344617,
+            "duck_pq_zstd_ms": 3.554791968781501,
+            "duck_pq_zstd_mrows_s": 84.39312416440305
+          }
+        ],
+        "8": [
+          {
+            "label": "COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500",
+            "vxg_ms": 2.4095409899018705,
+            "vxg_mrows_s": 124.5050411083555,
+            "duck_raw_ms": 81.76237501902506,
+            "duck_zst_ms": 154.55608296906576,
+            "duck_pq_snap_ms": 6.018874992150813,
+            "duck_pq_zstd_ms": 11.016667005605996,
+            "duck_pq_zstd_mrows_s": 27.23146663572027
+          },
+          {
+            "label": "SUM/MIN/MAX(total_cents) [all 300k rows]",
+            "vxg_ms": 0.42212504195049405,
+            "vxg_mrows_s": 710.689890876418,
+            "duck_raw_ms": 76.05520798824728,
+            "duck_zst_ms": 138.42099998146296,
+            "duck_pq_snap_ms": 2.8954159934073687,
+            "duck_pq_zstd_ms": 2.8641250100918114,
+            "duck_pq_zstd_mrows_s": 104.74403140328826
+          },
+          {
+            "label": "SUM/MIN/MAX(fare_cents) WHERE payment_type=2",
+            "vxg_ms": 3.0662090284749866,
+            "vxg_mrows_s": 97.84068770719404,
+            "duck_raw_ms": 71.40575000084937,
+            "duck_zst_ms": 141.2166670197621,
+            "duck_pq_snap_ms": 3.1375829712487757,
+            "duck_pq_zstd_ms": 3.7051669787615538,
+            "duck_pq_zstd_mrows_s": 80.9680108129093
+          }
+        ]
+      }
+    },
+    {
+      "name": "ndjson_varied.ndjson",
+      "category": "Synthetic Multi-Template Corpus (gen_varied_ndjson.py, 300k rows, 56.5 MB)",
+      "storage": {
+        "raw_bytes": 56503837,
+        "raw_mb": 56.503837,
+        "rows": 300000,
+        "vxg_bytes": 5167201,
+        "vxg_ratio": 0.09144867453868664,
+        "vxg_enc_1t_ms": 62.88562499685213,
+        "vxg_enc_8t_ms": 17.818792024627328,
+        "zst_bytes": 9863950,
+        "zst_ratio": 0.17457133043902842,
+        "zst_enc_8t_ms": 143.11004104092717,
+        "pq_zstd_bytes": 5556774,
+        "pq_zstd_ratio": 0.09834330365918335,
+        "pq_zstd_etl_8t_ms": 184.72683301661164,
+        "pq_snap_bytes": 9697531,
+        "pq_snap_ratio": 0.17162606143012907,
+        "pq_snap_etl_8t_ms": 151.03979199193418
+      },
+      "threads": {
+        "1": [
+          {
+            "label": "COUNT(*) WHERE fraud & status=500 & lat>=150",
+            "vxg_ms": 3.98945901542902,
+            "vxg_mrows_s": 75.19816567603928,
+            "duck_raw_ms": 115.46008300501853,
+            "duck_zst_ms": 211.00345900049433,
+            "duck_pq_snap_ms": 5.211833049543202,
+            "duck_pq_zstd_ms": 2.9674579855054617,
+            "duck_pq_zstd_mrows_s": 101.09662932562111
+          },
+          {
+            "label": "SUM/MIN/MAX(bytes) [all 300k rows]",
+            "vxg_ms": 2.00208299793303,
+            "vxg_mrows_s": 149.8439376937534,
+            "duck_raw_ms": 123.47533297725022,
+            "duck_zst_ms": 199.81241703499109,
+            "duck_pq_snap_ms": 5.2573749562725425,
+            "duck_pq_zstd_ms": 4.8086250317282975,
+            "duck_pq_zstd_mrows_s": 62.387896336382695
+          },
+          {
+            "label": "GROUP BY service: COUNT(*), SUM(bytes)",
+            "vxg_ms": 2.951250004116446,
+            "vxg_mrows_s": 101.65184229785876,
+            "duck_raw_ms": 123.92312497831881,
+            "duck_zst_ms": 188.307500036899,
+            "duck_pq_snap_ms": 5.4521249840036035,
+            "duck_pq_zstd_ms": 8.734584029298276,
+            "duck_pq_zstd_mrows_s": 34.34622633358553
+          },
+          {
+            "label": "ORDER BY latency_ms DESC LIMIT 10",
+            "vxg_ms": 2.508541976567358,
+            "vxg_mrows_s": 119.59138128934737,
+            "duck_raw_ms": 117.05687502399087,
+            "duck_zst_ms": 202.86045799730346,
+            "duck_pq_snap_ms": 7.55062501411885,
+            "duck_pq_zstd_ms": 12.237791961524636,
+            "duck_pq_zstd_mrows_s": 24.51422617276007
+          },
+          {
+            "label": "SELECT 3 cols WHERE fraud & 500 & lat>=150",
+            "vxg_ms": 5.288374959491193,
+            "vxg_mrows_s": 56.728201441462026,
+            "duck_raw_ms": 127.3487500147894,
+            "duck_zst_ms": 200.55304100969806,
+            "duck_pq_snap_ms": 8.758750045672059,
+            "duck_pq_zstd_ms": 11.313249997328967,
+            "duck_pq_zstd_mrows_s": 26.517578951303058
+          }
+        ],
+        "8": [
+          {
+            "label": "COUNT(*) WHERE fraud & status=500 & lat>=150",
+            "vxg_ms": 4.406791995279491,
+            "vxg_mrows_s": 68.07673253499526,
+            "duck_raw_ms": 96.53383301338181,
+            "duck_zst_ms": 184.10258297808468,
+            "duck_pq_snap_ms": 11.597166012506932,
+            "duck_pq_zstd_ms": 3.8250000216066837,
+            "duck_pq_zstd_mrows_s": 78.43137210597598
+          },
+          {
+            "label": "SUM/MIN/MAX(bytes) [all 300k rows]",
+            "vxg_ms": 3.078749985434115,
+            "vxg_mrows_s": 97.44214418817087,
+            "duck_raw_ms": 88.82970799459144,
+            "duck_zst_ms": 194.26366599509493,
+            "duck_pq_snap_ms": 2.6087909936904907,
+            "duck_pq_zstd_ms": 11.017250013537705,
+            "duck_pq_zstd_mrows_s": 27.230025608147944
+          },
+          {
+            "label": "GROUP BY service: COUNT(*), SUM(bytes)",
+            "vxg_ms": 1.5139160095714033,
+            "vxg_mrows_s": 198.16158763320786,
+            "duck_raw_ms": 86.62941603688523,
+            "duck_zst_ms": 188.65241704043,
+            "duck_pq_snap_ms": 4.819624999072403,
+            "duck_pq_zstd_ms": 11.503832996822894,
+            "duck_pq_zstd_mrows_s": 26.07826452999217
+          },
+          {
+            "label": "ORDER BY latency_ms DESC LIMIT 10",
+            "vxg_ms": 1.3186660362407565,
+            "vxg_mrows_s": 227.50263656993684,
+            "duck_raw_ms": 76.97625004220754,
+            "duck_zst_ms": 193.82425001822412,
+            "duck_pq_snap_ms": 11.852124996948987,
+            "duck_pq_zstd_ms": 11.830041999928653,
+            "duck_pq_zstd_mrows_s": 25.359166096097486
+          },
+          {
+            "label": "SELECT 3 cols WHERE fraud & 500 & lat>=150",
+            "vxg_ms": 3.844875027425587,
+            "vxg_mrows_s": 78.02594306969478,
+            "duck_raw_ms": 85.66758298547938,
+            "duck_zst_ms": 195.81062503857538,
+            "duck_pq_snap_ms": 13.32387502770871,
+            "duck_pq_zstd_ms": 18.867583014070988,
+            "duck_pq_zstd_mrows_s": 15.900287799251618
+          }
+        ]
+      }
+    }
+  ]
+}
