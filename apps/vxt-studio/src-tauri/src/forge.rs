@@ -71,7 +71,14 @@ fn round2(v: f64) -> f64 {
 }
 
 pub fn default_demo_vxt_path() -> Option<String> {
+    if let Ok(home) = std::env::var("HOME") {
+        let p9b = Path::new(&home).join("Models/Qwen3.5-9B-cb4-v2.vxt");
+        if p9b.is_file() {
+            return Some(p9b.to_string_lossy().into_owned());
+        }
+    }
     let candidates = [
+        "/Users/mapletechnologies/Models/Qwen3.5-9B-cb4-v2.vxt",
         "/private/tmp/vxg-real-qualification-20261104/cb4-v2-20261108/Qwen3.5-2B-cb4-v2.vxt",
         "/private/tmp/vxg-real-qualification-20261104/cb4-baseline-20261104/Qwen3.5-2B-cb4.vxt",
     ];
@@ -162,9 +169,18 @@ pub fn discover_local_files() -> Vec<DiscoveredFile> {
         }
     }
     out.sort_by(|a, b| {
-        let a_pref = a.name.contains("cb4-v2");
-        let b_pref = b.name.contains("cb4-v2");
-        b_pref.cmp(&a_pref).then_with(|| a.name.cmp(&b.name))
+        let rank = |name: &str| -> u8 {
+            if name.contains("9B") && name.contains("cb4-v2") {
+                0
+            } else if name.contains("cb4-v2") {
+                1
+            } else if name.contains("9B") {
+                2
+            } else {
+                3
+            }
+        };
+        rank(&a.name).cmp(&rank(&b.name)).then_with(|| a.name.cmp(&b.name))
     });
     out
 }

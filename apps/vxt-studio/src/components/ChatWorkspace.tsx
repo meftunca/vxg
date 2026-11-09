@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   Cpu,
+  Eye,
   Gauge,
   RotateCcw,
   Send,
@@ -15,6 +16,13 @@ import {
   Square,
   Zap,
 } from "lucide-react";
+import {
+  AttachImageButton,
+  MessageImages,
+  readImageFiles,
+  VisionPreviewStrip,
+  type VisionAttachment,
+} from "@/components/VisionAttachments";
 import {
   Badge,
   Button,
@@ -112,6 +120,8 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
   const [maxTokens, setMaxTokens] = React.useState(1024);
   const [enableThinking, setEnableThinking] = React.useState(false);
   const [systemPrompt, setSystemPrompt] = React.useState("");
+  const [attachments, setAttachments] = React.useState<VisionAttachment[]>([]);
+  const [dragOver, setDragOver] = React.useState(false);
 
   const baseUrl = studio?.base_url || "http://127.0.0.1:11435/v1";
   const modelId = studio?.model?.name || "vxt-local";
@@ -141,6 +151,8 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
     async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const cfg = cfgRef.current;
       const bodyObj = init?.body ? JSON.parse(String(init.body)) : {};
+      const uiMsgs: Array<{ role?: string; experimental_attachments?: VisionAttachment[] }> =
+        Array.isArray(bodyObj.messages) ? bodyObj.messages : [];
       const vxtProvider = createOpenAICompatible({
         name: "vxt-local",
         baseURL: cfg.baseUrl,
@@ -153,6 +165,23 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
               payload.presence_penalty = 0.0;
             } else {
               delete payload.presence_penalty;
+            }
+            if (Array.isArray(payload.messages)) {
+              const offset = payload.messages[0]?.role === "system" ? 1 : 0;
+              uiMsgs.forEach((um, idx) => {
+                const atts = (um.experimental_attachments ?? []).filter((a) =>
+                  a.url?.startsWith("data:image/"),
+                );
+                const target = payload.messages[idx + offset];
+                if (target && atts.length > 0) {
+                  const hasImgPart =
+                    Array.isArray(target.content) &&
+                    target.content.some((p: { type?: string }) => p.type === "image_url");
+                  if (!hasImgPart) {
+                    target.images = atts.map((a) => a.url);
+                  }
+                }
+              });
             }
             reqInit = { ...reqInit, body: JSON.stringify(payload) };
           }
@@ -177,8 +206,8 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
   const {
     messages,
     input,
+    setInput,
     handleInputChange,
-    handleSubmit,
     append,
     stop,
     setMessages,
@@ -210,22 +239,69 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
   const handleClear = async () => {
     stop();
     setMessages([]);
+    setAttachments([]);
     await resetChatCache(baseUrl);
     await onRefresh();
   };
 
   const m = studio?.last_metrics;
   const loaded = studio?.model;
+  const visionSupported = Boolean(loaded?.vision);
+
+  const addImageFiles = async (files: FileList | File[]) => {
+    if (!visionSupported) return;
+    const next = await readImageFiles(files);
+    if (next.length > 0) {
+      setAttachments((prev) => [...prev, ...next].slice(0, 4));
+    }
+  };
+
+  const sendMessage = () => {
+    if (!loaded || isStreaming) return;
+    const text = input.trim() || (attachments.length > 0 ? "Bu görseli detaylıca analiz et." : "");
+    if (!text) return;
+    const currentAtts = attachments;
+    setAttachments([]);
+    setInput("");
+    void append(
+      { role: "user", content: text },
+      currentAtts.length > 0 ? { experimental_attachments: currentAtts } : undefined,
+    );
+  };
 
   return (
     <div className="grid h-[calc(100vh-88px)] grid-cols-1 gap-4 lg:grid-cols-[1fr_290px]">
-      <Card className="flex h-full flex-col overflow-hidden border-border/80 bg-card/80">
+      <Card
+        onDragOver={(e) => {
+          if (visionSupported && e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+            setDragOver(true);
+          }
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          if (e.dataTransfer?.files?.length) {
+            void addImageFiles(e.dataTransfer.files);
+          }
+        }}
+        className={`flex h-full flex-col overflow-hidden border-border/80 bg-card/80 transition ${
+          dragOver ? "ring-2 ring-primary border-primary" : ""
+        }`}
+      >
         <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5 bg-muted/30">
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <Badge variant={loaded ? "default" : "secondary"} className="gap-1">
               <Zap className="h-3 w-3" />
               {loaded ? `${loaded.name} (${loaded.compressed_mib} MiB)` : "Model Yükleniyor / Seçilmedi"}
             </Badge>
+            {visionSupported && (
+              <Badge variant="outline" className="gap-1 border-emerald-500/40 text-emerald-400">
+                <Eye className="h-3 w-3" />
+                Vision 3D M-RoPE
+              </Badge>
+            )}
             {m && (
               <>
                 <Badge variant="outline" className="gap-1 font-mono">
@@ -255,12 +331,12 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
                 <Sparkles className="h-6 w-6" />
               </div>
               <h2 className="text-lg font-semibold tracking-tight">
-                VXT Compressed-Domain AI Playground
+                VXT Compressed-Domain AI &amp; Vision Playground
               </h2>
               <p className="mt-1 text-xs text-muted-foreground max-w-lg">
                 Vercel AI SDK (<code>useChat</code> + <code>streamText</code>) doğrudan cihazdaki{" "}
-                <code>.vxt</code> Metal motoruna bağlanır. Ağırlıklar açılmadan (zero-decompression)
-                GPU üzerinde çalıştırılır.
+                <code>.vxt</code> Metal motoruna bağlanır. Görselleri sürükleyip bırakabilir,{" "}
+                <code>Cmd+V</code> ile yapıştırabilir veya sol alttaki ikondan ekleyebilirsiniz.
               </p>
 
               {!loaded && (
@@ -300,7 +376,10 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
                   }`}
                 >
                   {msg.role === "user" ? (
-                    <div className="whitespace-pre-wrap">{msg.content}</div>
+                    <div>
+                      <MessageImages attachments={msg.experimental_attachments} />
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                    </div>
                   ) : (
                     <AssistantBubble content={msg.content} />
                   )}
@@ -319,26 +398,45 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (!input.trim() || !loaded || isStreaming) return;
-            handleSubmit(e);
+            sendMessage();
           }}
           className="border-t bg-background/50 p-3"
         >
+          <VisionPreviewStrip
+            attachments={attachments}
+            onRemove={(idx) => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+          />
           <div className="flex items-end gap-2">
+            <AttachImageButton
+              disabled={!loaded || isStreaming}
+              visionSupported={visionSupported}
+              onFiles={(files) => void addImageFiles(files)}
+            />
             <Textarea
               value={input}
               onChange={handleInputChange}
+              onPaste={(e) => {
+                const items = Array.from(e.clipboardData?.items ?? []);
+                const files = items
+                  .filter((it) => it.type.startsWith("image/"))
+                  .map((it) => it.getAsFile())
+                  .filter((f): f is File => f !== null);
+                if (files.length > 0) {
+                  e.preventDefault();
+                  void addImageFiles(files);
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  if (input.trim() && loaded && !isStreaming) {
-                    handleSubmit(e);
-                  }
+                  sendMessage();
                 }
               }}
               placeholder={
                 loaded
-                  ? "Mesajınızı yazın... (Göndermek için Enter, yeni satır için Shift+Enter)"
+                  ? visionSupported
+                    ? "Mesaj yazın veya görsel sürükleyip bırakın / Cmd+V yapıştırın..."
+                    : "Mesajınızı yazın... (Göndermek için Enter, yeni satır için Shift+Enter)"
                   : "Önce üst bardan bir .vxt / .gguf modeli yükleyin..."
               }
               className="min-h-[46px] max-h-[140px] resize-none bg-card"
@@ -349,7 +447,7 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
                 Durdur
               </Button>
             ) : (
-              <Button type="submit" disabled={!loaded || !input.trim()}>
+              <Button type="submit" disabled={!loaded || (!input.trim() && attachments.length === 0)}>
                 <Send className="h-4 w-4" />
                 Gönder
               </Button>

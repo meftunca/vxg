@@ -1,23 +1,37 @@
-//! Stateful multi-turn LLM conversation engine (`ChatSession`) with exact incremental `KV` +
-//! `DeltaNet` prefix caching, `ChatML` / `Llama-3` template formatting, instant atomic abort,
-//! and interactive terminal REPL (`vxg-tensor chat`).
+//! Stateful multi-turn LLM + Multimodal VLM conversation engine (`ChatSession`) with exact
+//! incremental `KV` + `DeltaNet` + `3D M-RoPE` prefix caching, `ChatML` / `Llama-3` template
+//! formatting, and instant atomic abort.
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
+pub use crate::chat_mm::cmd_chat_llm;
+use crate::chat_mm::{count_image_spans, format_chat_multimodal};
 use crate::llm::{sample_logits, LlmModel, LlmState};
 use crate::llm_ops::{
     has_severe_loop, sample_logits_top_k_p, strip_think_block, TokenPenaltyTracker,
 };
 use crate::tokenizer::BpeTokenizer;
+use crate::vision::EncodedVisionImage;
 use crate::{Error, Result};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    pub images: Vec<String>,
+}
+
+impl ChatMessage {
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +80,7 @@ pub struct ModelSummary {
     pub backend: String,
     pub cb4_fast: bool,
     pub turbo_fast: bool,
+    pub vision: bool,
     pub load_ms: f64,
 }
 
@@ -79,7 +94,7 @@ pub fn format_chat_messages(
     format_chat_messages_cached(tokenizer, arch, messages, enable_thinking, &HashMap::new())
 }
 
-fn format_chat_messages_cached(
+pub(crate) fn format_chat_messages_cached(
     tokenizer: &BpeTokenizer,
     arch: &str,
     messages: &[ChatMessage],
@@ -179,6 +194,7 @@ pub struct ChatSession {
     pub summary: ModelSummary,
     consumed_tokens: Vec<u32>,
     asst_cache: HashMap<String, (bool, Vec<u32>)>,
+    img_cache: HashMap<u64, Arc<EncodedVisionImage>>,
     logits: Vec<f32>,
     cb4_greedy_ready: bool,
     rng: u64,
@@ -203,6 +219,7 @@ impl ChatSession {
             backend: model.backend_label(),
             cb4_fast: model.has_cb4_fast_decode() && cb4_greedy_ready,
             turbo_fast: model.has_turbo_fast_decode(),
+            vision: model.has_vision(),
             load_ms,
         };
         Ok(Self {
@@ -211,6 +228,7 @@ impl ChatSession {
             summary,
             consumed_tokens: Vec::with_capacity(4096),
             asst_cache: HashMap::new(),
+            img_cache: HashMap::new(),
             logits: vec![0.0f32; n_vocab],
             cb4_greedy_ready,
             rng: 0x2026_11_08_5eed_u64,
@@ -221,6 +239,9 @@ impl ChatSession {
         self.state = self.model.new_state();
         self.consumed_tokens.clear();
         self.asst_cache.clear();
+        if self.img_cache.len() > 16 {
+            self.img_cache.clear();
+        }
     }
 
     pub fn cached_token_count(&self) -> usize {
@@ -242,13 +263,16 @@ impl ChatSession {
         let temp = params.temperature.max(0.0);
         let is_qwen_think = matches!(self.model.cfg.arch.as_str(), "qwen3" | "qwen35");
 
-        let full_ids = format_chat_messages_cached(
-            &self.model.tokenizer,
-            &self.model.cfg.arch,
+        if self.img_cache.len() > 16 {
+            self.img_cache.clear();
+        }
+        let (full_ids, all_images) = format_chat_multimodal(
+            &self.model,
             messages,
             params.enable_thinking,
             &self.asst_cache,
-        );
+            &mut self.img_cache,
+        )?;
         if full_ids.is_empty() {
             return Err(Error::Format("chat prompt tokenized to 0 tokens".into()));
         }
@@ -262,10 +286,35 @@ impl ChatSession {
 
         let cached_tokens = self.consumed_tokens.len();
         let delta_ids = &full_ids[cached_tokens..];
+        let img_tok_id = self.model.vision_config().map(|c| c.image_token_id).unwrap_or(u32::MAX);
+        let consumed_imgs = if cached_tokens > 0 && !all_images.is_empty() {
+            count_image_spans(&full_ids[..cached_tokens], img_tok_id)
+        } else {
+            0
+        };
+        let delta_imgs: Vec<&EncodedVisionImage> = all_images
+            .get(consumed_imgs..)
+            .unwrap_or(&[])
+            .iter()
+            .map(Arc::as_ref)
+            .collect();
+
         let t_pre = Instant::now();
-        if let Err(e) = self.model.prefill(&mut self.state, delta_ids, &mut self.logits) {
+        let pre_res = if delta_imgs.is_empty() {
+            self.model.prefill(&mut self.state, delta_ids, &mut self.logits)
+        } else {
+            self.model
+                .prefill_multimodal(&mut self.state, delta_ids, &delta_imgs, &mut self.logits)
+        };
+        if let Err(e) = pre_res {
             self.reset();
-            self.model.prefill(&mut self.state, &full_ids, &mut self.logits)?;
+            let all_refs: Vec<&EncodedVisionImage> = all_images.iter().map(Arc::as_ref).collect();
+            if all_refs.is_empty() {
+                self.model.prefill(&mut self.state, &full_ids, &mut self.logits)?;
+            } else {
+                self.model
+                    .prefill_multimodal(&mut self.state, &full_ids, &all_refs, &mut self.logits)?;
+            }
             let _ = e;
         }
         let prefill_s = t_pre.elapsed().as_secs_f64().max(1e-9);
@@ -353,7 +402,11 @@ impl ChatSession {
                     return Err(e);
                 }
             }
-        } else if temp <= 1e-6 && explicit_zero_pen && self.model.has_turbo_fast_decode() {
+        } else if temp <= 1e-6
+            && explicit_zero_pen
+            && self.state.rope_delta == 0
+            && self.model.has_turbo_fast_decode()
+        {
             decode_path = "turbo-fast-greedy".into();
             let first_id = sample_logits(&self.logits, 0.0, &mut self.rng);
             t_dec = Instant::now();
@@ -386,7 +439,7 @@ impl ChatSession {
             exempt.extend(think_end_id);
             let mut tracker = TokenPenaltyTracker::new(self.model.cfg.n_vocab, &exempt);
             let mut in_think = is_qwen_think && params.enable_thinking;
-            let think_budget = (max_tokens / 2).clamp(256, 1536);
+            let think_budget = (max_tokens * 3 / 4).clamp(256, 6144);
             let close_nl = if in_think { self.model.tokenizer.encode("\n</think>\n\n") } else { Vec::new() };
             let close_after = if in_think { self.model.tokenizer.encode("</think>\n\n") } else { Vec::new() };
             let mut ids = Vec::with_capacity(max_tokens);
@@ -480,113 +533,4 @@ impl ChatSession {
         };
         Ok((full_text, metrics))
     }
-}
-
-pub fn cmd_chat_llm(args: &[String]) -> Result<()> {
-    let Some(model_path) = args.first() else {
-        return Err(Error::Format(
-            "usage: vxg-tensor chat <model.vxt | model.gguf> [--temp T] [--max-tokens N] [--think] [--cpu]".into(),
-        ));
-    };
-    let mut params = ChatParams { max_tokens: 1024, ..ChatParams::default() };
-    let mut explicit_temp = false;
-    let mut explicit_max = false;
-    let mut use_gpu = true;
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--temp" => {
-                i += 1;
-                explicit_temp = true;
-                params.temperature = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                if params.temperature > 0.0 {
-                    params.presence_penalty = None;
-                }
-            }
-            "--max-tokens" | "-n" => {
-                i += 1;
-                explicit_max = true;
-                params.max_tokens = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(1024);
-            }
-            "--think" => params.enable_thinking = true,
-            "--cpu" => use_gpu = false,
-            other => return Err(Error::Format(format!("unexpected flag '{other}'"))),
-        }
-        i += 1;
-    }
-    if params.enable_thinking {
-        if !explicit_temp {
-            params.temperature = 0.6;
-        }
-        params.presence_penalty = None;
-        if !explicit_max && params.max_tokens < 2048 {
-            params.max_tokens = 2048;
-        }
-    }
-
-    let mut session = ChatSession::load(model_path, use_gpu, threads)?;
-    println!(
-        "Loaded '{}' ({}, {:.2} MiB) on {} in {:.0} ms\nCommands: /clear (reset context), /think (toggle CoT), /exit",
-        session.summary.model_name,
-        session.summary.arch,
-        session.summary.compressed_bytes as f64 / (1024.0 * 1024.0),
-        session.summary.backend,
-        session.summary.load_ms
-    );
-
-    let cancel = AtomicBool::new(false);
-    let stdin = io::stdin();
-    let mut history: Vec<ChatMessage> = Vec::new();
-    loop {
-        print!("\nYou > ");
-        let _ = io::stdout().flush();
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line).map_err(|e| Error::Io(e.to_string()))? == 0 {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match trimmed {
-            "/exit" | "/quit" => break,
-            "/clear" => {
-                session.reset();
-                history.clear();
-                println!("[context cleared]");
-                continue;
-            }
-            "/think" => {
-                params.enable_thinking = !params.enable_thinking;
-                if params.enable_thinking {
-                    if !explicit_temp { params.temperature = 0.6; }
-                    params.presence_penalty = None;
-                    params.max_tokens = params.max_tokens.max(2048);
-                }
-                println!("[thinking = {}]", params.enable_thinking);
-                continue;
-            }
-            _ => {}
-        }
-        history.push(ChatMessage { role: "user".into(), content: trimmed.to_owned() });
-        print!("VXT > ");
-        let _ = io::stdout().flush();
-        let (reply, m) = session.generate_chat(&history, &params, &cancel, |chunk| {
-            print!("{chunk}");
-            let _ = io::stdout().flush();
-            true
-        })?;
-        println!(
-            "\n  [prefill {:.1} ms ({} cached + {} new) | {:.1} tok/s ({:.1} GB/s) | {} tok]",
-            m.prefill_ms,
-            m.cached_tokens,
-            m.new_prefill_tokens,
-            m.decode_tps,
-            m.stream_gbs,
-            m.generated_tokens
-        );
-        history.push(ChatMessage { role: "assistant".into(), content: reply });
-    }
-    Ok(())
 }

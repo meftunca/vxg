@@ -4,41 +4,14 @@
 // ============================================================================
 
 struct Cb4FastDnetBatchParams {
-    uint n_kh;
-    uint n_vh;
-    uint dk;
-    uint dv;
-    uint conv_ch;
-    uint k_sz;
-    uint batch_m;
-    uint qkv_z_stride;
-    uint conv_stride;
-    uint ab_stride;
-    uint ab_half_stride;
-    uint padded_inner;
-    float eps;
-    float _pad0;
-    float _pad1;
-    float _pad2;
+    uint n_kh, n_vh, dk, dv, conv_ch, k_sz, batch_m, qkv_z_stride, conv_stride, ab_stride, ab_half_stride, padded_inner;
+    float eps, _pad0, _pad1, _pad2;
 };
 
 struct Cb4FastGqaBatchParams {
-    uint nh;
-    uint nkv;
-    uint hd;
-    uint pos_base;
-    uint rope_dim;
-    uint flags;
-    uint batch_m;
-    uint qkv_z_stride;
-    uint q_rows;
-    uint kv_dim;
-    uint padded_att;
-    float rope_freq_base;
-    float eps;
-    float _pad0;
-    float _pad1;
-    float _pad2;
+    uint nh, nkv, hd, pos_base, rope_dim, flags, batch_m, qkv_z_stride, q_rows, kv_dim, padded_att;
+    float rope_freq_base, eps;
+    uint rope_pos_base, mrope_s1, mrope_s2;
 };
 
 // 1. Batched Causal Conv1D + SiLU across `batch_m` tokens in 1 single dispatch (keeps history in regs!)
@@ -222,7 +195,9 @@ inline void cb4_gqa_norm_rope_sg(
     bool neox,
     uint hd,
     uint rope_dim,
-    uint pos,
+    uint3 pos_thw,
+    uint mrope_s1,
+    uint mrope_s2,
     float rope_freq_base,
     float eps,
     uint lane
@@ -243,9 +218,13 @@ inline void cb4_gqa_norm_rope_sg(
     }
     uint rdim = min(rope_dim, hd);
     uint half_r = rdim >> 1u;
+    uint h_lim = mrope_s1 * 3u;
+    uint w_lim = mrope_s2 * 3u;
     for (uint i = lane; i < half_r; i += 32u) {
+        uint rpos = (i < h_lim && (i % 3u) == 1u) ? pos_thw.y
+                  : ((i < w_lim && (i % 3u) == 2u) ? pos_thw.z : pos_thw.x);
         float freq = pow(rope_freq_base, -2.0f * float(i) / float(rdim));
-        float theta = float(pos) * freq;
+        float theta = float(rpos) * freq;
         float cs = cos(theta);
         float sn = sin(theta);
         uint i0 = neox ? i : (2u * i);
@@ -282,6 +261,7 @@ kernel void vxt_cb4_gqa_fused_m1(
     uint gqa_mul = p.nh / p.nkv;
     uint kv_h = h / gqa_mul;
     uint pos = p.pos_base;
+    uint3 rpos = uint3(p.rope_pos_base, p.rope_pos_base, p.rope_pos_base);
     uint seq_len = pos + 1u;
     ulong kv_stride = ulong(p.nkv * hd);
     bool gated_q = (p.flags & 1u) != 0u;
@@ -313,7 +293,7 @@ kernel void vxt_cb4_gqa_fused_m1(
                 q_sh[d] = qkv_z[base + d] + (has_qb ? q_bias[base + d] : 0.0f);
             }
         }
-        cb4_gqa_norm_rope_sg(q_sh, q_norm, has_qn, neox, hd, p.rope_dim, pos, p.rope_freq_base, p.eps, lane);
+        cb4_gqa_norm_rope_sg(q_sh, q_norm, has_qn, neox, hd, p.rope_dim, rpos, 0u, 0u, p.rope_freq_base, p.eps, lane);
     } else if (sg_id == 1u) {
         device const float* k_cur = qkv_z + p.q_rows;
         device const float* v_cur = k_cur + p.kv_dim;
@@ -326,7 +306,7 @@ kernel void vxt_cb4_gqa_fused_m1(
             v_last[d] = vv;
             if (write_kv) v_cache[cache_off + d] = vv;
         }
-        cb4_gqa_norm_rope_sg(k_last, k_norm, has_kn, neox, hd, p.rope_dim, pos, p.rope_freq_base, p.eps, lane);
+        cb4_gqa_norm_rope_sg(k_last, k_norm, has_kn, neox, hd, p.rope_dim, rpos, 0u, 0u, p.rope_freq_base, p.eps, lane);
         if (write_kv) {
             for (uint d = lane; d < hd; d += 32u) {
                 k_cache[cache_off + d] = k_last[d];
@@ -431,6 +411,7 @@ kernel void vxt_cb4_gqa_prep_batch(
     device float* k_cache               [[buffer(8)]],
     device float* v_cache               [[buffer(9)]],
     constant Cb4FastGqaBatchParams& p   [[buffer(10)]],
+    device const uint4* mrope_pos       [[buffer(11)]],
     uint lane                           [[thread_index_in_simdgroup]],
     uint3 tg_pos                        [[threadgroup_position_in_grid]]
 ) {
@@ -440,6 +421,11 @@ kernel void vxt_cb4_gqa_prep_batch(
 
     uint hd = p.hd;
     uint pos = p.pos_base + m;
+    uint rp = p.rope_pos_base + m;
+    bool has_mrope = (p.flags & 128u) != 0u;
+    uint3 rpos = has_mrope ? mrope_pos[m].xyz : uint3(rp, rp, rp);
+    uint ms1 = has_mrope ? p.mrope_s1 : 0u;
+    uint ms2 = has_mrope ? p.mrope_s2 : 0u;
     uint att_dim = p.nh * hd;
     bool gated_q = (p.flags & 1u) != 0u;
     bool neox = (p.flags & 2u) != 0u;
@@ -470,7 +456,7 @@ kernel void vxt_cb4_gqa_prep_batch(
                 h_buf[d] = q_raw[base + d] + (has_qb ? q_bias[base + d] : 0.0f);
             }
         }
-        cb4_gqa_norm_rope_sg(h_buf, q_norm, has_qn, neox, hd, p.rope_dim, pos, p.rope_freq_base, p.eps, lane);
+        cb4_gqa_norm_rope_sg(h_buf, q_norm, has_qn, neox, hd, p.rope_dim, rpos, ms1, ms2, p.rope_freq_base, p.eps, lane);
         for (uint d = lane; d < hd; d += 32u) q_dst[d] = h_buf[d];
     } else if (idx < p.nh + p.nkv) {
         uint kh = idx - p.nh;
@@ -480,7 +466,7 @@ kernel void vxt_cb4_gqa_prep_batch(
             h_buf[d] = k_cur[base + d] + (has_kb ? k_bias[base + d] : 0.0f);
             v_cache[cache_off + d] = v_cur[base + d] + (has_vb ? v_bias[base + d] : 0.0f);
         }
-        cb4_gqa_norm_rope_sg(h_buf, k_norm, has_kn, neox, hd, p.rope_dim, pos, p.rope_freq_base, p.eps, lane);
+        cb4_gqa_norm_rope_sg(h_buf, k_norm, has_kn, neox, hd, p.rope_dim, rpos, ms1, ms2, p.rope_freq_base, p.eps, lane);
         for (uint d = lane; d < hd; d += 32u) k_cache[cache_off + d] = h_buf[d];
     }
 }

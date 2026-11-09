@@ -179,18 +179,20 @@ impl MetalCb4FastRunner {
         &self,
         state: &mut MetalCb4FastState,
         pos: u32,
+        rope_delta: isize,
         tok_id: u32,
         logits_out: Option<&mut [f32]>,
     ) -> Result<()> {
         #[cfg(vxt_has_metal)]
         {
             let mode = u32::from(logits_out.is_some());
+            let rpos = ((pos as isize) + rope_delta).max(0) as u32;
             self.inner
-                .step_batch(&mut state.inner, &[tok_id], pos, mode, logits_out)
+                .step_batch(&mut state.inner, &[tok_id], pos, rpos, mode, logits_out)
         }
         #[cfg(not(vxt_has_metal))]
         {
-            let _ = (state, pos, tok_id, logits_out);
+            let _ = (state, pos, rope_delta, tok_id, logits_out);
             Err(Error::Unsupported("Metal unavailable".into()))
         }
     }
@@ -199,6 +201,7 @@ impl MetalCb4FastRunner {
         &self,
         state: &mut MetalCb4FastState,
         pos: &mut usize,
+        rope_delta: isize,
         prompt_ids: &[u32],
         logits_out: &mut [f32],
     ) -> Result<()> {
@@ -209,9 +212,51 @@ impl MetalCb4FastRunner {
                 let m = (prompt_ids.len() - off).min(32);
                 let is_last = off + m == prompt_ids.len();
                 let mode = if is_last { 2u32 } else { 0u32 };
+                let rpos = ((*pos as isize) + rope_delta).max(0) as u32;
                 self.inner.step_batch(
                     &mut state.inner,
                     &prompt_ids[off..off + m],
+                    *pos as u32,
+                    rpos,
+                    mode,
+                    is_last.then_some(&mut *logits_out),
+                )?;
+                *pos += m;
+                off += m;
+            }
+            Ok(())
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (state, pos, rope_delta, prompt_ids, logits_out);
+            Err(Error::Unsupported("Metal unavailable".into()))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_embeds_mrope(
+        &self,
+        state: &mut MetalCb4FastState,
+        pos: &mut usize,
+        embeds: &[f32],
+        n_embd: usize,
+        mrope_pos: &[[u32; 4]],
+        mrope_section: [usize; 3],
+        logits_out: &mut [f32],
+    ) -> Result<()> {
+        #[cfg(vxt_has_metal)]
+        {
+            let mut off = 0usize;
+            let total = mrope_pos.len();
+            while off < total {
+                let m = (total - off).min(32);
+                let is_last = off + m == total;
+                let mode = if is_last { 2u32 } else { 0u32 };
+                self.inner.step_embeds_batch(
+                    &mut state.inner,
+                    &embeds[off * n_embd..(off + m) * n_embd],
+                    &mrope_pos[off..off + m],
+                    mrope_section,
                     *pos as u32,
                     mode,
                     is_last.then_some(&mut *logits_out),
@@ -223,7 +268,7 @@ impl MetalCb4FastRunner {
         }
         #[cfg(not(vxt_has_metal))]
         {
-            let _ = (state, pos, prompt_ids, logits_out);
+            let _ = (state, pos, embeds, n_embd, mrope_pos, mrope_section, logits_out);
             Err(Error::Unsupported("Metal unavailable".into()))
         }
     }
@@ -233,6 +278,7 @@ impl MetalCb4FastRunner {
         &self,
         state: &mut MetalCb4FastState,
         pos: &mut usize,
+        rope_delta: isize,
         cb4_failed: &mut bool,
         tokenizer: &BpeTokenizer,
         first_tok: u32,
@@ -271,11 +317,14 @@ impl MetalCb4FastRunner {
                         while pending.len() < 2 && submitted < total {
                             let count = (total - submitted).min(BURST);
                             let slot = (submitted & 255) as u32;
+                            let p_base = start_pos + submitted;
+                            let r_base = ((p_base as isize) + rope_delta).max(0) as u32;
                             let cmd = self.inner.enqueue_async(
                                 st_in,
                                 slot,
                                 count as u32,
-                                (start_pos + submitted) as u32,
+                                p_base as u32,
+                                r_base,
                             )?;
                             pending.push_back((cmd, slot, count));
                             submitted += count;
@@ -341,7 +390,8 @@ impl MetalCb4FastRunner {
                     let mut off = 0usize;
                     while off < consumed {
                         let m = (consumed - off).min(32);
-                        self.inner.step_batch(st_in, &gen_ids[off..off + m], *pos as u32, 0, None)?;
+                        let rpos = ((*pos as isize) + rope_delta).max(0) as u32;
+                        self.inner.step_batch(st_in, &gen_ids[off..off + m], *pos as u32, rpos, 0, None)?;
                         *pos += m;
                         off += m;
                     }
@@ -365,6 +415,7 @@ impl MetalCb4FastRunner {
             let _ = (
                 state,
                 pos,
+                rope_delta,
                 cb4_failed,
                 tokenizer,
                 first_tok,

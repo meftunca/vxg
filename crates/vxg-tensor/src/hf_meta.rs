@@ -11,6 +11,7 @@ use crate::gguf_meta::{encode_string_list, ModelConfig};
 use crate::mmap::TensorBytes;
 use crate::safetensors::SafeTensorsView;
 use crate::tokenizer::BpeTokenizer;
+use crate::vision_img::{VisionConfig, DEFAULT_MAX_PIXELS, DEFAULT_MIN_PIXELS};
 use crate::{Error, Result};
 
 #[derive(Clone, Debug)]
@@ -310,9 +311,123 @@ pub(crate) fn parse_hf_tokenizer_meta(bytes: &[u8], min_vocab: usize) -> Result<
 #[derive(Clone, Copy)]
 pub(crate) enum HfTransform {
     Identity,
+    Flatten2D,
     NormWeight,
     NegExp,
     Squeeze1D,
+}
+
+pub fn parse_hf_vision_config(cfg_bytes: &[u8], preproc_bytes: Option<&[u8]>) -> Option<VisionConfig> {
+    let root: Value = serde_json::from_slice(cfg_bytes).ok()?;
+    let vc = root.get("vision_config")?;
+    if !vc.is_object() {
+        return None;
+    }
+    let depth = json_usize(vc, "depth")?;
+    let hidden_size = json_usize(vc, "hidden_size")?;
+    let intermediate_size = json_usize(vc, "intermediate_size")?;
+    let num_heads = json_usize(vc, "num_heads")?;
+    let head_dim = json_usize(vc, "head_dim").unwrap_or(hidden_size / num_heads.max(1));
+    let in_channels = json_usize(vc, "in_channels").unwrap_or(3);
+    let patch_size = json_usize(vc, "patch_size").unwrap_or(16);
+    let temporal_patch_size = json_usize(vc, "temporal_patch_size").unwrap_or(2);
+    let spatial_merge_size = json_usize(vc, "spatial_merge_size").unwrap_or(2);
+    let out_hidden_size = json_usize(vc, "out_hidden_size")?;
+    let num_position_embeddings = json_usize(vc, "num_position_embeddings").unwrap_or(2304);
+    let rope_theta = json_f32(vc, "rope_theta").unwrap_or(10_000.0);
+
+    let mut mrope_section = [11usize, 11, 10];
+    let t = root.get("text_config").unwrap_or(&root);
+    if let Some(arr) = t
+        .get("rope_parameters")
+        .or_else(|| t.get("rope_scaling"))
+        .and_then(|r| r.get("mrope_section"))
+        .and_then(Value::as_array)
+    {
+        if arr.len() == 3 {
+            for (i, v) in arr.iter().enumerate() {
+                if let Some(u) = v.as_u64() {
+                    mrope_section[i] = u as usize;
+                }
+            }
+        }
+    }
+
+    let mut min_pixels = DEFAULT_MIN_PIXELS;
+    if let Some(pb) = preproc_bytes {
+        if let Ok(pv) = serde_json::from_slice::<Value>(pb) {
+            if let Some(sp) = pv
+                .get("size")
+                .and_then(|s| json_usize(s, "shortest_edge"))
+                .or_else(|| json_usize(&pv, "min_pixels"))
+            {
+                min_pixels = sp.clamp(1024, DEFAULT_MAX_PIXELS / 4);
+            }
+        }
+    }
+
+    Some(VisionConfig {
+        depth,
+        hidden_size,
+        intermediate_size,
+        num_heads,
+        head_dim,
+        in_channels,
+        patch_size,
+        temporal_patch_size,
+        spatial_merge_size,
+        out_hidden_size,
+        num_position_embeddings,
+        rope_theta,
+        mrope_section,
+        vision_start_token_id: json_first_u32(&root, "vision_start_token_id").unwrap_or(248053),
+        vision_end_token_id: json_first_u32(&root, "vision_end_token_id").unwrap_or(248054),
+        image_token_id: json_first_u32(&root, "image_token_id").unwrap_or(248056),
+        min_pixels,
+        max_pixels: DEFAULT_MAX_PIXELS,
+    })
+}
+
+pub(crate) fn map_hf_vision_tensor_name(src: &str, v_depth: usize) -> Option<(String, HfTransform)> {
+    let body = src
+        .strip_prefix("model.visual.")
+        .or_else(|| src.strip_prefix("visual."))?;
+    match body {
+        "patch_embed.proj.weight" => {
+            return Some(("vis.patch_embed.proj.weight".into(), HfTransform::Flatten2D));
+        }
+        "patch_embed.proj.bias"
+        | "pos_embed.weight"
+        | "merger.norm.weight"
+        | "merger.norm.bias"
+        | "merger.linear_fc1.weight"
+        | "merger.linear_fc1.bias"
+        | "merger.linear_fc2.weight"
+        | "merger.linear_fc2.bias" => {
+            return Some((format!("vis.{body}"), HfTransform::Identity));
+        }
+        _ => {}
+    }
+    let (idx_s, suf) = body.strip_prefix("blocks.")?.split_once('.')?;
+    let il: usize = idx_s.parse().ok()?;
+    if il >= v_depth {
+        return None;
+    }
+    match suf {
+        "norm1.weight"
+        | "norm1.bias"
+        | "attn.qkv.weight"
+        | "attn.qkv.bias"
+        | "attn.proj.weight"
+        | "attn.proj.bias"
+        | "norm2.weight"
+        | "norm2.bias"
+        | "mlp.linear_fc1.weight"
+        | "mlp.linear_fc1.bias"
+        | "mlp.linear_fc2.weight"
+        | "mlp.linear_fc2.bias" => Some((format!("vis.blocks.{il}.{suf}"), HfTransform::Identity)),
+        _ => None,
+    }
 }
 
 pub(crate) fn map_hf_tensor_name(

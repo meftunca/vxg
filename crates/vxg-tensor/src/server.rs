@@ -300,6 +300,7 @@ pub fn snapshot_to_json(s: &ServerSnapshot) -> Value {
             "backend": m.backend,
             "cb4_fast": m.cb4_fast,
             "turbo_fast": m.turbo_fast,
+            "vision": m.vision,
             "load_ms": (m.load_ms * 10.0).round() / 10.0,
         })
     });

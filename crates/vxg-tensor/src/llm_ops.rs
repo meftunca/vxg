@@ -482,32 +482,32 @@ impl TokenPenaltyTracker {
             let mut cands: [(u32, usize); 16] = [(0, 0); 16];
             let mut n_cand = 0usize;
             for i in (start + 4)..(n - 1) {
-                if self.history[i] != last_tok {
-                    continue;
-                }
+                if self.history[i] != last_tok { continue; }
                 let nx = self.history[i + 1];
-                if self.exempt.contains(&nx)
-                    || ((nx as usize) < self.is_word.len() && self.is_word[nx as usize] == 1)
-                {
+                if self.exempt.contains(&nx) || self.is_word.get(nx as usize).copied() != Some(3) {
                     continue;
                 }
                 let max_b = (i - start + 1).min(48);
                 let mut mlen = 1usize;
+                let mut wlen = usize::from(self.is_word.get(last_tok as usize).copied() == Some(3));
                 while mlen < max_b && self.history[i - mlen] == self.history[n - 1 - mlen] {
+                    if self.is_word.get(self.history[i - mlen] as usize).copied() == Some(3) {
+                        wlen += 1;
+                    }
                     mlen += 1;
                 }
-                if mlen >= 5 {
+                if wlen >= 5 {
                     if let Some(s) = cands[..n_cand].iter_mut().find(|s| s.0 == nx) {
-                        s.1 = s.1.max(mlen);
+                        s.1 = s.1.max(wlen);
                     } else if n_cand < cands.len() {
-                        cands[n_cand] = (nx, mlen);
+                        cands[n_cand] = (nx, wlen);
                         n_cand += 1;
                     }
                 }
             }
-            for &(nx, mlen) in &cands[..n_cand] {
+            for &(nx, wlen) in &cands[..n_cand] {
                 if (nx as usize) < logits.len() {
-                    logits[nx as usize] -= 0.85 * 1.8f32.powi((mlen - 5).min(8) as i32);
+                    logits[nx as usize] -= 0.85 * 1.7f32.powi((wlen - 5).min(8) as i32);
                 }
             }
         }

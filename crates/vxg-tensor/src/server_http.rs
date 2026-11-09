@@ -82,22 +82,57 @@ fn read_http_request(stream: &TcpStream) -> std::io::Result<Option<(String, Stri
     Ok(Some((method, path, body)))
 }
 
-fn extract_content_text(v: &Value) -> String {
+fn extract_content_and_images(item: &Value) -> (String, Vec<String>) {
+    let mut images = Vec::new();
+    if let Some(arr) = item.get("images").and_then(Value::as_array) {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                if !s.trim().is_empty() {
+                    images.push(s.to_owned());
+                }
+            }
+        }
+    }
+    let Some(v) = item.get("content") else {
+        return (String::new(), images);
+    };
     if let Some(s) = v.as_str() {
-        return s.to_owned();
+        return (s.to_owned(), images);
     }
     if let Some(arr) = v.as_array() {
         let mut out = String::new();
         for part in arr {
-            if let Some(t) = part.get("text").and_then(Value::as_str) {
+            let ptype = part.get("type").and_then(Value::as_str).unwrap_or("");
+            if matches!(ptype, "image_url" | "input_image" | "image")
+                || part.get("image_url").is_some()
+            {
+                let url_opt = part
+                    .get("image_url")
+                    .and_then(|u| u.as_str().or_else(|| u.get("url").and_then(Value::as_str)))
+                    .or_else(|| part.get("image").and_then(Value::as_str))
+                    .or_else(|| part.get("url").and_then(Value::as_str));
+                if let Some(u) = url_opt {
+                    if !u.trim().is_empty() {
+                        images.push(u.to_owned());
+                    }
+                } else if let Some(src) = part.get("source") {
+                    if let Some(data) = src.get("data").and_then(Value::as_str) {
+                        let mime = src
+                            .get("media_type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png");
+                        images.push(format!("data:{mime};base64,{data}"));
+                    }
+                }
+            } else if let Some(t) = part.get("text").and_then(Value::as_str) {
                 out.push_str(t);
             } else if let Some(s) = part.as_str() {
                 out.push_str(s);
             }
         }
-        return out;
+        return (out, images);
     }
-    String::new()
+    (String::new(), images)
 }
 
 pub(crate) fn handle_http_conn(
@@ -194,8 +229,8 @@ fn handle_chat_completions(
     if let Some(arr) = req.get("messages").and_then(Value::as_array) {
         for item in arr {
             let role = item.get("role").and_then(Value::as_str).unwrap_or("user").to_owned();
-            let content = item.get("content").map(extract_content_text).unwrap_or_default();
-            messages.push(ChatMessage { role, content });
+            let (content, images) = extract_content_and_images(item);
+            messages.push(ChatMessage { role, content, images });
         }
     }
     if messages.is_empty() {

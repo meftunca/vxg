@@ -30,7 +30,7 @@ Usage:
   vxg-tensor pack-model <in.gguf | hf_model_dir | model.safetensors> <out.vxt> [--mode lossless|cb4|cb3|wht2|turbo|q4_0] [--threads T]
   vxg-tensor verify     <archive.vxt>
   vxg-tensor bench      [--gguf <path> | --safetensors <path> | --rows R --cols C] [--dtype bf16|fp16] [--threads T] [--iters N] [--max-tensors K]
-  vxg-tensor run        <model.vxt | model.gguf | model.safetensors> --prompt \"...\" [--max-tokens N] [--temp T] [--cpu] [--raw] [--think]
+  vxg-tensor run        <model.vxt | model.gguf | model.safetensors> --prompt \"...\" [--image <path>] [--max-tokens N] [--temp T] [--cpu] [--raw] [--think]
   vxg-tensor chat       <model.vxt | model.gguf> [--temp T] [--max-tokens N] [--think] [--cpu]
   vxg-tensor serve      [model.vxt | model.gguf] [--port 11435] [--host 127.0.0.1] [--cpu]
   vxg-tensor eval       <ref.gguf | ref.vxt | ref.safetensors> <test.vxt> [--prompt \"...\"] [--steps N] [--cpu]"

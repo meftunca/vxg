@@ -15,10 +15,12 @@ use crate::cb4_opt::encode_cb4_optimized;
 use crate::codebook::{CodebookMatrix, Q4_0Matrix};
 use crate::format::{write_vxt_model, PackedTensor, VxtEntry};
 use crate::gguf_meta::ModelConfig;
-use crate::hf_meta::{map_hf_tensor_name, parse_hf_tokenizer_meta, HfTransform};
+use crate::hf_meta::{
+    map_hf_tensor_name, map_hf_vision_tensor_name, parse_hf_tokenizer_meta, HfTransform,
+};
 pub use crate::hf_meta::{
-    inspect_hf_model_dir, parse_hf_config, resolve_hf_model_dir, HfInspectSummary,
-    HfInspectTensor, HfSourcePaths,
+    inspect_hf_model_dir, parse_hf_config, parse_hf_vision_config, resolve_hf_model_dir,
+    HfInspectSummary, HfInspectTensor, HfSourcePaths,
 };
 use crate::llm_pack::LlmPackMode;
 use crate::lossless::LosslessMatrix;
@@ -85,13 +87,25 @@ impl Cb4TensorSource for HfCalibAdapter<'_> {
     fn matrix_dims(&self, name: &str) -> Option<(usize, usize)> {
         let &idx = self.by_name.get(name)?;
         let it = &self.items[idx];
-        self.views[it.shard_idx].tensors[it.meta_idx].matrix_dims()
+        item_matrix_dims(&self.views[it.shard_idx].tensors[it.meta_idx], it.tf)
     }
 
     fn extract_f32(&self, name: &str) -> Option<Vec<f32>> {
         let &idx = self.by_name.get(name)?;
         self.extract_transformed(idx).ok()
     }
+}
+
+fn item_matrix_dims(meta: &SafeTensorMeta, tf: HfTransform) -> Option<(usize, usize)> {
+    if matches!(tf, HfTransform::Flatten2D) {
+        if meta.shape.len() < 2 {
+            return None;
+        }
+        let rows = meta.shape[0];
+        let cols: usize = meta.shape[1..].iter().copied().product();
+        return (rows > 0 && cols > 0).then_some((rows, cols));
+    }
+    meta.matrix_dims()
 }
 
 fn encode_hf_item(
@@ -105,7 +119,7 @@ fn encode_hf_item(
     let st = &adapter.views[it.shard_idx];
     let meta: &SafeTensorMeta = &st.tensors[it.meta_idx];
 
-    if !matches!(it.tf, HfTransform::Identity) {
+    if !matches!(it.tf, HfTransform::Identity | HfTransform::Flatten2D) {
         let data = adapter.extract_transformed(idx)?;
         return Ok(VxtEntry {
             name: it.dst_name.clone(),
@@ -117,7 +131,7 @@ fn encode_hf_item(
         });
     }
 
-    let Some((rows, cols)) = meta.matrix_dims() else {
+    let Some((rows, cols)) = item_matrix_dims(meta, it.tf) else {
         let data = st.extract_f32(meta)?;
         return Ok(VxtEntry {
             name: it.dst_name.clone(),
@@ -137,7 +151,12 @@ fn encode_hf_item(
         });
     }
 
-    let effective_mode = if rows < 64 { LlmPackMode::Lossless } else { mode };
+    let force_lossless = rows < 64
+        || it.dst_name == "vis.pos_embed.weight"
+        || it.dst_name == "vis.patch_embed.proj.weight"
+        || it.dst_name.ends_with(".ssm_alpha.weight")
+        || it.dst_name.ends_with(".ssm_beta.weight");
+    let effective_mode = if force_lossless { LlmPackMode::Lossless } else { mode };
     let layer_idx = it
         .dst_name
         .strip_prefix("blk.")
@@ -158,16 +177,20 @@ fn encode_hf_item(
         }
         LlmPackMode::Cb4 => {
             let f32s = st.extract_f32(meta)?;
-            let is_rec = layer_idx.is_some_and(|il| cfg.is_recurrent_layer(il));
-            let col_amp = cb4_col_amp(cb4_plan, &it.dst_name, layer_idx, cols);
-            let frac = cb4_target_outlier_frac(
-                &it.dst_name,
-                layer_idx,
-                cfg.n_layer,
-                is_rec,
-                cb4_plan.has_output_weight,
-            );
-            PackedTensor::Codebook(encode_cb4_optimized(rows, cols, &f32s, col_amp, frac)?)
+            if it.dst_name.starts_with("vis.") {
+                PackedTensor::Codebook(encode_cb4_optimized(rows, cols, &f32s, None, 0.0085)?)
+            } else {
+                let is_rec = layer_idx.is_some_and(|il| cfg.is_recurrent_layer(il));
+                let col_amp = cb4_col_amp(cb4_plan, &it.dst_name, layer_idx, cols);
+                let frac = cb4_target_outlier_frac(
+                    &it.dst_name,
+                    layer_idx,
+                    cfg.n_layer,
+                    is_rec,
+                    cb4_plan.has_output_weight,
+                );
+                PackedTensor::Codebook(encode_cb4_optimized(rows, cols, &f32s, col_amp, frac)?)
+            }
         }
         LlmPackMode::Cb3 => {
             PackedTensor::Codebook(CodebookMatrix::encode(3, rows, cols, &st.extract_f32(meta)?)?)
@@ -235,6 +258,8 @@ pub fn pack_hf_model_to_vxt(
         .map_err(|e| Error::Io(format!("{}: {e}", hf.tokenizer_path.display())))?;
 
     let (mut cfg, norm_plus_one, tie_word_embeddings) = parse_hf_config(&cfg_bytes, dir_name)?;
+    let preproc_bytes = fs::read(hf.dir.join("preprocessor_config.json")).ok();
+    let vision_cfg = parse_hf_vision_config(&cfg_bytes, preproc_bytes.as_deref());
 
     let mut mapped_shards = Vec::with_capacity(hf.shard_paths.len());
     for sp in &hf.shard_paths {
@@ -249,9 +274,14 @@ pub fn pack_hf_model_to_vxt(
     let mut seen_dst = BTreeSet::new();
     for (si, st) in views.iter().enumerate() {
         for (mi, meta) in st.tensors.iter().enumerate() {
-            if let Some((dst_name, tf)) =
-                map_hf_tensor_name(&meta.name, tie_word_embeddings, cfg.n_layer)
-            {
+            let mapped = map_hf_tensor_name(&meta.name, tie_word_embeddings, cfg.n_layer).or_else(
+                || {
+                    vision_cfg
+                        .as_ref()
+                        .and_then(|vc| map_hf_vision_tensor_name(&meta.name, vc.depth))
+                },
+            );
+            if let Some((dst_name, tf)) = mapped {
                 if seen_dst.insert(dst_name.clone()) {
                     if dst_name == "token_embd.weight" {
                         if let Some((rows, _)) = meta.matrix_dims() {
@@ -281,6 +311,11 @@ pub fn pack_hf_model_to_vxt(
         ("model.config".to_owned(), cfg.to_kv_bytes()),
         ("model.pack_mode".to_owned(), mode.name().as_bytes().to_vec()),
     ];
+    if let Some(vcfg) = vision_cfg {
+        if seen_dst.contains("vis.patch_embed.proj.weight") {
+            meta_kv.push(("vision.config".to_owned(), vcfg.to_json_bytes()));
+        }
+    }
     meta_kv.extend(tok_meta);
 
     let by_name: HashMap<&str, usize> = items
@@ -301,8 +336,20 @@ pub fn pack_hf_model_to_vxt(
     };
 
     let n = items.len();
-    let workers = threads.clamp(1, 32).min(n.max(1));
-    let slots: Vec<Mutex<Option<VxtEntry>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let mut slots: Vec<Mutex<Option<VxtEntry>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let mut regular_indices = Vec::with_capacity(n);
+    for (idx, it) in items.iter().enumerate() {
+        let numel = views[it.shard_idx].tensors[it.meta_idx].numel();
+        if numel >= 128_000_000 {
+            let entry = encode_hf_item(&adapter, idx, mode, &cfg, &cb4_plan)?;
+            *slots[idx].get_mut().unwrap() = Some(entry);
+        } else {
+            regular_indices.push(idx);
+        }
+    }
+
+    let reg_len = regular_indices.len();
+    let workers = threads.clamp(1, 6).min(reg_len.max(1));
     let first_err: Mutex<Option<Error>> = Mutex::new(None);
     let next_idx = AtomicUsize::new(0);
 
@@ -314,14 +361,16 @@ pub fn pack_hf_model_to_vxt(
             let slots_ref = &slots;
             let err_ref = &first_err;
             let idx_ref = &next_idx;
+            let reg_ref = &regular_indices;
             s.spawn(move || loop {
                 if err_ref.lock().unwrap().is_some() {
                     break;
                 }
-                let idx = idx_ref.fetch_add(1, Ordering::Relaxed);
-                if idx >= n {
+                let k = idx_ref.fetch_add(1, Ordering::Relaxed);
+                if k >= reg_len {
                     break;
                 }
+                let idx = reg_ref[k];
                 match encode_hf_item(ad_ref, idx, mode, cfg_ref, cb4_ref) {
                     Ok(entry) => *slots_ref[idx].lock().unwrap() = Some(entry),
                     Err(e) => {

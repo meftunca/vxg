@@ -8,9 +8,12 @@ Instead of inflating compressed weights back to `BF16`/`FP16` in RAM or VRAM, `v
 
 ---
 
-## Key Highlights (`Qwen3.5-2B` End-to-End on Apple M2 Max)
+## Key Highlights (`Qwen3.5-9B` & `Qwen3.5-2B` End-to-End + Multimodal Vision on Apple M2 Max)
 
-- **`CB4-v2` + `CB4-Fast` All-GPU Engine (`988.42 MiB`, `~176 tok/s`, `BF16` Quality Parity)**:
+- **`Qwen3.5-9B` + Native Multimodal Vision (`VLM`, `4.82 GiB` / `4940.12 MiB`, `47.2 tok/s`, `244.3 GB/s` Compressed Stream)**:
+  - Shrinks official 4-shard `Qwen/Qwen3.5-9B` (`18,411.93 MiB` `BF16`, including `Qwen3_5VisionModel` ViT + `2x2` `PatchMerger` + untied `248,320 x 4096` `lm_head`) into a **single `4940.12 MiB` (`3.73x` smaller) `.vxt` file**.
+  - Executes full multimodal **Vision (`--image` CLI, OpenAI `image_url`, `VXT Studio` drag-and-drop / `Cmd+V` paste)** via Apple Accelerate AMX `cblas_sgemm` ViT + exact Metal **3D `M-RoPE` (`mrope_section = [11, 11, 10]`)** + multi-turn ViT feature & `KV`/`DeltaNet` prefix caching, sustaining **`47.15 tok/s` (`244.3 GB/s` compressed stream = `~910 GB/s` effective `BF16` BW)** on `Qwen3.5-9B`!
+- **`Qwen3.5-2B` `CB4-v2` + `CB4-Fast` All-GPU Engine (`988.42 MiB`, `~176 tok/s`, `BF16` Quality Parity)**:
   - Shrinks `Qwen3.5-2B` from **`3600.80 MiB` (`.gguf` `BF16`) / `4337.52 MiB` (official HuggingFace `.safetensors`) -> `988.42 MiB` (`4.38 bpw`, `3.64x–4.39x` smaller)** — `32.4 MiB` smaller than `GGUF Q4_0` (`1020.83 MiB`).
   - **Zero-Shot Analytical Super-Weight Calibration (`CB4-v2`)**: Propagates residual-writer channel RMS (`ffn_down`, `ssm_out`, `attn_output`), `RMSNorm` gains, and 2-hop `SwiGLU` / `DeltaNet` / `GQA` row sensitivities (`col_amp`) without touching any calibration prompts, reaching **`36/40` (`0.900`) strict 40-item free-generation parity with raw `BF16` (`36/40`)**, **`0.047588 nats` `4x16` split KL divergence (`-16.6%` vs `CB4-v1`)**, **`0.972549` logit cosine similarity**, and **`61/64` Top-1 agreement** ([`reports/cb4-v2-2026-11-08.md`](../reports/cb4-v2-2026-11-08.md)).
   - **`MetalCb4FastRunner` (`0-ULP` Exact, `175.92 tok/s`)**: Packs all model layers (`NR = 2` step-major) and `248,320`-row vocabulary (`NR = 4` tile-major) into a single `256B`-aligned Metal arena with `32`-bit SRAM `c16` codebook LUTs, `64`-threadgroup split-state `FP32` `DeltaNet`, batched `M <= 32` prefill (`221.9 tok/s`), and `2`-deep `8`-step speculative command-buffer pipelining (`182.3 GB/s` effective compressed weight bandwidth).
@@ -109,7 +112,12 @@ cargo build --release -p vxg-tensor --bin vxg-tensor
   --cb4-greedy --temp 0 --presence-penalty 0 -n 256 \
   -p "Explain why memory bandwidth limits LLM inference in 3 bullet points."
 
-# 3. Interactive multi-turn terminal chat (stateful KV + DeltaNet prefix cache, /think, /fast, /reset)
+# 2b. Multimodal Vision generation (path, file://, or data:image/... URI)
+./target/release/vxg-tensor run Qwen3.5-9B-cb4-v2.vxt \
+  --image screenshot.png --cb4-greedy --temp 0 --presence-penalty 0 -n 256 \
+  -p "Bu görseldeki diyagramı ve metinleri açıkla."
+
+# 3. Interactive multi-turn terminal chat (stateful KV + DeltaNet prefix cache, /image <path>, /think, /clear)
 ./target/release/vxg-tensor chat qwen35_2b_cb4_v2.vxt
 
 # 4. Launch the OpenAI-compatible SSE server (http://127.0.0.1:11435/v1/chat/completions)

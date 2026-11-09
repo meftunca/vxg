@@ -12,6 +12,7 @@ export interface LoadedModelInfo {
   backend: string;
   cb4_fast: boolean;
   turbo_fast: boolean;
+  vision?: boolean;
   load_ms: number;
 }
 

@@ -383,6 +383,7 @@ void* vxt_metal_cb4_fast_create(
         size_t att_dim = std::max<size_t>(c.n_head * c.head_dim, 16u);
         r->dummy_buf = cb4_alloc_zeroed(dev, 256);
         r->tok_in_buf = cb4_alloc_zeroed(dev, CB4_MAX_BATCH_M * sizeof(uint32_t));
+        r->mrope_pos_buf = cb4_alloc_zeroed(dev, CB4_MAX_BATCH_M * 4u * sizeof(uint32_t));
         r->tok_ring_buf = cb4_alloc_zeroed(dev, CB4_RING_SLOTS * sizeof(uint32_t));
         r->out_ring_buf = cb4_alloc_zeroed(dev, CB4_RING_SLOTS * sizeof(uint32_t));
         r->err_ring_buf = cb4_alloc_zeroed(dev, CB4_RING_SLOTS * sizeof(uint32_t));
@@ -405,7 +406,7 @@ void* vxt_metal_cb4_fast_create(
         r->ffn_act_buf = cb4_alloc_zeroed(dev, size_t(CB4_MAX_BATCH_M) * r->padded_ff * sizeof(float));
         r->logits_buf = cb4_alloc_zeroed(dev, size_t(c.n_vocab) * sizeof(float));
 
-        if (!r->dummy_buf || !r->tok_in_buf || !r->tok_ring_buf || !r->out_ring_buf ||
+        if (!r->dummy_buf || !r->tok_in_buf || !r->mrope_pos_buf || !r->tok_ring_buf || !r->out_ring_buf ||
             !r->err_ring_buf || !r->s1_vals_buf || !r->s1_ids_buf || !r->s1_bad_buf ||
             !r->cur_buf || !r->delta_buf || !r->normed_buf || !r->qkv_z_buf || !r->ab_buf ||
             !r->conv_silu_buf || !r->o_raw_buf || !r->y_concat_buf || !r->att_cat_buf ||
@@ -498,6 +499,68 @@ void vxt_metal_cb4_fast_state_destroy(void* raw_state) {
     @autoreleasepool {
         delete static_cast<MetalCb4FastState*>(raw_state);
     }
+}
+
+int vxt_metal_cb4_fast_checkpoint(
+    void* raw_runner, void* raw_state, uint32_t restore, char* err_out, size_t err_cap
+) {
+    @autoreleasepool {
+        auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
+        auto* s = static_cast<MetalCb4FastState*>(raw_state);
+        if (!r || !s) {
+            vxt_write_err(err_out, err_cap, "null CB4-Fast checkpoint");
+            return -1;
+        }
+        bool any_rec = false;
+        for (uint8_t ir : s->is_rec) if (ir) { any_rec = true; break; }
+        if (!any_rec) return 0;
+
+        id<MTLCommandBuffer> cmd = [r->queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        if (!cmd || !blit) {
+            vxt_write_err(err_out, err_cap, "cannot create CB4-Fast checkpoint command");
+            return -1;
+        }
+        for (uint32_t il = 0; il < s->n_layer; ++il) {
+            if (!s->is_rec[il]) continue;
+            if (s->conv_bytes[il] > 0u) {
+                [blit copyFromBuffer:(restore ? s->conv_bak[il] : s->conv_states[il]) sourceOffset:0
+                            toBuffer:(restore ? s->conv_states[il] : s->conv_bak[il]) destinationOffset:0
+                                size:s->conv_bytes[il]];
+            }
+            if (s->ssm_bytes[il] > 0u) {
+                [blit copyFromBuffer:(restore ? s->ssm_bak[il] : s->ssm_states[il]) sourceOffset:0
+                            toBuffer:(restore ? s->ssm_states[il] : s->ssm_bak[il]) destinationOffset:0
+                                size:s->ssm_bytes[il]];
+            }
+        }
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        if ([cmd status] != MTLCommandBufferStatusCompleted) {
+            vxt_write_err(err_out, err_cap, "CB4-Fast checkpoint blit failed");
+            return -1;
+        }
+        return 0;
+    }
+}
+
+void vxt_metal_cb4_fast_ring_set_token(void* raw_runner, uint32_t slot, uint32_t tok_id) {
+    auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
+    if (!r) return;
+    static_cast<uint32_t*>([r->tok_ring_buf contents])[slot & (CB4_RING_SLOTS - 1u)] = tok_id;
+}
+
+uint32_t vxt_metal_cb4_fast_ring_get_out(void* raw_runner, uint32_t slot) {
+    auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
+    if (!r) return 0u;
+    return static_cast<const uint32_t*>([r->out_ring_buf contents])[slot & (CB4_RING_SLOTS - 1u)];
+}
+
+uint32_t vxt_metal_cb4_fast_ring_get_err(void* raw_runner, uint32_t slot) {
+    auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
+    if (!r) return 1u;
+    return static_cast<const uint32_t*>([r->err_ring_buf contents])[slot & (CB4_RING_SLOTS - 1u)];
 }
 
 } // extern "C"

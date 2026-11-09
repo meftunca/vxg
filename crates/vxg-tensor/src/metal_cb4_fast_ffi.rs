@@ -155,6 +155,21 @@ extern "C" {
         tok_ids: *const u32,
         batch_m: u32,
         pos_base: u32,
+        rope_pos_base: u32,
+        compute_mode: u32,
+        logits_out: *mut f32,
+        err_out: *mut c_char,
+        err_cap: usize,
+    ) -> i32;
+    fn vxt_metal_cb4_fast_step_embeds_batch(
+        runner: *mut c_void,
+        state: *mut c_void,
+        embeds_in: *const f32,
+        mrope_pos4: *const u32,
+        mrope_s1: u32,
+        mrope_s2: u32,
+        batch_m: u32,
+        pos_base: u32,
         compute_mode: u32,
         logits_out: *mut f32,
         err_out: *mut c_char,
@@ -176,6 +191,7 @@ extern "C" {
         base_slot: u32,
         step_count: u32,
         pos_base: u32,
+        rope_pos_base: u32,
         err_out: *mut c_char,
         err_cap: usize,
     ) -> *mut c_void;
@@ -442,6 +458,7 @@ impl Cb4FastRunnerInner {
         state: &mut Cb4FastStateInner,
         tok_ids: &[u32],
         pos_base: u32,
+        rope_pos_base: u32,
         compute_mode: u32,
         logits_out: Option<&mut [f32]>,
     ) -> Result<()> {
@@ -453,6 +470,42 @@ impl Cb4FastRunnerInner {
                 state.0.as_ptr(),
                 tok_ids.as_ptr(),
                 tok_ids.len() as u32,
+                pos_base,
+                rope_pos_base,
+                compute_mode,
+                l_ptr,
+                err_buf.as_mut_ptr() as *mut c_char,
+                err_buf.len(),
+            )
+        };
+        if rc != 0 {
+            return Err(Error::Backend(cbuf_to_str(&err_buf)));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_embeds_batch(
+        &self,
+        state: &mut Cb4FastStateInner,
+        embeds: &[f32],
+        mrope_pos: &[[u32; 4]],
+        mrope_section: [usize; 3],
+        pos_base: u32,
+        compute_mode: u32,
+        logits_out: Option<&mut [f32]>,
+    ) -> Result<()> {
+        let mut err_buf = [0u8; 512];
+        let l_ptr = logits_out.map_or(null_mut(), |s| s.as_mut_ptr());
+        let rc = unsafe {
+            vxt_metal_cb4_fast_step_embeds_batch(
+                self.raw.as_ptr(),
+                state.0.as_ptr(),
+                embeds.as_ptr(),
+                mrope_pos.as_ptr() as *const u32,
+                mrope_section[1] as u32,
+                mrope_section[2] as u32,
+                mrope_pos.len() as u32,
                 pos_base,
                 compute_mode,
                 l_ptr,
@@ -501,6 +554,7 @@ impl Cb4FastRunnerInner {
         base_slot: u32,
         step_count: u32,
         pos_base: u32,
+        rope_pos_base: u32,
     ) -> Result<NonNull<c_void>> {
         let mut err_buf = [0u8; 512];
         let raw = unsafe {
@@ -510,6 +564,7 @@ impl Cb4FastRunnerInner {
                 base_slot,
                 step_count,
                 pos_base,
+                rope_pos_base,
                 err_buf.as_mut_ptr() as *mut c_char,
                 err_buf.len(),
             )

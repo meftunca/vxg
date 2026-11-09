@@ -363,8 +363,8 @@ examples/ffi/            Zero-copy integration examples for C, Python, Go, Bun/J
 native/shaders/core.gpu  Shared GPU kernel source (Metal, Vulkan GLSL, CUDA)
 native/                  Metal, Vulkan, and CUDA host bridges
 verification/            Independent Python reference model and C++ SIMT emulator
-crates/vxg-tensor/       Compressed-domain AI weight codec (.vxt), CB4-Fast Metal LLM engine & OpenAI SSE server
-apps/vxt-studio/         Tauri v2 + React + shadcn/ui + AI SDK desktop app (Chat, Tensor Forge & API Hub)
+crates/vxg-tensor/       Compressed-domain AI weight codec (.vxt), CB4-Fast Metal LLM/VLM (3D M-RoPE) & OpenAI SSE server
+apps/vxt-studio/         Tauri v2 + React + shadcn/ui + AI SDK desktop app (Multimodal Vision Chat, Tensor Forge & API Hub)
 tests/                   Property, stress, differential analytics/projection, and golden wire tests
 reports/ci-v0.4.1/       Cross-platform GitHub Actions benchmark outputs (macOS, Linux, Windows)
 docs/                    Wire format, tensor engine, FFI guide, proofs, benchmarks, GPU architecture, and safety

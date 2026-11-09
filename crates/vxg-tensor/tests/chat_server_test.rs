@@ -108,6 +108,16 @@ fn anti_loop_dry_tracker_and_think_history_stripping() {
     assert!((logits[2] - 9.5).abs() < 1e-6);
     // Token `7` ("adimi") gets BOTH word presence_penalty (`-0.5`) AND DRY 5-gram clone penalty (`-0.85`)
     assert!(logits[7] < 8.7, "expected DRY suffix-clone penalty on token 7, got {}", logits[7]);
+
+    // Repeated single-digit numbers (vocab[0]="0", vocab[1]="4") must NEVER incur DRY suffix penalties
+    let mut num_tracker = TokenPenaltyTracker::new(vocab.len(), &[8, 9, 10, 11]);
+    for &id in &[2u32, 1, 0, 0, 0, 1, 0, 2, 1, 0, 0, 0, 1] {
+        num_tracker.record(id, &tok);
+    }
+    let mut num_logits = vec![10.0f32; vocab.len()];
+    num_tracker.apply(&mut num_logits, 0.5, 0.0);
+    assert!((num_logits[0] - 10.0).abs() < 1e-6, "digit token '0' must never be penalized by DRY");
+    assert!((num_logits[1] - 10.0).abs() < 1e-6, "digit token '4' must never be penalized by DRY");
 }
 
 #[test]

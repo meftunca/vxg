@@ -6,10 +6,12 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
 
+use crate::chat_mm::build_single_turn_vlm_prompt;
 use crate::llm::{compare_logits, sample_logits, LlmModel};
 use crate::llm_ops::{has_severe_loop, sample_logits_top_k_p, TokenPenaltyTracker};
 use crate::llm_pack::{pack_gguf_model_to_vxt_with_entropy_scale, LlmPackMode};
 use crate::mmap::TensorBytes;
+use crate::vision::EncodedVisionImage;
 use crate::{Error, Result};
 
 pub fn cmd_pack_model(args: &[String]) -> Result<()> {
@@ -103,12 +105,13 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
 pub fn cmd_run_llm(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(Error::Format(
-            "usage: vxg-tensor run <model.vxt | model.gguf | model.safetensors> --prompt \"...\" [--max-tokens N] [--temp T] [--cpu] [--raw] [--think] [--reference-decode] [--cb4-greedy --temp 0 --presence-penalty 0]".into(),
+            "usage: vxg-tensor run <model.vxt | model.gguf | model.safetensors> --prompt \"...\" [--image <path_or_data_uri>] [--max-tokens N] [--temp T] [--cpu] [--raw] [--think] [--reference-decode] [--cb4-greedy --temp 0 --presence-penalty 0]".into(),
         ));
     }
     let model_path = &args[0];
     let mut prompt =
         String::from("Explain why memory bandwidth limits LLM inference in 3 short bullet points.");
+    let mut images: Vec<String> = Vec::new();
     let mut max_tokens = 64usize;
     let mut temp = 0.0f32;
     let mut presence_penalty: Option<f32> = None;
@@ -131,6 +134,14 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
                     .get(i)
                     .cloned()
                     .ok_or_else(|| Error::Format("missing --prompt string".into()))?;
+            }
+            "--image" | "-i" => {
+                i += 1;
+                images.push(
+                    args.get(i)
+                        .cloned()
+                        .ok_or_else(|| Error::Format("missing --image path or data URI".into()))?,
+                );
             }
             "--max-tokens" | "-n" => {
                 i += 1;
@@ -180,33 +191,84 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
     if cb4_greedy { model.enable_cb4_greedy()?; }
     let load_s = t_load.elapsed().as_secs_f64();
 
-    let prompt_ids = if raw_prompt {
-        model.tokenizer.encode(&prompt)
+    let t_vis = Instant::now();
+    let mut encoded_imgs: Vec<EncodedVisionImage> = Vec::with_capacity(images.len());
+    for src in &images {
+        encoded_imgs.push(model.encode_image_source(src)?);
+    }
+    let vision_s = if images.is_empty() { 0.0 } else { t_vis.elapsed().as_secs_f64() };
+
+    let prompt_ids = if encoded_imgs.is_empty() {
+        if raw_prompt {
+            model.tokenizer.encode(&prompt)
+        } else {
+            model.tokenizer.encode_chat(&prompt, &model.cfg.arch, enable_thinking)
+        }
     } else {
-        model
-            .tokenizer
-            .encode_chat(&prompt, &model.cfg.arch, enable_thinking)
+        let vcfg = model
+            .vision_config()
+            .ok_or_else(|| Error::Unsupported("model has no vision.config".into()))?;
+        if raw_prompt {
+            let mut ids = Vec::new();
+            for img in &encoded_imgs {
+                ids.push(vcfg.vision_start_token_id);
+                ids.resize(ids.len() + img.llm_tokens, vcfg.image_token_id);
+                ids.push(vcfg.vision_end_token_id);
+            }
+            ids.extend(model.tokenizer.encode(&prompt));
+            ids
+        } else {
+            build_single_turn_vlm_prompt(
+                &model.tokenizer,
+                &model.cfg.arch,
+                vcfg,
+                &prompt,
+                &encoded_imgs,
+                enable_thinking,
+            )
+        }
     };
     if prompt_ids.is_empty() {
         return Err(Error::Format("prompt tokenized to 0 tokens".into()));
     }
 
-    println!(
-        "Loaded '{}' ({}, {:.2} MiB) on {} in {:.2}s | prompt={} tokens",
-        model.cfg.model_name,
-        model.cfg.arch,
-        model.total_compressed_bytes as f64 / (1024.0 * 1024.0),
-        model.backend_label(),
-        load_s,
-        prompt_ids.len()
-    );
+    if encoded_imgs.is_empty() {
+        println!(
+            "Loaded '{}' ({}, {:.2} MiB) on {} in {:.2}s | prompt={} tokens",
+            model.cfg.model_name,
+            model.cfg.arch,
+            model.total_compressed_bytes as f64 / (1024.0 * 1024.0),
+            model.backend_label(),
+            load_s,
+            prompt_ids.len()
+        );
+    } else {
+        let img_toks: usize = encoded_imgs.iter().map(|im| im.llm_tokens).sum();
+        println!(
+            "Loaded '{}' ({}, {:.2} MiB) on {} in {:.2}s | vision={} img ({} tok in {:.2}s) | prompt={} tokens",
+            model.cfg.model_name,
+            model.cfg.arch,
+            model.total_compressed_bytes as f64 / (1024.0 * 1024.0),
+            model.backend_label(),
+            load_s,
+            encoded_imgs.len(),
+            img_toks,
+            vision_s,
+            prompt_ids.len()
+        );
+    }
     println!("---");
 
     let mut state = model.new_state();
     let mut logits = vec![0.0f32; model.cfg.n_vocab];
 
     let t_prefill = Instant::now();
-    model.prefill(&mut state, &prompt_ids, &mut logits)?;
+    if encoded_imgs.is_empty() {
+        model.prefill(&mut state, &prompt_ids, &mut logits)?;
+    } else {
+        let refs: Vec<&EncodedVisionImage> = encoded_imgs.iter().collect();
+        model.prefill_multimodal(&mut state, &prompt_ids, &refs, &mut logits)?;
+    }
     let prefill_s = t_prefill.elapsed().as_secs_f64();
     if cb4_greedy && !logits.iter().all(|x| x.is_finite()) {
         return Err(Error::Format("CB4 greedy requires finite prefill logits".into()));
@@ -238,7 +300,7 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
     let mut dec_start_tok = 0usize;
     let t_decode: Instant;
     println!("Decode path: {} | presence_penalty={presence_pen} max_tokens={max_tokens}",
-        if cb4_greedy { "cb4-greedy-full-head" } else if temp <= 1e-6 && model.has_turbo_fast_decode() && !reference_decode {
+        if cb4_greedy { "cb4-greedy-full-head" } else if temp <= 1e-6 && state.rope_delta == 0 && model.has_turbo_fast_decode() && !reference_decode {
             if exact_head { "turbo-fast-exact-head" } else { "turbo-fast-sketch-head" }
         } else { "forward-step" });
     if enable_thinking && !raw_prompt && is_qwen3 {
@@ -260,7 +322,7 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
             }
             true
         })?
-    } else if temp <= 1e-6 && model.has_turbo_fast_decode() && !reference_decode {
+    } else if temp <= 1e-6 && state.rope_delta == 0 && model.has_turbo_fast_decode() && !reference_decode {
         let first_id = sample_logits(&logits, 0.0, &mut rng);
         t_decode = Instant::now();
         let mut streamed_ids = Vec::with_capacity(max_tokens);
@@ -287,7 +349,7 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
         t_decode = Instant::now();
         let mut ids = Vec::with_capacity(max_tokens);
         let mut in_think = enable_thinking && !raw_prompt && is_qwen3;
-        let think_budget = (max_tokens / 2).clamp(256, 1536);
+        let think_budget = (max_tokens * 3 / 4).clamp(256, 6144);
         let close_nl = model.tokenizer.encode("\n</think>\n\n");
         let close_after_nl = model.tokenizer.encode("</think>\n\n");
         let mut last_ended_nl = false;

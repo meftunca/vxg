@@ -107,6 +107,7 @@ struct MetalCb4FastRunner {
     uint32_t ab_stride = 0;
 
     id<MTLBuffer> tok_in_buf = nil;
+    id<MTLBuffer> mrope_pos_buf = nil;
     id<MTLBuffer> tok_ring_buf = nil;
     id<MTLBuffer> out_ring_buf = nil;
     id<MTLBuffer> err_ring_buf = nil;

@@ -99,6 +99,7 @@ fn main() {
         archive(&out, "vxt_metal_gemv", &objects);
         println!("cargo:rustc-link-lib=framework=Metal");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Accelerate");
         println!("cargo:rustc-link-lib=c++");
         println!("cargo:rustc-cfg=vxt_has_metal");
     }

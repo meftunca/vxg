@@ -89,7 +89,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold tracking-tight">VXT Studio</span>
                 <Badge variant="outline" className="text-[10px]">
-                  CB4-v2 · Metal 0-ULP
+                  CB4-v2 · Vision · Metal 0-ULP
                 </Badge>
               </div>
               <div className="text-[11px] text-muted-foreground">

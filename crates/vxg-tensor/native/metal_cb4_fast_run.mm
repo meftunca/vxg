@@ -23,7 +23,8 @@ struct Cb4FastDnetBatchParamsC {
 };
 struct Cb4FastGqaBatchParamsC {
     uint32_t nh, nkv, hd, pos_base, rope_dim, flags, batch_m, qkv_z_stride, q_rows, kv_dim, padded_att;
-    float rope_freq_base, eps, _pad0, _pad1, _pad2;
+    float rope_freq_base, eps;
+    uint32_t rope_pos_base, mrope_s1, mrope_s2;
 };
 struct Cb4FastGemvParamsC {
     uint32_t rows, padded_cols, split0, split1, x_stride, y_stride, batch_m, flags;
@@ -93,43 +94,46 @@ static void encode_add_rms_norm(
 static void encode_cb4_fast_forward(
     MetalCb4FastRunner* r, MetalCb4FastState* s, id<MTLComputeCommandEncoder> enc,
     id<MTLBuffer> tok_buf, size_t tok_byte_off, uint32_t batch_m,
-    uint32_t pos_base, uint32_t compute_mode, uint32_t slot, uint32_t next_slot
+    uint32_t pos_base, uint32_t rope_pos_base, bool has_mrope, uint32_t mrope_s1, uint32_t mrope_s2,
+    uint32_t compute_mode, uint32_t slot, uint32_t next_slot
 ) {
     const VxtLlmConfig& c = r->cfg;
     MTLSize tg256 = MTLSizeMake(256, 1, 1);
     bool fuse_m1 = (batch_m == 1u) && !r->disable_fusions;
     bool can_fuse_gu = fuse_m1 && ((c.n_ff & 1u) == 0u);
 
-    Cb4FastEmbedParamsC ep{};
-    ep.cols = c.n_embd; ep.padded_cols = r->padded_embd;
-    ep.batch_m = batch_m; ep.n_vocab = c.n_vocab; ep.eps = c.rms_norm_eps;
-    std::memcpy(ep.centroids, r->embed_centroids, sizeof(ep.centroids));
-
     bool norm_ready = false;
-    if (fuse_m1 && c.n_layer > 0u && r->padded_embd <= 4096u) {
-        [enc setComputePipelineState:r->pso_embed_norm0];
-        [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.sc_off atIndex:0];
-        [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.pw_off atIndex:1];
-        [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.rp_off atIndex:2];
-        [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.out_off atIndex:3];
-        [enc setBuffer:tok_buf offset:tok_byte_off atIndex:4];
-        [enc setBuffer:r->weight_arena_buf offset:r->layers[0].attn_norm_off atIndex:5];
-        [enc setBuffer:r->cur_buf offset:0 atIndex:6];
-        [enc setBuffer:r->normed_buf offset:0 atIndex:7];
-        [enc setBytes:&ep length:sizeof(ep) atIndex:8];
-        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:tg256];
-        norm_ready = true;
-    } else {
-        [enc setComputePipelineState:r->pso_embed];
-        [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.sc_off atIndex:0];
-        [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.pw_off atIndex:1];
-        [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.rp_off atIndex:2];
-        [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.out_off atIndex:3];
-        [enc setBuffer:tok_buf offset:tok_byte_off atIndex:4];
-        [enc setBuffer:r->cur_buf offset:0 atIndex:5];
-        [enc setBytes:&ep length:sizeof(ep) atIndex:6];
-        [enc dispatchThreadgroups:MTLSizeMake(r->padded_embd / 256u, batch_m, 1)
-            threadsPerThreadgroup:tg256];
+    if (tok_buf != nil) {
+        Cb4FastEmbedParamsC ep{};
+        ep.cols = c.n_embd; ep.padded_cols = r->padded_embd;
+        ep.batch_m = batch_m; ep.n_vocab = c.n_vocab; ep.eps = c.rms_norm_eps;
+        std::memcpy(ep.centroids, r->embed_centroids, sizeof(ep.centroids));
+
+        if (fuse_m1 && c.n_layer > 0u && r->padded_embd <= 4096u) {
+            [enc setComputePipelineState:r->pso_embed_norm0];
+            [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.sc_off atIndex:0];
+            [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.pw_off atIndex:1];
+            [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.rp_off atIndex:2];
+            [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.out_off atIndex:3];
+            [enc setBuffer:tok_buf offset:tok_byte_off atIndex:4];
+            [enc setBuffer:r->weight_arena_buf offset:r->layers[0].attn_norm_off atIndex:5];
+            [enc setBuffer:r->cur_buf offset:0 atIndex:6];
+            [enc setBuffer:r->normed_buf offset:0 atIndex:7];
+            [enc setBytes:&ep length:sizeof(ep) atIndex:8];
+            [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:tg256];
+            norm_ready = true;
+        } else {
+            [enc setComputePipelineState:r->pso_embed];
+            [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.sc_off atIndex:0];
+            [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.pw_off atIndex:1];
+            [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.rp_off atIndex:2];
+            [enc setBuffer:r->weight_arena_buf offset:r->embed_mat.out_off atIndex:3];
+            [enc setBuffer:tok_buf offset:tok_byte_off atIndex:4];
+            [enc setBuffer:r->cur_buf offset:0 atIndex:5];
+            [enc setBytes:&ep length:sizeof(ep) atIndex:6];
+            [enc dispatchThreadgroups:MTLSizeMake(r->padded_embd / 256u, batch_m, 1)
+                threadsPerThreadgroup:tg256];
+        }
     }
 
     Cb4FastNormParamsC np{c.n_embd, r->padded_embd, batch_m, c.rms_norm_eps};
@@ -145,7 +149,7 @@ static void encode_cb4_fast_forward(
         && (dv >= 32u && dv <= 256u && (dv & 3u) == 0u)
         && (c.ssm_dt_rank >= c.ssm_group_count) && ((c.ssm_dt_rank % c.ssm_group_count) == 0u)
         && (c.ssm_inner_size == c.ssm_dt_rank * dv);
-    bool can_fuse_gqa = fuse_m1 && (c.n_head_kv > 0u) && ((c.n_head % c.n_head_kv) == 0u)
+    bool can_fuse_gqa = fuse_m1 && !has_mrope && (c.n_head_kv > 0u) && ((c.n_head % c.n_head_kv) == 0u)
         && (c.head_dim <= 512u);
 
     for (uint32_t il = 0; il < c.n_layer; ++il) {
@@ -255,9 +259,10 @@ static void encode_cb4_fast_forward(
                 return L.has_vec[idx] ? L.vec_off[idx] : 0u;
             };
             Cb4FastGqaBatchParamsC gp{
-                c.n_head, c.n_head_kv, c.head_dim, pos_base, c.rope_dim, L.gqa_flags,
+                c.n_head, c.n_head_kv, c.head_dim, pos_base, c.rope_dim,
+                L.gqa_flags | (has_mrope ? 128u : 0u),
                 batch_m, r->qkv_z_stride, L.w_in.split0, kv_dim, r->padded_att,
-                c.rope_freq_base, c.rms_norm_eps, 0, 0, 0
+                c.rope_freq_base, c.rms_norm_eps, rope_pos_base, mrope_s1, mrope_s2
             };
             if (can_fuse_gqa) {
                 [enc setComputePipelineState:r->pso_gqa_fused_m1];
@@ -286,6 +291,7 @@ static void encode_cb4_fast_forward(
                 [enc setBuffer:s->k_caches[il] offset:0 atIndex:8];
                 [enc setBuffer:s->v_caches[il] offset:0 atIndex:9];
                 [enc setBytes:&gp length:sizeof(gp) atIndex:10];
+                [enc setBuffer:r->mrope_pos_buf offset:0 atIndex:11];
                 [enc dispatchThreadgroups:MTLSizeMake(c.n_head + c.n_head_kv, batch_m, 1)
                     threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
@@ -410,7 +416,8 @@ extern "C" {
 
 int vxt_metal_cb4_fast_step_batch(
     void* raw_runner, void* raw_state, const uint32_t* tok_ids, uint32_t batch_m,
-    uint32_t pos_base, uint32_t compute_mode, float* logits_out, char* err_out, size_t err_cap
+    uint32_t pos_base, uint32_t rope_pos_base, uint32_t compute_mode,
+    float* logits_out, char* err_out, size_t err_cap
 ) {
     @autoreleasepool {
         auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
@@ -437,7 +444,10 @@ int vxt_metal_cb4_fast_step_batch(
             vxt_write_err(err_out, err_cap, "failed to create CB4-Fast command buffer");
             return -3;
         }
-        encode_cb4_fast_forward(r, s, enc, r->tok_in_buf, 0, batch_m, pos_base, compute_mode, 0u, 0xffffffffu);
+        encode_cb4_fast_forward(
+            r, s, enc, r->tok_in_buf, 0, batch_m, pos_base, rope_pos_base,
+            false, 0u, 0u, compute_mode, 0u, 0xffffffffu
+        );
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
@@ -458,71 +468,59 @@ int vxt_metal_cb4_fast_step_batch(
     }
 }
 
-int vxt_metal_cb4_fast_checkpoint(
-    void* raw_runner, void* raw_state, uint32_t restore, char* err_out, size_t err_cap
+int vxt_metal_cb4_fast_step_embeds_batch(
+    void* raw_runner, void* raw_state, const float* embeds_in, const uint32_t* mrope_pos4,
+    uint32_t mrope_s1, uint32_t mrope_s2, uint32_t batch_m, uint32_t pos_base,
+    uint32_t compute_mode, float* logits_out, char* err_out, size_t err_cap
 ) {
     @autoreleasepool {
         auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
         auto* s = static_cast<MetalCb4FastState*>(raw_state);
-        if (!r || !s) {
-            vxt_write_err(err_out, err_cap, "null CB4-Fast checkpoint");
+        if (!r || !s || !embeds_in || !mrope_pos4 || batch_m == 0u || batch_m > CB4_MAX_BATCH_M) {
+            vxt_write_err(err_out, err_cap, "invalid arguments to vxt_metal_cb4_fast_step_embeds_batch");
             return -1;
         }
-        bool any_rec = false;
-        for (uint8_t ir : s->is_rec) if (ir) { any_rec = true; break; }
-        if (!any_rec) return 0;
+        if (!s->ensure_kv_cap(pos_base + batch_m)) {
+            vxt_write_err(err_out, err_cap, "failed to grow CB4-Fast KV cache in embeds_batch");
+            return -2;
+        }
+        float* cur_dst = static_cast<float*>([r->cur_buf contents]);
+        uint32_t d = r->cfg.n_embd, pd = r->padded_embd;
+        for (uint32_t m = 0u; m < batch_m; ++m) {
+            float* row = cur_dst + size_t(m) * size_t(pd);
+            std::memcpy(row, embeds_in + size_t(m) * size_t(d), size_t(d) * sizeof(float));
+            if (pd > d) std::memset(row + d, 0, size_t(pd - d) * sizeof(float));
+        }
+        std::memcpy([r->mrope_pos_buf contents], mrope_pos4, size_t(batch_m) * 4u * sizeof(uint32_t));
 
         id<MTLCommandBuffer> cmd = [r->queue commandBuffer];
-        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-        if (!cmd || !blit) {
-            vxt_write_err(err_out, err_cap, "cannot create CB4-Fast checkpoint command");
-            return -1;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!cmd || !enc) {
+            vxt_write_err(err_out, err_cap, "failed to create CB4-Fast embeds command buffer");
+            return -3;
         }
-        for (uint32_t il = 0; il < s->n_layer; ++il) {
-            if (!s->is_rec[il]) continue;
-            if (s->conv_bytes[il] > 0u) {
-                [blit copyFromBuffer:(restore ? s->conv_bak[il] : s->conv_states[il]) sourceOffset:0
-                            toBuffer:(restore ? s->conv_states[il] : s->conv_bak[il]) destinationOffset:0
-                                size:s->conv_bytes[il]];
-            }
-            if (s->ssm_bytes[il] > 0u) {
-                [blit copyFromBuffer:(restore ? s->ssm_bak[il] : s->ssm_states[il]) sourceOffset:0
-                            toBuffer:(restore ? s->ssm_states[il] : s->ssm_bak[il]) destinationOffset:0
-                                size:s->ssm_bytes[il]];
-            }
-        }
-        [blit endEncoding];
+        encode_cb4_fast_forward(
+            r, s, enc, nil, 0, batch_m, pos_base, pos_base,
+            true, mrope_s1, mrope_s2, compute_mode, 0u, 0xffffffffu
+        );
+        [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
         if ([cmd status] != MTLCommandBufferStatusCompleted) {
-            vxt_write_err(err_out, err_cap, "CB4-Fast checkpoint blit failed");
-            return -1;
+            NSString* desc = [[cmd error] localizedDescription];
+            vxt_write_err(err_out, err_cap, desc ? [desc UTF8String] : "CB4-Fast step_embeds_batch failed");
+            return -4;
+        }
+        if (logits_out && compute_mode != 0u) {
+            std::memcpy(logits_out, [r->logits_buf contents], size_t(r->cfg.n_vocab) * sizeof(float));
         }
         return 0;
     }
 }
 
-void vxt_metal_cb4_fast_ring_set_token(void* raw_runner, uint32_t slot, uint32_t tok_id) {
-    auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
-    if (!r) return;
-    static_cast<uint32_t*>([r->tok_ring_buf contents])[slot & (CB4_RING_SLOTS - 1u)] = tok_id;
-}
-
-uint32_t vxt_metal_cb4_fast_ring_get_out(void* raw_runner, uint32_t slot) {
-    auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
-    if (!r) return 0u;
-    return static_cast<const uint32_t*>([r->out_ring_buf contents])[slot & (CB4_RING_SLOTS - 1u)];
-}
-
-uint32_t vxt_metal_cb4_fast_ring_get_err(void* raw_runner, uint32_t slot) {
-    auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
-    if (!r) return 1u;
-    return static_cast<const uint32_t*>([r->err_ring_buf contents])[slot & (CB4_RING_SLOTS - 1u)];
-}
-
 void* vxt_metal_cb4_fast_enqueue_async(
     void* raw_runner, void* raw_state, uint32_t base_slot, uint32_t step_count,
-    uint32_t pos_base, char* err_out, size_t err_cap
+    uint32_t pos_base, uint32_t rope_pos_base, char* err_out, size_t err_cap
 ) {
     @autoreleasepool {
         auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
@@ -559,7 +557,10 @@ void* vxt_metal_cb4_fast_enqueue_async(
             uint32_t slot = (base_slot + k) & (CB4_RING_SLOTS - 1u);
             uint32_t next_slot = (base_slot + k + 1u) & (CB4_RING_SLOTS - 1u);
             size_t tok_off = size_t(slot) * sizeof(uint32_t);
-            encode_cb4_fast_forward(r, s, enc, r->tok_ring_buf, tok_off, 1u, pos_base + k, 3u, slot, next_slot);
+            encode_cb4_fast_forward(
+                r, s, enc, r->tok_ring_buf, tok_off, 1u,
+                pos_base + k, rope_pos_base + k, false, 0u, 0u, 3u, slot, next_slot
+            );
         }
         [enc endEncoding];
         if (r->profile_enabled) {
