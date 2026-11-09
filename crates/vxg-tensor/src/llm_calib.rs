@@ -7,7 +7,8 @@
 //!   from `RMSNorm` gains (`attn_norm`, `post_attention_norm`, `ssm_norm`, `output_norm`), preserving
 //!   exact intra-block Rademacher isotropy with zero calibration-prompt overfitting.
 
-use crate::gguf::{GgufTensorMeta, GgufView};
+use crate::cb4_calib::Cb4TensorSource;
+use crate::gguf::GgufView;
 use crate::gguf_meta::ModelConfig;
 
 #[derive(Default)]
@@ -19,21 +20,6 @@ pub(crate) struct TurboCalibPlan {
     pub h_ffn_gu: Vec<Vec<f32>>,
     pub h_embd: Vec<f32>,
     pub h_lm_head: Vec<f32>,
-}
-
-fn find_tensor<'a>(gg: &'a GgufView<'a>, name: &str) -> Option<&'a GgufTensorMeta> {
-    gg.tensors.iter().find(|m| m.name == name)
-}
-
-fn should_skip_layer(name: &str, n_layer: usize) -> bool {
-    if let Some(rest) = name.strip_prefix("blk.") {
-        if let Some((idx_s, _)) = rest.split_once('.') {
-            if let Ok(il) = idx_s.parse::<usize>() {
-                return il >= n_layer;
-            }
-        }
-    }
-    false
 }
 
 fn block_isotropic_hessian(ch_amp: &[f32]) -> Vec<f32> {
@@ -75,6 +61,13 @@ fn block_isotropic_hessian(ch_amp: &[f32]) -> Vec<f32> {
 }
 
 pub(crate) fn run_turbo_calibration(gg: &GgufView<'_>, cfg: &ModelConfig) -> TurboCalibPlan {
+    run_turbo_calibration_from_source(gg, cfg)
+}
+
+pub(crate) fn run_turbo_calibration_from_source(
+    src: &dyn Cb4TensorSource,
+    cfg: &ModelConfig,
+) -> TurboCalibPlan {
     let n_embd = cfg.n_embd;
     let n_layer = cfg.n_layer;
     if n_embd < 64 || n_layer == 0 {
@@ -92,23 +85,14 @@ pub(crate) fn run_turbo_calibration(gg: &GgufView<'_>, cfg: &ModelConfig) -> Tur
 
     let mut ch_e = vec![0.0f64; n_embd];
     let mut count = 0usize;
-    for m in &gg.tensors {
-        if should_skip_layer(&m.name, n_layer) {
-            continue;
-        }
-        if !(m.name.ends_with(".ffn_down.weight")
-            || m.name.ends_with(".ssm_out.weight")
-            || m.name.ends_with(".attn_output.weight"))
-        {
-            continue;
-        }
-        let Some((rows, cols)) = m.matrix_dims() else {
+    for wname in src.writer_tensors(n_layer) {
+        let Some((rows, cols)) = src.matrix_dims(&wname) else {
             continue;
         };
         if rows != n_embd || cols < 64 {
             continue;
         }
-        let Ok(w) = gg.extract_f32(m) else {
+        let Some(w) = src.extract_f32(&wname) else {
             continue;
         };
         let ns = cols.div_ceil(8).max(1) as f64;
@@ -142,10 +126,7 @@ pub(crate) fn run_turbo_calibration(gg: &GgufView<'_>, cfg: &ModelConfig) -> Tur
 
     let eval_norm =
         |norm_name: &str, hi_scale: f32, has_res: bool| -> (Vec<(usize, f32)>, Vec<f32>) {
-            let Some(nm) = find_tensor(gg, norm_name) else {
-                return (Vec::new(), Vec::new());
-            };
-            let Ok(nw) = gg.extract_f32(nm) else {
+            let Some(nw) = src.extract_f32(norm_name) else {
                 return (Vec::new(), Vec::new());
             };
             if nw.len() != n_embd {
@@ -189,7 +170,7 @@ pub(crate) fn run_turbo_calibration(gg: &GgufView<'_>, cfg: &ModelConfig) -> Tur
         plan.attn_smooth[il] = as_sc;
         plan.h_attn[il] = ah;
 
-        let pn_name = if find_tensor(gg, &format!("{pfx}.post_attention_norm.weight")).is_some() {
+        let pn_name = if src.has_tensor(&format!("{pfx}.post_attention_norm.weight")) {
             format!("{pfx}.post_attention_norm.weight")
         } else {
             format!("{pfx}.ffn_norm.weight")
@@ -199,16 +180,14 @@ pub(crate) fn run_turbo_calibration(gg: &GgufView<'_>, cfg: &ModelConfig) -> Tur
         plan.h_ffn_gu[il] = ph;
 
         if cfg.is_recurrent_layer(il) && cfg.ssm_inner_size >= 64 && cfg.ssm_dt_rank > 0 {
-            if let Some(sm) = find_tensor(gg, &format!("{pfx}.ssm_norm.weight")) {
-                if let Ok(sw) = gg.extract_f32(sm) {
-                    let dv = cfg.ssm_inner_size / cfg.ssm_dt_rank;
-                    if sw.len() == dv && dv >= 32 {
-                        let mut full = Vec::with_capacity(cfg.ssm_inner_size);
-                        for _ in 0..cfg.ssm_dt_rank {
-                            full.extend(sw.iter().map(|v| v.abs()));
-                        }
-                        plan.h_ssm_out[il] = block_isotropic_hessian(&full);
+            if let Some(sw) = src.extract_f32(&format!("{pfx}.ssm_norm.weight")) {
+                let dv = cfg.ssm_inner_size / cfg.ssm_dt_rank;
+                if sw.len() == dv && dv >= 32 {
+                    let mut full = Vec::with_capacity(cfg.ssm_inner_size);
+                    for _ in 0..cfg.ssm_dt_rank {
+                        full.extend(sw.iter().map(|v| v.abs()));
                     }
+                    plan.h_ssm_out[il] = block_isotropic_hessian(&full);
                 }
             }
         }
@@ -216,7 +195,7 @@ pub(crate) fn run_turbo_calibration(gg: &GgufView<'_>, cfg: &ModelConfig) -> Tur
 
     let (_, h_out) = eval_norm("output_norm.weight", 1.0, true);
     if !h_out.is_empty() {
-        if find_tensor(gg, "output.weight").is_some() {
+        if src.has_tensor("output.weight") {
             plan.h_lm_head = h_out;
         } else {
             plan.h_embd = h_out.iter().map(|&hv| 0.35 + 0.65 * hv).collect();

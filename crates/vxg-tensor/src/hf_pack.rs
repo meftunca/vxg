@@ -22,6 +22,7 @@ pub use crate::hf_meta::{
     inspect_hf_model_dir, parse_hf_config, parse_hf_vision_config, resolve_hf_model_dir,
     HfInspectSummary, HfInspectTensor, HfSourcePaths,
 };
+use crate::llm_calib::{run_turbo_calibration_from_source, TurboCalibPlan};
 use crate::llm_pack::LlmPackMode;
 use crate::lossless::LosslessMatrix;
 use crate::mmap::TensorBytes;
@@ -108,19 +109,49 @@ fn item_matrix_dims(meta: &SafeTensorMeta, tf: HfTransform) -> Option<(usize, us
     meta.matrix_dims()
 }
 
+fn non_empty(v: &[f32]) -> Option<&[f32]> {
+    (!v.is_empty()).then_some(v)
+}
+
 fn encode_hf_item(
     adapter: &HfCalibAdapter<'_>,
     idx: usize,
     mode: LlmPackMode,
     cfg: &ModelConfig,
     cb4_plan: &Cb4CalibPlan,
+    turbo_plan: &TurboCalibPlan,
 ) -> Result<VxtEntry> {
     let it = &adapter.items[idx];
     let st = &adapter.views[it.shard_idx];
     let meta: &SafeTensorMeta = &st.tensors[it.meta_idx];
+    let layer_idx = it
+        .dst_name
+        .strip_prefix("blk.")
+        .and_then(|s| s.split_once('.'))
+        .and_then(|(i, _)| i.parse::<usize>().ok());
 
     if !matches!(it.tf, HfTransform::Identity | HfTransform::Flatten2D) {
-        let data = adapter.extract_transformed(idx)?;
+        let mut data = adapter.extract_transformed(idx)?;
+        if mode == LlmPackMode::Turbo {
+            if let Some(il) = layer_idx {
+                let sc = if it.dst_name.ends_with(".attn_norm.weight") {
+                    turbo_plan.attn_smooth.get(il)
+                } else if it.dst_name.ends_with(".post_attention_norm.weight")
+                    || it.dst_name.ends_with(".ffn_norm.weight")
+                {
+                    turbo_plan.post_smooth.get(il)
+                } else {
+                    None
+                };
+                if let Some(scales) = sc {
+                    for &(c, g) in scales {
+                        if c < data.len() {
+                            data[c] /= g;
+                        }
+                    }
+                }
+            }
+        }
         return Ok(VxtEntry {
             name: it.dst_name.clone(),
             tensor: PackedTensor::RawF32 {
@@ -151,28 +182,60 @@ fn encode_hf_item(
         });
     }
 
+    let col_scales: &[(usize, f32)] = if mode == LlmPackMode::Turbo {
+        if let Some(il) = layer_idx {
+            if it.dst_name.ends_with(".attn_qkv.weight")
+                || it.dst_name.ends_with(".attn_gate.weight")
+                || it.dst_name.ends_with(".ssm_alpha.weight")
+                || it.dst_name.ends_with(".ssm_beta.weight")
+                || it.dst_name.ends_with(".attn_q.weight")
+                || it.dst_name.ends_with(".attn_k.weight")
+                || it.dst_name.ends_with(".attn_v.weight")
+            {
+                turbo_plan.attn_smooth.get(il).map_or(&[], Vec::as_slice)
+            } else if it.dst_name.ends_with(".ffn_gate.weight")
+                || it.dst_name.ends_with(".ffn_up.weight")
+            {
+                turbo_plan.post_smooth.get(il).map_or(&[], Vec::as_slice)
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+
     let force_lossless = rows < 64
         || it.dst_name == "vis.pos_embed.weight"
         || it.dst_name == "vis.patch_embed.proj.weight"
         || it.dst_name.ends_with(".ssm_alpha.weight")
         || it.dst_name.ends_with(".ssm_beta.weight");
     let effective_mode = if force_lossless { LlmPackMode::Lossless } else { mode };
-    let layer_idx = it
-        .dst_name
-        .strip_prefix("blk.")
-        .and_then(|s| s.split_once('.'))
-        .and_then(|(i, _)| i.parse::<usize>().ok());
 
     let tensor = match effective_mode {
         LlmPackMode::Lossless => {
-            if let Some((dt, words)) = st.extract_fp16_words(meta)? {
-                PackedTensor::Lossless(LosslessMatrix::encode(dt, rows, cols, &words)?)
-            } else {
-                PackedTensor::RawF32 {
-                    rows,
-                    cols,
-                    data: st.extract_f32(meta)?,
+            if col_scales.is_empty() {
+                if let Some((dt, words)) = st.extract_fp16_words(meta)? {
+                    PackedTensor::Lossless(LosslessMatrix::encode(dt, rows, cols, &words)?)
+                } else {
+                    PackedTensor::RawF32 {
+                        rows,
+                        cols,
+                        data: st.extract_f32(meta)?,
+                    }
                 }
+            } else {
+                let mut f32s = st.extract_f32(meta)?;
+                for &(c, g) in col_scales {
+                    if c < cols {
+                        for r in 0..rows {
+                            f32s[r * cols + c] *= g;
+                        }
+                    }
+                }
+                PackedTensor::RawF32 { rows, cols, data: f32s }
             }
         }
         LlmPackMode::Cb4 => {
@@ -208,26 +271,107 @@ fn encode_hf_item(
             }
         }
         LlmPackMode::Turbo => {
-            let f32s = st.extract_f32(meta)?;
+            let mut f32s = st.extract_f32(meta)?;
+            for &(c, g) in col_scales {
+                if c < cols {
+                    for r in 0..rows {
+                        f32s[r * cols + c] *= g;
+                    }
+                }
+            }
             let inv_cols = 1.0 / (cols.max(1) as f64);
             let row_ms: Vec<f32> = (0..rows)
                 .map(|r| {
                     let row = &f32s[r * cols..(r + 1) * cols];
                     let s2: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
-                    ((s2 * inv_cols) as f32).max(1e-12)
+                    ((s2 * inv_cols) as f64 as f32).max(1e-12)
                 })
                 .collect();
             let mut sorted = row_ms.clone();
             sorted.sort_by(f32::total_cmp);
             let mat_ms = sorted.get(rows / 2).copied().unwrap_or(1e-6).max(1e-12);
-            PackedTensor::TurboWht(TurboWhtMatrix::encode_with_hessian(
-                4,
-                rows,
-                cols,
-                &f32s,
-                None,
-                |r| if row_ms[r] > 3.2 * mat_ms { 0.0 } else { 0.045 },
-            )?)
+
+            if it.dst_name.starts_with("vis.") {
+                PackedTensor::TurboWht(TurboWhtMatrix::encode_with_hessian(
+                    4,
+                    rows,
+                    cols,
+                    &f32s,
+                    None,
+                    |r| if row_ms[r] > 3.2 * mat_ms { 0.0 } else { 0.030 },
+                )?)
+            } else if it.dst_name == "token_embd.weight" || it.dst_name == "output.weight" {
+                let h = if it.dst_name == "token_embd.weight" {
+                    &turbo_plan.h_embd
+                } else {
+                    &turbo_plan.h_lm_head
+                };
+                let lam = if it.dst_name == "token_embd.weight" { 0.052 } else { 0.040 };
+                PackedTensor::TurboWht(TurboWhtMatrix::encode_with_hessian(
+                    4,
+                    rows,
+                    cols,
+                    &f32s,
+                    non_empty(h),
+                    |r| if row_ms[r] > 3.0 * mat_ms { 0.0 } else { lam },
+                )?)
+            } else {
+                let n_lay = cfg.n_layer.max(1);
+                let h_rot = layer_idx.and_then(|il| {
+                    if it.dst_name.ends_with(".attn_qkv.weight")
+                        || it.dst_name.ends_with(".attn_gate.weight")
+                        || it.dst_name.ends_with(".attn_q.weight")
+                        || it.dst_name.ends_with(".attn_k.weight")
+                        || it.dst_name.ends_with(".attn_v.weight")
+                    {
+                        turbo_plan.h_attn.get(il).and_then(|v| non_empty(v))
+                    } else if it.dst_name.ends_with(".ssm_out.weight") {
+                        turbo_plan.h_ssm_out.get(il).and_then(|v| non_empty(v))
+                    } else if it.dst_name.ends_with(".ffn_gate.weight")
+                        || it.dst_name.ends_with(".ffn_up.weight")
+                    {
+                        turbo_plan.h_ffn_gu.get(il).and_then(|v| non_empty(v))
+                    } else {
+                        None
+                    }
+                });
+                let is_edge = layer_idx.is_some_and(|il| il <= 1 || il + 2 >= n_lay);
+                let is_anchor = is_edge || layer_idx.is_some_and(|il| il % 4 == 3);
+                let base_lam: f32 = if it.dst_name.ends_with(".attn_q.weight")
+                    || it.dst_name.ends_with(".attn_k.weight")
+                    || it.dst_name.ends_with(".attn_v.weight")
+                    || it.dst_name.ends_with(".attn_output.weight")
+                    || it.dst_name.ends_with(".ssm_out.weight")
+                {
+                    0.026
+                } else if it.dst_name.ends_with(".attn_qkv.weight")
+                    || it.dst_name.ends_with(".attn_gate.weight")
+                {
+                    if is_edge { 0.036 } else { 0.044 }
+                } else if it.dst_name.ends_with(".ffn_down.weight") {
+                    if is_anchor { 0.038 } else { 0.052 }
+                } else if it.dst_name.ends_with(".ffn_gate.weight")
+                    || it.dst_name.ends_with(".ffn_up.weight")
+                {
+                    if is_anchor { 0.045 } else { 0.074 }
+                } else {
+                    0.040
+                };
+                PackedTensor::TurboWht(TurboWhtMatrix::encode_with_hessian(
+                    4,
+                    rows,
+                    cols,
+                    &f32s,
+                    h_rot,
+                    |r| {
+                        if row_ms[r] > 3.2 * mat_ms {
+                            0.0
+                        } else {
+                            base_lam * (mat_ms / row_ms[r]).clamp(0.45, 1.50)
+                        }
+                    },
+                )?)
+            }
         }
         LlmPackMode::Q4_0 => {
             PackedTensor::Q4_0(Q4_0Matrix::encode(rows, cols, &st.extract_f32(meta)?))
@@ -334,6 +478,11 @@ pub fn pack_hf_model_to_vxt(
     } else {
         Cb4CalibPlan::default()
     };
+    let turbo_plan = if mode == LlmPackMode::Turbo {
+        run_turbo_calibration_from_source(&adapter, &cfg)
+    } else {
+        TurboCalibPlan::default()
+    };
 
     let n = items.len();
     let mut slots: Vec<Mutex<Option<VxtEntry>>> = (0..n).map(|_| Mutex::new(None)).collect();
@@ -341,7 +490,7 @@ pub fn pack_hf_model_to_vxt(
     for (idx, it) in items.iter().enumerate() {
         let numel = views[it.shard_idx].tensors[it.meta_idx].numel();
         if numel >= 128_000_000 {
-            let entry = encode_hf_item(&adapter, idx, mode, &cfg, &cb4_plan)?;
+            let entry = encode_hf_item(&adapter, idx, mode, &cfg, &cb4_plan, &turbo_plan)?;
             *slots[idx].get_mut().unwrap() = Some(entry);
         } else {
             regular_indices.push(idx);
@@ -358,6 +507,7 @@ pub fn pack_hf_model_to_vxt(
             let ad_ref = &adapter;
             let cfg_ref = &cfg;
             let cb4_ref = &cb4_plan;
+            let turbo_ref = &turbo_plan;
             let slots_ref = &slots;
             let err_ref = &first_err;
             let idx_ref = &next_idx;
@@ -371,7 +521,7 @@ pub fn pack_hf_model_to_vxt(
                     break;
                 }
                 let idx = reg_ref[k];
-                match encode_hf_item(ad_ref, idx, mode, cfg_ref, cb4_ref) {
+                match encode_hf_item(ad_ref, idx, mode, cfg_ref, cb4_ref, turbo_ref) {
                     Ok(entry) => *slots_ref[idx].lock().unwrap() = Some(entry),
                     Err(e) => {
                         let mut g = err_ref.lock().unwrap();
