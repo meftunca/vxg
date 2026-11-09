@@ -234,6 +234,7 @@ pub unsafe extern "C" fn vxg_compress_into(
             simd: Simd::Auto,
             legacy_v2: false,
             record_aligned: false,
+            target_block_rows: 0,
             level: 3,
         };
         match compress_into(input, output, &opt) {
@@ -348,6 +349,7 @@ pub unsafe extern "C" fn vxg_compress_alloc(
             simd: Simd::Auto,
             legacy_v2: false,
             record_aligned: false,
+            target_block_rows: 0,
             level: 3,
         };
         let Ok(encoded) = compress(input, &opt) else {

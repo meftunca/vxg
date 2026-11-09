@@ -137,6 +137,7 @@ pub unsafe extern "C" fn vxg_compress_file(
             simd: Simd::Auto,
             legacy_v2: false,
             record_aligned: false,
+            target_block_rows: 0,
             level: 3,
         };
         match compress_file(in_p, out_p, &opt, force != 0) {

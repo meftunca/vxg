@@ -37,88 +37,105 @@ fn parse_grammar_for_ops<'a>(payload: &'a [u8]) -> Result<Option<OpsGrammarHeade
         return Err(invalid("column raw length"));
     }
     let p_after_raw_len = 1 + cursor.pos;
-    let template_count = cursor.uleb()?;
-    if template_count > MAX_TEMPLATES {
-        return Err(invalid("column template count"));
-    }
-    if template_count == 0 || template_count > 16 {
-        return Ok(None);
-    }
-    let dictionary_len = cursor.uleb()?;
-    if dictionary_len == 0 || dictionary_len > template_count.saturating_mul(MAX_SLOTS + 1) {
-        return Err(invalid("column segment dictionary count"));
-    }
-    let mut seg_dict_inline = [&[][..]; 128];
-    let mut seg_dict_overflow = if dictionary_len > 128 {
-        vec![&[][..]; dictionary_len]
-    } else {
-        Vec::new()
-    };
-    let seg_dict: &mut [&'a [u8]] = if dictionary_len <= 128 {
-        &mut seg_dict_inline[..dictionary_len]
-    } else {
-        &mut seg_dict_overflow[..dictionary_len]
-    };
-    for i in 0..dictionary_len {
-        let len = cursor.uleb()?;
-        let seg = cursor.take(len)?;
-        if i > 0 && seg_dict[i - 1] >= seg {
-            return Err(invalid("column segment dictionary ordering"));
-        }
-        seg_dict[i] = seg;
-    }
-    let mut slot_counts = [0usize; 16];
-    for slot_out in slot_counts.iter_mut().take(template_count) {
-        let slots = cursor.uleb()?;
-        if slots > MAX_SLOTS {
-            return Err(invalid("column slot count"));
-        }
-        *slot_out = slots;
-    }
-    let segment_width = cursor.byte()?;
-    if segment_width != bit_width(dictionary_len.saturating_sub(1) as u64) {
-        return Err(invalid("column segment selector width"));
-    }
-    let mut tpl0_segs = [&[][..]; MAX_SLOTS + 1];
-    let mut extra_tpl_segs = Vec::with_capacity(template_count.saturating_sub(1));
-    let mut packed_slices = [&[][..]; 16];
-    for t_idx in 0..template_count {
-        let slots = slot_counts[t_idx];
-        let packed_len = bit_bytes(slots + 1, segment_width)?;
-        let packed_slice = cursor.take(packed_len)?;
-        for prev in 0..t_idx {
-            if slot_counts[prev] == slots && packed_slices[prev] == packed_slice {
-                return Err(invalid("duplicate column template"));
-            }
-        }
-        packed_slices[t_idx] = packed_slice;
-        let mut reader = FastBitReader::new_validated(packed_slice, slots + 1, segment_width)?;
-        if t_idx == 0 {
-            for s in 0..=slots {
-                let idx = reader.next_u64() as usize;
-                if idx >= dictionary_len {
-                    return Err(invalid("column segment dictionary index"));
-                }
-                tpl0_segs[s] = seg_dict[idx];
-            }
-            if !tpl0_segs[slots].ends_with(b"\n") {
-                return Ok(None);
-            }
+    let (template_count, slot_counts, tpl0_segs, extra_tpl_segs) =
+        if let Some(hit) = try_match_cached_grammar_wire(&payload[p_after_raw_len..], &mut cursor) {
+            hit
         } else {
-            let mut segs = Vec::with_capacity(slots + 1);
-            for _ in 0..=slots {
-                let idx = reader.next_u64() as usize;
-                if idx >= dictionary_len {
-                    return Err(invalid("column segment dictionary index"));
-                }
-                segs.push(seg_dict[idx]);
+            let start_pos = cursor.pos;
+            let template_count = cursor.uleb()?;
+            if template_count > MAX_TEMPLATES {
+                return Err(invalid("column template count"));
             }
-            if !segs[slots].ends_with(b"\n") {
+            if template_count == 0 || template_count > 16 {
                 return Ok(None);
             }
-            extra_tpl_segs.push(segs);
-        }
-    }
+            let dictionary_len = cursor.uleb()?;
+            if dictionary_len == 0 || dictionary_len > template_count.saturating_mul(MAX_SLOTS + 1)
+            {
+                return Err(invalid("column segment dictionary count"));
+            }
+            let mut seg_dict_inline = [&[][..]; 128];
+            let mut seg_dict_overflow = if dictionary_len > 128 {
+                vec![&[][..]; dictionary_len]
+            } else {
+                Vec::new()
+            };
+            let seg_dict: &mut [&'a [u8]] = if dictionary_len <= 128 {
+                &mut seg_dict_inline[..dictionary_len]
+            } else {
+                &mut seg_dict_overflow[..dictionary_len]
+            };
+            for i in 0..dictionary_len {
+                let len = cursor.uleb()?;
+                let seg = cursor.take(len)?;
+                if i > 0 && seg_dict[i - 1] >= seg {
+                    return Err(invalid("column segment dictionary ordering"));
+                }
+                seg_dict[i] = seg;
+            }
+            let mut slot_counts = [0usize; 16];
+            for slot_out in slot_counts.iter_mut().take(template_count) {
+                let slots = cursor.uleb()?;
+                if slots > MAX_SLOTS {
+                    return Err(invalid("column slot count"));
+                }
+                *slot_out = slots;
+            }
+            let segment_width = cursor.byte()?;
+            if segment_width != bit_width(dictionary_len.saturating_sub(1) as u64) {
+                return Err(invalid("column segment selector width"));
+            }
+            let mut tpl0_segs = [&[][..]; MAX_SLOTS + 1];
+            let mut extra_tpl_segs = Vec::with_capacity(template_count.saturating_sub(1));
+            let mut packed_slices = [&[][..]; 16];
+            for t_idx in 0..template_count {
+                let slots = slot_counts[t_idx];
+                let packed_len = bit_bytes(slots + 1, segment_width)?;
+                let packed_slice = cursor.take(packed_len)?;
+                for prev in 0..t_idx {
+                    if slot_counts[prev] == slots && packed_slices[prev] == packed_slice {
+                        return Err(invalid("duplicate column template"));
+                    }
+                }
+                packed_slices[t_idx] = packed_slice;
+                let mut reader =
+                    FastBitReader::new_validated(packed_slice, slots + 1, segment_width)?;
+                if t_idx == 0 {
+                    for s in 0..=slots {
+                        let idx = reader.next_u64() as usize;
+                        if idx >= dictionary_len {
+                            return Err(invalid("column segment dictionary index"));
+                        }
+                        tpl0_segs[s] = seg_dict[idx];
+                    }
+                    if !tpl0_segs[slots].ends_with(b"\n") {
+                        return Ok(None);
+                    }
+                } else {
+                    let mut segs = Vec::with_capacity(slots + 1);
+                    for _ in 0..=slots {
+                        let idx = reader.next_u64() as usize;
+                        if idx >= dictionary_len {
+                            return Err(invalid("column segment dictionary index"));
+                        }
+                        segs.push(seg_dict[idx]);
+                    }
+                    if !segs[slots].ends_with(b"\n") {
+                        return Ok(None);
+                    }
+                    extra_tpl_segs.push(segs);
+                }
+            }
+            let wire_len = cursor.pos - start_pos;
+            store_cached_grammar_wire(
+                &payload[p_after_raw_len..p_after_raw_len + wire_len],
+                template_count,
+                &slot_counts,
+                &tpl0_segs,
+                &extra_tpl_segs,
+            );
+            (template_count, slot_counts, tpl0_segs, extra_tpl_segs)
+        };
     let row_count = cursor.uleb()?;
     if row_count > raw_len.saturating_add(1) {
         return Err(invalid("column row count"));

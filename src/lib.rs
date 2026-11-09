@@ -85,6 +85,9 @@ pub struct Options {
     /// Snap block split points backward to newline (`\n`) boundaries when possible (`VERSION_V5`
     /// `FLAG_VAR_RAW`), eliminating cross-block partial rows on multi-GB tabular/NDJSON frames.
     pub record_aligned: bool,
+    /// Optional target records per block (`0` = disabled; `1..=65536` scales `VERSION_V5`
+    /// record-aligned block byte size up to `1 MiB` so verbose NDJSON scales with row count).
+    pub target_block_rows: usize,
     /// Compression effort level (`1..=9`; default `3`). Higher levels search deeper local/dictionary
     /// hash ways and lazy windows in `BLOCK_DICT_LZ` with zero change to wire format or decode speed.
     pub level: u8,
@@ -99,6 +102,7 @@ impl Default for Options {
             simd: Simd::Auto,
             legacy_v2: false,
             record_aligned: false,
+            target_block_rows: 0,
             level: 3,
         }
     }
@@ -111,6 +115,9 @@ impl Options {
         }
         if !(1..=64).contains(&self.acceleration) {
             return Err(Error::InvalidOption("acceleration must be 1..64"));
+        }
+        if self.target_block_rows > 65_536 {
+            return Err(Error::InvalidOption("target_block_rows must be 0..65536"));
         }
         if !(1..=9).contains(&self.level) {
             return Err(Error::InvalidOption("level must be 1..9"));
@@ -155,6 +162,8 @@ pub fn compress_with_stats(input: &[u8], options: &Options) -> Result<(Vec<u8>, 
 pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<usize> {
     options.validate()?;
     max_compressed_size(input.len(), options.block_size)?;
+    let eff = frame::v5::resolve_effective_options(input, options);
+    let options = &eff;
     let engine = simd::Engine::new(options.simd)?;
     let ranges = frame::v5::compute_block_ranges(
         input,
@@ -230,6 +239,8 @@ fn compress_inner<const STATS: bool>(
 ) -> Result<(Vec<u8>, WorkStats)> {
     options.validate()?;
     max_compressed_size(input.len(), options.block_size)?;
+    let eff = frame::v5::resolve_effective_options(input, options);
+    let options = &eff;
     let engine = simd::Engine::new(options.simd)?;
     let ranges = frame::v5::compute_block_ranges(
         input,

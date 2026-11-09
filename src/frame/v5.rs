@@ -187,6 +187,66 @@ pub(crate) fn write_header_bytes(
     buf[28..32].copy_from_slice(&dr.to_le_bytes());
 }
 
+fn is_ndjson_sample(sample: &[u8]) -> bool {
+    let mut total = 0usize;
+    let mut json_obj = 0usize;
+    for raw_ln in sample.split(|&b| b == b'\n') {
+        let ln = raw_ln.strip_suffix(b"\r").unwrap_or(raw_ln);
+        let trimmed_start = match ln.iter().position(|b| !b.is_ascii_whitespace()) {
+            Some(i) => &ln[i..],
+            None => continue,
+        };
+        let trimmed_end = match trimmed_start.iter().rposition(|b| !b.is_ascii_whitespace()) {
+            Some(i) => &trimmed_start[..=i],
+            None => continue,
+        };
+        total += 1;
+        if trimmed_end.first() == Some(&b'{') && trimmed_end.last() == Some(&b'}') {
+            json_obj += 1;
+        }
+        if total >= 64 {
+            break;
+        }
+    }
+    // Exclude the trailing partial line from `sample[..65536]` if needed; require >= 75% JSON objects.
+    total >= 8 && json_obj * 4 >= total.saturating_sub(1) * 3
+}
+
+/// Resolve effective block size and `record_aligned` mode for verbose tabular/NDJSON inputs.
+/// Never shrinks below `options.block_size`, preserving `max_compressed_size(n, options.block_size)`.
+pub(crate) fn resolve_effective_options(input: &[u8], options: &crate::Options) -> crate::Options {
+    let mut eff = options.clone();
+    if eff.legacy_v2 {
+        return eff;
+    }
+    if eff.target_block_rows > 0 {
+        eff.record_aligned = true;
+        let sample = &input[..input.len().min(65_536)];
+        let nl = sample.iter().filter(|&&b| b == b'\n').count();
+        if nl >= 2 {
+            let avg_line = sample.len() / nl;
+            let raw_target = eff.target_block_rows.saturating_mul(avg_line);
+            let rounded = raw_target.div_ceil(4096).saturating_mul(4096);
+            eff.block_size = rounded.clamp(options.block_size, 1_048_576);
+        }
+        return eff;
+    }
+    if eff.record_aligned && options.block_size == 65_536 && input.len() >= 1_048_576 {
+        let sample = &input[..65_536];
+        let nl = sample.iter().filter(|&&b| b == b'\n').count();
+        if nl >= 8 && is_ndjson_sample(sample) {
+            let avg_line = 65_536 / nl;
+            if avg_line >= 110 {
+                let max_par_bsz = ((input.len() / 4) & !65_535).clamp(65_536, 524_288);
+                let raw_target = 2048usize.saturating_mul(avg_line);
+                let rounded = raw_target.div_ceil(65_536).saturating_mul(65_536);
+                eff.block_size = rounded.clamp(65_536, max_par_bsz);
+            }
+        }
+    }
+    eff
+}
+
 /// Compute newline-aligned `(start, end)` byte ranges when `record_aligned` is active.
 /// Returns `None` if fixed `block_size` chunking should be used instead.
 pub(crate) fn compute_block_ranges(
@@ -198,7 +258,7 @@ pub(crate) fn compute_block_ranges(
     if !record_aligned || n <= block_size {
         return None;
     }
-    let max_back = (block_size / 4).min(8192);
+    let max_back = (block_size / 4).min(32_768);
     let mut ranges = Vec::with_capacity(n.div_ceil(block_size) + 4);
     let mut pos = 0usize;
     let mut any_shifted = false;

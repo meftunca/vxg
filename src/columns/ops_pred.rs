@@ -5,7 +5,15 @@ enum SlotLookup {
     Fallback,
 }
 
+#[inline]
 fn json_single_line_template_slot(segs: &[&[u8]], target_key: &[u8]) -> Option<Option<usize>> {
+    json_single_line_template_slot_cached(segs, target_key)
+}
+
+fn json_single_line_template_slot_uncached(
+    segs: &[&[u8]],
+    target_key: &[u8],
+) -> Option<Option<usize>> {
     let slots = segs.len().saturating_sub(1);
     if slots == 0 {
         return None;
