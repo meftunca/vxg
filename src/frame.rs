@@ -433,6 +433,7 @@ impl<'a> ValidatedFrame<'a> {
 
 mod assemble;
 mod decode;
+pub mod recover;
 pub(crate) mod v5;
 
 pub(crate) use assemble::{assemble, parallel_encode_assemble, AssembleDest, Part};
@@ -442,3 +443,4 @@ pub(crate) use decode::{
     extract_block_validated_into, validate_header_and_directory_with_offsets,
     MAX_STACK_DIR_BLOCKS,
 };
+pub use recover::{recover_frame, FailedBlock, RecoveredBlock, RecoveryReport};

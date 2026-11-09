@@ -39,7 +39,10 @@ pub use block::{
     WorkStats, COLUMN as BLOCK_COLUMN, DICT_LZ as BLOCK_DICT_LZ, LZ as BLOCK_LZ, RAW as BLOCK_RAW,
 };
 pub use error::{Error, Result};
-pub use frame::{max_compressed_size, BlockInfo, Frame, ValidatedFrame};
+pub use frame::{
+    max_compressed_size, recover_frame, BlockInfo, FailedBlock, Frame, RecoveredBlock,
+    RecoveryReport, ValidatedFrame,
+};
 pub use mmap::{
     compress_file, decompress_file, mmap_supported, verify_file, InputBytes, MappedFile,
     MappedFileMut,

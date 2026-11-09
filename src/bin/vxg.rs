@@ -24,9 +24,11 @@ Usage:
                                 [--record-aligned] [--no-checksum] [--legacy] [--stream]
                                 [--no-mmap] [--gpu-batch BYTES] [--force|-f] [--quiet|-q]
   vxg d|decompress INPUT OUTPUT [--backend cpu|metal|vulkan|cuda] [--threads N|auto]
-                                [--simd MODE] [--max-output BYTES]
+                                [--simd MODE] [--max-output BYTES] [--recover]
                                 [--no-checksum|--no-verify-checksum] [--stream] [--no-mmap]
                                 [--gpu-batch BYTES] [--force|-f] [--quiet|-q]
+  vxg recover      INPUT OUTPUT [--simd MODE] [--max-output BYTES] [--no-checksum]
+                                [--no-mmap] [--force|-f] [--quiet|-q]
   vxg t|verify     FRAME        [--threads N|auto] [--simd MODE] [--max-output BYTES]
                                 [--no-checksum|--no-verify-checksum] [--stream] [--no-mmap] [-q]
   vxg block        FRAME INDEX [OUTPUT] [--simd MODE] [--max-output BYTES]
@@ -348,8 +350,14 @@ fn run_args(args: &[String]) -> R<()> {
         "q" | "query" => return run_query_cmd(args),
         "agg" | "group-by" => return run_agg_cmd(args),
         "sql" => return run_sql_cmd(args),
+        "recover" => return run_recover_cmd(args),
         "filter-frame" | "project" | "update" | "map" => return run_ops_cmd(args),
-        "c" | "compress" | "d" | "decompress" => {}
+        "c" | "compress" => {}
+        "d" | "decompress" => {
+            if args.iter().skip(3).any(|a| a == "--recover") {
+                return run_recover_cmd(args);
+            }
+        }
         _ => return Err(format!("unknown command: {cmd}\n{HELP}").into()),
     }
     if args.len() < 3 {
@@ -537,4 +545,5 @@ include!("cli_support/ops.rs");
 include!("cli_support/query.rs");
 include!("cli_support/agg.rs");
 include!("cli_support/sql.rs");
+include!("cli_support/recover.rs");
 include!("cli_support/tests.rs");
