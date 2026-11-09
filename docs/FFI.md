@@ -45,7 +45,7 @@ To achieve multi-GB/s throughput across language boundaries without heap-allocat
 
 | Function | Signature | Description |
 | :--- | :--- | :--- |
-| `vxg_version_string` | `const char* vxg_version_string(void)` | Returns null-terminated version string (`"0.5.1"`). |
+| `vxg_version_string` | `const char* vxg_version_string(void)` | Returns null-terminated version string (`"0.5.2"`). |
 | `vxg_error_message` | `const char* vxg_error_message(vxg_ssize_t code)` | Returns static human-readable message for `< 0` error codes. |
 | `vxg_compress_bound` | `vxg_ssize_t vxg_compress_bound(size_t raw_len, size_t block_size)` | Worst-case compressed byte size (`block_size = 0` uses default `65536`). |
 | `vxg_frame_raw_size` | `vxg_ssize_t vxg_frame_raw_size(const uint8_t* src, size_t src_len)` | $O(1)$ header inspection (or multi-frame sum) returning exact uncompressed size in bytes. |
@@ -69,6 +69,9 @@ To achieve multi-GB/s throughput across language boundaries without heap-allocat
 | `vxg_select_alloc` | `uint8_t* vxg_select_alloc(const uint8_t* src, size_t src_len, const char* cols_csv, const char* where_expr, const char* order_by_col, int32_t order_desc, size_t limit, size_t threads, size_t* out_len)` | Compressed-domain `SELECT` (`cols_csv` or `NULL` for full rows) + optional `WHERE` + optional `ORDER BY` Top-K (`limit = 0` means unlimited). Free with `vxg_free(ptr, out_len)`. |
 | `vxg_project_frame_alloc` | `uint8_t* vxg_project_frame_alloc(const uint8_t* src, size_t src_len, const char* cols_csv, const char* where_expr, size_t threads, size_t* out_len)` | Zero-reencode `VXG -> VXG` column splicing (`project_frame`) with optional `WHERE`. Free with `vxg_free(ptr, out_len)`. |
 | `vxg_sql_alloc` | `uint8_t* vxg_sql_alloc(const uint8_t* src, size_t src_len, const char* query_cstr, int32_t format, int32_t no_header, size_t threads, size_t* out_len)` | Executes a compressed-domain SQL `SELECT` query (`WHERE`, multi-key/multi-agg `GROUP BY`, `ORDER BY`, `LIMIT`, CSV header names, and dotted nested JSON keys) directly on `src`; `format` = `0` (TSV), `1` (CSV), or `2` (NDJSON). Free with `vxg_free(ptr, out_len)`. |
+| `vxg_arrow_export` | `vxg_ssize_t vxg_arrow_export(const uint8_t* frame_ptr, size_t frame_len, const char* query_cstr, size_t threads, struct ArrowSchema* out_schema, struct ArrowArray* out_array)` | Exports a compressed VXG frame (with optional SQL `query_cstr`, or `NULL`/`""` for automatic CSV header / NDJSON schema inference) into 64-byte-aligned Apache Arrow C Data Interface structs (`Int64`, `Float64`, `Utf8`). Release via `out_schema->release` and `out_array->release`. |
+| `vxg_arrow_export_stream` | `vxg_ssize_t vxg_arrow_export_stream(const uint8_t* frame_ptr, size_t frame_len, const char* query_cstr, size_t threads, struct ArrowArrayStream* out_stream)` | Exports a compressed VXG frame (with optional compressed-domain SQL pushdown) as an Apache Arrow C Stream (`ArrowArrayStream`) directly consumable by DuckDB, Polars, PyArrow, DataFusion, and Arrow `PyCapsule` (`__arrow_c_stream__`). |
+| `vxg_arrow_ipc_alloc` | `uint8_t* vxg_arrow_ipc_alloc(const uint8_t* frame_ptr, size_t frame_len, const char* query_cstr, size_t threads, size_t* out_len)` | Serializes a compressed VXG frame (or SQL pushdown result) into an Apache Arrow IPC Stream (`MetadataVersion::V5`, zero external crate dependencies). Free with `vxg_free(ptr, *out_len)`. |
 | `vxg_alloc` / `vxg_compress_alloc` / `vxg_decompress_alloc` / `vxg_free` | `uint8_t* ...` | Convenience heap-allocated wrappers and WebAssembly linear-memory helpers. |
 
 ### Compressed-Domain SQL Analytics & `Top-K` from C (`vxg_agg_stats_t` & `vxg_select_alloc`)
@@ -143,5 +146,21 @@ Builds a self-contained `vxg.wasm` binary requiring **zero WASI or host imports*
 rustup target add wasm32-unknown-unknown
 cargo build --release --lib --target wasm32-unknown-unknown
 node examples/ffi/wasm_example.mjs
+```
+
+### Apache Arrow C Stream & Zero-Dependency DuckDB Scan ([`examples/ffi/duckdb_read_vxg.py`](../examples/ffi/duckdb_read_vxg.py))
+Exposes `vxg_arrow_export_stream` via Python's built-in `PyCapsule_New` (`__arrow_c_stream__` protocol — **no `pyarrow` required**) so `DuckDB` (and `Polars`) can run arbitrary `JOIN`s, window functions, and CTEs directly over compressed `.vxg` files with optional compressed-domain `vxg sql` pushdown:
+```python
+import duckdb
+from examples.ffi.duckdb_read_vxg import read_vxg
+
+con = duckdb.connect()
+vxg_rel = read_vxg("telemetry.vxg", sql="SELECT service, status, latency_ms WHERE status >= 400")
+rows = con.sql("""
+    SELECT service, COUNT(*) AS errs, QUANTILE_CONT(latency_ms, 0.95) AS p95
+    FROM vxg_rel
+    GROUP BY service
+    ORDER BY errs DESC
+""").fetchall()
 ```
 

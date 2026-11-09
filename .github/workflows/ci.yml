@@ -48,6 +48,7 @@ jobs:
       - run: cargo run --release --features bench --bin vxg-bench -- --suite v4 --size-mib 4 --samples 3 --seconds 0.02 --csv reports/ci-benchmark.csv --markdown reports/ci-benchmark.md
       - run: cargo run --release --features bench --bin vxg-bench -- --suite src-unique --samples 3 --seconds 0.02 --csv reports/ci-src-unique.csv
       - run: python3 scripts/check_ratio_gate.py --ci-csv reports/ci-benchmark.csv --src-csv reports/ci-src-unique.csv --max-regression-pct 1.0
+      - run: python3 scripts/render_tables.py --check
       - run: cat reports/ci-benchmark.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:

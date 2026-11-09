@@ -13,16 +13,18 @@ export default defineConfig({
     /\.\.\/scripts\//,
     /\.\.\/examples\//,
     /\.\.\/reports\//,
+    /\.\.\/tests\//,
+    /\.\.\/archive\//,
     /\.\.\/\.github\//
   ],
   head: [
     ['meta', { name: 'theme-color', content: '#10b981' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:title', content: 'VXG — Vectorized Execution Grammar Codec' }],
-    ['meta', { name: 'og:description', content: 'Store raw NDJSON/CSV verbatim (2.4x-16.7x faster than Parquet ETL), 1.17x-1.32x smaller than Zstd+Dict on flat tabular records, 0.1213 6-dataset real geomean (within 0.6% of Zstd+Dict-9), SQL on 40M+ compressed rows, 100% byte-exact reversible.' }]
+    ['meta', { name: 'og:description', content: 'Store raw NDJSON/CSV verbatim, 0.1172 6-dataset real public geomean (beating Zstd-9 & Zstd+Dict-9 [32..256K] 0.1181), PFOR-Delta time-series (Covid-19 0.0963 vs Zstd-9 0.1415), SQL & Arrow/DuckDB scan up to 40M+ rows, 100% byte-exact reversible.' }]
   ],
   themeConfig: {
-    siteTitle: 'VXG v0.5.1',
+    siteTitle: 'VXG v0.5.2',
     nav: [
       { text: 'Playground (WASM)', link: '/playground' },
       { text: 'AI Tensor (.vxt)', link: '/TENSOR' },

@@ -1,13 +1,13 @@
 # Benchmark protocol
 
-For the current numerical target, see [TARGET_4_006_12_15.md](TARGET_4_006_12_15.md).
+For historical pre-`v4` target notes, see [`archive/docs/TARGET_4_006_12_15.md`](../archive/docs/TARGET_4_006_12_15.md).
 The fourth axis, CPU energy per GB, has its own [energy protocol](ENERGY_BENCHMARKS.md)
 with sustained workloads, idle observations and explicit measurement boundaries.
-For **Real-World Public & System Corpora** (`NYC TLC Yellow Taxi`, `GitHub Archive`, `Apache Access Log`, `Project Gutenberg Shakespeare`, `Kodak` camera photographs), **`Zstd + Trained Dictionary` (`64 KiB` blocks)**, **whole-file `zstd -19 --long` (`128 MiB` window)**, and **head-to-head `DuckDB 2.0 + Parquet` analytical query benchmarks**, see **[CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md)**, [`reports/real-public-1t.md`](../reports/real-public-1t.md), [`reports/real-public-8t.md`](../reports/real-public-8t.md), and [`reports/duckdb-vs-vxg.json`](../reports/duckdb-vs-vxg.json).
+For **Real-World Public & System Corpora** (`NYC TLC Yellow Taxi`, `GitHub Archive`, `Apache Access Log`, `Project Gutenberg Shakespeare`, `Kodak` camera photographs, `datasets/covid-19` cumulative time series, and non-repeating `vxg-src-nonrepeating.rs`), **`Zstd + Trained Dictionary` (`32..256 KiB` sweep over `64 KiB` blocks)**, **whole-file `zstd -19 --long` (`128 MiB` window)**, and **head-to-head `DuckDB 2.0 + Parquet` (`ROW_GROUP_SIZE` `122,880` and `16,384`) analytical query benchmarks**, see **[CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md)**, [`reports/real-public-1t.md`](../reports/real-public-1t.md), [`reports/real-public-8t.md`](../reports/real-public-8t.md), [`reports/covid-19-and-src-8t.md`](../reports/covid-19-and-src-8t.md), and [`reports/duckdb-vs-vxg.json`](../reports/duckdb-vs-vxg.json).
 
-## Synthetic & Procedural Qualification Suite (`--suite v4`, Apple Silicon `aarch64`, SIMD=`Neon`, `16 MiB`, `block=65536`)
+## Historical `v0.4.1` Pre-`v5` Synthetic Qualification Baseline (`--suite v4`, Apple Silicon `aarch64`, SIMD=`Neon`, `16 MiB`, `block=65536`)
 
-> **Corpus note:** `--suite v4` consists of deterministic procedurally generated qualification inputs (`8` structured/text streams + `2` procedural flat-shaded UI/gradient `.bmp` renders). Bold cells mark **only the actual per-row winner** on each metric. For non-synthetic public corpora and real camera photographs, see [CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md).
+> **Corpus & version note (`v0.4.1` pre-`Format v5` vs `v0.5.1+`):** `--suite v4` consists of deterministic procedurally generated qualification inputs (`8` structured/text streams + `2` procedural flat-shaded UI/gradient `.bmp` renders). In particular, `source-and-docs.txt` in `--suite v4` repeats a `~190 KiB` 10-file documentation/source seed via `fill_repeated` to reach `16 MiB`: pre-`v5` (`v0.4.1`, `64 KiB` block-local `FAST_LZ` shown below) compresses it to `0.2698`, whereas `v0.5.1+` (`Format v5` `<= 256 KiB` frame dictionary) captures the repeating `~190 KiB` seed at `0.0036` (just as whole-file `zstd -19 --long` gets `0.0029`). On **non-repeating** source code (`--suite src-unique` / `vxg-src-nonrepeating.rs`, `2.65 MB` with `0%` repetition), `VXG v0.5.2` achieves **`0.1933`** vs `Zstd-9` `0.1954` and `Zstd+Dict-9` `0.1889`. See [CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md) for current `v0.5.2` tables.
 
 Measured on Apple Silicon (`aarch64`, SIMD=`Neon`, `liblz4 1.10.0`, `libzstd 1.5.7`, `16 MiB` per dataset, 5 samples of `0.08 s` per phase, checksums OFF) via `vxg-bench --suite v4 --size-mib 16`.
 - **VXG Performance Index (`VPI`):** $\text{VPI} = \frac{\sqrt{\text{Encode}_{\text{GB/s}} \cdot \text{Decode}_{\text{GB/s}}}}{\text{Ratio}}$ (higher is better; summarizes space-speed trade-off and does not imply higher raw speed where `LZ4` leads in `Enc` or `Dec`).
@@ -189,7 +189,7 @@ scripts/run_qualification.sh reports/qualification/runs/P0-baseline
 ```
 
 A second frozen revision, Q95-r2, applies the 2026-09-26 scope revision
-([E_B_FRONTIER_REVIEW.md](E_B_FRONTIER_REVIEW.md), [TARGET_4_006_12_15.md](TARGET_4_006_12_15.md)):
+([`archive/docs/E_B_FRONTIER_REVIEW.md`](../archive/docs/E_B_FRONTIER_REVIEW.md), [`archive/docs/TARGET_4_006_12_15.md`](../archive/docs/TARGET_4_006_12_15.md)):
 only the `event-mix-identifiers` and `bursty-variable-records` value sources change
 (epoch+counter identifiers; bounded phrase-vocabulary messages). The other two families
 regenerate byte-identical to r1, which remains as an adversarial control set.
@@ -251,7 +251,7 @@ cargo run --release --features bench --bin vxg-pack-eval -- \
 
 The full Q95 reports show an adaptive JSON-only improvement (0.113659 on JSON-16) but no
 held-out ratio improvement beyond fixed-128's selector-byte cost. It is retained as a costed
-negative result; `docs/TARGET_4_95_15_PLAN.md` defines the next literal and matcher gates.
+negative result; `archive/docs/TARGET_4_95_15_PLAN.md` defines the historical literal and matcher gates.
 
 The same evaluator also contains the P5 literal oracle. It extracts validated v2 literal streams,
 builds raw and canonical byte-Huffman payloads for every LZ block and charges a selector, tables,
@@ -651,46 +651,48 @@ Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`,
 
 ### 1. Varied NDJSON (`ndjson_varied.ndjson`, 56.5 MB, 300,000 rows, 863 blocks, input ratio `0.091`)
 
-| Operation | Naive (`dec + op [+ enc]`) | VXG Compressed-Domain | Speedup | Effective Throughput | Output Ratio / Hits |
+> **Historical note (`v0.4.2`–`v0.4.4` Stage 2–6 logs):** Query/mutation tables report wall-clock latency (`ms`) and row scan rate (`M rows/s`), never `raw_bytes / query_time`. For current `v0.5.2` worker-pool latencies and head-to-head `DuckDB 2.0 + Parquet` comparisons, see [CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md).
+
+| Operation | Naive (`dec + op [+ enc]`) | VXG Compressed-Domain | Speedup | Row Scan Rate | Output Ratio / Hits |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| `filter_column` `level == "NOPE"` (0-hit alphabet) | 103.68 ms | **1.43 ms** | **72.5×** | **39.51 GB/s** | 0 hits |
-| `filter_column` `bytes >= 50000` (zone-map skip) | 124.59 ms | **2.11 ms** | **59.0×** | **26.77 GB/s** | 6 hits |
-| `filter_column` `latency_ms >= 200` (numeric pushdown) | 130.25 ms | **4.54 ms** | **28.7×** | **12.43 GB/s** | 563 hits |
-| `filter_column` `service == "fraud-engine"` (dict pushdown) | 124.67 ms | **16.02 ms** | **7.8×** | **3.53 GB/s** | 37,539 hits |
-| `filter_frame` `status == 500` (~5% rows -> `VXG1`) | 134.51 ms | **13.21 ms** | **10.2×** | **4.28 GB/s** | `0.093` |
-| `update_column` `WHERE level == "NOPE" SET CRITICAL` | 213.09 ms | **4.08 ms** | **52.2×** | **13.84 GB/s** | `0.091` (0 hits) |
-| `update_column` `WHERE latency_ms >= 250 SET CRITICAL` | 228.70 ms | **6.51 ms** | **35.2×** | **8.69 GB/s** | `0.092` |
-| `update_column` `WHERE status == 500 SET CRITICAL` | 260.37 ms | **11.55 ms** | **22.6×** | **4.89 GB/s** | `0.092` (14,937 hits) |
-| `map_column` `service -> uppercase` (`O(|D|)` dict splice) | 257.66 ms | **8.44 ms** | **30.5×** | **6.70 GB/s** | `0.092` (all 300k rows) |
-| `map_column` `bytes -> bytes + 100` (1-col numeric splice) | 241.71 ms | **28.74 ms** | **8.4×** | **1.97 GB/s** | `0.092` (all 300k rows) |
+| `filter_column` `level == "NOPE"` (0-hit alphabet) | 103.68 ms | **1.43 ms** | **72.5×** | **209.8 M rows/s** | 0 hits |
+| `filter_column` `bytes >= 50000` (zone-map skip) | 124.59 ms | **2.11 ms** | **59.0×** | **142.2 M rows/s** | 6 hits |
+| `filter_column` `latency_ms >= 200` (numeric pushdown) | 130.25 ms | **4.54 ms** | **28.7×** | **66.1 M rows/s** | 563 hits |
+| `filter_column` `service == "fraud-engine"` (dict pushdown) | 124.67 ms | **16.02 ms** | **7.8×** | **18.7 M rows/s** | 37,539 hits |
+| `filter_frame` `status == 500` (~5% rows -> `VXG1`) | 134.51 ms | **13.21 ms** | **10.2×** | **22.7 M rows/s** | `0.093` |
+| `update_column` `WHERE level == "NOPE" SET CRITICAL` | 213.09 ms | **4.08 ms** | **52.2×** | **73.5 M rows/s** | `0.091` (0 hits) |
+| `update_column` `WHERE latency_ms >= 250 SET CRITICAL` | 228.70 ms | **6.51 ms** | **35.2×** | **46.1 M rows/s** | `0.092` |
+| `update_column` `WHERE status == 500 SET CRITICAL` | 260.37 ms | **11.55 ms** | **22.6×** | **26.0 M rows/s** | `0.092` (14,937 hits) |
+| `map_column` `service -> uppercase` (`O(|D|)` dict splice) | 257.66 ms | **8.44 ms** | **30.5×** | **35.5 M rows/s** | `0.092` (all 300k rows) |
+| `map_column` `bytes -> bytes + 100` (1-col numeric splice) | 241.71 ms | **28.74 ms** | **8.4×** | **10.4 M rows/s** | `0.092` (all 300k rows) |
 
 ### 2. Multi-Column CSV (`data.csv`, 30.5 MB, 250,001 lines, 11 columns, input ratio `0.182`)
 
-| Operation | Naive (`dec + op [+ enc]`) | VXG Compressed-Domain | Speedup | Effective Throughput | Output Ratio / Hits |
+| Operation | Naive (`dec + op [+ enc]`) | VXG Compressed-Domain | Speedup | Row Scan Rate | Output Ratio / Hits |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| `filter_column` `csv:1 == "NOPE"` (0-hit alphabet) | 68.77 ms | **5.01 ms** | **13.7×** | **6.09 GB/s** | 0 hits |
-| `filter_column` `csv:6 >= 200` (`latency_ms`) | 81.30 ms | **14.14 ms** | **5.8×** | **2.16 GB/s** | 492 hits |
-| `filter_frame` `csv:5 == 500` (`status == 500`) | 77.45 ms | **20.56 ms** | **3.8×** | **1.49 GB/s** | `0.185` |
-| `update_column` `WHERE csv:6 >= 250 SET CRITICAL` | 144.94 ms | **14.02 ms** | **10.3×** | **2.18 GB/s** | `0.182` |
-| `map_column` `csv:2 -> uppercase` (`O(|D|)` dict splice) | 163.99 ms | **17.79 ms** | **9.2×** | **1.72 GB/s** | `0.182` |
-| `map_column` `csv:7 -> bytes + 100` (1-col numeric splice) | 160.04 ms | **29.83 ms** | **5.4×** | **1.02 GB/s** | `0.182` |
+| `filter_column` `csv:1 == "NOPE"` (0-hit alphabet) | 68.77 ms | **5.01 ms** | **13.7×** | **49.9 M rows/s** | 0 hits |
+| `filter_column` `csv:6 >= 200` (`latency_ms`) | 81.30 ms | **14.14 ms** | **5.8×** | **17.7 M rows/s** | 492 hits |
+| `filter_frame` `csv:5 == 500` (`status == 500`) | 77.45 ms | **20.56 ms** | **3.8×** | **12.2 M rows/s** | `0.185` |
+| `update_column` `WHERE csv:6 >= 250 SET CRITICAL` | 144.94 ms | **14.02 ms** | **10.3×** | **17.8 M rows/s** | `0.182` |
+| `map_column` `csv:2 -> uppercase` (`O(|D|)` dict splice) | 163.99 ms | **17.79 ms** | **9.2×** | **14.1 M rows/s** | `0.182` |
+| `map_column` `csv:7 -> bytes + 100` (1-col numeric splice) | 160.04 ms | **29.83 ms** | **5.4×** | **8.4 M rows/s** | `0.182` |
 
 ### 3. Multi-Threaded Scaling (`threads = 8`, `ndjson_varied.ndjson`, 56.5 MB, 300,000 rows, 863 blocks)
 
 Deterministic work-stealing across independent blocks (`Options { threads: 8, .. }`, `DecodeOptions { threads: 8, .. }`), compared against 8-thread `vxg::decompress` + raw transform + 8-thread `vxg::compress`:
 
-| Operation (`threads = 8`) | Naive 8T (`ms`) | VXG 8T (`ms`) | Speedup | VXG 8T Throughput |
+| Operation (`threads = 8`) | Naive 8T (`ms`) | VXG 8T (`ms`) | Speedup | VXG 8T Row Rate |
 | :--- | ---: | ---: | ---: | ---: |
-| `filter_column` `level == "NOPE"` (0 hits) | 73.39 ms | **1.48 ms** | **49.7×** | **38.29 GB/s** |
-| `filter_column` `bytes >= 50000` (6 hits, zone-map) | 84.39 ms | **1.54 ms** | **54.9×** | **36.75 GB/s** |
-| `filter_column` `latency_ms >= 200` (563 hits) | 82.44 ms | **1.88 ms** | **43.8×** | **30.04 GB/s** |
-| `filter_column` `service == "fraud-engine"` (37,539 hits) | 79.94 ms | **5.49 ms** | **14.6×** | **10.30 GB/s** |
-| `filter_frame` `status == 500` (~5% rows -> `VXG1`) | 81.12 ms | **4.24 ms** | **19.1×** | **13.32 GB/s** |
-| `update_column` `WHERE level == "NOPE" SET CRITICAL` | 88.83 ms | **2.03 ms** | **43.8×** | **27.84 GB/s** |
-| `update_column` `WHERE latency_ms >= 250 SET CRITICAL` | 96.52 ms | **3.54 ms** | **27.3×** | **15.96 GB/s** |
-| `update_column` `WHERE status == 500 SET CRITICAL` | 110.40 ms | **3.20 ms** | **34.5×** | **17.66 GB/s** |
-| `map_column` `service -> uppercase` (`O(|D|)` dict splice) | 103.17 ms | **3.27 ms** | **31.5×** | **17.27 GB/s** |
-| `map_column` `bytes -> bytes + 100` (1-col numeric splice) | 107.75 ms | **5.51 ms** | **19.5×** | **10.25 GB/s** |
+| `filter_column` `level == "NOPE"` (0 hits) | 73.39 ms | **1.48 ms** | **49.7×** | **202.7 M rows/s** |
+| `filter_column` `bytes >= 50000` (6 hits, zone-map) | 84.39 ms | **1.54 ms** | **54.9×** | **194.8 M rows/s** |
+| `filter_column` `latency_ms >= 200` (563 hits) | 82.44 ms | **1.88 ms** | **43.8×** | **159.6 M rows/s** |
+| `filter_column` `service == "fraud-engine"` (37,539 hits) | 79.94 ms | **5.49 ms** | **14.6×** | **54.6 M rows/s** |
+| `filter_frame` `status == 500` (~5% rows -> `VXG1`) | 81.12 ms | **4.24 ms** | **19.1×** | **70.8 M rows/s** |
+| `update_column` `WHERE level == "NOPE" SET CRITICAL` | 88.83 ms | **2.03 ms** | **43.8×** | **147.8 M rows/s** |
+| `update_column` `WHERE latency_ms >= 250 SET CRITICAL` | 96.52 ms | **3.54 ms** | **27.3×** | **84.7 M rows/s** |
+| `update_column` `WHERE status == 500 SET CRITICAL` | 110.40 ms | **3.20 ms** | **34.5×** | **93.8 M rows/s** |
+| `map_column` `service -> uppercase` (`O(|D|)` dict splice) | 103.17 ms | **3.27 ms** | **31.5×** | **91.7 M rows/s** |
+| `map_column` `bytes -> bytes + 100` (1-col numeric splice) | 107.75 ms | **5.51 ms** | **19.5×** | **54.4 M rows/s** |
 
 ## Stage 3 & Stage 4: Compound `WHERE`, `GROUP BY` Analytics & Zero-Reencode Column Projection (`v0.4.2`)
 
@@ -698,45 +700,45 @@ Measured on **`ndjson_varied.ndjson`** (`56,503,837 B` raw -> `5,167,201 B` / `9
 
 ### 1. Stage 3 — Compound `PredExpr`, Scalar Aggregations & 2-Tier Dictionary `GROUP BY`
 
-| Query | Naive `1T` | VXG `1T` | `1T` Speedup (`GB/s`) | VXG `8T` | `8T` Speedup (`GB/s`) |
+| Query | Naive `1T` | VXG `1T` | `1T` Speedup (`M rows/s`) | VXG `8T` | `8T` Speedup (`M rows/s`) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `count_where` `service==fraud & status==500 & lat>=150` (`12` hits) | 166.88 ms | **6.44 ms** | **25.9×** (**8.77 GB/s**) | **6.26 ms** | **22.3×** (**9.03 GB/s**) |
-| `filter_where` `(status==500 & lat>=220) \| bytes>=50000` (`30` hits) | 300.06 ms | **9.45 ms** | **31.7×** (**5.98 GB/s**) | **5.99 ms** | **39.9×** (**9.44 GB/s**) |
-| `aggregate_column` `SUM/MIN/MAX(bytes)` (all `300k` rows) | 184.61 ms | **3.74 ms** | **49.4×** (**15.12 GB/s**) | **6.13 ms** | **21.6×** (**9.22 GB/s**) |
-| `aggregate_column` `SUM/MIN/MAX(bytes) WHERE status==500` | 153.59 ms | **4.36 ms** | **35.2×** (**12.95 GB/s**) | **4.97 ms** | **29.4×** (**11.36 GB/s**) |
-| `group_by(service)` `COUNT(*)` (`8` groups) | 167.55 ms | **4.07 ms** | **41.2×** (**13.89 GB/s**) | **5.39 ms** | **28.3×** (**10.49 GB/s**) |
-| `group_by(service)` `SUM/MIN/MAX(bytes)` (`8` groups) | 263.26 ms | **8.45 ms** | **31.2×** (**6.69 GB/s**) | **5.22 ms** | **48.5×** (**10.82 GB/s**) |
-| `group_by(service)` `SUM(latency_ms) WHERE status==500` | 182.87 ms | **6.68 ms** | **27.4×** (**8.46 GB/s**) | **7.84 ms** | **18.4×** (**7.21 GB/s**) |
+| `count_where` `service==fraud & status==500 & lat>=150` (`12` hits) | 166.88 ms | **6.44 ms** | **25.9×** (**46.6 M/s**) | **6.26 ms** | **22.3×** (**47.9 M/s**) |
+| `filter_where` `(status==500 & lat>=220) \| bytes>=50000` (`30` hits) | 300.06 ms | **9.45 ms** | **31.7×** (**31.7 M/s**) | **5.99 ms** | **39.9×** (**50.1 M/s**) |
+| `aggregate_column` `SUM/MIN/MAX(bytes)` (all `300k` rows) | 184.61 ms | **3.74 ms** | **49.4×** (**80.2 M/s**) | **6.13 ms** | **21.6×** (**48.9 M/s**) |
+| `aggregate_column` `SUM/MIN/MAX(bytes) WHERE status==500` | 153.59 ms | **4.36 ms** | **35.2×** (**68.8 M/s**) | **4.97 ms** | **29.4×** (**60.4 M/s**) |
+| `group_by(service)` `COUNT(*)` (`8` groups) | 167.55 ms | **4.07 ms** | **41.2×** (**73.7 M/s**) | **5.39 ms** | **28.3×** (**55.7 M/s**) |
+| `group_by(service)` `SUM/MIN/MAX(bytes)` (`8` groups) | 263.26 ms | **8.45 ms** | **31.2×** (**35.5 M/s**) | **5.22 ms** | **48.5×** (**57.5 M/s**) |
+| `group_by(service)` `SUM(latency_ms) WHERE status==500` | 182.87 ms | **6.68 ms** | **27.4×** (**44.9 M/s**) | **7.84 ms** | **18.4×** (**38.3 M/s**) |
 
 ### 2. Stage 4 — `select_columns` & Zero-Reencode `project_frame` Column Splicing
 
-| Projection | Naive `1T` | VXG `1T` | `1T` Speedup (`GB/s`) | VXG `12T` | `12T` Speedup (`GB/s`) | Output |
+| Projection | Naive `1T` | VXG `1T` | `1T` Speedup (`M rows/s`) | VXG `12T` | `12T` Speedup (`M rows/s`) | Output |
 | :--- | ---: | ---: | ---: | ---: | ---: | :--- |
-| `select [service,status,bytes]` (all `300k`) | 150.91 ms | **9.18 ms** | **16.4×** (**6.15 GB/s**) | **5.49 ms** | **22.4×** (**10.30 GB/s**) | `16.25 MB` NDJSON |
-| `select [ts,req_id]` (all `300k`) | 148.22 ms | **8.58 ms** | **17.3×** (**6.58 GB/s**) | **4.53 ms** | **29.0×** (**12.47 GB/s**) | `13.80 MB` NDJSON |
-| `select [service,lat,bytes] WHERE status==500` | 124.92 ms | **3.39 ms** | **36.9×** (**16.68 GB/s**) | **3.57 ms** | **30.8×** (**15.83 GB/s**) | `851 KB` NDJSON |
-| `select [ts,req_id,lat] WHERE fraud&500&lat>=150` | 104.44 ms | **3.75 ms** | **27.8×** (**15.06 GB/s**) | **2.73 ms** | **37.3×** (**20.71 GB/s**) | `756 B` NDJSON |
-| `project_frame [service,status,bytes,lat]` (**splice**) | 165.26 ms | **7.09 ms** | **23.3×** (**7.97 GB/s**) | **5.26 ms** | **32.6×** (**10.73 GB/s**) | `1.42 MB` VXG (`6.78%`) |
-| `project_frame [service,lat,bytes] WHERE status==500` | 110.38 ms | **8.07 ms** | **13.7×** (**7.00 GB/s**) | **7.73 ms** | **14.3×** (**7.31 GB/s**) | `57 KB` VXG (`6.70%`) |
+| `select [service,status,bytes]` (all `300k`) | 150.91 ms | **9.18 ms** | **16.4×** (**32.7 M/s**) | **5.49 ms** | **22.4×** (**54.6 M/s**) | `16.25 MB` NDJSON |
+| `select [ts,req_id]` (all `300k`) | 148.22 ms | **8.58 ms** | **17.3×** (**35.0 M/s**) | **4.53 ms** | **29.0×** (**66.2 M/s**) | `13.80 MB` NDJSON |
+| `select [service,lat,bytes] WHERE status==500` | 124.92 ms | **3.39 ms** | **36.9×** (**88.5 M/s**) | **3.57 ms** | **30.8×** (**84.0 M/s**) | `851 KB` NDJSON |
+| `select [ts,req_id,lat] WHERE fraud&500&lat>=150` | 104.44 ms | **3.75 ms** | **27.8×** (**80.0 M/s**) | **2.73 ms** | **37.3×** (**109.9 M/s**) | `756 B` NDJSON |
+| `project_frame [service,status,bytes,lat]` (**splice**) | 165.26 ms | **7.09 ms** | **23.3×** (**42.3 M/s**) | **5.26 ms** | **32.6×** (**57.0 M/s**) | `1.42 MB` VXG (`6.78%`) |
+| `project_frame [service,lat,bytes] WHERE status==500` | 110.38 ms | **8.07 ms** | **13.7×** (**37.2 M/s**) | **7.73 ms** | **14.3×** (**38.8 M/s**) | `57 KB` VXG (`6.70%`) |
 
 ### 3. Stage 5 — Zero-Copy `mmap` Verification & Bounded-Memory Multi-Frame `--stream` (`v0.4.3`, `8T`)
 
-| Operation (`ndjson_varied.ndjson`, `56.50 MB` raw, `300,000` rows, `8T`) | Latency | Effective Throughput | Peak Output / Stream Buffer |
+| Operation (`ndjson_varied.ndjson`, `56.50 MB` raw, `300,000` rows, `8T`) | Latency | Full-Frame `GB/s` / Row Rate | Peak Output / Stream Buffer |
 | :--- | ---: | ---: | :--- |
-| `vxg verify -t 8` (`MappedFile` + zero-output-alloc `verify_frame`) | **4.69 ms** | **12.04 GB/s** | `~512 KiB` (`64 KiB × 8` L2 scratch) |
-| `vxg verify --stream -t 8` (`FrameReader` + `verify_stream`) | **10.37 ms** | **5.45 GB/s** | `8 MiB` single-frame buffer |
-| `vxg compress --stream -t 8` (`5,167,393 B`, `9.15%`, `7` frames) | **25.97 ms** | **2.18 GB/s** | `8 MiB` bounded chunk |
-| `vxg project --cols ts,service,status,latency_ms` (`mmap` / `--stream`) | **4.73 ms** / **12.02 ms** | **11.95 GB/s** / **4.70 GB/s** | Byte-exact decoded output |
+| `vxg verify -t 8` (`MappedFile` + zero-output-alloc `verify_frame`) | **4.69 ms** | **12.04 GB/s** *(full-frame)* | `~512 KiB` (`64 KiB × 8` L2 scratch) |
+| `vxg verify --stream -t 8` (`FrameReader` + `verify_stream`) | **10.37 ms** | **5.45 GB/s** *(full-frame)* | `8 MiB` single-frame buffer |
+| `vxg compress --stream -t 8` (`5,167,393 B`, `9.15%`, `7` frames) | **25.97 ms** | **2.18 GB/s** *(full-frame)* | `8 MiB` bounded chunk |
+| `vxg project --cols ts,service,status,latency_ms` (`mmap` / `--stream`) | **4.73 ms** / **12.02 ms** | **63.4 M rows/s** / **25.0 M rows/s** | Byte-exact decoded output |
 
 ### 4. Stage 6 — Compressed-Domain `ORDER BY` / `Top-K` Heap Queries (`top_k_by`, `select_top_k_by`)
 
 Measured on **`ndjson_varied.ndjson`** (`56.50 MB` raw, `300,000` rows, `863` blocks, median of 5 timed samples via `vxg-query-real --topk-suite`). Every run compares against `vxg::decompress` + $O(N)$ `select_nth_unstable_by` partial sort (`naive`) and asserts exact `(global_row_index, bytes)` equality:
 
-| Top-K Query (`ndjson_varied.ndjson`, `56.50 MB`, `300k` rows) | Naive `1T` | VXG `1T` | `1T` Speedup (`GB/s`) | VXG `8T` | `8T` Speedup (`GB/s`) |
+| Top-K Query (`ndjson_varied.ndjson`, `56.50 MB`, `300k` rows) | Naive `1T` | VXG `1T` | `1T` Speedup (`M rows/s`) | VXG `8T` | `8T` Speedup (`M rows/s`) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| `top_k_by` `ORDER BY bytes DESC LIMIT 10` (zone-map skip) | 101.68 ms | **1.82 ms** | **55.9×** (**31.04 GB/s**) | **1.43 ms** | **63.8×** (**39.60 GB/s**) |
-| `top_k_by` `ORDER BY latency_ms DESC LIMIT 10` (all `300k`) | 98.13 ms | **1.78 ms** | **55.0×** (**31.65 GB/s**) | **1.59 ms** | **57.5×** (**35.63 GB/s**) |
-| `top_k_by` `ORDER BY latency_ms ASC LIMIT 10` (all `300k`) | 94.89 ms | **1.38 ms** | **68.6×** (**40.85 GB/s**) | **1.33 ms** | **72.5×** (**42.33 GB/s**) |
-| `top_k_by` `WHERE status==500 ORDER BY latency_ms DESC K=20` | 93.32 ms | **2.63 ms** | **35.5×** (**21.52 GB/s**) | **1.56 ms** | **55.9×** (**36.33 GB/s**) |
-| `select_top_k_by` `[ts,svc,lat] WHERE fraud&500 ORDER BY lat DESC K=10` | 108.15 ms | **3.94 ms** | **27.4×** (**14.32 GB/s**) | **1.64 ms** | **54.3×** (**34.52 GB/s**) |
-| `top_k_by` `ORDER BY service ASC LIMIT 10` (`O(\|D\|)` alive bitmap) | 107.05 ms | **1.90 ms** | **56.2×** (**29.67 GB/s**) | **1.44 ms** | **63.7×** (**39.22 GB/s**) |
+| `top_k_by` `ORDER BY bytes DESC LIMIT 10` (zone-map skip) | 101.68 ms | **1.82 ms** | **55.9×** (**164.8 M/s**) | **1.43 ms** | **63.8×** (**209.8 M/s**) |
+| `top_k_by` `ORDER BY latency_ms DESC LIMIT 10` (all `300k`) | 98.13 ms | **1.78 ms** | **55.0×** (**168.5 M/s**) | **1.59 ms** | **57.5×** (**188.7 M/s**) |
+| `top_k_by` `ORDER BY latency_ms ASC LIMIT 10` (all `300k`) | 94.89 ms | **1.38 ms** | **68.6×** (**217.4 M/s**) | **1.33 ms** | **72.5×** (**225.6 M/s**) |
+| `top_k_by` `WHERE status==500 ORDER BY latency_ms DESC K=20` | 93.32 ms | **2.63 ms** | **35.5×** (**114.1 M/s**) | **1.56 ms** | **55.9×** (**192.3 M/s**) |
+| `select_top_k_by` `[ts,svc,lat] WHERE fraud&500 ORDER BY lat DESC K=10` | 108.15 ms | **3.94 ms** | **27.4×** (**76.1 M/s**) | **1.64 ms** | **54.3×** (**182.9 M/s**) |
+| `top_k_by` `ORDER BY service ASC LIMIT 10` (`O(\|D\|)` alive bitmap) | 107.05 ms | **1.90 ms** | **56.2×** (**157.9 M/s**) | **1.44 ms** | **63.7×** (**208.3 M/s**) |

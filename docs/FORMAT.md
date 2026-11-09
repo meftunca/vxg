@@ -32,16 +32,18 @@ In versions 4 and 5, raw offsets and payload offsets are reconstructed determini
 | 4 | u32 | CRC32C of raw block, or zero when disabled |
 
 In `VERSION_V5`, immediately following the `8 * count`-byte block directory and preceding block 0's payload:
-1. **`var_raw` table (`4 * count` bytes, present iff `FLAG_VAR_RAW` is set):** `u32[count]` uncompressed byte lengths `rn_i` (`1 <= rn_i <= B`, $\sum rn_i = N$), used by `--record-aligned` (`Options { record_aligned: true }`) to snap block boundaries to `\n` record delimiters so zero structured records split across blocks.
+1. **`var_raw` table (`4 * count` bytes, present iff `FLAG_VAR_RAW` is set):** `u32[count]` uncompressed byte lengths `rn_i` (`1 <= rn_i <= B`, $\sum rn_i = N$), used by `--record-aligned` (`Options { record_aligned: true }`) to snap block boundaries to `\n` record delimiters so zero structured records split across blocks. On verbose multi-column NDJSON streams, `--record-aligned` automatically scales nominal $B$ up to `<= 1,048,576` bytes (`Options::target_block_rows`, default `2,048` rows/block) while staying strictly within the `v5` `rn_i <= B <= 1 MiB` wire bound.
 2. **Frame prefix dictionary (`dict_wire_len` bytes, present iff `FLAG_FRAME_DICT` is set):** Self-contained raw (`dict_wire_len == dict_raw_len`) or `DICT_LZ`-compressed (`wire[0] & 0x80 != 0`) shared prefix dictionary (`64..=262,144` uncompressed bytes: FastCover `<= 32 KiB` shingle vocabulary or macroscopic `<= 256 KiB` repeating-span coalescer), decoded once per frame and shared read-only across all worker threads without cross-block state.
 
 ### `BLOCK_DICT_LZ` (`kind = 3`, `VERSION_V5`)
 
-`BLOCK_DICT_LZ` payloads begin with header byte `0x80 | huf_flags` (`bit 0` = literals Huffman, `bit 1` = tokens Huffman, `bit 2` = offset-codes Huffman, `bit 3` = length-extensions Huffman), followed by ULEB128 stream counts/byte lengths and five streams (`lits`, `toks` `(lit_code) | (ml_code << 4)`, `off_codes` supporting 3 repeat-offset slots `0..=2` and log2 offset classes `3..` across intra-block + optional frame dictionary history, `len_ext`, and `off_bits` extra offset bits). Each of the four byte streams is independently 4-stream canonical Huffman coded only when strictly smaller (`huf_flags == 0` decodes zero-copy directly from the payload slice).
+`BLOCK_DICT_LZ` payloads begin with header byte `0x80 | huf_flags` (`bit 0` = literals Huffman, `bit 1` = tokens Huffman, `bit 2` = offset-codes Huffman, `bit 3` = length-extensions Huffman), followed by ULEB128 stream counts/byte lengths and five streams (`lits`, `toks` `(lit_code) | (ml_code << 4)`, `off_codes` supporting 3 repeat-offset slots `0..=2` and log2 offset classes `3..` across intra-block + optional frame dictionary history, `len_ext`, and `off_bits` extra offset bits). Each of the four byte streams is independently 4-stream canonical Huffman coded only when strictly smaller (`huf_flags == 0` decodes zero-copy directly from the payload slice). Encoder search effort (`Options::level` `1..=9`) changes only match selection, never the wire format.
 
-### `MODEL_SCALED_DECIMAL` (`tag = 16`, `GRAMMAR_PACKET`)
+### `MODEL_SCALED_DECIMAL` (`tag = 16`) & Exception-Patched `PFOR-Delta` (`0x80 | base_width`)
 
 Fixed-scale ASCII floating-point / currency columns (`scale` fractional digits `1..=9`, optional sign, `base: i64` + bit-packed `u64` scaled-integer deltas) are stored losslessly in `GRAMMAR_PACKET` (`src/columns/model_scaled_dec.rs`) and expose exact scaled-integer zone maps and vectorised arithmetic to the compressed-domain SQL engine.
+
+Both `MODEL_DECIMAL_DELTA` (`tag = 4`, signed row-to-row zigzag integer deltas) and `MODEL_SCALED_DECIMAL` (`tag = 16`, row-to-row zigzag scaled-decimal deltas) support **exception-patched `PFOR-Delta` sub-encoding** (`src/columns/model_delta_pfor.rs`): when the width byte has bit 7 set (`width_byte = 0x80 | base_width`, `0 <= base_width <= 63`), all `count - 1` row-to-row zigzag deltas are bit-packed at `base_width` bits, followed by `exc_count` (`ULEB128`, `<= count / 4`) sorted `(idx_delta: ULEB128, high_bits: ULEB128)` exception patches for partition/entity resets (e.g., country or county boundaries in cumulative time-series CSVs). Nullable/empty numeric cells in mixed columns are handled via a sparse presence mask without forcing the block out of `BLOCK_COLUMN`.
 
 ### Versions 1–3 directory: 32 bytes per block
 
@@ -128,11 +130,15 @@ output overrun, command-count mismatch, or unconsumed streams. Enforce caller ou
 CRC verification is separate from structural validation; an explicitly disabled CRC check
 is not permission to skip structural validation for untrusted GPU input.
 
-## Compatibility
+## Compatibility & Frozen Golden Vector Policy (`v1`–`v5`)
 
 CPU and GPU encoders choose different candidates and may emit different bytes and ratios.
 Both conform to this format. CPU output is intended to be deterministic across SIMD paths
 and worker counts; GPU atomic-min anchor discovery is deterministic within its algorithm.
 The two encoders are not required to be byte-identical. Version 2 is backward-compatible
-at the decoder: it adds opcode 7 only to frames explicitly marked version 2. Future
-incompatible changes require a new version; do not silently reinterpret earlier opcodes.
+at the decoder: it adds opcode 7 only to frames explicitly marked version 2.
+
+**Backward-Compatibility Contract (`0.x` through `1.0`):**
+1. Every public `vxg` release guarantees 100% lossless read/decode/verify compatibility for all valid `VERSION_V1` (`1`), `VERSION_V2` (`2`), `VERSION_V3` (`3`), `VERSION_V4` (`4`), and `VERSION_V5` (`5`) frames.
+2. Any incompatible header, directory, block-kind, or column-model wire layout change **must** increment the frame version (`VERSION_V6+`) or allocate a previously rejected tag/flag bit; existing tags, opcodes, and flag meanings are immutable once released.
+3. Byte-frozen compatibility vectors covering `v1`–`v5` (`BLOCK_RAW`, `BLOCK_LZ`, `BLOCK_COLUMN`, `BLOCK_DICT_LZ`, `FLAG_FRAME_DICT`, and `FLAG_VAR_RAW` `--record-aligned`) are checked into [`tests/vectors/`](../tests/vectors/) and verified on every CI push (`tests/golden.rs`) across Linux (`x86_64`, `aarch64`), macOS (`aarch64`), Windows (`x86_64`), and `wasm32-unknown-unknown`.

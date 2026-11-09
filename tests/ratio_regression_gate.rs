@@ -124,37 +124,37 @@ fn free_text_daemon_logs_corpus() -> Vec<u8> {
 
 #[test]
 fn compression_ratio_regression_gate_1pct() {
-    // Pinned v0.5.1/v0.5.2 encoded byte ceilings (with 1.0% max regression tolerance).
-    // If any codec change degrades ratio by > 1.0% on any corpus class, fail CI immediately.
-    let cases: [(&str, Vec<u8>, usize); 4] = [
-        ("non-repeating-rust-and-docs", non_repeating_source_corpus(), 35_030),
-        ("apache-clf-access-log", non_repeating_clf_corpus(), 13_279),
-        ("cumulative-timeseries-csv", cumulative_timeseries_csv_corpus(), 14_147),
-        ("free-text-daemon-log", free_text_daemon_logs_corpus(), 34_156),
+    // Pinned v0.5.2 compression ratio ceilings (with 1.0% max relative regression tolerance).
+    // Comparing `encoded.len() / raw.len()` rather than raw byte count keeps the gate invariant
+    // to documentation additions in `docs/*.md` while catching any > 1.0% codec ratio regression.
+    let cases: [(&str, Vec<u8>, f64); 4] = [
+        ("non-repeating-rust-and-docs", non_repeating_source_corpus(), 0.2796),
+        ("apache-clf-access-log", non_repeating_clf_corpus(), 0.0574),
+        ("cumulative-timeseries-csv", cumulative_timeseries_csv_corpus(), 0.1061),
+        ("free-text-daemon-log", free_text_daemon_logs_corpus(), 0.1214),
     ];
 
     let enc_opts = Options::default();
     let dec_opts = DecodeOptions::default();
     let mut failures = Vec::new();
 
-    for (name, raw, baseline_bytes) in &cases {
+    for (name, raw, baseline_ratio) in &cases {
         let encoded = compress(raw, &enc_opts).unwrap();
         let decoded = decompress(&encoded, &dec_opts).unwrap();
         assert_eq!(&decoded, raw, "roundtrip mismatch on {name}");
 
-        let max_allowed = (*baseline_bytes as f64 * 1.01).ceil() as usize;
         let ratio = encoded.len() as f64 / raw.len() as f64;
-        let base_ratio = *baseline_bytes as f64 / raw.len() as f64;
+        let max_ratio = *baseline_ratio * 1.01;
         eprintln!(
-            "[ratio-gate] {name:30} raw={:7} enc={:6} ratio={ratio:.4} baseline={baseline_bytes} (limit={max_allowed})",
+            "[ratio-gate] {name:30} raw={:7} enc={:6} ratio={ratio:.4} baseline={baseline_ratio:.4} (limit={max_ratio:.4})",
             raw.len(),
             encoded.len()
         );
-        if encoded.len() > max_allowed {
+        if ratio > max_ratio {
             failures.push(format!(
-                "RATIO REGRESSION > 1.0% on `{name}`: encoded={} bytes (ratio={ratio:.4}) > ceiling={max_allowed} bytes (baseline={} bytes, {base_ratio:.4})",
+                "RATIO REGRESSION > 1.0% on `{name}`: ratio={ratio:.4} ({} / {} bytes) > ceiling={max_ratio:.4} (baseline={baseline_ratio:.4})",
                 encoded.len(),
-                baseline_bytes
+                raw.len(),
             ));
         }
     }
