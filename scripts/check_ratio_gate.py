@@ -44,6 +44,28 @@ COVID_BASELINES = {
     "us_confirmed_33m.csv": 0.0456,
 }
 
+SRC_UNIQUE_BASELINES = {
+    "vxg-src-nonrepeating.rs": 0.1950,
+}
+
+
+def resolve_vxg_bin(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    env_bin = os.environ.get("VXG_BIN")
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+    exe = "vxg.exe" if sys.platform == "win32" else "vxg"
+    candidates: list[str] = []
+    if os.environ.get("CARGO_TARGET_DIR"):
+        candidates.append(os.path.join(os.environ["CARGO_TARGET_DIR"], "release", exe))
+    candidates.append(os.path.expanduser(os.path.join("~", ".cargo", "target", "release", exe)))
+    candidates.append(os.path.join("target", "release", exe))
+    existing = [c for c in candidates if os.path.exists(c)]
+    if existing:
+        return max(existing, key=lambda p: os.path.getmtime(p))
+    return os.path.join("target", "release", exe)
+
 
 def check_bench_csv(csv_path: str, baselines: dict[str, float], tol: float) -> list[str]:
     failures: list[str] = []
@@ -53,11 +75,15 @@ def check_bench_csv(csv_path: str, baselines: dict[str, float], tol: float) -> l
         for row in reader:
             codec = row.get("codec", "")
             op = row.get("operation", "")
-            ds = row.get("dataset", "")
-            if not codec.startswith("vxg") or op != "compress" or ds not in baselines:
+            ds = os.path.basename(row.get("dataset", ""))
+            if codec != "vxg" or op != "compress" or ds not in baselines:
                 continue
             seen.add(ds)
-            ratio = float(row["ratio"])
+            raw_ratio = row.get("ratio_encoded_over_raw") or row.get("ratio")
+            if raw_ratio is None:
+                failures.append(f"{ds}: missing ratio column in {csv_path}")
+                continue
+            ratio = float(raw_ratio)
             base = baselines[ds]
             limit = base * (1.0 + tol / 100.0)
             delta_pct = (ratio / base - 1.0) * 100.0
@@ -109,29 +135,39 @@ def check_corpus_dir(vxg_bin: str, corpus_dir: str, baselines: dict[str, float],
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ci-csv", help="Path to vxg-bench --suite v4 CSV")
+    ap.add_argument("--src-csv", help="Path to vxg-bench --suite src-unique CSV")
     ap.add_argument("--real-csv", help="Path to vxg-bench real-public CSV")
     ap.add_argument("--real-dir", help="Directory containing real public corpora")
     ap.add_argument("--covid-dir", help="Directory containing datasets/covid-19 CSVs")
-    ap.add_argument("--vxg-bin", default="target/release/vxg", help="Path to vxg CLI binary")
+    ap.add_argument("--vxg-bin", default=None, help="Path to vxg CLI binary")
     ap.add_argument("--max-regression-pct", type=float, default=1.0)
     ap.add_argument("--extra-json", help="Optional JSON mapping extra file paths -> baseline ratio")
     args = ap.parse_args()
+    vxg_bin = resolve_vxg_bin(args.vxg_bin)
 
-    if not any([args.ci_csv, args.real_csv, args.real_dir, args.covid_dir, args.extra_json]):
-        ap.error("provide at least one of --ci-csv, --real-csv, --real-dir, --covid-dir, or --extra-json")
+    if not any(
+        [args.ci_csv, args.src_csv, args.real_csv, args.real_dir, args.covid_dir, args.extra_json]
+    ):
+        ap.error(
+            "provide at least one of --ci-csv, --src-csv, --real-csv, --real-dir, --covid-dir, or --extra-json"
+        )
 
     failures: list[str] = []
     if args.ci_csv:
         failures.extend(check_bench_csv(args.ci_csv, CI_SUITE_BASELINES, args.max_regression_pct))
+    if args.src_csv:
+        failures.extend(
+            check_bench_csv(args.src_csv, SRC_UNIQUE_BASELINES, args.max_regression_pct)
+        )
     if args.real_csv:
         failures.extend(check_bench_csv(args.real_csv, REAL_PUBLIC_BASELINES, args.max_regression_pct))
     if args.real_dir:
         failures.extend(
-            check_corpus_dir(args.vxg_bin, args.real_dir, REAL_PUBLIC_BASELINES, args.max_regression_pct)
+            check_corpus_dir(vxg_bin, args.real_dir, REAL_PUBLIC_BASELINES, args.max_regression_pct)
         )
     if args.covid_dir:
         failures.extend(
-            check_corpus_dir(args.vxg_bin, args.covid_dir, COVID_BASELINES, args.max_regression_pct)
+            check_corpus_dir(vxg_bin, args.covid_dir, COVID_BASELINES, args.max_regression_pct)
         )
     if args.extra_json:
         with open(args.extra_json, encoding="utf-8") as jf:
@@ -140,7 +176,7 @@ def main() -> int:
             out_vxg = os.path.join(tmp, "extra.vxg")
             for path, base in extra.items():
                 raw_sz = os.path.getsize(path)
-                subprocess.run([args.vxg_bin, "compress", path, out_vxg, "-t", "8", "-f", "-q"], check=True)
+                subprocess.run([vxg_bin, "compress", path, out_vxg, "-t", "8", "-f", "-q"], check=True)
                 ratio = os.path.getsize(out_vxg) / raw_sz
                 limit = base * (1.0 + args.max_regression_pct / 100.0)
                 delta_pct = (ratio / base - 1.0) * 100.0

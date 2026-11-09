@@ -33,12 +33,21 @@ pub(super) fn evaluate_baselines_and_gpu(
     lz: &str,
     zs: &str,
 ) -> R<()> {
-    let trained_dict = TrainedDict::train(data);
-    ds_summary.dict_bytes = trained_dict.bytes.len();
-    ds_summary.dict_train_ms = trained_dict.train_ns / 1e6;
+    let dict_candidates = TrainedDict::train_sweep(data);
+    let sweep_desc: Vec<String> = dict_candidates
+        .iter()
+        .map(|(cap, d)| {
+            format!(
+                "{}K:{}B({:.1}ms)",
+                cap >> 10,
+                d.bytes.len(),
+                d.train_ns / 1e6
+            )
+        })
+        .collect();
     eprintln!(
-        "{name:22} zstd-dict      train      dict_bytes={} train_ms={:.2}",
-        ds_summary.dict_bytes, ds_summary.dict_train_ms
+        "{name:22} zstd-dict      sweep      [{}]",
+        sweep_desc.join(", ")
     );
 
     let mut codecs = vec![
@@ -71,22 +80,42 @@ pub(super) fn evaluate_baselines_and_gpu(
                 | Codec::ZstdDict { level: 9.. }
                 | Codec::ZstdWholeLong { .. }
         );
-        let compressed = if is_dict {
-            Encoded::compress_with_dict(data, codec, &trained_dict, c.block_size, c.threads)?
+        let (chosen_dict, compressed) = if is_dict {
+            let (best_d, best_cap, enc) = Encoded::compress_best_dict_sweep(
+                data,
+                codec,
+                &dict_candidates,
+                c.block_size,
+                c.threads,
+            )?;
+            eprintln!(
+                "{name:22} {:14} best-dict  cap={}K dict_bytes={} ratio={:.4}",
+                codec.name(),
+                best_cap >> 10,
+                best_d.bytes.len(),
+                enc.encoded_size() as f64 / data.len() as f64
+            );
+            if matches!(codec, Codec::ZstdDict { level: 3 }) {
+                ds_summary.dict_l3_bytes = best_d.bytes.len();
+                ds_summary.dict_bytes = best_d.bytes.len();
+                ds_summary.dict_train_ms = best_d.train_ns / 1e6;
+            } else if matches!(codec, Codec::ZstdDict { level: 9 }) {
+                ds_summary.dict_l9_bytes = best_d.bytes.len();
+                ds_summary.dict_bytes = best_d.bytes.len();
+                ds_summary.dict_train_ms = best_d.train_ns / 1e6;
+            }
+            (Some(best_d), enc)
         } else {
-            Encoded::compress(data, codec, c.block_size, c.threads)?
+            (
+                None,
+                Encoded::compress(data, codec, c.block_size, c.threads)?,
+            )
         };
         compressed.decode_into(out, c.threads)?;
         assert_eq!(out, data, "baseline correctness before timing");
         let en = measure_op_ext(c, data.len(), is_heavy_enc, || {
-            let f = if is_dict {
-                Encoded::compress_with_dict(
-                    black_box(data),
-                    codec,
-                    &trained_dict,
-                    c.block_size,
-                    c.threads,
-                )?
+            let f = if let Some(d) = chosen_dict {
+                Encoded::compress_with_dict(black_box(data), codec, d, c.block_size, c.threads)?
             } else {
                 Encoded::compress(black_box(data), codec, c.block_size, c.threads)?
             };

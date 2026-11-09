@@ -178,6 +178,8 @@ fn synth_geomean_summary(rows: &[&DatasetSummary]) -> DatasetSummary {
         zstd_dict_9: gm_pt(|s| s.zstd_dict_9),
         zstd_whole_19: gm_pt(|s| s.zstd_whole_19),
         dict_bytes: 0,
+        dict_l3_bytes: 0,
+        dict_l9_bytes: 0,
         dict_train_ms: geomean(
             rows.iter()
                 .map(|s| s.dict_train_ms)
@@ -233,7 +235,7 @@ pub(super) fn write_markdown_report(
     )?;
     writeln!(
         f,
-        "\n- **Block-independent codecs (`{}`-byte blocks, random access = YES):** `VXG v4/v5`, `liblz4 {lz}` (`lz4-c-a1`, `lz4-c-a4`{}), and `libzstd {zs}` (`zstd-c-l-3`, `zstd-c-l1`, `zstd-c-l3`, `zstd-dict-l3`{}).\n- **Dictionary accounting:** `zstd-dict-*` trains up to a `32 KiB` dictionary via `ZDICT_trainFromBuffer` (charging `dict_bytes` in compressed size); steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput is reported in `Enc` / `Dec`, with one-time `ZDICT` training time reported separately in `Dict Train (ms)`. `VXG v5` embeds its self-trained `<= 256 KiB` prefix dictionary inside the `.vxg` frame itself, and `VXG Enc` / `Dec` include full dictionary training and parsing time.\n- **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window, single stream) quantifies the compression-ratio difference of removing `{}`-byte block boundaries.\n- Bold cells mark the best block-codec metric in each row; codecs storing near-raw bytes (`ratio >= 0.90`, `< 10%` size reduction) are excluded from speed/trade-off/energy bolding.\n",
+        "\n- **Block-independent codecs (`{}`-byte blocks, random access = YES):** `VXG v4/v5`, `liblz4 {lz}` (`lz4-c-a1`, `lz4-c-a4`{}), and `libzstd {zs}` (`zstd-c-l-3`, `zstd-c-l1`, `zstd-c-l3`, `zstd-dict-l3`{}).\n- **Dictionary accounting:** `zstd-dict-*` sweeps `32 / 64 / 112 / 256 KiB` dictionaries per dataset via `ZDICT_trainFromBuffer` and selects the budget achieving the lowest total compressed size (charging `dict_bytes` in compressed size); steady-state `ZSTD_CDict` / `ZSTD_DDict` throughput is reported in `Enc` / `Dec`, with single-budget `ZDICT` training time of the selected dictionary reported separately in `Dict Train (ms)`. `VXG v5` embeds its self-trained `<= 256 KiB` prefix dictionary inside the `.vxg` frame itself, and `VXG Enc` / `Dec` include full dictionary training and parsing time.\n- **Whole-file reference (`random access = NO`):** `zstd-whole-l19-long` (`zstd -19 --long`, `128 MiB` window, single stream) quantifies the compression-ratio difference of removing `{}`-byte block boundaries.\n- Bold cells mark the best block-codec metric in each row; codecs storing near-raw bytes (`ratio >= 0.90`, `< 10%` size reduction) are excluded from speed/trade-off/energy bolding.\n",
         c.block_size,
         if has_heavy { ", `lz4hc-c-l9`" } else { "" },
         if has_heavy {

@@ -88,6 +88,8 @@ pub(super) struct DatasetSummary {
     pub(super) zstd_dict_9: CodecPoint,
     pub(super) zstd_whole_19: CodecPoint,
     pub(super) dict_bytes: usize,
+    pub(super) dict_l3_bytes: usize,
+    pub(super) dict_l9_bytes: usize,
     pub(super) dict_train_ms: f64,
 }
 
@@ -184,7 +186,7 @@ impl Config {
                 "--v3" | "--v4" => {} // unified pipeline is the default; kept for script compatibility
                 "--legacy" => c.legacy_v2 = true,
                 "--help" => {
-                    println!("vxg-bench [--suite default|v4|all] [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1|auto] [--block-size 65536] [--simd auto] [--csv FILE] [--samples-csv FILE] [--markdown FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--fast-baselines] [--decode-only] [--validated-decode] [--legacy]\nBlock baselines use independent blocks, RAW fallback, and no checksum: LZ4 (a1, a4, HC-L9), Zstd (-3, 1, 3, 9), and Zstd+TrainedDict (L3, L9, charging dictionary size), plus whole-file zstd -19 --long as a non-random-access reference. Pass --fast-baselines to skip heavy presets (L9, dict-L9, whole-L19) during quick iteration.");
+                    println!("vxg-bench [--suite default|v4|src-unique|all] [--size-mib N] [--seconds 0.1] [--samples 5] [--threads 1|auto] [--block-size 65536] [--simd auto] [--csv FILE] [--samples-csv FILE] [--markdown FILE] [--file CORPUS_FILE]... [--only DATASET] [--gpu metal|vulkan|cuda] [--microbench] [--vxg-only] [--fast-baselines] [--decode-only] [--validated-decode] [--legacy]\nBlock baselines use independent blocks, RAW fallback, and no checksum: LZ4 (a1, a4, HC-L9), Zstd (-3, 1, 3, 9), and Zstd+TrainedDict (L3, L9, sweeping 32/64/112/256 KiB per dataset and charging dictionary size), plus whole-file zstd -19 --long as a non-random-access reference. Pass --fast-baselines to skip heavy presets (L9, dict-L9, whole-L19) during quick iteration.");
                     return Ok(None);
                 }
                 x => return Err(format!("unknown option {x}").into()),

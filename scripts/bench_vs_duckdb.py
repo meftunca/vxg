@@ -2,12 +2,15 @@
 """Head-to-head analytical benchmark: VXG Compressed-Domain vs DuckDB (Raw, .zst, Parquet).
 
 Compares in-process libvxg (`ctypes` over `libvxg.dylib` / `libvxg.so`) against in-process
-DuckDB across identical SQL queries, thread counts (1T and 8T), and storage representations:
-  1. `.vxg`            — VXG Format v4 (64 KiB independent blocks, 100% byte-exact lossless)
-  2. Raw `.ndjson/.csv` — DuckDB `read_json_auto` / `read_csv`
-  3. `.ndjson.zst`     — DuckDB `read_json_auto` / `read_csv` over `zstd -3`
-  4. `.parquet` (Snappy) — DuckDB `read_parquet` (columnar ETL, NOT byte-reversible to raw text)
-  5. `.parquet` (Zstd)   — DuckDB `read_parquet` (columnar ETL, NOT byte-reversible to raw text)
+DuckDB across identical SQL queries, thread counts (`1T` and `8T`), and storage representations:
+  1. `.vxg`                        — VXG Format v4/v5 (`64 KiB` independent blocks, 100% byte-exact lossless)
+  2. `.aligned.vxg`                — VXG `--record-aligned` (100% byte-exact lossless)
+  3. Raw `.ndjson/.csv`            — DuckDB `read_json_auto` / `read_csv`
+  4. `.ndjson.zst`                 — DuckDB `read_json_auto` / `read_csv` over `zstd -3`
+  5. `.parquet` (Snappy, default)  — DuckDB `read_parquet` (`ROW_GROUP_SIZE=122880`, NOT byte-reversible)
+  6. `.parquet` (Zstd, default)    — DuckDB `read_parquet` (`ROW_GROUP_SIZE=122880`, NOT byte-reversible)
+  7. `.parquet` (Snappy, RG=16384) — DuckDB `read_parquet` (`ROW_GROUP_SIZE=16384` for fair 8T parallelism)
+  8. `.parquet` (Zstd, RG=16384)   — DuckDB `read_parquet` (`ROW_GROUP_SIZE=16384` for fair 8T parallelism)
 
 Reports wall-clock latency (`ms`), throughput in million rows/sec (`M rows/s`), archive size on
 disk (`MB` + ratio), one-time ingest/compression latency (`ms`), and exact output verification.
@@ -140,7 +143,28 @@ def vxg_compress_bytes(lib, raw: bytes, threads: int) -> tuple[bytes, float]:
     return frame, ms
 
 
-def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
+def resolve_vxg_artifact(env_key: str, filenames: list[str]) -> str:
+    env_val = os.environ.get(env_key)
+    if env_val and os.path.exists(env_val):
+        return env_val
+    dirs: list[str] = []
+    if os.environ.get("CARGO_TARGET_DIR"):
+        dirs.append(os.path.join(os.environ["CARGO_TARGET_DIR"], "release"))
+    dirs.append(os.path.expanduser(os.path.join("~", ".cargo", "target", "release")))
+    dirs.append(os.path.join("target", "release"))
+    dirs.append("/tmp/vxg-target/release")
+    existing: list[str] = []
+    for d in dirs:
+        for fn in filenames:
+            p = os.path.join(d, fn)
+            if os.path.exists(p):
+                existing.append(p)
+    if not existing:
+        raise FileNotFoundError(f"Could not find {filenames} in {dirs}; run `cargo build --release` first")
+    return max(existing, key=lambda p: os.path.getmtime(p))
+
+
+def run_dataset_suite(lib, vxg_bin: str, spec: dict, work_dir: str) -> dict:
     name = spec["name"]
     path = spec["path"]
     kind = spec["kind"]  # "ndjson" or "csv"
@@ -150,15 +174,18 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
 
     ext = ".ndjson" if kind == "ndjson" else ".csv"
     zst_path = os.path.join(work_dir, f"{name}{ext}.zst")
+    vxg_aln_path = os.path.join(work_dir, f"{name}.aligned.vxg")
     pq_zstd_path = os.path.join(work_dir, f"{name}.zstd.parquet")
     pq_snap_path = os.path.join(work_dir, f"{name}.snappy.parquet")
+    pq_zstd_rg16k_path = os.path.join(work_dir, f"{name}.zstd.rg16k.parquet")
+    pq_snap_rg16k_path = os.path.join(work_dir, f"{name}.snappy.rg16k.parquet")
 
     # Prepare Zstd -3 raw archive
     t0 = time.perf_counter()
     subprocess.run(["zstd", "-q", "-f", "-3", "-T8", path, "-o", zst_path], check=True)
     zst_enc_ms = (time.perf_counter() - t0) * 1000.0
 
-    # Prepare Parquet (Zstd & Snappy) via DuckDB 8T
+    # Prepare Parquet (default ROW_GROUP_SIZE=122880 AND parallel-friendly ROW_GROUP_SIZE=16384) via DuckDB 8T
     con_prep = duckdb.connect()
     con_prep.execute("SET threads TO 8;")
     reader_expr = (
@@ -180,11 +207,47 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
         samples=3,
         warmups=1,
     )
+    pq_zstd_rg16k_ms, _ = bench_median_ms(
+        lambda: con_prep.execute(
+            f"COPY (SELECT * FROM {reader_expr}) TO '{pq_zstd_rg16k_path}' "
+            f"(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 16384);"
+        ),
+        samples=3,
+        warmups=1,
+    )
+    pq_snap_rg16k_ms, _ = bench_median_ms(
+        lambda: con_prep.execute(
+            f"COPY (SELECT * FROM {reader_expr}) TO '{pq_snap_rg16k_path}' "
+            f"(FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 16384);"
+        ),
+        samples=3,
+        warmups=1,
+    )
+    con_prep.close()
 
     _, vxg_1t_ms = vxg_compress_bytes(lib, raw, 1)
     frame, vxg_8t_ms = vxg_compress_bytes(lib, raw, 8)
     frame_buf = (ctypes.c_uint8 * len(frame)).from_buffer_copy(frame)
     frame_len = len(frame)
+
+    # Prepare & verify VXG `--record-aligned`
+    vxg_aln_8t_ms, _ = bench_median_ms(
+        lambda: subprocess.run(
+            [vxg_bin, "compress", path, vxg_aln_path, "-t", "8", "--record-aligned", "--no-checksum", "-f", "-q"],
+            check=True,
+        ),
+        samples=3,
+        warmups=1,
+    )
+    frame_aln = open(vxg_aln_path, "rb").read()
+    frame_aln_buf = (ctypes.c_uint8 * len(frame_aln)).from_buffer_copy(frame_aln)
+    frame_aln_len = len(frame_aln)
+    out_len_aln = ctypes.c_size_t(0)
+    dptr_aln = lib.vxg_decompress_alloc(frame_aln_buf, frame_aln_len, 8, 0, ctypes.byref(out_len_aln))
+    assert dptr_aln, "vxg_decompress_alloc (--record-aligned) failed"
+    restored_aln = ctypes.string_at(dptr_aln, out_len_aln.value)
+    lib.vxg_free(dptr_aln, out_len_aln.value)
+    assert restored_aln == raw, "VXG --record-aligned roundtrip mismatch!"
 
     storage = {
         "raw_bytes": len(raw),
@@ -194,6 +257,9 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
         "vxg_ratio": frame_len / len(raw),
         "vxg_enc_1t_ms": vxg_1t_ms,
         "vxg_enc_8t_ms": vxg_8t_ms,
+        "vxg_aligned_bytes": frame_aln_len,
+        "vxg_aligned_ratio": frame_aln_len / len(raw),
+        "vxg_aligned_enc_8t_ms": vxg_aln_8t_ms,
         "zst_bytes": os.path.getsize(zst_path),
         "zst_ratio": os.path.getsize(zst_path) / len(raw),
         "zst_enc_8t_ms": zst_enc_ms,
@@ -203,6 +269,12 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
         "pq_snap_bytes": os.path.getsize(pq_snap_path),
         "pq_snap_ratio": os.path.getsize(pq_snap_path) / len(raw),
         "pq_snap_etl_8t_ms": pq_snap_ms,
+        "pq_zstd_rg16k_bytes": os.path.getsize(pq_zstd_rg16k_path),
+        "pq_zstd_rg16k_ratio": os.path.getsize(pq_zstd_rg16k_path) / len(raw),
+        "pq_zstd_rg16k_etl_8t_ms": pq_zstd_rg16k_ms,
+        "pq_snap_rg16k_bytes": os.path.getsize(pq_snap_rg16k_path),
+        "pq_snap_rg16k_ratio": os.path.getsize(pq_snap_rg16k_path) / len(raw),
+        "pq_snap_rg16k_etl_8t_ms": pq_snap_rg16k_ms,
     }
 
     results_by_threads = {}
@@ -231,100 +303,114 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
         )
         src_pq_zstd = f"read_parquet('{pq_zstd_path}')"
         src_pq_snap = f"read_parquet('{pq_snap_path}')"
+        src_pq_zstd_rg16k = f"read_parquet('{pq_zstd_rg16k_path}')"
+        src_pq_snap_rg16k = f"read_parquet('{pq_snap_rg16k_path}')"
 
         q_rows = []
         for qi, q in enumerate(spec["queries"]):
             qtype = q["type"]
             label = q["label"]
 
-            if qtype == "count_where":
-                w_b = q["vxg_where"].encode()
+            def make_vxg_runner(fbuf, flen: int):
+                if qtype == "count_where":
+                    w_b = q["vxg_where"].encode()
 
-                def run_vxg():
-                    n = lib.vxg_count_where_str(frame_buf, frame_len, w_b, threads)
-                    assert n >= 0
-                    return int(n)
+                    def _run():
+                        n = lib.vxg_count_where_str(fbuf, flen, w_b, threads)
+                        assert n >= 0
+                        return int(n)
 
-            elif qtype == "agg":
-                c_b = q["vxg_col"].encode()
-                w_b = q["vxg_where"].encode() if q.get("vxg_where") else None
+                    return _run
+                if qtype == "agg":
+                    c_b = q["vxg_col"].encode()
+                    w_b = q["vxg_where"].encode() if q.get("vxg_where") else None
 
-                def run_vxg():
-                    st = VxgAggStats()
-                    rc = lib.vxg_aggregate_col(
-                        frame_buf, frame_len, c_b, w_b, threads, ctypes.byref(st)
-                    )
-                    assert rc == 0
-                    total = st.sum_lo | (st.sum_hi << 64)
-                    return (int(st.num_count), int(total), int(st.min_val), int(st.max_val))
+                    def _run():
+                        st = VxgAggStats()
+                        rc = lib.vxg_aggregate_col(fbuf, flen, c_b, w_b, threads, ctypes.byref(st))
+                        assert rc == 0
+                        total = st.sum_lo | (st.sum_hi << 64)
+                        return (int(st.num_count), int(total), int(st.min_val), int(st.max_val))
 
-            elif qtype == "group_by":
-                g_b = q["vxg_group"].encode()
-                a_b = q["vxg_agg"].encode()
-                w_b = q["vxg_where"].encode() if q.get("vxg_where") else None
+                    return _run
+                if qtype == "group_by":
+                    g_b = q["vxg_group"].encode()
+                    a_b = q["vxg_agg"].encode()
+                    w_b = q["vxg_where"].encode() if q.get("vxg_where") else None
 
-                def run_vxg():
-                    out_len = ctypes.c_size_t(0)
-                    ptr = lib.vxg_group_by_alloc(
-                        frame_buf, frame_len, g_b, a_b, w_b, threads, ctypes.byref(out_len)
-                    )
-                    assert ptr
-                    txt = ctypes.string_at(ptr, out_len.value).decode()
-                    lib.vxg_free(ptr, out_len.value)
-                    out_map = {}
-                    for ln in txt.splitlines():
-                        k, rc_s, _, sum_s, _, _ = ln.split("\t")
-                        out_map[str(k)] = (int(rc_s), int(sum_s))
-                    return out_map
+                    def _run():
+                        out_len = ctypes.c_size_t(0)
+                        ptr = lib.vxg_group_by_alloc(
+                            fbuf, flen, g_b, a_b, w_b, threads, ctypes.byref(out_len)
+                        )
+                        assert ptr
+                        txt = ctypes.string_at(ptr, out_len.value).decode()
+                        lib.vxg_free(ptr, out_len.value)
+                        out_map = {}
+                        for ln in txt.splitlines():
+                            k, rc_s, _, sum_s, _, _ = ln.split("\t")
+                            out_map[str(k)] = (int(rc_s), int(sum_s))
+                        return out_map
 
-            elif qtype == "top_k":
-                cols_b = q["vxg_cols"].encode()
-                ord_b = q["vxg_order"].encode()
-                w_b = q["vxg_where"].encode() if q.get("vxg_where") else None
-                desc_i = 1 if q.get("desc", True) else 0
-                lim = q["limit"]
+                    return _run
+                if qtype == "top_k":
+                    cols_b = q["vxg_cols"].encode()
+                    ord_b = q["vxg_order"].encode()
+                    w_b = q["vxg_where"].encode() if q.get("vxg_where") else None
+                    desc_i = 1 if q.get("desc", True) else 0
+                    lim = q["limit"]
 
-                def run_vxg():
-                    out_len = ctypes.c_size_t(0)
-                    ptr = lib.vxg_select_alloc(
-                        frame_buf,
-                        frame_len,
-                        cols_b,
-                        w_b,
-                        ord_b,
-                        desc_i,
-                        lim,
-                        threads,
-                        ctypes.byref(out_len),
-                    )
-                    assert ptr
-                    b = ctypes.string_at(ptr, out_len.value)
-                    lib.vxg_free(ptr, out_len.value)
-                    return b
+                    def _run():
+                        out_len = ctypes.c_size_t(0)
+                        ptr = lib.vxg_select_alloc(
+                            fbuf,
+                            flen,
+                            cols_b,
+                            w_b,
+                            ord_b,
+                            desc_i,
+                            lim,
+                            threads,
+                            ctypes.byref(out_len),
+                        )
+                        assert ptr
+                        b = ctypes.string_at(ptr, out_len.value)
+                        lib.vxg_free(ptr, out_len.value)
+                        return b
 
-            elif qtype == "select_where":
-                cols_b = q["vxg_cols"].encode()
-                w_b = q["vxg_where"].encode()
+                    return _run
+                if qtype == "select_where":
+                    cols_b = q["vxg_cols"].encode()
+                    w_b = q["vxg_where"].encode()
 
-                def run_vxg():
-                    out_len = ctypes.c_size_t(0)
-                    ptr = lib.vxg_select_alloc(
-                        frame_buf,
-                        frame_len,
-                        cols_b,
-                        w_b,
-                        None,
-                        0,
-                        (1 << 62),
-                        threads,
-                        ctypes.byref(out_len),
-                    )
-                    assert ptr
-                    b = ctypes.string_at(ptr, out_len.value)
-                    lib.vxg_free(ptr, out_len.value)
-                    return b
+                    def _run():
+                        out_len = ctypes.c_size_t(0)
+                        ptr = lib.vxg_select_alloc(
+                            fbuf,
+                            flen,
+                            cols_b,
+                            w_b,
+                            None,
+                            0,
+                            (1 << 62),
+                            threads,
+                            ctypes.byref(out_len),
+                        )
+                        assert ptr
+                        b = ctypes.string_at(ptr, out_len.value)
+                        lib.vxg_free(ptr, out_len.value)
+                        return b
 
-            vxg_ms, vxg_val = bench_median_ms(run_vxg, samples=7, warmups=2)
+                    return _run
+                raise ValueError(qtype)
+
+            vxg_ms, vxg_val = bench_median_ms(
+                make_vxg_runner(frame_buf, frame_len), samples=7, warmups=2
+            )
+            vxg_aligned_ms, vxg_aln_val = bench_median_ms(
+                make_vxg_runner(frame_aln_buf, frame_aln_len), samples=7, warmups=2
+            )
+            assert vxg_val == vxg_aln_val, f"{label}: aligned mismatch"
 
             def bench_duck(tbl_src: str):
                 sql = q["sql"].format(tbl=tbl_src)
@@ -343,10 +429,22 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
             pq_zstd_ms_q, d_pq_z = bench_duck(src_pq_zstd)
             pq_snap_prep_ms, d_pq_sp = bench_duck_prepared(f"pqs_{qi}", src_pq_snap)
             pq_zstd_prep_ms, d_pq_zp = bench_duck_prepared(f"pqz_{qi}", src_pq_zstd)
+            pq_snap_rg16k_prep_ms, d_pq_s16 = bench_duck_prepared(
+                f"pqs16_{qi}", src_pq_snap_rg16k
+            )
+            pq_zstd_rg16k_prep_ms, d_pq_z16 = bench_duck_prepared(
+                f"pqz16_{qi}", src_pq_zstd_rg16k
+            )
             if qtype == "group_by":
-                assert sorted(d_pq_s) == sorted(d_pq_sp) and sorted(d_pq_z) == sorted(d_pq_zp)
+                assert (
+                    sorted(d_pq_s) == sorted(d_pq_sp) == sorted(d_pq_s16)
+                    and sorted(d_pq_z) == sorted(d_pq_zp) == sorted(d_pq_z16)
+                )
+            elif qtype == "top_k":
+                assert [int(r[-1]) for r in d_pq_s] == [int(r[-1]) for r in d_pq_s16]
+                assert [int(r[-1]) for r in d_pq_z] == [int(r[-1]) for r in d_pq_z16]
             else:
-                assert d_pq_s == d_pq_sp and d_pq_z == d_pq_zp
+                assert d_pq_s == d_pq_sp == d_pq_s16 and d_pq_z == d_pq_zp == d_pq_z16
 
             # Strict semantic equivalence check between VXG and DuckDB!
             if qtype == "count_where":
@@ -374,25 +472,31 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
                     "label": label,
                     "vxg_ms": vxg_ms,
                     "vxg_mrows_s": mrows / (vxg_ms / 1000.0),
+                    "vxg_aligned_ms": vxg_aligned_ms,
+                    "vxg_aligned_mrows_s": mrows / (vxg_aligned_ms / 1000.0),
                     "duck_raw_ms": raw_ms,
                     "duck_zst_ms": zst_ms,
                     "duck_pq_snap_ms": pq_snap_ms_q,
                     "duck_pq_snap_prep_ms": pq_snap_prep_ms,
+                    "duck_pq_snap_rg16k_prep_ms": pq_snap_rg16k_prep_ms,
                     "duck_pq_zstd_ms": pq_zstd_ms_q,
                     "duck_pq_zstd_prep_ms": pq_zstd_prep_ms,
+                    "duck_pq_zstd_rg16k_prep_ms": pq_zstd_rg16k_prep_ms,
                     "duck_pq_zstd_mrows_s": mrows / (pq_zstd_ms_q / 1000.0),
                     "duck_pq_zstd_prep_mrows_s": mrows / (pq_zstd_prep_ms / 1000.0),
+                    "duck_pq_snap_rg16k_prep_mrows_s": mrows / (pq_snap_rg16k_prep_ms / 1000.0),
+                    "duck_pq_zstd_rg16k_prep_mrows_s": mrows / (pq_zstd_rg16k_prep_ms / 1000.0),
                 }
             )
             print(
-                f"  [{name} {threads}T sel1={sel1_adhoc_ms:.2f}/{sel1_prep_ms:.2f}ms] {label:44s}  "
-                f"VXG={vxg_ms:6.2f}ms ({mrows/(vxg_ms/1000.0):6.1f} Mrow/s) | "
-                f"DuckRaw={raw_ms:6.2f}ms | DuckZst={zst_ms:6.2f}ms | "
-                f"ParqSnap={pq_snap_ms_q:5.2f}ms(prep {pq_snap_prep_ms:5.2f}) | "
-                f"ParqZstd={pq_zstd_ms_q:5.2f}ms(prep {pq_zstd_prep_ms:5.2f})",
+                f"  [{name} {threads}T sel1={sel1_adhoc_ms:.2f}/{sel1_prep_ms:.2f}ms] {label:42s}  "
+                f"VXG={vxg_ms:5.2f}ms (aln={vxg_aligned_ms:5.2f}ms) | "
+                f"ParqSnap={pq_snap_prep_ms:5.2f}ms(rg16k={pq_snap_rg16k_prep_ms:5.2f}) | "
+                f"ParqZstd={pq_zstd_prep_ms:5.2f}ms(rg16k={pq_zstd_rg16k_prep_ms:5.2f})",
                 flush=True,
             )
 
+        con.close()
         results_by_threads[str(threads)] = {
             "duck_select_1_adhoc_ms": sel1_adhoc_ms,
             "duck_select_1_prepared_ms": sel1_prep_ms,
@@ -403,9 +507,9 @@ def run_dataset_suite(lib, spec: dict, work_dir: str) -> dict:
 
 
 def main():
-    lib_path = os.environ.get("VXG_LIB", "/tmp/vxg-target/release/libvxg.dylib")
-    if not os.path.exists(lib_path):
-        lib_path = "/tmp/vxg-target/release/libvxg.so"
+    lib_path = resolve_vxg_artifact("VXG_LIB", ["libvxg.dylib", "libvxg.so", "vxg.dll"])
+    vxg_bin = resolve_vxg_artifact("VXG_BIN", ["vxg", "vxg.exe"])
+    print(f"Using libvxg={lib_path}, vxg_bin={vxg_bin}", flush=True)
     lib = load_vxg_lib(lib_path)
 
     suites = [
@@ -550,7 +654,7 @@ def main():
                 print(f"Skipping missing {s['path']}", file=sys.stderr)
                 continue
             print(f"\n=== Benchmarking {s['name']} ({s['category']}) ===", flush=True)
-            all_out["datasets"].append(run_dataset_suite(lib, s, wdir))
+            all_out["datasets"].append(run_dataset_suite(lib, vxg_bin, s, wdir))
 
     with open(out_json, "w") as f:
         json.dump(all_out, f, indent=2)

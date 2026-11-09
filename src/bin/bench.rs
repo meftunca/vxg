@@ -13,7 +13,7 @@ mod metrics;
 mod report;
 
 use config::{CodecPoint, Config, DatasetSummary};
-use datasets::{datasets, datasets_v4};
+use datasets::{datasets, datasets_src_unique, datasets_v4};
 use harness::{evaluate_baselines_and_gpu, measure, median, row, run_microbench};
 use metrics::measure_op;
 use report::write_markdown_report;
@@ -166,13 +166,18 @@ fn run() -> R<()> {
         match c.suite.as_str() {
             "default" => datasets(c.size),
             "v4" => datasets_v4(c.size),
+            "src-unique" => datasets_src_unique()?,
             "all" => {
                 let mut v = datasets_v4(c.size);
+                v.extend(datasets_src_unique()?);
                 v.extend(datasets(c.size));
                 v
             }
             other => {
-                return Err(format!("unknown --suite {other} (expected default, v4, or all)").into())
+                return Err(format!(
+                    "unknown --suite {other} (expected default, v4, src-unique, or all)"
+                )
+                .into())
             }
         }
     } else {

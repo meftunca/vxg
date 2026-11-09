@@ -27,14 +27,19 @@ def _find_library() -> Path:
     else:
         name = "libvxg.so"
 
+    if os.environ.get("VXG_LIB_PATH"):
+        explicit = Path(os.environ["VXG_LIB_PATH"])
+        if explicit.is_file():
+            return explicit
     candidates = [
-        Path(os.environ.get("VXG_LIB_PATH", "")),
         root / "target" / "release" / name,
         Path.home() / ".cargo" / "target" / "release" / name,
     ]
-    for path in candidates:
-        if path.is_file():
-            return path
+    if os.environ.get("CARGO_TARGET_DIR"):
+        candidates.append(Path(os.environ["CARGO_TARGET_DIR"]) / "release" / name)
+    existing = [p for p in candidates if p.is_file()]
+    if existing:
+        return max(existing, key=lambda p: p.stat().st_mtime)
     raise FileNotFoundError(f"Could not find {name}; run `cargo build --release` first.")
 
 

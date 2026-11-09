@@ -108,6 +108,12 @@ impl Drop for DDict {
     }
 }
 
+/// Candidate Zstandard dictionary budgets (`32`, `64`, `112`, and `256 KiB`) swept per dataset
+/// so `Zstd+Dict` receives up to the same `256 KiB` dictionary budget as `VXG v5` while never
+/// being penalized when a smaller dictionary produces a lower total `encoded_size()` (including
+/// dictionary bytes).
+pub const ZSTD_DICT_SWEEP_CAPS: [usize; 4] = [32_768, 65_536, 114_688, 262_144];
+
 /// Trained Zstandard dictionary (`ZDICT_trainFromBuffer`) plus measured one-time training latency.
 #[derive(Clone, Debug)]
 pub struct TrainedDict {
@@ -116,20 +122,39 @@ pub struct TrainedDict {
 }
 
 impl TrainedDict {
-    /// Trains a Zstd dictionary (up to 32 KiB, scaled down for small inputs) from up to 1,024
-    /// evenly strided samples across `input`. Falls back to an empty dictionary if `input` is
-    /// degenerate (e.g. all-zeros) and `ZDICT_trainFromBuffer` reports insufficient entropy.
+    /// Trains a default `<= 32 KiB` Zstd dictionary from evenly strided samples across `input`.
     pub fn train(input: &[u8]) -> Self {
+        Self::train_with_cap(input, 32_768)
+    }
+
+    /// Trains a Zstd dictionary up to `max_dict_cap` bytes (`2 KiB ..= 256 KiB`, capped at
+    /// `input.len() / 2` on tiny inputs) from evenly strided samples across `input`. Falls back to
+    /// an empty dictionary if `input` is degenerate (e.g. all-zeros) and `ZDICT_trainFromBuffer`
+    /// reports insufficient entropy.
+    pub fn train_with_cap(input: &[u8], max_dict_cap: usize) -> Self {
         let start = Instant::now();
-        if input.len() < 2048 {
+        if input.len() < 2048 || max_dict_cap < 512 {
             return Self {
                 bytes: Vec::new(),
                 train_ns: start.elapsed().as_secs_f64() * 1e9,
             };
         }
-        let dict_cap = (input.len() / 64).clamp(2048, 32_768);
-        let sample_len = (input.len() / 64).clamp(256, 2048);
-        let nb_samples = (input.len() / sample_len).clamp(16, 1024);
+        let dict_cap = max_dict_cap.clamp(2048, 262_144).min(input.len() / 2);
+        if dict_cap < 512 {
+            return Self {
+                bytes: Vec::new(),
+                train_ns: start.elapsed().as_secs_f64() * 1e9,
+            };
+        }
+        let target_total = (dict_cap * 16).clamp(65_536, 4_194_304).min(input.len());
+        let sample_len = (target_total / 128)
+            .clamp(256, 4096)
+            .min(input.len() / 8)
+            .max(64);
+        let nb_samples = (target_total / sample_len)
+            .clamp(8, 2048)
+            .min(input.len() / sample_len)
+            .max(1);
         let mut samples_buf = Vec::with_capacity(nb_samples * sample_len);
         let mut sample_sizes = Vec::with_capacity(nb_samples);
         let max_start = input.len().saturating_sub(sample_len);
@@ -165,6 +190,32 @@ impl TrainedDict {
                 train_ns,
             }
         }
+    }
+
+    /// Trains candidate dictionaries across [`ZSTD_DICT_SWEEP_CAPS`] (`32 / 64 / 112 / 256 KiB`),
+    /// deduplicating effective caps on small inputs and returning `(budget_bytes, TrainedDict)`.
+    pub fn train_sweep(input: &[u8]) -> Vec<(usize, Self)> {
+        let mut out = Vec::with_capacity(ZSTD_DICT_SWEEP_CAPS.len());
+        let mut last_eff = 0usize;
+        for &cap in &ZSTD_DICT_SWEEP_CAPS {
+            if input.len() < 2048 {
+                break;
+            }
+            let eff = cap.clamp(2048, 262_144).min(input.len() / 2);
+            if eff == last_eff {
+                continue;
+            }
+            last_eff = eff;
+            let d = Self::train_with_cap(input, cap);
+            if !d.bytes.is_empty() {
+                out.push((cap, d));
+            }
+        }
+        if out.is_empty() {
+            let d = Self::train_with_cap(input, 32_768);
+            out.push((0, d));
+        }
+        out
     }
 }
 
@@ -310,4 +361,51 @@ pub(super) fn decode_whole(chunk: &Chunk, out: &mut [u8]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::baselines::{Codec, Encoded};
+
+    #[test]
+    fn zstd_dict_sweep_covers_32_to_256_kib_and_picks_minimum() {
+        let mut src = Vec::with_capacity(1_200_000);
+        for i in 0..10_000u32 {
+            src.extend_from_slice(
+                format!(
+                    "row={i} host=\"edge-gateway-{}\" service=\"billing-ledger-{}\" trace=\"{:08x}{:08x}\"\n",
+                    i % 64,
+                    i % 37,
+                    i.wrapping_mul(0x9E37_79B9),
+                    i.wrapping_mul(0x85EB_CA6B),
+                )
+                .as_bytes(),
+            );
+        }
+        let sweep = TrainedDict::train_sweep(&src);
+        assert_eq!(sweep.len(), ZSTD_DICT_SWEEP_CAPS.len());
+        let caps: Vec<usize> = sweep.iter().map(|(c, _)| *c).collect();
+        assert_eq!(caps, ZSTD_DICT_SWEEP_CAPS.to_vec());
+
+        let (best_dict, best_cap, best_enc) = Encoded::compress_best_dict_sweep(
+            &src,
+            Codec::ZstdDict { level: 3 },
+            &sweep,
+            65536,
+            2,
+        )
+        .unwrap();
+        assert!(ZSTD_DICT_SWEEP_CAPS.contains(&best_cap));
+        assert_eq!(best_enc.dict_size(), best_dict.bytes.len());
+        for (_, d) in &sweep {
+            let cand =
+                Encoded::compress_with_dict(&src, Codec::ZstdDict { level: 3 }, d, 65536, 2)
+                    .unwrap();
+            assert!(best_enc.encoded_size() <= cand.encoded_size());
+        }
+        let mut out = vec![0u8; src.len()];
+        best_enc.decode_into(&mut out, 2).unwrap();
+        assert_eq!(out, src);
+    }
 }

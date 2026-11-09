@@ -253,7 +253,11 @@ pub(super) fn datasets_v4(n: usize) -> Vec<(String, Vec<u8>)> {
         idx += 1;
     }
 
-    // 8. source-and-docs.txt
+    // 8. source-and-docs.txt (SYNTHETIC PERIODIC SEED: ~190 KiB 10-file seed repeated via
+    // `fill_repeated` to `n` bytes so `--suite v4` scales deterministically to any `--size-mib`.
+    // Because the ~190 KiB seed fits inside a 256 KiB dictionary / 128 MiB window, both VXG v5
+    // and Zstd+Dict(256K) / `zstd -19 --long` compress the repeated period aggressively. Use
+    // `--suite src-unique` (`vxg-src-nonrepeating.rs`) for non-repeating source code ratios!)
     let mut src_seed = Vec::new();
     for slice in [
         include_bytes!("../../analysis.rs") as &[u8],
@@ -346,4 +350,52 @@ pub(super) fn datasets_v4(n: usize) -> Vec<(String, Vec<u8>)> {
         ("ui-render-32bpp.bmp".into(), bmp32),
         ("rgb-frame-24bpp.bmp".into(), bmp24),
     ]
+}
+
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Builds `vxg-src-nonrepeating.rs` by concatenating every `.rs` file under `src/` once in
+/// deterministic lexicographic path order with zero `fill_repeated` duplication.
+pub(super) fn datasets_src_unique() -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src_dir = root.join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_dir, &mut files)?;
+    let mut keyed: Vec<(String, std::path::PathBuf)> = files
+        .into_iter()
+        .map(|p| {
+            let rel = p
+                .strip_prefix(root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            (rel, p)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let mut buf = Vec::with_capacity(3 << 20);
+    for (rel, path) in keyed {
+        buf.extend_from_slice(format!("// === {rel} ===\n").as_bytes());
+        let raw = std::fs::read(&path)?;
+        for &b in &raw {
+            if b != b'\r' {
+                buf.push(b);
+            }
+        }
+        if buf.last().copied() != Some(b'\n') {
+            buf.push(b'\n');
+        }
+    }
+    Ok(vec![("vxg-src-nonrepeating.rs".into(), buf)])
 }

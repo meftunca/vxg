@@ -245,6 +245,27 @@ def build_raw_export(
     return target_rows
 
 
+def resolve_vxg_artifact(env_key: str, filenames: list[str]) -> str:
+    env_val = os.environ.get(env_key)
+    if env_val and os.path.exists(env_val):
+        return env_val
+    dirs: list[str] = []
+    if os.environ.get("CARGO_TARGET_DIR"):
+        dirs.append(os.path.join(os.environ["CARGO_TARGET_DIR"], "release"))
+    dirs.append(os.path.expanduser(os.path.join("~", ".cargo", "target", "release")))
+    dirs.append(os.path.join("target", "release"))
+    dirs.append("/tmp/vxg-target/release")
+    existing: list[str] = []
+    for d in dirs:
+        for fn in filenames:
+            p = os.path.join(d, fn)
+            if os.path.exists(p):
+                existing.append(p)
+    if not existing:
+        raise FileNotFoundError(f"Could not find {filenames} in {dirs}; run `cargo build --release` first")
+    return max(existing, key=lambda p: os.path.getmtime(p))
+
+
 def mmap_ptr_and_len(mm: mmap.mmap) -> tuple[ctypes.Array, int, int]:
     buf = (ctypes.c_char * len(mm)).from_buffer(mm)
     return buf, ctypes.addressof(buf), len(mm)
@@ -266,6 +287,7 @@ def benchmark_scale_suite(
     vxg_aligned_path = os.path.join(work_dir, f"{name}.aligned.vxg")
     pq_snap_path = os.path.join(work_dir, f"{name}.snappy.parquet")
     pq_zstd_path = os.path.join(work_dir, f"{name}.zstd.parquet")
+    pq_snap_rg16k_path = os.path.join(work_dir, f"{name}.snappy.rg16k.parquet")
 
     print(f"\n=== Preparing archives for {name} ({row_count:,d} rows, {raw_bytes/1e9:.3f} GB) ===", flush=True)
 
@@ -290,7 +312,7 @@ def benchmark_scale_suite(
     vxg_aligned_enc_8t_ms = (time.perf_counter() - t0) * 1000.0
     vxg_aligned_bytes = os.path.getsize(vxg_aligned_path)
 
-    # 3. DuckDB Parquet ETL (8T)
+    # 3. DuckDB Parquet ETL (8T: default ROW_GROUP_SIZE=122880 + fine-grained ROW_GROUP_SIZE=16384)
     con_prep = duckdb.connect()
     con_prep.execute("SET threads TO 8;")
     reader_expr = (
@@ -303,6 +325,13 @@ def benchmark_scale_suite(
         f"COPY (SELECT * FROM {reader_expr}) TO '{pq_snap_path}' (FORMAT PARQUET, COMPRESSION SNAPPY);"
     )
     pq_snap_etl_8t_ms = (time.perf_counter() - t0) * 1000.0
+
+    t0 = time.perf_counter()
+    con_prep.execute(
+        f"COPY (SELECT * FROM {reader_expr}) TO '{pq_snap_rg16k_path}' "
+        f"(FORMAT PARQUET, COMPRESSION SNAPPY, ROW_GROUP_SIZE 16384);"
+    )
+    pq_snap_rg16k_etl_8t_ms = (time.perf_counter() - t0) * 1000.0
 
     t0 = time.perf_counter()
     con_prep.execute(
@@ -327,6 +356,9 @@ def benchmark_scale_suite(
         "pq_snap_bytes": os.path.getsize(pq_snap_path),
         "pq_snap_ratio": os.path.getsize(pq_snap_path) / raw_bytes,
         "pq_snap_etl_8t_ms": pq_snap_etl_8t_ms,
+        "pq_snap_rg16k_bytes": os.path.getsize(pq_snap_rg16k_path),
+        "pq_snap_rg16k_ratio": os.path.getsize(pq_snap_rg16k_path) / raw_bytes,
+        "pq_snap_rg16k_etl_8t_ms": pq_snap_rg16k_etl_8t_ms,
         "pq_zstd_bytes": os.path.getsize(pq_zstd_path),
         "pq_zstd_ratio": os.path.getsize(pq_zstd_path) / raw_bytes,
         "pq_zstd_etl_8t_ms": pq_zstd_etl_8t_ms,
@@ -399,6 +431,7 @@ def benchmark_scale_suite(
             )
 
             src_pq_snap = f"read_parquet('{pq_snap_path}')"
+            src_pq_snap_rg16k = f"read_parquet('{pq_snap_rg16k_path}')"
             src_pq_zstd = f"read_parquet('{pq_zstd_path}')"
             src_raw = (
                 f"read_json_auto('{raw_path}')"
@@ -486,11 +519,17 @@ def benchmark_scale_suite(
 
                     vxg_sql_ms, _ = bench_median_ms(_run_sql, samples=samples, warmups=1)
 
-                # DuckDB Prepared Parquet-Snappy & Parquet-Zstd
+                # DuckDB Prepared Parquet-Snappy (default + RG=16384) & Parquet-Zstd
                 sql_snap = q["sql"].format(tbl=src_pq_snap)
                 con.execute(f"PREPARE pqs_{qi} AS {sql_snap};")
                 pq_snap_prep_ms, d_pqs = bench_median_ms(
                     lambda: con.execute(f"EXECUTE pqs_{qi}").fetchall(), samples=samples, warmups=1
+                )
+
+                sql_snap_rg16k = q["sql"].format(tbl=src_pq_snap_rg16k)
+                con.execute(f"PREPARE pqs16_{qi} AS {sql_snap_rg16k};")
+                pq_snap_rg16k_prep_ms, d_pqs16 = bench_median_ms(
+                    lambda: con.execute(f"EXECUTE pqs16_{qi}").fetchall(), samples=samples, warmups=1
                 )
 
                 sql_zstd = q["sql"].format(tbl=src_pq_zstd)
@@ -538,6 +577,8 @@ def benchmark_scale_suite(
                         "vxg_sql_ms": vxg_sql_ms,
                         "duck_pq_snap_prep_ms": pq_snap_prep_ms,
                         "duck_pq_snap_prep_mrows_s": mrows / (pq_snap_prep_ms / 1000.0),
+                        "duck_pq_snap_rg16k_prep_ms": pq_snap_rg16k_prep_ms,
+                        "duck_pq_snap_rg16k_prep_mrows_s": mrows / (pq_snap_rg16k_prep_ms / 1000.0),
                         "duck_pq_zstd_prep_ms": pq_zstd_prep_ms,
                         "duck_pq_zstd_prep_mrows_s": mrows / (pq_zstd_prep_ms / 1000.0),
                         "duck_raw_single_run_ms": duck_raw_ms,
@@ -546,7 +587,7 @@ def benchmark_scale_suite(
                 sql_tag = f" (sql={vxg_sql_ms:.1f}ms)" if vxg_sql_ms is not None else ""
                 print(
                     f"  [{name} {threads}T] {label:48s} VXG={vxg_ms:7.2f}ms | Aligned={vxg_aln_ms:7.2f}ms{sql_tag} | "
-                    f"ParqSnap={pq_snap_prep_ms:7.2f}ms | ParqZstd={pq_zstd_prep_ms:7.2f}ms",
+                    f"ParqSnap={pq_snap_prep_ms:7.2f}ms (RG16K={pq_snap_rg16k_prep_ms:7.2f}ms) | ParqZstd={pq_zstd_prep_ms:7.2f}ms",
                     flush=True,
                 )
 
@@ -581,7 +622,7 @@ def benchmark_scale_suite(
         f_std.close()
         mm_aln.close()
         f_aln.close()
-        for p in [vxg_path, vxg_aligned_path, pq_snap_path, pq_zstd_path]:
+        for p in [vxg_path, vxg_aligned_path, pq_snap_path, pq_snap_rg16k_path, pq_zstd_path]:
             if os.path.exists(p):
                 os.remove(p)
 
@@ -590,9 +631,9 @@ def benchmark_scale_suite(
 
 def write_markdown(report: dict, md_path: str) -> None:
     lines = [
-        "## Out-of-Cache Multi-GB Scale Benchmark (`10M`–`40M` Rows): `VXG v0.5.0` vs `DuckDB + Parquet`",
+        "## Out-of-Cache Multi-GB Scale Benchmark (`10M`–`40M` Rows): `VXG v0.5.2` vs `DuckDB + Parquet`",
         "",
-        f"- **Engine versions:** `VXG v0.5.0` (`mmap` zero-copy C-FFI + `--record-aligned` + `--stream`) vs `DuckDB {report['duckdb_version']}` (`PREPARE / EXECUTE` calibrated with `SELECT 1`).",
+        f"- **Engine versions:** `VXG v0.5.2` (`mmap` zero-copy C-FFI + `--record-aligned` + `--stream`) vs `DuckDB {report['duckdb_version']}` (`PREPARE / EXECUTE` calibrated with `SELECT 1`, testing both default `ROW_GROUP_SIZE=122880` and fine-grained `ROW_GROUP_SIZE=16384`).",
         "- **Verification:** Every query asserts 100% exact result equality between `VXG` and `DuckDB`, and every `.vxg` archive passes full `vxg_verify_file` lossless verification.",
         "- **Key distinction:** `VXG` stores the original `.csv` / `.ndjson` **100% losslessly byte-for-byte** (`1` step, zero schema ETL), whereas `Parquet` requires an upfront lossy-to-formatting schema conversion (`COPY ... TO PARQUET`).",
         "",
@@ -606,8 +647,9 @@ def write_markdown(report: dict, md_path: str) -> None:
         lines.append(
             f"- **Archive Size & 8T Ingest/ETL Time:** "
             f"`VXG` **`{st['vxg_bytes']/1e6:.1f} MB`** (`ratio={st['vxg_ratio']:.4f}`, **`{st['vxg_enc_8t_ms']/1000.0:.2f} s`** / `{st['vxg_enc_8t_gbps']:.2f} GB/s`, lossless=`YES`) · "
-            f"`VXG --record-aligned` `{st['vxg_aligned_bytes']/1e6:.1f} MB` (`{st['vxg_aligned_enc_8t_ms']/1000.0:.2f} s`) · "
+            f"`VXG --record-aligned` `{st['vxg_aligned_bytes']/1e6:.1f} MB` (`ratio={st['vxg_aligned_ratio']:.4f}`, `{st['vxg_aligned_enc_8t_ms']/1000.0:.2f} s`, lossless=`YES`) · "
             f"`Parquet-Snappy` `{st['pq_snap_bytes']/1e6:.1f} MB` (`ratio={st['pq_snap_ratio']:.4f}`, `{st['pq_snap_etl_8t_ms']/1000.0:.2f} s` ETL, lossless=`NO`) · "
+            f"`Parquet-Snappy (RG=16384)` `{st['pq_snap_rg16k_bytes']/1e6:.1f} MB` (`ratio={st['pq_snap_rg16k_ratio']:.4f}`, `{st['pq_snap_rg16k_etl_8t_ms']/1000.0:.2f} s` ETL) · "
             f"`Parquet-Zstd` `{st['pq_zstd_bytes']/1e6:.1f} MB` (`ratio={st['pq_zstd_ratio']:.4f}`, `{st['pq_zstd_etl_8t_ms']/1000.0:.2f} s` ETL, lossless=`NO`)."
         )
         lines.append("")
@@ -620,14 +662,15 @@ def write_markdown(report: dict, md_path: str) -> None:
             )
             lines.append("")
             lines.append(
-                "| Query | `VXG` (`ms` / `M rows/s`) | `VXG --record-aligned` (`ms`) | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Zstd` *(prep)* |"
+                "| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |"
             )
-            lines.append("| :--- | :---: | :---: | :---: | :---: |")
+            lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
             for q in tb["queries"]:
                 peers = [
                     q["vxg_ms"],
                     q["vxg_aligned_ms"],
                     q["duck_pq_snap_prep_ms"],
+                    q["duck_pq_snap_rg16k_prep_ms"],
                     q["duck_pq_zstd_prep_ms"],
                 ]
                 best = min(peers)
@@ -636,19 +679,16 @@ def write_markdown(report: dict, md_path: str) -> None:
                     s = f"{ms_val:.2f} ms ({mrows:.1f} M/s)"
                     return f"**{s}**" if abs(ms_val - best) <= 1e-6 else s
 
-                aln_s = (
-                    f"**{q['vxg_aligned_ms']:.2f} ms**"
-                    if abs(q["vxg_aligned_ms"] - best) <= 1e-6
-                    else f"{q['vxg_aligned_ms']:.2f} ms"
-                )
                 raw_note = (
                     f" *(DuckDB raw text: {q['duck_raw_single_run_ms']/1000.0:.2f} s)*"
                     if q.get("duck_raw_single_run_ms")
                     else ""
                 )
                 lines.append(
-                    f"| `{q['label']}`{raw_note} | {fmt_cell(q['vxg_ms'], q['vxg_mrows_s'])} | {aln_s} | "
+                    f"| `{q['label']}`{raw_note} | {fmt_cell(q['vxg_ms'], q['vxg_mrows_s'])} | "
+                    f"{fmt_cell(q['vxg_aligned_ms'], q['vxg_aligned_mrows_s'])} | "
                     f"{fmt_cell(q['duck_pq_snap_prep_ms'], q['duck_pq_snap_prep_mrows_s'])} | "
+                    f"{fmt_cell(q['duck_pq_snap_rg16k_prep_ms'], q['duck_pq_snap_rg16k_prep_mrows_s'])} | "
                     f"{fmt_cell(q['duck_pq_zstd_prep_ms'], q['duck_pq_zstd_prep_mrows_s'])} |"
                 )
             if tb.get("vxg_cli_stream_groupby_ms"):
@@ -673,10 +713,9 @@ def main() -> None:
     ap.add_argument("--out-md", default="reports/scale-duckdb-vs-vxg.md")
     args = ap.parse_args()
 
-    lib_path = os.environ.get("VXG_LIB", "/tmp/vxg-target/release/libvxg.dylib")
-    if not os.path.exists(lib_path):
-        lib_path = "/tmp/vxg-target/release/libvxg.so"
-    vxg_bin = os.environ.get("VXG_BIN", "/tmp/vxg-target/release/vxg")
+    lib_path = resolve_vxg_artifact("VXG_LIB", ["libvxg.dylib", "libvxg.so", "vxg.dll"])
+    vxg_bin = resolve_vxg_artifact("VXG_BIN", ["vxg", "vxg.exe"])
+    print(f"Using libvxg={lib_path}, vxg_bin={vxg_bin}", flush=True)
     lib = load_vxg_lib(lib_path)
 
     os.makedirs(args.work_dir, exist_ok=True)

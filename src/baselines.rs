@@ -11,7 +11,7 @@ use std::{
 
 #[path = "baselines/zstd_ext.rs"]
 mod zstd_ext;
-pub use zstd_ext::TrainedDict;
+pub use zstd_ext::{TrainedDict, ZSTD_DICT_SWEEP_CAPS};
 use zstd_ext::{
     compress_whole_long, decode_ddict_group, decode_whole, encode_cdict_group, CDict, DDict,
 };
@@ -174,8 +174,10 @@ impl Encoded {
 
     pub fn compress(input: &[u8], codec: Codec, block_size: usize, threads: usize) -> Result<Self> {
         if matches!(codec, Codec::ZstdDict { .. }) {
-            let dict = TrainedDict::train(input);
-            return Self::compress_with_dict(input, codec, &dict, block_size, threads);
+            let candidates = TrainedDict::train_sweep(input);
+            let (_, _, enc) =
+                Self::compress_best_dict_sweep(input, codec, &candidates, block_size, threads)?;
+            return Ok(enc);
         }
         Self::compress_inner(input, codec, None, block_size, threads)
     }
@@ -188,6 +190,32 @@ impl Encoded {
         threads: usize,
     ) -> Result<Self> {
         Self::compress_inner(input, codec, Some(&dict.bytes), block_size, threads)
+    }
+
+    /// Evaluates pre-trained `(budget_bytes, TrainedDict)` candidates and returns the candidate
+    /// achieving the lowest `encoded_size()` (charging `dict.bytes.len()`).
+    pub fn compress_best_dict_sweep<'a>(
+        input: &[u8],
+        codec: Codec,
+        candidates: &'a [(usize, TrainedDict)],
+        block_size: usize,
+        threads: usize,
+    ) -> Result<(&'a TrainedDict, usize, Self)> {
+        if candidates.is_empty() {
+            return Err(Error::InvalidOption("empty ZstdDict candidate sweep"));
+        }
+        let mut best: Option<(&'a TrainedDict, usize, Self)> = None;
+        for (cap, dict) in candidates {
+            let enc = Self::compress_with_dict(input, codec, dict, block_size, threads)?;
+            let take = match &best {
+                None => true,
+                Some((_, _, prev)) => enc.encoded_size() < prev.encoded_size(),
+            };
+            if take {
+                best = Some((dict, *cap, enc));
+            }
+        }
+        Ok(best.unwrap())
     }
 
     fn compress_inner(
