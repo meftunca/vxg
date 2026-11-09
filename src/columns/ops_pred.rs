@@ -143,10 +143,20 @@ fn json_single_line_template_slot_uncached(
     }
 }
 
+#[inline]
 fn resolve_template_slot(
     segs: &[&[u8]],
     col_slices: &[&[u8]],
     col: crate::ops::ColTarget<'_>,
+) -> Result<SlotLookup> {
+    resolve_template_slot_with_delim(segs, col_slices, col, None)
+}
+
+fn resolve_template_slot_with_delim(
+    segs: &[&[u8]],
+    col_slices: &[&[u8]],
+    col: crate::ops::ColTarget<'_>,
+    known_delim: Option<Option<u8>>,
 ) -> Result<SlotLookup> {
     let slots = col_slices.len();
     match col {
@@ -172,7 +182,8 @@ fn resolve_template_slot(
             Ok(SlotLookup::Fallback)
         }
         crate::ops::ColTarget::Delimited { delim, index } => {
-            if delimited_template_delim(segs) == Some(delim) {
+            let tpl_delim = known_delim.unwrap_or_else(|| delimited_template_delim(segs));
+            if tpl_delim == Some(delim) {
                 return Ok(if index < slots {
                     SlotLookup::Slot(index)
                 } else {

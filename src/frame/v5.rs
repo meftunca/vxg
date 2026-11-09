@@ -3,8 +3,8 @@
 use crate::{dict_lz, Error, Result};
 
 use super::{
-    check_block_size, entry_size, read_u32, read_u64, HEADER_SIZE, MAGIC, MAX_VERSION, MIN_VERSION,
-    VERSION_V5,
+    check_block_size, entry_size, read_u32, read_u64, valid_kind_and_size, HEADER_SIZE, MAGIC,
+    MAX_VERSION, MIN_VERSION, V4_SIZE_MASK, VERSION_V4, VERSION_V5,
 };
 
 pub const FLAG_CHECKSUM: u16 = 0x0001;
@@ -294,4 +294,28 @@ pub(crate) fn compute_block_ranges(
         return None;
     }
     Some(ranges)
+}
+
+/// Zero-allocation $O(1)$ peek of block 0's `(kind, raw_size, payload)` on `v4`/`v5` frames.
+/// Used only by internal header-probing paths where the caller subsequently validates the full
+/// frame directory via `Frame::parse_all`.
+pub(crate) fn peek_v4_v5_block0(src: &[u8], max_output: usize) -> Option<(u32, usize, &[u8])> {
+    let hdr = parse_v1_to_v5_header(src, max_output).ok()?;
+    if hdr.version < VERSION_V4 || hdr.count == 0 || hdr.payload_start > src.len() {
+        return None;
+    }
+    let rn = block_raw_size(src, &hdr, 0, 0).ok()?;
+    if rn == 0 {
+        return None;
+    }
+    let word = read_u32(src, HEADER_SIZE).ok()?;
+    let cn = (word & V4_SIZE_MASK) as usize;
+    let kind = word >> 30;
+    let csum = read_u32(src, HEADER_SIZE + 4).ok()?;
+    if !valid_kind_and_size(hdr.version, kind, cn, rn) || (!hdr.checksummed && csum != 0) {
+        return None;
+    }
+    let end = hdr.payload_start.checked_add(cn)?;
+    let payload = src.get(hdr.payload_start..end)?;
+    Some((kind, rn, payload))
 }

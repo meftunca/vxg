@@ -116,6 +116,83 @@ fn parse_delim_header_line(line_with_nl: &[u8]) -> Option<(u8, Vec<String>)> {
     None
 }
 
+fn try_peek_raw_or_grammar_header(
+    f_idx: usize,
+    b_idx: usize,
+    kind: u32,
+    payload: &[u8],
+) -> Result<Option<Option<DelimHeader>>> {
+    if kind == block::RAW {
+        let Some(nl) = payload.iter().position(|&b| b == b'\n') else {
+            return Ok(Some(None));
+        };
+        let hdr_len = nl + 1;
+        let line_slice = &payload[..hdr_len];
+        return Ok(Some(parse_delim_header_line(line_slice).map(
+            |(delim, columns)| DelimHeader {
+                delim,
+                columns,
+                header_line: line_slice.to_vec(),
+                f0_idx: f_idx,
+                b0_idx: b_idx,
+                header_byte_len: hdr_len,
+            },
+        )));
+    }
+    if kind == BLOCK_COLUMN {
+        if let Some(indep) = crate::columns::peek_grammar_boundary_indep(payload)? {
+            if let Some(ref first_raw) = indep.first_raw {
+                if first_raw.ends_with(b"\n") {
+                    let hdr_len = first_raw.len();
+                    return Ok(Some(parse_delim_header_line(first_raw).map(
+                        |(delim, columns)| DelimHeader {
+                            delim,
+                            columns,
+                            header_line: first_raw.to_vec(),
+                            f0_idx: f_idx,
+                            b0_idx: b_idx,
+                            header_byte_len: hdr_len,
+                        },
+                    )));
+                }
+            } else if indep.first_seg_byte == Some(b'{') {
+                return Ok(Some(None));
+            }
+            let mut row0 = Vec::new();
+            if crate::columns::unpack_grammar_row_range(payload, 0, 1, &mut row0)?.is_some()
+                && row0.ends_with(b"\n")
+            {
+                let hdr_len = row0.len();
+                return Ok(Some(parse_delim_header_line(&row0).map(|(delim, columns)| {
+                    DelimHeader {
+                        delim,
+                        columns,
+                        header_line: row0,
+                        f0_idx: f_idx,
+                        b0_idx: b_idx,
+                        header_byte_len: hdr_len,
+                    }
+                })));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Zero-directory-allocation $O(1)$ header probe for callers that subsequently run `Frame::parse_all`.
+pub(crate) fn peek_delim_header_fast(
+    frame_bytes: &[u8],
+    options: &DecodeOptions,
+) -> Result<Option<DelimHeader>> {
+    options.validate()?;
+    if let Some((kind, _rn, payload)) = v5::peek_v4_v5_block0(frame_bytes, options.max_output) {
+        if let Ok(Some(decided)) = try_peek_raw_or_grammar_header(0, 0, kind, payload) {
+            return Ok(decided);
+        }
+    }
+    peek_delim_header(frame_bytes, options)
+}
+
 /// Inspect block 0 of `frame_bytes` in microseconds (zero block decode if NDJSON `GRAMMAR_PACKET`
 /// with raw first row or `RAW` block) and return its [`DelimHeader`] if line 0 is a delimited header.
 pub fn peek_delim_header(frame_bytes: &[u8], options: &DecodeOptions) -> Result<Option<DelimHeader>> {
@@ -128,57 +205,8 @@ pub fn peek_delim_header(frame_bytes: &[u8], options: &DecodeOptions) -> Result<
                 continue;
             }
             let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
-            if info.kind == block::RAW {
-                let Some(nl) = payload.iter().position(|&b| b == b'\n') else {
-                    return Ok(None);
-                };
-                let hdr_len = nl + 1;
-                let line_slice = &payload[..hdr_len];
-                return Ok(parse_delim_header_line(line_slice).map(|(delim, columns)| DelimHeader {
-                    delim,
-                    columns,
-                    header_line: line_slice.to_vec(),
-                    f0_idx: f_idx,
-                    b0_idx: b_idx,
-                    header_byte_len: hdr_len,
-                }));
-            }
-            if info.kind == BLOCK_COLUMN {
-                if let Some(indep) = crate::columns::peek_grammar_boundary_indep(payload)? {
-                    if let Some(ref first_raw) = indep.first_raw {
-                        if first_raw.ends_with(b"\n") {
-                            let hdr_len = first_raw.len();
-                            return Ok(parse_delim_header_line(first_raw).map(
-                                |(delim, columns)| DelimHeader {
-                                    delim,
-                                    columns,
-                                    header_line: first_raw.to_vec(),
-                                    f0_idx: f_idx,
-                                    b0_idx: b_idx,
-                                    header_byte_len: hdr_len,
-                                },
-                            ));
-                        }
-                    } else if indep.first_seg_byte == Some(b'{') {
-                        return Ok(None);
-                    }
-                    let mut row0 = Vec::new();
-                    if crate::columns::unpack_grammar_row_range(payload, 0, 1, &mut row0)?.is_some()
-                        && row0.ends_with(b"\n")
-                    {
-                        let hdr_len = row0.len();
-                        return Ok(parse_delim_header_line(&row0).map(|(delim, columns)| {
-                            DelimHeader {
-                                delim,
-                                columns,
-                                header_line: row0,
-                                f0_idx: f_idx,
-                                b0_idx: b_idx,
-                                header_byte_len: hdr_len,
-                            }
-                        }));
-                    }
-                }
+            if let Some(decided) = try_peek_raw_or_grammar_header(f_idx, b_idx, info.kind, payload)? {
+                return Ok(decided);
             }
             let mut blk = Vec::new();
             query::decode_block_into(f_bytes, b_idx, info.raw_size, options, &mut blk)?;
@@ -462,7 +490,7 @@ pub fn resolve_header_for_targets(
     if !has_jk {
         return Ok(None);
     }
-    let Some(hdr) = peek_delim_header(frame_bytes, options)? else {
+    let Some(hdr) = peek_delim_header_fast(frame_bytes, options)? else {
         return Ok(None);
     };
     if let Some(w) = where_expr {

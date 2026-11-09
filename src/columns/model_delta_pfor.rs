@@ -413,8 +413,21 @@ fn decode_pfor_delta_into(
                 return Err(e);
             }
         };
-        for _ in 0..steps {
-            dst.push(reader.next_u64());
+        if base_width <= 16 {
+            let mut z_buf = [0u16; 64];
+            let mut s = 0usize;
+            while s < steps {
+                let cnt = (steps - s).min(64);
+                unpack_u16_chunk64(packed_bytes, s, cnt, base_width, &mut z_buf);
+                for &z in &z_buf[..cnt] {
+                    dst.push(u64::from(z));
+                }
+                s += cnt;
+            }
+        } else {
+            for _ in 0..steps {
+                dst.push(reader.next_u64());
+            }
         }
     }
 

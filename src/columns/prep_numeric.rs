@@ -369,17 +369,40 @@ impl<'a> PreparedColumn<'a> {
                 scratch.u64_arena.push(first);
                 let mut prev = first as i128;
                 let mut or_all = first;
-                for _ in 1..count {
-                    let zz = reader.next_u64();
-                    let delta = ((zz >> 1) as i64) ^ -((zz & 1) as i64);
-                    let cur = prev + i128::from(delta);
-                    if cur < 0 || cur > i128::from(u64::MAX) {
-                        return Err(invalid("column decimal delta range"));
+                if width <= 16 {
+                    let steps = count - 1;
+                    let mut z_buf = [0u16; 64];
+                    let mut s = 0usize;
+                    while s < steps {
+                        let cnt = (steps - s).min(64);
+                        unpack_u16_chunk64(packed_bytes, s, cnt, width, &mut z_buf);
+                        for &z in &z_buf[..cnt] {
+                            let zz = i64::from(z);
+                            let delta = (zz >> 1) ^ -(zz & 1);
+                            let cur = prev + i128::from(delta);
+                            if cur < 0 || cur > i128::from(u64::MAX) {
+                                return Err(invalid("column decimal delta range"));
+                            }
+                            let u = cur as u64;
+                            or_all |= u;
+                            scratch.u64_arena.push(u);
+                            prev = cur;
+                        }
+                        s += cnt;
                     }
-                    let u = cur as u64;
-                    or_all |= u;
-                    scratch.u64_arena.push(u);
-                    prev = cur;
+                } else {
+                    for _ in 1..count {
+                        let zz = reader.next_u64();
+                        let delta = ((zz >> 1) as i64) ^ -((zz & 1) as i64);
+                        let cur = prev + i128::from(delta);
+                        if cur < 0 || cur > i128::from(u64::MAX) {
+                            return Err(invalid("column decimal delta range"));
+                        }
+                        let u = cur as u64;
+                        or_all |= u;
+                        scratch.u64_arena.push(u);
+                        prev = cur;
+                    }
                 }
                 let stream = if or_all < 10_000 {
                     let u16_offset = scratch.u16_arena.len();

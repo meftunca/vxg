@@ -5,7 +5,7 @@
 //! inter-chunk seam blocks up front (`O(workers)` instead of `O(num_blocks)`), runs a single
 //! thread-pool pass with sequential intra-chunk `carry`, and stitches seam lines on join.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::{DecodeOptions, Result, BLOCK_COLUMN};
 
@@ -95,107 +95,129 @@ where
 {
     let nb = in_blocks.len();
     let workers = options.threads.min(nb).max(1);
-    let chunk_len = nb.div_ceil(workers);
-    let actual_workers = nb.div_ceil(chunk_len);
+    let target_chunks = if nb >= workers.saturating_mul(16) {
+        workers.saturating_mul(8).min(256).min(nb)
+    } else {
+        workers
+    };
+    let chunk_len = nb.div_ceil(target_chunks);
+    let num_chunks = nb.div_ceil(chunk_len);
+    let actual_workers = workers.min(num_chunks);
 
-    let mut had_in = vec![false; actual_workers];
-    for (w, slot) in had_in.iter_mut().enumerate().skip(1) {
-        let start = w * chunk_len;
+    let mut had_in = vec![false; num_chunks];
+    for (cid, slot) in had_in.iter_mut().enumerate().skip(1) {
+        let start = cid * chunk_len;
         if let Some(prev_idx) = (0..start).rev().find(|&p| in_blocks[p].info.raw_size > 0) {
             *slot = block_ends_unterminated(&in_blocks[prev_idx], options)?;
         }
     }
 
+    let next_chunk = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let outcomes: Vec<SyncCell<Option<Result<ChunkOutcome<Acc>>>>> =
-        (0..actual_workers).map(|_| SyncCell::new(None)).collect();
+        (0..num_chunks).map(|_| SyncCell::new(None)).collect();
 
-    crate::pool::parallel_run(actual_workers, |wid| {
-        let start = wid * chunk_len;
-        let end = (start + chunk_len).min(nb);
-        let mut acc = Acc::default();
-        let mut head_open = had_in[wid];
-        let mut head_frag = Vec::new();
-        let mut carry: Option<Vec<u8>> = None;
+    crate::pool::parallel_run(actual_workers, |_wid| {
         let mut dec_buf = Vec::new();
-
-        for ib in &in_blocks[start..end] {
+        loop {
             if failed.load(Ordering::Relaxed) {
                 return;
             }
-            if ib.info.raw_size == 0 {
-                continue;
+            let cid = next_chunk.fetch_add(1, Ordering::Relaxed);
+            if cid >= num_chunks {
+                return;
             }
-            let step_res: Result<()> = (|| {
-                if head_open {
-                    if ib.info.kind == BLOCK_COLUMN {
-                        if let Some(fb) =
-                            crate::columns::peek_grammar_boundary_fast(ib.payload, true)?
-                        {
-                            if fb.row_count == 0 {
-                                return Ok(());
-                            }
-                            if fb.row_count == 1 && fb.last_unterminated_raw.is_some() {
-                                head_frag.extend_from_slice(&fb.last_unterminated_raw.unwrap());
-                                return Ok(());
-                            }
-                            if fb.first_raw.as_deref().is_some_and(|s| s.ends_with(b"\n")) {
-                                let mut out_carry = Some(Vec::new());
-                                if eval_grammar(ib.payload, &mut out_carry, false, &mut acc)? {
-                                    if let Some(first) = fb.first_raw {
-                                        head_frag.extend_from_slice(&first);
-                                    }
-                                    head_open = false;
-                                    carry = out_carry;
+            let start = cid * chunk_len;
+            let end = (start + chunk_len).min(nb);
+            let mut acc = Acc::default();
+            let mut head_open = had_in[cid];
+            let mut head_frag = Vec::new();
+            let mut carry: Option<Vec<u8>> = None;
+
+            for ib in &in_blocks[start..end] {
+                if failed.load(Ordering::Relaxed) {
+                    return;
+                }
+                if ib.info.raw_size == 0 {
+                    continue;
+                }
+                let step_res: Result<()> = (|| {
+                    if head_open {
+                        if ib.info.kind == BLOCK_COLUMN {
+                            if let Some(fb) =
+                                crate::columns::peek_grammar_boundary_fast(ib.payload, true)?
+                            {
+                                if fb.row_count == 0 {
                                     return Ok(());
+                                }
+                                if fb.row_count == 1 && fb.last_unterminated_raw.is_some() {
+                                    head_frag
+                                        .extend_from_slice(&fb.last_unterminated_raw.unwrap());
+                                    return Ok(());
+                                }
+                                if fb.first_raw.as_deref().is_some_and(|s| s.ends_with(b"\n")) {
+                                    let mut out_carry = Some(Vec::new());
+                                    if eval_grammar(ib.payload, &mut out_carry, false, &mut acc)? {
+                                        if let Some(first) = fb.first_raw {
+                                            head_frag.extend_from_slice(&first);
+                                        }
+                                        head_open = false;
+                                        carry = out_carry;
+                                        return Ok(());
+                                    }
                                 }
                             }
                         }
-                    }
-                    ib.decode_into(options, &mut dec_buf)?;
-                    if dec_buf.is_empty() {
+                        ib.decode_into(options, &mut dec_buf)?;
+                        if dec_buf.is_empty() {
+                            return Ok(());
+                        }
+                        if let Some(nl_pos) = dec_buf.iter().position(|&b| b == b'\n') {
+                            head_frag.extend_from_slice(&dec_buf[..=nl_pos]);
+                            head_open = false;
+                            feed_decoded_lines(
+                                &dec_buf[nl_pos + 1..],
+                                &mut carry,
+                                &mut acc,
+                                &eval_line,
+                            );
+                        } else {
+                            head_frag.extend_from_slice(&dec_buf);
+                        }
                         return Ok(());
                     }
-                    if let Some(nl_pos) = dec_buf.iter().position(|&b| b == b'\n') {
-                        head_frag.extend_from_slice(&dec_buf[..=nl_pos]);
-                        head_open = false;
-                        feed_decoded_lines(&dec_buf[nl_pos + 1..], &mut carry, &mut acc, &eval_line);
-                    } else {
-                        head_frag.extend_from_slice(&dec_buf);
+
+                    if ib.info.kind == BLOCK_COLUMN
+                        && eval_grammar(ib.payload, &mut carry, true, &mut acc)?
+                    {
+                        return Ok(());
                     }
-                    return Ok(());
-                }
+                    ib.decode_into(options, &mut dec_buf)?;
+                    feed_decoded_lines(&dec_buf, &mut carry, &mut acc, &eval_line);
+                    Ok(())
+                })();
 
-                if ib.info.kind == BLOCK_COLUMN
-                    && eval_grammar(ib.payload, &mut carry, true, &mut acc)?
-                {
-                    return Ok(());
+                if let Err(e) = step_res {
+                    unsafe {
+                        *outcomes[cid].get() = Some(Err(e));
+                    }
+                    failed.store(true, Ordering::Relaxed);
+                    return;
                 }
-                ib.decode_into(options, &mut dec_buf)?;
-                feed_decoded_lines(&dec_buf, &mut carry, &mut acc, &eval_line);
-                Ok(())
-            })();
-
-            if let Err(e) = step_res {
-                unsafe {
-                    *outcomes[wid].get() = Some(Err(e));
-                }
-                failed.store(true, Ordering::Relaxed);
-                return;
             }
-        }
 
-        unsafe {
-            *outcomes[wid].get() = Some(Ok(ChunkOutcome {
-                acc,
-                head_frag,
-                head_open,
-                tail_carry: carry,
-            }));
+            unsafe {
+                *outcomes[cid].get() = Some(Ok(ChunkOutcome {
+                    acc,
+                    head_frag,
+                    head_open,
+                    tail_carry: carry,
+                }));
+            }
         }
     });
 
-    let mut unpacked = Vec::with_capacity(actual_workers);
+    let mut unpacked = Vec::with_capacity(num_chunks);
     let mut first_err = None;
     for slot in outcomes {
         match slot.into_inner() {

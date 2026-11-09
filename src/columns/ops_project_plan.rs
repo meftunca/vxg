@@ -9,6 +9,55 @@ pub(crate) enum GrammarProjectOut {
     Fallback,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProjPrecheck {
+    Ok,
+    SkipAll,
+    Fallback,
+}
+
+fn check_template_projection_fast(
+    segs: &[&[u8]],
+    tcols: &[&[u8]],
+    cols: &[crate::ops::ColTarget<'_>],
+    known_delim: Option<Option<u8>>,
+) -> Result<ProjPrecheck> {
+    match cols[0] {
+        crate::ops::ColTarget::JsonKey(first_k) => {
+            if segs.last().is_some_and(|s| s.ends_with(b"\n"))
+                && json_single_line_template_slot(segs, first_k.as_bytes()).is_some()
+            {
+                for &col in cols {
+                    let crate::ops::ColTarget::JsonKey(k) = col else {
+                        unreachable!();
+                    };
+                    if json_single_line_template_slot(segs, k.as_bytes()).is_none() {
+                        return Ok(ProjPrecheck::Fallback);
+                    }
+                }
+                Ok(ProjPrecheck::Ok)
+            } else if !can_template_match_fast(segs, tcols, b"{")? {
+                Ok(ProjPrecheck::SkipAll)
+            } else {
+                Ok(ProjPrecheck::Fallback)
+            }
+        }
+        crate::ops::ColTarget::Delimited { delim, .. } => {
+            if delim.is_ascii_digit() {
+                return Ok(ProjPrecheck::Fallback);
+            }
+            let tpl_delim = known_delim.unwrap_or_else(|| delimited_template_delim(segs));
+            if tpl_delim == Some(delim) {
+                Ok(ProjPrecheck::Ok)
+            } else if !can_template_match_fast(segs, tcols, &[delim])? {
+                Ok(ProjPrecheck::SkipAll)
+            } else {
+                Ok(ProjPrecheck::Fallback)
+            }
+        }
+    }
+}
+
 enum TemplateProjPlan {
     SkipAll,
     ConstJsonEmpty { crlf: bool },

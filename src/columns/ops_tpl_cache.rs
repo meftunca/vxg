@@ -14,6 +14,7 @@ struct GrammarTplWireCache {
     wire: Vec<u8>,
     template_count: usize,
     slot_counts: [usize; 16],
+    tpl0_delim: Option<u8>,
     tpl0_rel: [(u16, u16); MAX_SLOTS + 1],
     extra_rel: Vec<Vec<(u16, u16)>>,
 }
@@ -24,6 +25,7 @@ impl GrammarTplWireCache {
             wire: Vec::new(),
             template_count: 0,
             slot_counts: [0usize; 16],
+            tpl0_delim: None,
             tpl0_rel: [(0u16, 0u16); MAX_SLOTS + 1],
             extra_rel: Vec::new(),
         }
@@ -129,9 +131,26 @@ thread_local! {
 type CachedGrammarMatch<'a> = (
     usize,
     [usize; 16],
+    Option<u8>,
     [&'a [u8]; MAX_SLOTS + 1],
     Vec<Vec<&'a [u8]>>,
 );
+
+#[inline]
+fn try_match_cached_single_tpl(rest: &[u8]) -> Option<(usize, Option<u8>, usize)> {
+    GRAMMAR_TPL_WIRE_CACHE.with(|cell| {
+        let c = cell.borrow();
+        let wlen = c.wire.len();
+        if c.template_count != 1
+            || wlen == 0
+            || rest.len() < wlen
+            || &rest[..wlen] != c.wire.as_slice()
+        {
+            return None;
+        }
+        Some((c.slot_counts[0], c.tpl0_delim, wlen))
+    })
+}
 
 #[inline]
 fn try_match_cached_grammar_wire<'a>(
@@ -158,7 +177,13 @@ fn try_match_cached_grammar_wire<'a>(
             extra_tpl_segs.push(v);
         }
         cursor.pos += wlen;
-        Some((c.template_count, c.slot_counts, tpl0_segs, extra_tpl_segs))
+        Some((
+            c.template_count,
+            c.slot_counts,
+            c.tpl0_delim,
+            tpl0_segs,
+            extra_tpl_segs,
+        ))
     })
 }
 
@@ -166,6 +191,7 @@ fn store_cached_grammar_wire(
     rest_wire: &[u8],
     template_count: usize,
     slot_counts: &[usize; 16],
+    tpl0_delim: Option<u8>,
     tpl0_segs: &[&[u8]; MAX_SLOTS + 1],
     extra_tpl_segs: &[Vec<&[u8]>],
 ) {
@@ -203,6 +229,7 @@ fn store_cached_grammar_wire(
         c.wire.extend_from_slice(rest_wire);
         c.template_count = template_count;
         c.slot_counts = *slot_counts;
+        c.tpl0_delim = tpl0_delim;
         c.tpl0_rel = tpl0_rel;
         c.extra_rel = extra_rel;
     });

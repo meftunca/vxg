@@ -47,7 +47,7 @@ impl CandTracker {
         Self {
             k,
             dir,
-            heap: std::collections::BinaryHeap::with_capacity(k.min(256)),
+            heap: std::collections::BinaryHeap::new(),
         }
     }
 
@@ -94,6 +94,9 @@ impl CandTracker {
             global_row,
         };
         if self.heap.len() < self.k {
+            if self.heap.capacity() == 0 {
+                self.heap.reserve(self.k.min(256));
+            }
             self.heap.push(item);
         } else if let Some(mut worst) = self.heap.peek_mut() {
             *worst = item;
@@ -270,8 +273,6 @@ fn scan_order_slot_cands(
     cands: &mut CandTracker,
     scratch: &mut DecodeScratch,
 ) -> Result<()> {
-    use crate::ops::top_k::{extract_token_sort_key, extract_token_sort_key_ref, SortKeyRef};
-
     let digit_delim = matches!(
         order_col,
         crate::ops::ColTarget::Delimited { delim, .. } if delim.is_ascii_digit()
@@ -285,31 +286,51 @@ fn scan_order_slot_cands(
         digit_delim,
         outer,
         cands,
+    )? || try_scan_decimal_topk(
+        order_col_bytes,
+        ones,
+        mask,
+        row_map,
+        base_row,
+        digit_delim,
+        shared_bound,
+        outer,
+        cands,
     )? {
         return Ok(());
     }
-    if !digit_delim {
-        if let Some(tag @ (MODEL_DECIMAL_PACKED | MODEL_DECIMAL_AFFINE)) =
-            order_col_bytes.first().copied()
-        {
-            let exact_valid_len = if tag == MODEL_DECIMAL_AFFINE {
-                ones >= 2 && order_col_bytes.len() == 17
-            } else if order_col_bytes.len() >= 10 {
-                let w = order_col_bytes[9];
-                w <= 64 && order_col_bytes.len() == 10 + (ones * usize::from(w)).div_ceil(8)
-            } else {
-                false
-            };
-            if exact_valid_len {
-                let Some(cmp) = outer.num_accept_cmp(shared_bound, base_row) else {
-                    return Ok(());
-                };
-                if !can_numeric_col_match_fast(order_col_bytes, ones, cmp) {
-                    return Ok(());
-                }
-            }
-        }
-    }
+    scan_order_slot_cands_scratch(
+        order_col_bytes,
+        ones,
+        mask,
+        row_map,
+        base_row,
+        order_col,
+        digit_delim,
+        hdr_raw_len,
+        shared_bound,
+        outer,
+        cands,
+        scratch,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_order_slot_cands_scratch(
+    order_col_bytes: &[u8],
+    ones: usize,
+    mask: &TplMask,
+    row_map: &mut TplRowMap<'_>,
+    base_row: usize,
+    order_col: crate::ops::ColTarget<'_>,
+    digit_delim: bool,
+    hdr_raw_len: usize,
+    shared_bound: Option<&std::sync::atomic::AtomicU64>,
+    outer: &crate::ops::top_k::TopKHeap,
+    cands: &mut CandTracker,
+    scratch: &mut DecodeScratch,
+) -> Result<()> {
+    use crate::ops::top_k::{extract_token_sort_key, extract_token_sort_key_ref, SortKeyRef};
 
     ensure_col_raw_arena(order_col_bytes, hdr_raw_len, &mut scratch.raw_arena);
     let col = PreparedColumn::parse_and_validate(order_col_bytes, ones, scratch)?;
@@ -361,6 +382,9 @@ fn scan_order_slot_cands(
                 let Some(cmp) = outer.num_accept_cmp(shared_bound, base_row) else {
                     return Ok(());
                 };
+                if !can_numeric_col_match_fast(order_col_bytes, ones, cmp) {
+                    return Ok(());
+                }
                 let vals = &scratch.u64_arena[u64_offset..u64_offset + ones];
                 scan_numeric_slice_cands(vals, mask, row_map, base_row, cmp, outer, cands);
                 return Ok(());

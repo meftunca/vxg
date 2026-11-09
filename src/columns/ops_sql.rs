@@ -492,6 +492,20 @@ fn multi_group_by_grammar_block_inner(
                 }
             }
 
+            if g_views.len() == 1
+                && try_multi_group_single_fast(
+                    &g_views[0],
+                    &a_views,
+                    ones,
+                    &mask,
+                    &scratch,
+                    out_map,
+                )
+            {
+                reset_scratch_to(&mut scratch, raw_mark, slice_mark);
+                continue;
+            }
+
             let mut visit_idx = |idx: usize| {
                 let mut keys = Vec::with_capacity(g_views.len());
                 for gv in &g_views {

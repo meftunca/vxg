@@ -17,20 +17,13 @@ fn group_by_template_resolved<'a>(
     if pop == 0 {
         return Ok(());
     }
-    if try_group_by_dict_packed_fast(g_col_bytes, a_slot_bytes, ones, mask, group_col, out_map)? {
-        return Ok(());
-    }
-    if try_group_by_decimal_packed_fast(
+    if try_group_by_packed_or_dict_fast(
         g_col_bytes,
         a_slot_bytes,
         ones,
         mask,
         group_col,
         out_map,
-        hdr_raw_len,
-        raw_mark,
-        slice_mark,
-        scratch,
     )? {
         return Ok(());
     }
@@ -412,6 +405,54 @@ fn group_by_grammar_block_inner(
     }
     if carry.is_some() && !hdr.first_is_raw {
         return Ok(false);
+    }
+    if hdr.template_count == 1 && hdr.raw_count == 0 && carry.is_none() && where_expr.is_none() {
+        let multi_cols = read_all_template_col_slices(&mut hdr)?;
+        let segs = hdr.segs(0);
+        let tcols = multi_cols.get(0);
+        let kd = Some(hdr.tpl0_delim);
+        let g_slot = match resolve_template_slot_with_delim(segs, tcols, group_col, kd)? {
+            SlotLookup::Fallback => return Ok(false),
+            SlotLookup::Absent => return Ok(true),
+            SlotLookup::Slot(s) => s,
+        };
+        let a_slot = match agg_col {
+            None => None,
+            Some(acol) => match resolve_template_slot_with_delim(segs, tcols, acol, kd)? {
+                SlotLookup::Fallback => return Ok(false),
+                SlotLookup::Absent => None,
+                SlotLookup::Slot(s) => Some((tcols[s], acol)),
+            },
+        };
+        let cnt = hdr.tpl_row_counts[0];
+        if try_group_by_packed_or_dict_fast(
+            tcols[g_slot],
+            a_slot,
+            cnt,
+            &TplMask::All,
+            group_col,
+            out_map,
+        )? {
+            return Ok(true);
+        }
+        return DECODE_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            scratch.clear();
+            ensure_raw_rows_arena(&hdr, &mut scratch.raw_arena);
+            group_by_template_resolved(
+                tcols[g_slot],
+                a_slot,
+                cnt,
+                &TplMask::All,
+                group_col,
+                out_map,
+                hdr.raw_len,
+                0,
+                0,
+                &mut scratch,
+            )?;
+            Ok(true)
+        });
     }
     DECODE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();

@@ -15,13 +15,13 @@ pub(crate) fn scan_frame_into_heap(
     if heap.capacity_k() == 0 {
         return Ok((0, 0));
     }
-    let in_blocks = collect_par_blocks(frame_bytes, &frames);
-    let nb = in_blocks.len();
+    let nb: usize = frames.iter().map(|f| f.blocks.len()).sum();
     if nb == 0 {
         return Ok((0, 0));
     }
 
     if options.threads > 1 && nb > 1 {
+        let in_blocks = collect_par_blocks(frame_bytes, &frames);
         let (meta, boundary_lines) = build_par_meta_and_boundary(&in_blocks, options)?;
         let total_rows = meta
             .iter()
@@ -158,76 +158,80 @@ pub(crate) fn scan_frame_into_heap(
     let mut cur_global = global_row_offset;
     let mut carry: Option<(usize, usize, usize, Vec<u8>)> = None;
     let mut buf: Vec<u8> = Vec::new();
-    for (local_idx, ib) in in_blocks.iter().enumerate() {
-        let blk_idx = global_block_offset + local_idx;
-        if ib.info.kind == BLOCK_COLUMN {
-            if let Some(new_rows) = crate::columns::topk_grammar_block(
-                ib.payload,
-                blk_idx,
-                cur_global,
-                &mut carry,
-                true,
-                where_expr,
-                project_cols,
-                order_col,
-                None,
-                heap,
-            )? {
-                cur_global += new_rows;
-                continue;
-            }
-        }
-        query::decode_block_into(
-            ib.f_bytes,
-            ib.local_blk,
-            ib.info.raw_size,
-            options,
-            &mut buf,
-        )?;
-        if buf.is_empty() {
-            continue;
-        }
-        let had_carry = carry.is_some();
-        let base_row = cur_global - usize::from(had_carry);
-        let lines: Vec<&[u8]> = buf.split_inclusive(|&b| b == b'\n').collect();
-        let blk_rows = lines.len();
-        for (row_idx, &line_bytes) in lines.iter().enumerate() {
-            if row_idx == 0 {
-                if let Some((c_blk, c_row, c_glob, mut c_bytes)) = carry.take() {
-                    c_bytes.extend_from_slice(line_bytes);
-                    if !c_bytes.ends_with(b"\n") && blk_rows == 1 {
-                        carry = Some((c_blk, c_row, c_glob, c_bytes));
-                        break;
-                    }
-                    heap.push_line_if_match(
-                        &c_bytes,
-                        c_blk,
-                        c_row,
-                        c_glob,
-                        where_expr,
-                        project_cols,
-                        order_col,
-                        None,
-                    );
+    let mut local_idx = 0usize;
+    for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
+        for (local_blk, blk) in parsed.blocks.iter().enumerate() {
+            let blk_idx = global_block_offset + local_idx;
+            local_idx += 1;
+            if blk.info.kind == BLOCK_COLUMN {
+                if let Some(new_rows) = crate::columns::topk_grammar_block(
+                    blk.payload,
+                    blk_idx,
+                    cur_global,
+                    &mut carry,
+                    true,
+                    where_expr,
+                    project_cols,
+                    order_col,
+                    None,
+                    heap,
+                )? {
+                    cur_global += new_rows;
                     continue;
                 }
             }
-            if row_idx + 1 == blk_rows && !line_bytes.ends_with(b"\n") {
-                carry = Some((blk_idx, row_idx, base_row + row_idx, line_bytes.to_vec()));
-                break;
+            query::decode_block_into(
+                f_bytes,
+                local_blk,
+                blk.info.raw_size,
+                options,
+                &mut buf,
+            )?;
+            if buf.is_empty() {
+                continue;
             }
-            heap.push_line_if_match(
-                line_bytes,
-                blk_idx,
-                row_idx,
-                base_row + row_idx,
-                where_expr,
-                project_cols,
-                order_col,
-                None,
-            );
+            let had_carry = carry.is_some();
+            let base_row = cur_global - usize::from(had_carry);
+            let lines: Vec<&[u8]> = buf.split_inclusive(|&b| b == b'\n').collect();
+            let blk_rows = lines.len();
+            for (row_idx, &line_bytes) in lines.iter().enumerate() {
+                if row_idx == 0 {
+                    if let Some((c_blk, c_row, c_glob, mut c_bytes)) = carry.take() {
+                        c_bytes.extend_from_slice(line_bytes);
+                        if !c_bytes.ends_with(b"\n") && blk_rows == 1 {
+                            carry = Some((c_blk, c_row, c_glob, c_bytes));
+                            break;
+                        }
+                        heap.push_line_if_match(
+                            &c_bytes,
+                            c_blk,
+                            c_row,
+                            c_glob,
+                            where_expr,
+                            project_cols,
+                            order_col,
+                            None,
+                        );
+                        continue;
+                    }
+                }
+                if row_idx + 1 == blk_rows && !line_bytes.ends_with(b"\n") {
+                    carry = Some((blk_idx, row_idx, base_row + row_idx, line_bytes.to_vec()));
+                    break;
+                }
+                heap.push_line_if_match(
+                    line_bytes,
+                    blk_idx,
+                    row_idx,
+                    base_row + row_idx,
+                    where_expr,
+                    project_cols,
+                    order_col,
+                    None,
+                );
+            }
+            cur_global = base_row + blk_rows;
         }
-        cur_global = base_row + blk_rows;
     }
     if let Some((c_blk, c_row, c_glob, c_bytes)) = carry.take() {
         heap.push_line_if_match(

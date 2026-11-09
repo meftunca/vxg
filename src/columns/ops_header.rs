@@ -3,6 +3,7 @@ struct OpsGrammarHeader<'a> {
     p_after_raw_len: usize,
     template_count: usize,
     slot_counts: [usize; 16],
+    tpl0_delim: Option<u8>,
     tpl0_segs: [&'a [u8]; MAX_SLOTS + 1],
     extra_tpl_segs: Vec<Vec<&'a [u8]>>,
     row_count: usize,
@@ -13,6 +14,19 @@ struct OpsGrammarHeader<'a> {
     first_is_raw: bool,
     last_is_raw: bool,
     cursor: Cursor<'a>,
+}
+
+#[inline(always)]
+fn popcount_bytes(slice: &[u8]) -> usize {
+    let mut chunks = slice.chunks_exact(8);
+    let mut total = 0usize;
+    for c in &mut chunks {
+        total += u64::from_ne_bytes(c.try_into().unwrap()).count_ones() as usize;
+    }
+    for &b in chunks.remainder() {
+        total += b.count_ones() as usize;
+    }
+    total
 }
 
 impl<'a> OpsGrammarHeader<'a> {
@@ -37,7 +51,7 @@ fn parse_grammar_for_ops<'a>(payload: &'a [u8]) -> Result<Option<OpsGrammarHeade
         return Err(invalid("column raw length"));
     }
     let p_after_raw_len = 1 + cursor.pos;
-    let (template_count, slot_counts, tpl0_segs, extra_tpl_segs) =
+    let (template_count, slot_counts, tpl0_delim, tpl0_segs, extra_tpl_segs) =
         if let Some(hit) = try_match_cached_grammar_wire(&payload[p_after_raw_len..], &mut cursor) {
             hit
         } else {
@@ -127,14 +141,22 @@ fn parse_grammar_for_ops<'a>(payload: &'a [u8]) -> Result<Option<OpsGrammarHeade
                 }
             }
             let wire_len = cursor.pos - start_pos;
+            let tpl0_delim = delimited_template_delim(&tpl0_segs[..=slot_counts[0]]);
             store_cached_grammar_wire(
                 &payload[p_after_raw_len..p_after_raw_len + wire_len],
                 template_count,
                 &slot_counts,
+                tpl0_delim,
                 &tpl0_segs,
                 &extra_tpl_segs,
             );
-            (template_count, slot_counts, tpl0_segs, extra_tpl_segs)
+            (
+                template_count,
+                slot_counts,
+                tpl0_delim,
+                tpl0_segs,
+                extra_tpl_segs,
+            )
         };
     let row_count = cursor.uleb()?;
     if row_count > raw_len.saturating_add(1) {
@@ -152,7 +174,7 @@ fn parse_grammar_for_ops<'a>(payload: &'a [u8]) -> Result<Option<OpsGrammarHeade
         (0, false, false)
     } else if template_count == 1 {
         let _ = FastBitReader::new_validated(selector_slice, row_count, 1)?;
-        let ones: usize = selector_slice.iter().map(|b| b.count_ones() as usize).sum();
+        let ones = popcount_bytes(selector_slice);
         tpl_row_counts[0] = ones;
         let f_raw = (selector_slice[0] & 1) == 0;
         let l_raw = ((selector_slice[(row_count - 1) >> 3] >> ((row_count - 1) & 7)) & 1) == 0;
@@ -186,6 +208,7 @@ fn parse_grammar_for_ops<'a>(payload: &'a [u8]) -> Result<Option<OpsGrammarHeade
         p_after_raw_len,
         template_count,
         slot_counts,
+        tpl0_delim,
         tpl0_segs,
         extra_tpl_segs,
         row_count,

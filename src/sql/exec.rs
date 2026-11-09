@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 
 use crate::{
     ops::{
-        csv_header::peek_delim_header,
+        csv_header::{peek_delim_header, peek_delim_header_fast},
         line_matches_expr,
         multi_agg::{aggregate_multi_columns, multi_group_by, MultiGroupRow},
         AggStats, ColTarget, GroupKey, PredExpr, SortDir,
@@ -290,7 +290,7 @@ fn exec_scalar_agg(
         let cnt = match where_expr {
             None => {
                 let mut n = crate::frame_row_count(frame_bytes)? as u64;
-                if peek_delim_header(frame_bytes, dec_options)?.is_some() {
+                if peek_delim_header_fast(frame_bytes, dec_options)?.is_some() {
                     n = n.saturating_sub(1);
                 }
                 n
@@ -298,7 +298,7 @@ fn exec_scalar_agg(
             Some(w) => {
                 let mut n = crate::count_where(frame_bytes, w, dec_options)?;
                 if !crate::ops::csv_header::expr_contains_json_key(w) {
-                    if let Some(hdr) = peek_delim_header(frame_bytes, dec_options)? {
+                    if let Some(hdr) = peek_delim_header_fast(frame_bytes, dec_options)? {
                         if line_matches_expr(&hdr.header_line, w) {
                             n = n.saturating_sub(1);
                         }
@@ -314,7 +314,7 @@ fn exec_scalar_agg(
         if matches!(acol, ColTarget::Delimited { .. })
             && where_expr.is_none_or(|w| !crate::ops::csv_header::expr_contains_json_key(w))
         {
-            if let Some(hdr) = peek_delim_header(frame_bytes, dec_options)? {
+            if let Some(hdr) = peek_delim_header_fast(frame_bytes, dec_options)? {
                 crate::ops::csv_header::subtract_header_agg(&hdr, where_expr, acol, &mut st);
             }
         }

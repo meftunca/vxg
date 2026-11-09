@@ -492,13 +492,35 @@ fn try_scan_scaled_dec_topk(
     let min_i128 = min_v as i128;
     match mask {
         TplMask::All => {
-            let mut rdr = FastBitReader::new_validated(packed_bytes, ones, width)?;
-            for ti in 0..ones {
-                let k = SortKeyRef::Dec(DecNum::new(min_i128 + (rdr.next_u64() as i128), scale));
-                if outer.can_accept_key_from(k, base_row + ti) && cands.can_accept(k, base_row + ti)
-                {
-                    let b_row = row_map.row_of(ti);
-                    cands.try_push(k, ti, b_row, base_row + b_row, outer);
+            if width <= 16 {
+                let mut buf = [0u16; 64];
+                let mut row = 0usize;
+                while row < ones {
+                    let cnt = (ones - row).min(64);
+                    unpack_u16_chunk64(packed_bytes, row, cnt, width, &mut buf);
+                    for (j, &r16) in buf[..cnt].iter().enumerate() {
+                        let ti = row + j;
+                        let k = SortKeyRef::Dec(DecNum::new(min_i128 + i128::from(r16), scale));
+                        if outer.can_accept_key_from(k, base_row + ti)
+                            && cands.can_accept(k, base_row + ti)
+                        {
+                            let b_row = row_map.row_of(ti);
+                            cands.try_push(k, ti, b_row, base_row + b_row, outer);
+                        }
+                    }
+                    row += cnt;
+                }
+            } else {
+                let mut rdr = FastBitReader::new_validated(packed_bytes, ones, width)?;
+                for ti in 0..ones {
+                    let k =
+                        SortKeyRef::Dec(DecNum::new(min_i128 + (rdr.next_u64() as i128), scale));
+                    if outer.can_accept_key_from(k, base_row + ti)
+                        && cands.can_accept(k, base_row + ti)
+                    {
+                        let b_row = row_map.row_of(ti);
+                        cands.try_push(k, ti, b_row, base_row + b_row, outer);
+                    }
                 }
             }
         }

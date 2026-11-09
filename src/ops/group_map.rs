@@ -108,6 +108,49 @@ impl GroupMap {
     }
 
     #[inline]
+    pub(crate) fn merge_decoded_unsigned_batch(
+        &mut self,
+        is_str: bool,
+        key: &[u8],
+        count: u64,
+        sum: u128,
+        min: u64,
+        max: u64,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let map = if is_str {
+            &mut self.str_groups
+        } else {
+            &mut self.raw_json_groups
+        };
+        if let Some(ex) = map.get_mut(key) {
+            if !ex.has_signed_or_dec {
+                ex.row_count += count;
+                ex.num_count += count;
+                ex.sum += sum;
+                ex.min = Some(ex.min.map_or(min, |m| m.min(min)));
+                ex.max = Some(ex.max.map_or(max, |m| m.max(max)));
+            } else {
+                ex.add_scaled_batch(sum as i128, min as i128, max as i128, 0, count);
+            }
+        } else {
+            map.insert(
+                key.to_vec(),
+                AggStats {
+                    row_count: count,
+                    num_count: count,
+                    sum,
+                    min: Some(min),
+                    max: Some(max),
+                    ..AggStats::default()
+                },
+            );
+        }
+    }
+
+    #[inline]
     pub(crate) fn merge_u64_key(&mut self, col: ColTarget<'_>, val: u64, delta: &AggStats) {
         if delta.row_count == 0 {
             return;
@@ -121,6 +164,57 @@ impl GroupMap {
             arr[val as usize].merge(delta);
         } else {
             self.u64_overflow.entry(val).or_default().merge(delta);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn merge_u64_unsigned_batch(
+        &mut self,
+        col: ColTarget<'_>,
+        val: u64,
+        count: u64,
+        sum: u128,
+        min: u64,
+        max: u64,
+    ) {
+        if count == 0 {
+            return;
+        }
+        self.u64_is_str = matches!(col, ColTarget::Delimited { .. });
+        let dst = if val < 64 {
+            let arr = self
+                .u64_small
+                .get_or_insert_with(|| Box::new([AggStats::default(); 64]));
+            self.u64_small_used |= 1u64 << val;
+            &mut arr[val as usize]
+        } else {
+            self.u64_overflow.entry(val).or_default()
+        };
+        if !dst.has_signed_or_dec {
+            dst.row_count += count;
+            dst.num_count += count;
+            dst.sum += sum;
+            dst.min = Some(dst.min.map_or(min, |m| m.min(min)));
+            dst.max = Some(dst.max.map_or(max, |m| m.max(max)));
+        } else {
+            dst.add_scaled_batch(sum as i128, min as i128, max as i128, 0, count);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn merge_u64_rows_only(&mut self, col: ColTarget<'_>, val: u64, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.u64_is_str = matches!(col, ColTarget::Delimited { .. });
+        if val < 64 {
+            let arr = self
+                .u64_small
+                .get_or_insert_with(|| Box::new([AggStats::default(); 64]));
+            self.u64_small_used |= 1u64 << val;
+            arr[val as usize].row_count += count;
+        } else {
+            self.u64_overflow.entry(val).or_default().row_count += count;
         }
     }
 

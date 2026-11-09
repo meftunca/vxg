@@ -129,53 +129,6 @@ fn residual_interval(
 }
 
 #[inline(always)]
-fn unpack_u16_chunk64(packed: &[u8], start_row: usize, count: usize, width: u8, out: &mut [u16; 64]) {
-    let w = width as u32;
-    let m = (1u64 << w) - 1;
-    let mut bit_pos = start_row * (width as usize);
-    let mut i = 0usize;
-    if w <= 14 {
-        let step_bits = (width as usize) * 4;
-        while i + 4 <= count {
-            let byte_idx = bit_pos >> 3;
-            let bit_off = (bit_pos & 7) as u32;
-            let v = if byte_idx + 8 <= packed.len() && bit_off + 4 * w <= 64 {
-                let raw = unsafe {
-                    packed.as_ptr().add(byte_idx).cast::<u64>().read_unaligned().to_le()
-                };
-                raw >> bit_off
-            } else if byte_idx + 16 <= packed.len() {
-                let raw = unsafe {
-                    packed.as_ptr().add(byte_idx).cast::<u128>().read_unaligned().to_le()
-                };
-                (raw >> bit_off) as u64
-            } else {
-                let mut r = 0u128;
-                let rem = packed.len().saturating_sub(byte_idx).min(16);
-                for k in 0..rem {
-                    r |= u128::from(unsafe { *packed.get_unchecked(byte_idx + k) }) << (8 * k);
-                }
-                (r >> bit_off) as u64
-            };
-            let u16x4 = (v & m)
-                | (((v >> w) & m) << 16)
-                | (((v >> (2 * w)) & m) << 32)
-                | (((v >> (3 * w)) & m) << 48);
-            unsafe {
-                out.as_mut_ptr().add(i).cast::<u64>().write_unaligned(u16x4.to_le());
-            }
-            i += 4;
-            bit_pos += step_bits;
-        }
-    }
-    while i < count {
-        out[i] = read_packed_bits_at(packed, bit_pos, width) as u16;
-        i += 1;
-        bit_pos += width as usize;
-    }
-}
-
-#[inline(always)]
 fn cmp_u16_chunk64_mask(buf: &[u16; 64], count: usize, lo: u16, hi: u16, is_neq: bool) -> u64 {
     let count_mask = if count >= 64 { u64::MAX } else { (1u64 << count) - 1 };
     #[cfg(target_arch = "aarch64")]
