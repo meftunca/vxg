@@ -147,6 +147,14 @@ const FROZEN_VECTORS: &[FrozenVector] = &[
         expected_kind: Some(BLOCK_DICT_LZ),
         expect_dict: true,
     },
+    FrozenVector {
+        name: "v5-dict-lz-fse",
+        frame: include_bytes!("vectors/v5-dict-lz-fse.vxg"),
+        raw: include_bytes!("vectors/v5-dict-lz-fse.raw"),
+        expected_version: 5,
+        expected_kind: Some(BLOCK_DICT_LZ),
+        expect_dict: true,
+    },
 ];
 
 #[test]
@@ -171,6 +179,14 @@ fn frozen_v1_to_v5_compatibility_vectors() {
                 parsed.blocks().all(|b| b.kind == expected_kind),
                 "unexpected block kind in {}",
                 vec_case.name
+            );
+        }
+        if vec_case.name == "v5-dict-lz-fse" {
+            assert!(
+                parsed
+                    .blocks()
+                    .any(|b| b.payload_size > 0 && (vec_case.frame[b.payload_offset] & 0x10) != 0),
+                "v5-dict-lz-fse vector must exercise FLAG_FSE (0x10)"
             );
         }
         parsed

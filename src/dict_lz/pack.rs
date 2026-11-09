@@ -1,10 +1,13 @@
 use crate::columns::huf_encode_min;
 
+use super::fse::fse_encode_min;
+
 pub(crate) const DICT_LZ_MAGIC: u8 = 0x80;
 pub(crate) const FLAG_HUF_LITS: u8 = 0x01;
 pub(crate) const FLAG_HUF_TOKS: u8 = 0x02;
 pub(crate) const FLAG_HUF_OFFS: u8 = 0x04;
 pub(crate) const FLAG_HUF_EXT: u8 = 0x08;
+pub(crate) const FLAG_FSE: u8 = 0x10;
 
 #[inline(always)]
 pub(crate) fn put_uleb(out: &mut Vec<u8>, mut v: usize) {
@@ -86,6 +89,13 @@ impl<'a> BitWriter<'a> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamMode {
+    Raw,
+    Huf,
+    Fse,
+}
+
 pub(super) struct StreamBufs {
     pub(super) lits: Vec<u8>,
     pub(super) toks: Vec<u8>,
@@ -96,6 +106,10 @@ pub(super) struct StreamBufs {
     pub(super) huf_toks: Vec<u8>,
     pub(super) huf_offs: Vec<u8>,
     pub(super) huf_ext: Vec<u8>,
+    pub(super) fse_lits: Vec<u8>,
+    pub(super) fse_toks: Vec<u8>,
+    pub(super) fse_offs: Vec<u8>,
+    pub(super) fse_ext: Vec<u8>,
 }
 
 impl StreamBufs {
@@ -110,6 +124,10 @@ impl StreamBufs {
             huf_toks: Vec::new(),
             huf_offs: Vec::new(),
             huf_ext: Vec::new(),
+            fse_lits: Vec::new(),
+            fse_toks: Vec::new(),
+            fse_offs: Vec::new(),
+            fse_ext: Vec::new(),
         }
     }
 
@@ -126,12 +144,70 @@ impl StreamBufs {
     }
 }
 
+#[inline]
+fn pick_stream_mode(
+    raw: &[u8],
+    huf_buf: &mut Vec<u8>,
+    fse_buf: &mut Vec<u8>,
+    huf_min: usize,
+    huf_margin: usize,
+    try_fse: bool,
+    fse_min: usize,
+    fse_margin: usize,
+) -> (StreamMode, usize, usize) {
+    let raw_len = raw.len();
+    huf_buf.clear();
+    let has_huf = raw_len >= huf_min
+        && huf_encode_min(raw, huf_buf, raw_len.saturating_sub(huf_margin + 2), huf_min)
+        && uleb_len(huf_buf.len()) + huf_buf.len() + huf_margin < raw_len;
+    let non_fse_mode = if has_huf { StreamMode::Huf } else { StreamMode::Raw };
+    let non_fse_wire = if has_huf {
+        uleb_len(huf_buf.len()) + huf_buf.len()
+    } else {
+        raw_len
+    };
+
+    fse_buf.clear();
+    if try_fse && raw_len >= fse_min && non_fse_wire > fse_margin + 3 {
+        let fse_cap = non_fse_wire - fse_margin - 2;
+        if fse_encode_min(raw, fse_buf, fse_cap, fse_min) {
+            let fw = uleb_len(fse_buf.len()) + fse_buf.len();
+            if fw + fse_margin <= non_fse_wire {
+                return (StreamMode::Fse, fw, non_fse_wire);
+            }
+        }
+    }
+    (non_fse_mode, non_fse_wire, non_fse_wire)
+}
+
+#[inline]
+fn emit_chosen_stream(
+    out: &mut Vec<u8>,
+    mode: StreamMode,
+    raw: &[u8],
+    huf: &[u8],
+    fse: &[u8],
+) {
+    match mode {
+        StreamMode::Raw => out.extend_from_slice(raw),
+        StreamMode::Huf => {
+            put_uleb(out, huf.len());
+            out.extend_from_slice(huf);
+        }
+        StreamMode::Fse => {
+            put_uleb(out, fse.len());
+            out.extend_from_slice(fse);
+        }
+    }
+}
+
 pub(super) fn serialize_streams(
     chunk: &[u8],
     anchor: usize,
     sb: &mut StreamBufs,
     out: &mut Vec<u8>,
     max_len: usize,
+    level: u8,
 ) -> Option<(usize, usize)> {
     let n = chunk.len();
     let seq_count = sb.toks.len();
@@ -139,18 +215,38 @@ pub(super) fn serialize_streams(
 
     if seq_count == 0 {
         sb.huf_lits.clear();
+        sb.fse_lits.clear();
         let hdr_budget = 1 + 1 + uleb_len(n) + 4;
         if max_len <= hdr_budget {
             return None;
         }
-        if !huf_encode_min(chunk, &mut sb.huf_lits, max_len - hdr_budget, 32) {
+        let has_huf = huf_encode_min(chunk, &mut sb.huf_lits, max_len - hdr_budget, 32);
+        let huf_est = if has_huf {
+            1 + 1 + uleb_len(n) + uleb_len(sb.huf_lits.len()) + sb.huf_lits.len()
+        } else {
+            usize::MAX
+        };
+        let fse_cap = huf_est.min(max_len).saturating_sub(hdr_budget + 2);
+        let has_fse = level >= 2
+            && fse_cap >= 2
+            && fse_encode_min(chunk, &mut sb.fse_lits, fse_cap, 32);
+        if has_fse {
+            let est = 1 + 1 + 1 + uleb_len(n) + uleb_len(sb.fse_lits.len()) + sb.fse_lits.len();
+            if est < huf_est && est < max_len {
+                out.reserve(est);
+                out.push(DICT_LZ_MAGIC | FLAG_FSE);
+                out.push(FLAG_HUF_LITS);
+                put_uleb(out, 0);
+                put_uleb(out, n);
+                put_uleb(out, sb.fse_lits.len());
+                out.extend_from_slice(&sb.fse_lits);
+                return Some((out_start, out.len() - out_start));
+            }
+        }
+        if huf_est >= max_len {
             return None;
         }
-        let est = 1 + 1 + uleb_len(n) + uleb_len(sb.huf_lits.len()) + sb.huf_lits.len();
-        if est >= max_len {
-            return None;
-        }
-        out.reserve(est);
+        out.reserve(huf_est);
         out.push(DICT_LZ_MAGIC | FLAG_HUF_LITS);
         put_uleb(out, 0);
         put_uleb(out, n);
@@ -164,79 +260,115 @@ pub(super) fn serialize_streams(
     }
     let lit_total = sb.lits.len();
     let ext_raw_len = sb.len_ext.len();
+    let fse_margin = if level >= 5 { 1usize } else { 3usize };
+    let try_fse_seq = level >= 2;
+    let try_fse_lits = level >= 5;
+
+    let (mut m_lits, mut w_lits, nf_lits) = pick_stream_mode(
+        &sb.lits,
+        &mut sb.huf_lits,
+        &mut sb.fse_lits,
+        96,
+        8,
+        try_fse_lits,
+        96,
+        fse_margin + 2,
+    );
+    let (mut m_toks, mut w_toks, nf_toks) = pick_stream_mode(
+        &sb.toks,
+        &mut sb.huf_toks,
+        &mut sb.fse_toks,
+        96,
+        8,
+        try_fse_seq,
+        48,
+        fse_margin,
+    );
+    let (mut m_offs, mut w_offs, nf_offs) = pick_stream_mode(
+        &sb.off_codes,
+        &mut sb.huf_offs,
+        &mut sb.fse_offs,
+        96,
+        8,
+        try_fse_seq,
+        32,
+        fse_margin,
+    );
+    let (mut m_ext, mut w_ext, nf_ext) = pick_stream_mode(
+        &sb.len_ext,
+        &mut sb.huf_ext,
+        &mut sb.fse_ext,
+        256,
+        12,
+        try_fse_seq,
+        32,
+        fse_margin,
+    );
+
+    let fse_saved =
+        (nf_lits - w_lits) + (nf_toks - w_toks) + (nf_offs - w_offs) + (nf_ext - w_ext);
+    if fse_saved < 2 {
+        if m_lits == StreamMode::Fse {
+            m_lits = if !sb.huf_lits.is_empty() && nf_lits < lit_total {
+                StreamMode::Huf
+            } else {
+                StreamMode::Raw
+            };
+            w_lits = nf_lits;
+        }
+        if m_toks == StreamMode::Fse {
+            m_toks = if !sb.huf_toks.is_empty() && nf_toks < seq_count {
+                StreamMode::Huf
+            } else {
+                StreamMode::Raw
+            };
+            w_toks = nf_toks;
+        }
+        if m_offs == StreamMode::Fse {
+            m_offs = if !sb.huf_offs.is_empty() && nf_offs < seq_count {
+                StreamMode::Huf
+            } else {
+                StreamMode::Raw
+            };
+            w_offs = nf_offs;
+        }
+        if m_ext == StreamMode::Fse {
+            m_ext = if !sb.huf_ext.is_empty() && nf_ext < ext_raw_len {
+                StreamMode::Huf
+            } else {
+                StreamMode::Raw
+            };
+            w_ext = nf_ext;
+        }
+    }
 
     let mut flags = DICT_LZ_MAGIC;
-
-    sb.huf_lits.clear();
-    let use_huf_lits = lit_total >= 96
-        && huf_encode_min(&sb.lits, &mut sb.huf_lits, lit_total.saturating_sub(12), 96)
-        && uleb_len(sb.huf_lits.len()) + sb.huf_lits.len() + 8 < lit_total;
-    if use_huf_lits {
-        flags |= FLAG_HUF_LITS;
+    let mut fse_mask = 0u8;
+    for (mode, bit) in [
+        (m_lits, FLAG_HUF_LITS),
+        (m_toks, FLAG_HUF_TOKS),
+        (m_offs, FLAG_HUF_OFFS),
+        (m_ext, FLAG_HUF_EXT),
+    ] {
+        match mode {
+            StreamMode::Huf => flags |= bit,
+            StreamMode::Fse => fse_mask |= bit,
+            StreamMode::Raw => {}
+        }
+    }
+    if fse_mask != 0 {
+        flags |= FLAG_FSE;
     }
 
-    sb.huf_toks.clear();
-    let use_huf_toks = seq_count >= 96
-        && huf_encode_min(&sb.toks, &mut sb.huf_toks, seq_count.saturating_sub(12), 96)
-        && uleb_len(sb.huf_toks.len()) + sb.huf_toks.len() + 8 < seq_count;
-    if use_huf_toks {
-        flags |= FLAG_HUF_TOKS;
-    }
-
-    sb.huf_offs.clear();
-    let use_huf_offs = seq_count >= 96
-        && huf_encode_min(
-            &sb.off_codes,
-            &mut sb.huf_offs,
-            seq_count.saturating_sub(12),
-            96,
-        )
-        && uleb_len(sb.huf_offs.len()) + sb.huf_offs.len() + 8 < seq_count;
-    if use_huf_offs {
-        flags |= FLAG_HUF_OFFS;
-    }
-
-    sb.huf_ext.clear();
-    let use_huf_ext = ext_raw_len >= 256
-        && huf_encode_min(
-            &sb.len_ext,
-            &mut sb.huf_ext,
-            ext_raw_len.saturating_sub(16),
-            256,
-        )
-        && uleb_len(sb.huf_ext.len()) + sb.huf_ext.len() + 12 < ext_raw_len;
-    if use_huf_ext {
-        flags |= FLAG_HUF_EXT;
-    }
-
-    let lits_wire = if use_huf_lits {
-        uleb_len(sb.huf_lits.len()) + sb.huf_lits.len()
-    } else {
-        lit_total
-    };
-    let toks_wire = if use_huf_toks {
-        uleb_len(sb.huf_toks.len()) + sb.huf_toks.len()
-    } else {
-        seq_count
-    };
-    let offs_wire = if use_huf_offs {
-        uleb_len(sb.huf_offs.len()) + sb.huf_offs.len()
-    } else {
-        seq_count
-    };
-    let ext_wire = uleb_len(ext_raw_len)
-        + if use_huf_ext {
-            uleb_len(sb.huf_ext.len()) + sb.huf_ext.len()
-        } else {
-            ext_raw_len
-        };
+    let hdr_bytes = 1 + usize::from(fse_mask != 0);
+    let ext_wire = uleb_len(ext_raw_len) + w_ext;
     let bits_wire = uleb_len(sb.off_bits.len()) + sb.off_bits.len();
-    let total_wire = 1
+    let total_wire = hdr_bytes
         + uleb_len(seq_count)
         + uleb_len(lit_total)
-        + lits_wire
-        + toks_wire
-        + offs_wire
+        + w_lits
+        + w_toks
+        + w_offs
         + ext_wire
         + bits_wire;
 
@@ -246,34 +378,17 @@ pub(super) fn serialize_streams(
 
     out.reserve(total_wire);
     out.push(flags);
+    if fse_mask != 0 {
+        out.push(fse_mask);
+    }
     put_uleb(out, seq_count);
     put_uleb(out, lit_total);
 
-    if use_huf_lits {
-        put_uleb(out, sb.huf_lits.len());
-        out.extend_from_slice(&sb.huf_lits);
-    } else {
-        out.extend_from_slice(&sb.lits);
-    }
-    if use_huf_toks {
-        put_uleb(out, sb.huf_toks.len());
-        out.extend_from_slice(&sb.huf_toks);
-    } else {
-        out.extend_from_slice(&sb.toks);
-    }
-    if use_huf_offs {
-        put_uleb(out, sb.huf_offs.len());
-        out.extend_from_slice(&sb.huf_offs);
-    } else {
-        out.extend_from_slice(&sb.off_codes);
-    }
+    emit_chosen_stream(out, m_lits, &sb.lits, &sb.huf_lits, &sb.fse_lits);
+    emit_chosen_stream(out, m_toks, &sb.toks, &sb.huf_toks, &sb.fse_toks);
+    emit_chosen_stream(out, m_offs, &sb.off_codes, &sb.huf_offs, &sb.fse_offs);
     put_uleb(out, ext_raw_len);
-    if use_huf_ext {
-        put_uleb(out, sb.huf_ext.len());
-        out.extend_from_slice(&sb.huf_ext);
-    } else {
-        out.extend_from_slice(&sb.len_ext);
-    }
+    emit_chosen_stream(out, m_ext, &sb.len_ext, &sb.huf_ext, &sb.fse_ext);
     put_uleb(out, sb.off_bits.len());
     out.extend_from_slice(&sb.off_bits);
 

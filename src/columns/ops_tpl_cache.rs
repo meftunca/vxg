@@ -283,6 +283,9 @@ fn build_json_tpl_entry(segs: &[&[u8]]) -> Option<ParsedJsonTpl> {
             p = k_end;
             let k_dec = crate::ops::unescape_json_str(&seg[k_start..k_end])?;
             let kb = k_dec.as_ref();
+            if depth > 1 && kb.contains(&b'.') {
+                return None;
+            }
             skip_space(seg, &mut p);
             if seg.get(p) != Some(&b':') {
                 return None;

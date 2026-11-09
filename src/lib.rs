@@ -191,7 +191,7 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
         frame::VERSION_RELEASE
     };
     let prep_dict = if !options.legacy_v2 {
-        dict_lz::prepare_frame_dict(input, options.block_size, options.level)
+        dict_lz::prepare_frame_dict(input, options.block_size, options.level, workers)
     } else {
         None
     };
@@ -268,7 +268,7 @@ fn compress_inner<const STATS: bool>(
         frame::VERSION_RELEASE
     };
     let prep_dict = if !options.legacy_v2 {
-        dict_lz::prepare_frame_dict(input, options.block_size, options.level)
+        dict_lz::prepare_frame_dict(input, options.block_size, options.level, workers)
     } else {
         None
     };

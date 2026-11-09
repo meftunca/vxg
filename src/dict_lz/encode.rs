@@ -369,5 +369,5 @@ pub(super) fn encode_into(
             encode_loop::<false, 8, 4>(chunk, dict, ht4, ht6, &mut sc.sb, level)
         }
     };
-    serialize_streams(chunk, anchor, &mut sc.sb, out, max_len)
+    serialize_streams(chunk, anchor, &mut sc.sb, out, max_len, level)
 }

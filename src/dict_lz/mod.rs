@@ -12,9 +12,11 @@ use crate::{columns, Error, Result};
 
 mod decode;
 mod encode;
+mod fse;
 mod pack;
 mod probe;
 mod train;
+mod train_macro;
 
 pub(crate) use decode::{decode_dict_block, validate_dict_block};
 pub(crate) use encode::DictLzScratch;
@@ -158,8 +160,9 @@ pub(crate) fn prepare_frame_dict(
     input: &[u8],
     block_size: usize,
     level: u8,
+    workers: usize,
 ) -> Option<PreparedDict> {
-    train::build_prepared_dict(input, block_size, level)
+    train::build_prepared_dict(input, block_size, level, workers)
 }
 
 pub(crate) fn encode_dict_block_into(

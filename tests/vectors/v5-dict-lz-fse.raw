@@ -1,0 +1,409 @@
+[2026-11-09T12:00:00.000Z] WARN edge-proxy req_id=00000000 retry=1 upstream timeout on /api/v2/checkout/confirm after 120ms
+[2026-11-09T12:00:01.013Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (309B)
+[2026-11-09T12:00:02.026Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (362B)
+[2026-11-09T12:00:03.039Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (415B)
+[2026-11-09T12:00:04.052Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (468B)
+[2026-11-09T12:00:05.185Z] WARN edge-proxy req_id=1715609d retry=3 upstream timeout on /api/v2/checkout/confirm after 215ms
+[2026-11-09T12:00:06.078Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (574B)
+[2026-11-09T12:00:07.091Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (627B)
+[2026-11-09T12:00:08.104Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (680B)
+[2026-11-09T12:00:09.117Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (733B)
+[2026-11-09T12:00:10.370Z] WARN auth-gw req_id=2e2ac13a retry=2 upstream timeout on /api/v2/checkout/confirm after 310ms
+[2026-11-09T12:00:11.143Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (839B)
+[2026-11-09T12:00:12.156Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (892B)
+[2026-11-09T12:00:13.169Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (945B)
+[2026-11-09T12:00:14.182Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (998B)
+[2026-11-09T12:00:15.555Z] WARN auth-gw req_id=454021d7 retry=1 upstream timeout on /api/v2/checkout/confirm after 405ms
+[2026-11-09T12:00:16.208Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (1104B)
+[2026-11-09T12:00:17.221Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (1157B)
+[2026-11-09T12:00:18.234Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (1210B)
+[2026-11-09T12:00:19.247Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (1263B)
+[2026-11-09T12:00:20.740Z] WARN billing-worker req_id=5c558274 retry=3 upstream timeout on /api/v2/users/session/refresh after 500ms
+[2026-11-09T12:00:21.273Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (1369B)
+[2026-11-09T12:00:22.286Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (1422B)
+[2026-11-09T12:00:23.299Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (1475B)
+[2026-11-09T12:00:24.312Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (1528B)
+[2026-11-09T12:00:25.925Z] WARN search-idx req_id=736ae311 retry=2 upstream timeout on /api/v2/users/session/refresh after 595ms
+[2026-11-09T12:00:26.338Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (1634B)
+[2026-11-09T12:00:27.351Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (1687B)
+[2026-11-09T12:00:28.364Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (1740B)
+[2026-11-09T12:00:29.377Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (1793B)
+[2026-11-09T12:00:30.110Z] WARN search-idx req_id=8a8043ae retry=1 upstream timeout on /api/v2/users/session/refresh after 690ms
+[2026-11-09T12:00:31.403Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (1899B)
+[2026-11-09T12:00:32.416Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (1952B)
+[2026-11-09T12:00:33.429Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (2005B)
+[2026-11-09T12:00:34.442Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (2058B)
+[2026-11-09T12:00:35.295Z] WARN kv-store req_id=a195a44b retry=3 upstream timeout on /api/v2/users/session/refresh after 785ms
+[2026-11-09T12:00:36.468Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (2164B)
+[2026-11-09T12:00:37.481Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (2217B)
+[2026-11-09T12:00:38.494Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (2270B)
+[2026-11-09T12:00:39.507Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (2323B)
+[2026-11-09T12:00:40.480Z] WARN edge-proxy req_id=b8ab04e8 retry=2 upstream timeout on /internal/metrics/prometheus after 880ms
+[2026-11-09T12:00:41.533Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (2429B)
+[2026-11-09T12:00:42.546Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (2482B)
+[2026-11-09T12:00:43.559Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (2535B)
+[2026-11-09T12:00:44.572Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (2588B)
+[2026-11-09T12:00:45.665Z] WARN edge-proxy req_id=cfc06585 retry=1 upstream timeout on /internal/metrics/prometheus after 125ms
+[2026-11-09T12:00:46.598Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (2694B)
+[2026-11-09T12:00:47.611Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (2747B)
+[2026-11-09T12:00:48.624Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (2800B)
+[2026-11-09T12:00:49.637Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (2853B)
+[2026-11-09T12:00:50.850Z] WARN auth-gw req_id=e6d5c622 retry=3 upstream timeout on /internal/metrics/prometheus after 220ms
+[2026-11-09T12:00:51.663Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (2959B)
+[2026-11-09T12:00:52.676Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (3012B)
+[2026-11-09T12:00:53.689Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (3065B)
+[2026-11-09T12:00:54.702Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (3118B)
+[2026-11-09T12:00:55.035Z] WARN auth-gw req_id=fdeb26bf retry=2 upstream timeout on /internal/metrics/prometheus after 315ms
+[2026-11-09T12:00:56.728Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (3224B)
+[2026-11-09T12:00:57.741Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (3277B)
+[2026-11-09T12:00:58.754Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (3330B)
+[2026-11-09T12:00:59.767Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (3383B)
+[2026-11-09T12:01:00.220Z] WARN billing-worker req_id=1500875c retry=1 upstream timeout on /assets/bundle-9f8a7b6c.js after 410ms
+[2026-11-09T12:01:01.793Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (3489B)
+[2026-11-09T12:01:02.806Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (3542B)
+[2026-11-09T12:01:03.819Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (3595B)
+[2026-11-09T12:01:04.832Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (3648B)
+[2026-11-09T12:01:05.405Z] WARN search-idx req_id=2c15e7f9 retry=3 upstream timeout on /assets/bundle-9f8a7b6c.js after 505ms
+[2026-11-09T12:01:06.858Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (3754B)
+[2026-11-09T12:01:07.871Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (3807B)
+[2026-11-09T12:01:08.884Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (3860B)
+[2026-11-09T12:01:09.897Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (3913B)
+[2026-11-09T12:01:10.590Z] WARN search-idx req_id=432b4896 retry=2 upstream timeout on /assets/bundle-9f8a7b6c.js after 600ms
+[2026-11-09T12:01:11.923Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (4019B)
+[2026-11-09T12:01:12.936Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (4072B)
+[2026-11-09T12:01:13.949Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (4125B)
+[2026-11-09T12:01:14.962Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (4178B)
+[2026-11-09T12:01:15.775Z] WARN kv-store req_id=5a40a933 retry=1 upstream timeout on /assets/bundle-9f8a7b6c.js after 695ms
+[2026-11-09T12:01:16.988Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (4284B)
+[2026-11-09T12:01:17.001Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (4337B)
+[2026-11-09T12:01:18.014Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (4390B)
+[2026-11-09T12:01:19.027Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (4443B)
+[2026-11-09T12:01:20.960Z] WARN edge-proxy req_id=715609d0 retry=3 upstream timeout on /api/v2/checkout/confirm after 790ms
+[2026-11-09T12:01:21.053Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (4549B)
+[2026-11-09T12:01:22.066Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (4602B)
+[2026-11-09T12:01:23.079Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (4655B)
+[2026-11-09T12:01:24.092Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (4708B)
+[2026-11-09T12:01:25.145Z] WARN edge-proxy req_id=886b6a6d retry=2 upstream timeout on /api/v2/checkout/confirm after 885ms
+[2026-11-09T12:01:26.118Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (4814B)
+[2026-11-09T12:01:27.131Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (4867B)
+[2026-11-09T12:01:28.144Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (4920B)
+[2026-11-09T12:01:29.157Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (4973B)
+[2026-11-09T12:01:30.330Z] WARN auth-gw req_id=9f80cb0a retry=1 upstream timeout on /api/v2/checkout/confirm after 130ms
+[2026-11-09T12:01:31.183Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (5079B)
+[2026-11-09T12:01:32.196Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (5132B)
+[2026-11-09T12:01:33.209Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (5185B)
+[2026-11-09T12:01:34.222Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (5238B)
+[2026-11-09T12:01:35.515Z] WARN auth-gw req_id=b6962ba7 retry=3 upstream timeout on /api/v2/checkout/confirm after 225ms
+[2026-11-09T12:01:36.248Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (5344B)
+[2026-11-09T12:01:37.261Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (5397B)
+[2026-11-09T12:01:38.274Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (5450B)
+[2026-11-09T12:01:39.287Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (5503B)
+[2026-11-09T12:01:40.700Z] WARN billing-worker req_id=cdab8c44 retry=2 upstream timeout on /api/v2/users/session/refresh after 320ms
+[2026-11-09T12:01:41.313Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (5609B)
+[2026-11-09T12:01:42.326Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (5662B)
+[2026-11-09T12:01:43.339Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (5715B)
+[2026-11-09T12:01:44.352Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (5768B)
+[2026-11-09T12:01:45.885Z] WARN search-idx req_id=e4c0ece1 retry=1 upstream timeout on /api/v2/users/session/refresh after 415ms
+[2026-11-09T12:01:46.378Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (5874B)
+[2026-11-09T12:01:47.391Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (5927B)
+[2026-11-09T12:01:48.404Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (5980B)
+[2026-11-09T12:01:49.417Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (6033B)
+[2026-11-09T12:01:50.070Z] WARN search-idx req_id=fbd64d7e retry=3 upstream timeout on /api/v2/users/session/refresh after 510ms
+[2026-11-09T12:01:51.443Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (6139B)
+[2026-11-09T12:01:52.456Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (6192B)
+[2026-11-09T12:01:53.469Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (6245B)
+[2026-11-09T12:01:54.482Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (6298B)
+[2026-11-09T12:01:55.255Z] WARN kv-store req_id=12ebae1b retry=2 upstream timeout on /api/v2/users/session/refresh after 605ms
+[2026-11-09T12:01:56.508Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (6404B)
+[2026-11-09T12:01:57.521Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (6457B)
+[2026-11-09T12:01:58.534Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (6510B)
+[2026-11-09T12:01:59.547Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (6563B)
+[2026-11-09T12:02:00.440Z] WARN edge-proxy req_id=2a010eb8 retry=1 upstream timeout on /internal/metrics/prometheus after 700ms
+[2026-11-09T12:02:01.573Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (6669B)
+[2026-11-09T12:02:02.586Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (6722B)
+[2026-11-09T12:02:03.599Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (6775B)
+[2026-11-09T12:02:04.612Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (6828B)
+[2026-11-09T12:02:05.625Z] WARN edge-proxy req_id=41166f55 retry=3 upstream timeout on /internal/metrics/prometheus after 795ms
+[2026-11-09T12:02:06.638Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (6934B)
+[2026-11-09T12:02:07.651Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (6987B)
+[2026-11-09T12:02:08.664Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (7040B)
+[2026-11-09T12:02:09.677Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (7093B)
+[2026-11-09T12:02:10.810Z] WARN auth-gw req_id=582bcff2 retry=2 upstream timeout on /internal/metrics/prometheus after 890ms
+[2026-11-09T12:02:11.703Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (7199B)
+[2026-11-09T12:02:12.716Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (7252B)
+[2026-11-09T12:02:13.729Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (7305B)
+[2026-11-09T12:02:14.742Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (7358B)
+[2026-11-09T12:02:15.995Z] WARN auth-gw req_id=6f41308f retry=1 upstream timeout on /internal/metrics/prometheus after 135ms
+[2026-11-09T12:02:16.768Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (7464B)
+[2026-11-09T12:02:17.781Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (7517B)
+[2026-11-09T12:02:18.794Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (7570B)
+[2026-11-09T12:02:19.807Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (7623B)
+[2026-11-09T12:02:20.180Z] WARN billing-worker req_id=8656912c retry=3 upstream timeout on /assets/bundle-9f8a7b6c.js after 230ms
+[2026-11-09T12:02:21.833Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (7729B)
+[2026-11-09T12:02:22.846Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (7782B)
+[2026-11-09T12:02:23.859Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (7835B)
+[2026-11-09T12:02:24.872Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (7888B)
+[2026-11-09T12:02:25.365Z] WARN search-idx req_id=9d6bf1c9 retry=2 upstream timeout on /assets/bundle-9f8a7b6c.js after 325ms
+[2026-11-09T12:02:26.898Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (7994B)
+[2026-11-09T12:02:27.911Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (8047B)
+[2026-11-09T12:02:28.924Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (8100B)
+[2026-11-09T12:02:29.937Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (8153B)
+[2026-11-09T12:02:30.550Z] WARN search-idx req_id=b4815266 retry=1 upstream timeout on /assets/bundle-9f8a7b6c.js after 420ms
+[2026-11-09T12:02:31.963Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (8259B)
+[2026-11-09T12:02:32.976Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (8312B)
+[2026-11-09T12:02:33.989Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (8365B)
+[2026-11-09T12:02:34.002Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (8418B)
+[2026-11-09T12:02:35.735Z] WARN kv-store req_id=cb96b303 retry=3 upstream timeout on /assets/bundle-9f8a7b6c.js after 515ms
+[2026-11-09T12:02:36.028Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (8524B)
+[2026-11-09T12:02:37.041Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (8577B)
+[2026-11-09T12:02:38.054Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (8630B)
+[2026-11-09T12:02:39.067Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (8683B)
+[2026-11-09T12:02:40.920Z] WARN edge-proxy req_id=e2ac13a0 retry=2 upstream timeout on /api/v2/checkout/confirm after 610ms
+[2026-11-09T12:02:41.093Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (8789B)
+[2026-11-09T12:02:42.106Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (8842B)
+[2026-11-09T12:02:43.119Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (8895B)
+[2026-11-09T12:02:44.132Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (8948B)
+[2026-11-09T12:02:45.105Z] WARN edge-proxy req_id=f9c1743d retry=1 upstream timeout on /api/v2/checkout/confirm after 705ms
+[2026-11-09T12:02:46.158Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (9054B)
+[2026-11-09T12:02:47.171Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (9107B)
+[2026-11-09T12:02:48.184Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (9160B)
+[2026-11-09T12:02:49.197Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (9213B)
+[2026-11-09T12:02:50.290Z] WARN auth-gw req_id=10d6d4da retry=3 upstream timeout on /api/v2/checkout/confirm after 800ms
+[2026-11-09T12:02:51.223Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (9319B)
+[2026-11-09T12:02:52.236Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (9372B)
+[2026-11-09T12:02:53.249Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (9425B)
+[2026-11-09T12:02:54.262Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (9478B)
+[2026-11-09T12:02:55.475Z] WARN auth-gw req_id=27ec3577 retry=2 upstream timeout on /api/v2/checkout/confirm after 895ms
+[2026-11-09T12:02:56.288Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (9584B)
+[2026-11-09T12:02:57.301Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (9637B)
+[2026-11-09T12:02:58.314Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (9690B)
+[2026-11-09T12:02:59.327Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (9743B)
+[2026-11-09T12:03:00.660Z] WARN billing-worker req_id=3f019614 retry=1 upstream timeout on /api/v2/users/session/refresh after 140ms
+[2026-11-09T12:03:01.353Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (9849B)
+[2026-11-09T12:03:02.366Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (9902B)
+[2026-11-09T12:03:03.379Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (9955B)
+[2026-11-09T12:03:04.392Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (10008B)
+[2026-11-09T12:03:05.845Z] WARN search-idx req_id=5616f6b1 retry=3 upstream timeout on /api/v2/users/session/refresh after 235ms
+[2026-11-09T12:03:06.418Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (10114B)
+[2026-11-09T12:03:07.431Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (10167B)
+[2026-11-09T12:03:08.444Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (10220B)
+[2026-11-09T12:03:09.457Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (10273B)
+[2026-11-09T12:03:10.030Z] WARN search-idx req_id=6d2c574e retry=2 upstream timeout on /api/v2/users/session/refresh after 330ms
+[2026-11-09T12:03:11.483Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (10379B)
+[2026-11-09T12:03:12.496Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (10432B)
+[2026-11-09T12:03:13.509Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (10485B)
+[2026-11-09T12:03:14.522Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (10538B)
+[2026-11-09T12:03:15.215Z] WARN kv-store req_id=8441b7eb retry=1 upstream timeout on /api/v2/users/session/refresh after 425ms
+[2026-11-09T12:03:16.548Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (10644B)
+[2026-11-09T12:03:17.561Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (10697B)
+[2026-11-09T12:03:18.574Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (10750B)
+[2026-11-09T12:03:19.587Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (10803B)
+[2026-11-09T12:03:20.400Z] WARN edge-proxy req_id=9b571888 retry=3 upstream timeout on /internal/metrics/prometheus after 520ms
+[2026-11-09T12:03:21.613Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (10909B)
+[2026-11-09T12:03:22.626Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (10962B)
+[2026-11-09T12:03:23.639Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (11015B)
+[2026-11-09T12:03:24.652Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (11068B)
+[2026-11-09T12:03:25.585Z] WARN edge-proxy req_id=b26c7925 retry=2 upstream timeout on /internal/metrics/prometheus after 615ms
+[2026-11-09T12:03:26.678Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (11174B)
+[2026-11-09T12:03:27.691Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (11227B)
+[2026-11-09T12:03:28.704Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (11280B)
+[2026-11-09T12:03:29.717Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (11333B)
+[2026-11-09T12:03:30.770Z] WARN auth-gw req_id=c981d9c2 retry=1 upstream timeout on /internal/metrics/prometheus after 710ms
+[2026-11-09T12:03:31.743Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (11439B)
+[2026-11-09T12:03:32.756Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (11492B)
+[2026-11-09T12:03:33.769Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (11545B)
+[2026-11-09T12:03:34.782Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (11598B)
+[2026-11-09T12:03:35.955Z] WARN auth-gw req_id=e0973a5f retry=3 upstream timeout on /internal/metrics/prometheus after 805ms
+[2026-11-09T12:03:36.808Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (11704B)
+[2026-11-09T12:03:37.821Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (11757B)
+[2026-11-09T12:03:38.834Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (11810B)
+[2026-11-09T12:03:39.847Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (11863B)
+[2026-11-09T12:03:40.140Z] WARN billing-worker req_id=f7ac9afc retry=2 upstream timeout on /assets/bundle-9f8a7b6c.js after 900ms
+[2026-11-09T12:03:41.873Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (11969B)
+[2026-11-09T12:03:42.886Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (12022B)
+[2026-11-09T12:03:43.899Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (12075B)
+[2026-11-09T12:03:44.912Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (12128B)
+[2026-11-09T12:03:45.325Z] WARN search-idx req_id=0ec1fb99 retry=1 upstream timeout on /assets/bundle-9f8a7b6c.js after 145ms
+[2026-11-09T12:03:46.938Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (12234B)
+[2026-11-09T12:03:47.951Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (12287B)
+[2026-11-09T12:03:48.964Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (12340B)
+[2026-11-09T12:03:49.977Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (12393B)
+[2026-11-09T12:03:50.510Z] WARN search-idx req_id=25d75c36 retry=3 upstream timeout on /assets/bundle-9f8a7b6c.js after 240ms
+[2026-11-09T12:03:51.003Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (12499B)
+[2026-11-09T12:03:52.016Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (12552B)
+[2026-11-09T12:03:53.029Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (12605B)
+[2026-11-09T12:03:54.042Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (12658B)
+[2026-11-09T12:03:55.695Z] WARN kv-store req_id=3cecbcd3 retry=2 upstream timeout on /assets/bundle-9f8a7b6c.js after 335ms
+[2026-11-09T12:03:56.068Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (12764B)
+[2026-11-09T12:03:57.081Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (12817B)
+[2026-11-09T12:03:58.094Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (12870B)
+[2026-11-09T12:03:59.107Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (12923B)
+[2026-11-09T12:04:00.880Z] WARN edge-proxy req_id=54021d70 retry=1 upstream timeout on /api/v2/checkout/confirm after 430ms
+[2026-11-09T12:04:01.133Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (13029B)
+[2026-11-09T12:04:02.146Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (13082B)
+[2026-11-09T12:04:03.159Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (13135B)
+[2026-11-09T12:04:04.172Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (13188B)
+[2026-11-09T12:04:05.065Z] WARN edge-proxy req_id=6b177e0d retry=3 upstream timeout on /api/v2/checkout/confirm after 525ms
+[2026-11-09T12:04:06.198Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (13294B)
+[2026-11-09T12:04:07.211Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (13347B)
+[2026-11-09T12:04:08.224Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (13400B)
+[2026-11-09T12:04:09.237Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (13453B)
+[2026-11-09T12:04:10.250Z] WARN auth-gw req_id=822cdeaa retry=2 upstream timeout on /api/v2/checkout/confirm after 620ms
+[2026-11-09T12:04:11.263Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (13559B)
+[2026-11-09T12:04:12.276Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (13612B)
+[2026-11-09T12:04:13.289Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (13665B)
+[2026-11-09T12:04:14.302Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (13718B)
+[2026-11-09T12:04:15.435Z] WARN auth-gw req_id=99423f47 retry=1 upstream timeout on /api/v2/checkout/confirm after 715ms
+[2026-11-09T12:04:16.328Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (13824B)
+[2026-11-09T12:04:17.341Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (13877B)
+[2026-11-09T12:04:18.354Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (13930B)
+[2026-11-09T12:04:19.367Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (13983B)
+[2026-11-09T12:04:20.620Z] WARN billing-worker req_id=b0579fe4 retry=3 upstream timeout on /api/v2/users/session/refresh after 810ms
+[2026-11-09T12:04:21.393Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (14089B)
+[2026-11-09T12:04:22.406Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (14142B)
+[2026-11-09T12:04:23.419Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (14195B)
+[2026-11-09T12:04:24.432Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (14248B)
+[2026-11-09T12:04:25.805Z] WARN search-idx req_id=c76d0081 retry=2 upstream timeout on /api/v2/users/session/refresh after 905ms
+[2026-11-09T12:04:26.458Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (14354B)
+[2026-11-09T12:04:27.471Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (14407B)
+[2026-11-09T12:04:28.484Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (14460B)
+[2026-11-09T12:04:29.497Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (14513B)
+[2026-11-09T12:04:30.990Z] WARN search-idx req_id=de82611e retry=1 upstream timeout on /api/v2/users/session/refresh after 150ms
+[2026-11-09T12:04:31.523Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (14619B)
+[2026-11-09T12:04:32.536Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (14672B)
+[2026-11-09T12:04:33.549Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (14725B)
+[2026-11-09T12:04:34.562Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (14778B)
+[2026-11-09T12:04:35.175Z] WARN kv-store req_id=f597c1bb retry=3 upstream timeout on /api/v2/users/session/refresh after 245ms
+[2026-11-09T12:04:36.588Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (14884B)
+[2026-11-09T12:04:37.601Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (14937B)
+[2026-11-09T12:04:38.614Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (14990B)
+[2026-11-09T12:04:39.627Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (15043B)
+[2026-11-09T12:04:40.360Z] WARN edge-proxy req_id=0cad2258 retry=2 upstream timeout on /internal/metrics/prometheus after 340ms
+[2026-11-09T12:04:41.653Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (15149B)
+[2026-11-09T12:04:42.666Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (15202B)
+[2026-11-09T12:04:43.679Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (15255B)
+[2026-11-09T12:04:44.692Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (15308B)
+[2026-11-09T12:04:45.545Z] WARN edge-proxy req_id=23c282f5 retry=1 upstream timeout on /internal/metrics/prometheus after 435ms
+[2026-11-09T12:04:46.718Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (15414B)
+[2026-11-09T12:04:47.731Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (15467B)
+[2026-11-09T12:04:48.744Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (15520B)
+[2026-11-09T12:04:49.757Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (15573B)
+[2026-11-09T12:04:50.730Z] WARN auth-gw req_id=3ad7e392 retry=3 upstream timeout on /internal/metrics/prometheus after 530ms
+[2026-11-09T12:04:51.783Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (15679B)
+[2026-11-09T12:04:52.796Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (15732B)
+[2026-11-09T12:04:53.809Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (15785B)
+[2026-11-09T12:04:54.822Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (15838B)
+[2026-11-09T12:04:55.915Z] WARN auth-gw req_id=51ed442f retry=2 upstream timeout on /internal/metrics/prometheus after 625ms
+[2026-11-09T12:04:56.848Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (15944B)
+[2026-11-09T12:04:57.861Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (15997B)
+[2026-11-09T12:04:58.874Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (16050B)
+[2026-11-09T12:04:59.887Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (16103B)
+[2026-11-09T12:05:00.100Z] WARN billing-worker req_id=6902a4cc retry=1 upstream timeout on /assets/bundle-9f8a7b6c.js after 720ms
+[2026-11-09T12:05:01.913Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (16209B)
+[2026-11-09T12:05:02.926Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (16262B)
+[2026-11-09T12:05:03.939Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (16315B)
+[2026-11-09T12:05:04.952Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (16368B)
+[2026-11-09T12:05:05.285Z] WARN search-idx req_id=80180569 retry=3 upstream timeout on /assets/bundle-9f8a7b6c.js after 815ms
+[2026-11-09T12:05:06.978Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (16474B)
+[2026-11-09T12:05:07.991Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (16527B)
+[2026-11-09T12:05:08.004Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (16580B)
+[2026-11-09T12:05:09.017Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (16633B)
+[2026-11-09T12:05:10.470Z] WARN search-idx req_id=972d6606 retry=2 upstream timeout on /assets/bundle-9f8a7b6c.js after 910ms
+[2026-11-09T12:05:11.043Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (355B)
+[2026-11-09T12:05:12.056Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (408B)
+[2026-11-09T12:05:13.069Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (461B)
+[2026-11-09T12:05:14.082Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (514B)
+[2026-11-09T12:05:15.655Z] WARN kv-store req_id=ae42c6a3 retry=1 upstream timeout on /assets/bundle-9f8a7b6c.js after 155ms
+[2026-11-09T12:05:16.108Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (620B)
+[2026-11-09T12:05:17.121Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (673B)
+[2026-11-09T12:05:18.134Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (726B)
+[2026-11-09T12:05:19.147Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (779B)
+[2026-11-09T12:05:20.840Z] WARN edge-proxy req_id=c5582740 retry=3 upstream timeout on /api/v2/checkout/confirm after 250ms
+[2026-11-09T12:05:21.173Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (885B)
+[2026-11-09T12:05:22.186Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (938B)
+[2026-11-09T12:05:23.199Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (991B)
+[2026-11-09T12:05:24.212Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (1044B)
+[2026-11-09T12:05:25.025Z] WARN edge-proxy req_id=dc6d87dd retry=2 upstream timeout on /api/v2/checkout/confirm after 345ms
+[2026-11-09T12:05:26.238Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (1150B)
+[2026-11-09T12:05:27.251Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (1203B)
+[2026-11-09T12:05:28.264Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (1256B)
+[2026-11-09T12:05:29.277Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (1309B)
+[2026-11-09T12:05:30.210Z] WARN auth-gw req_id=f382e87a retry=1 upstream timeout on /api/v2/checkout/confirm after 440ms
+[2026-11-09T12:05:31.303Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (1415B)
+[2026-11-09T12:05:32.316Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (1468B)
+[2026-11-09T12:05:33.329Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (1521B)
+[2026-11-09T12:05:34.342Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (1574B)
+[2026-11-09T12:05:35.395Z] WARN auth-gw req_id=0a984917 retry=3 upstream timeout on /api/v2/checkout/confirm after 535ms
+[2026-11-09T12:05:36.368Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (1680B)
+[2026-11-09T12:05:37.381Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (1733B)
+[2026-11-09T12:05:38.394Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (1786B)
+[2026-11-09T12:05:39.407Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (1839B)
+[2026-11-09T12:05:40.580Z] WARN billing-worker req_id=21ada9b4 retry=2 upstream timeout on /api/v2/users/session/refresh after 630ms
+[2026-11-09T12:05:41.433Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (1945B)
+[2026-11-09T12:05:42.446Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (1998B)
+[2026-11-09T12:05:43.459Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (2051B)
+[2026-11-09T12:05:44.472Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (2104B)
+[2026-11-09T12:05:45.765Z] WARN search-idx req_id=38c30a51 retry=1 upstream timeout on /api/v2/users/session/refresh after 725ms
+[2026-11-09T12:05:46.498Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (2210B)
+[2026-11-09T12:05:47.511Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (2263B)
+[2026-11-09T12:05:48.524Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (2316B)
+[2026-11-09T12:05:49.537Z] INFO auth-gw handled /internal/metrics/prometheus -> 200 OK (2369B)
+[2026-11-09T12:05:50.950Z] WARN search-idx req_id=4fd86aee retry=3 upstream timeout on /api/v2/users/session/refresh after 820ms
+[2026-11-09T12:05:51.563Z] INFO edge-proxy handled /api/v2/checkout/confirm -> 200 OK (2475B)
+[2026-11-09T12:05:52.576Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (2528B)
+[2026-11-09T12:05:53.589Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (2581B)
+[2026-11-09T12:05:54.602Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (2634B)
+[2026-11-09T12:05:55.135Z] WARN kv-store req_id=66edcb8b retry=2 upstream timeout on /api/v2/users/session/refresh after 915ms
+[2026-11-09T12:05:56.628Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (2740B)
+[2026-11-09T12:05:57.641Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (2793B)
+[2026-11-09T12:05:58.654Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (2846B)
+[2026-11-09T12:05:59.667Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (2899B)
+[2026-11-09T12:06:00.320Z] WARN edge-proxy req_id=7e032c28 retry=1 upstream timeout on /internal/metrics/prometheus after 160ms
+[2026-11-09T12:06:01.693Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (3005B)
+[2026-11-09T12:06:02.706Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (3058B)
+[2026-11-09T12:06:03.719Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (3111B)
+[2026-11-09T12:06:04.732Z] INFO search-idx handled /assets/bundle-9f8a7b6c.js -> 200 OK (3164B)
+[2026-11-09T12:06:05.505Z] WARN edge-proxy req_id=95188cc5 retry=3 upstream timeout on /internal/metrics/prometheus after 255ms
+[2026-11-09T12:06:06.758Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (3270B)
+[2026-11-09T12:06:07.771Z] INFO kv-store handled /api/v2/checkout/confirm -> 200 OK (3323B)
+[2026-11-09T12:06:08.784Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (3376B)
+[2026-11-09T12:06:09.797Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (3429B)
+[2026-11-09T12:06:10.690Z] WARN auth-gw req_id=ac2ded62 retry=2 upstream timeout on /internal/metrics/prometheus after 350ms
+[2026-11-09T12:06:11.823Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (3535B)
+[2026-11-09T12:06:12.836Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (3588B)
+[2026-11-09T12:06:13.849Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (3641B)
+[2026-11-09T12:06:14.862Z] INFO kv-store handled /assets/bundle-9f8a7b6c.js -> 200 OK (3694B)
+[2026-11-09T12:06:15.875Z] WARN auth-gw req_id=c3434dff retry=1 upstream timeout on /internal/metrics/prometheus after 445ms
+[2026-11-09T12:06:16.888Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (3800B)
+[2026-11-09T12:06:17.901Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (3853B)
+[2026-11-09T12:06:18.914Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (3906B)
+[2026-11-09T12:06:19.927Z] INFO edge-proxy handled /assets/bundle-9f8a7b6c.js -> 200 OK (3959B)
+[2026-11-09T12:06:20.060Z] WARN billing-worker req_id=da58ae9c retry=3 upstream timeout on /assets/bundle-9f8a7b6c.js after 540ms
+[2026-11-09T12:06:21.953Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (4065B)
+[2026-11-09T12:06:22.966Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (4118B)
+[2026-11-09T12:06:23.979Z] INFO search-idx handled /api/v2/checkout/confirm -> 200 OK (4171B)
+[2026-11-09T12:06:24.992Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (4224B)
+[2026-11-09T12:06:25.245Z] WARN search-idx req_id=f16e0f39 retry=2 upstream timeout on /assets/bundle-9f8a7b6c.js after 635ms
+[2026-11-09T12:06:26.018Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (4330B)
+[2026-11-09T12:06:27.031Z] INFO billing-worker handled /api/v2/users/session/refresh -> 200 OK (4383B)
+[2026-11-09T12:06:28.044Z] INFO kv-store handled /api/v2/users/session/refresh -> 200 OK (4436B)
+[2026-11-09T12:06:29.057Z] INFO auth-gw handled /api/v2/checkout/confirm -> 200 OK (4489B)
+[2026-11-09T12:06:30.430Z] WARN search-idx req_id=08836fd6 retry=1 upstream timeout on /assets/bundle-9f8a7b6c.js after 730ms
+[2026-11-09T12:06:31.083Z] INFO edge-proxy handled /internal/metrics/prometheus -> 200 OK (4595B)
+[2026-11-09T12:06:32.096Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (4648B)
+[2026-11-09T12:06:33.109Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (4701B)
+[2026-11-09T12:06:34.122Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (4754B)
+[2026-11-09T12:06:35.615Z] WARN kv-store req_id=1f98d073 retry=3 upstream timeout on /assets/bundle-9f8a7b6c.js after 825ms
+[2026-11-09T12:06:36.148Z] INFO auth-gw handled /assets/bundle-9f8a7b6c.js -> 200 OK (4860B)
+[2026-11-09T12:06:37.161Z] INFO search-idx handled /internal/metrics/prometheus -> 200 OK (4913B)
+[2026-11-09T12:06:38.174Z] INFO edge-proxy handled /api/v2/users/session/refresh -> 200 OK (4966B)
+[2026-11-09T12:06:39.187Z] INFO billing-worker handled /api/v2/checkout/confirm -> 200 OK (5019B)
+[2026-11-09T12:06:40.800Z] WARN edge-proxy req_id=36ae3110 retry=2 upstream timeout on /api/v2/checkout/confirm after 920ms
+[2026-11-09T12:06:41.213Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (5125B)
+[2026-11-09T12:06:42.226Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (5178B)
+[2026-11-09T12:06:43.239Z] INFO auth-gw handled /api/v2/users/session/refresh -> 200 OK (5231B)
+[2026-11-09T12:06:44.252Z] INFO search-idx handled /api/v2/users/session/refresh -> 200 OK (5284B)
+[2026-11-09T12:06:45.985Z] WARN edge-proxy req_id=4dc391ad retry=1 upstream timeout on /api/v2/checkout/confirm after 165ms
+[2026-11-09T12:06:46.278Z] INFO billing-worker handled /assets/bundle-9f8a7b6c.js -> 200 OK (5390B)
+[2026-11-09T12:06:47.291Z] INFO kv-store handled /internal/metrics/prometheus -> 200 OK (5443B)
+[2026-11-09T12:06:48.304Z] INFO billing-worker handled /internal/metrics/prometheus -> 200 OK (5496B)

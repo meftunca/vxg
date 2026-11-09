@@ -2,8 +2,9 @@ use std::cell::RefCell;
 
 use crate::{columns::huf_decode, Error, Result};
 
-use super::pack::{
-    DICT_LZ_MAGIC, FLAG_HUF_EXT, FLAG_HUF_LITS, FLAG_HUF_OFFS, FLAG_HUF_TOKS,
+use super::{
+    fse::fse_decode,
+    pack::{DICT_LZ_MAGIC, FLAG_FSE, FLAG_HUF_EXT, FLAG_HUF_LITS, FLAG_HUF_OFFS, FLAG_HUF_TOKS},
 };
 
 struct DecScratch {
@@ -29,13 +30,18 @@ thread_local! {
 }
 
 #[inline(always)]
+fn stream_mode(flags: u8, fse_mask: u8, bit: u8) -> u8 {
+    if (flags & bit) != 0 { 1 } else if (fse_mask & bit) != 0 { 2 } else { 0 }
+}
+
+#[inline(always)]
 fn unpack_stream<'a, 'b: 'a>(
     cur: &mut WireCursor<'b>,
-    huf: bool,
+    mode: u8,
     raw_n: usize,
     scratch: &'a mut Vec<u8>,
 ) -> Result<&'a [u8]> {
-    if huf {
+    if mode != 0 {
         if raw_n == 0 {
             return Err(Error::InvalidFrame("dict_lz empty huf stream"));
         }
@@ -45,7 +51,7 @@ fn unpack_stream<'a, 'b: 'a>(
             scratch.resize(raw_n, 0);
         }
         let buf = &mut scratch[..raw_n];
-        huf_decode(blob, buf)?;
+        if mode == 1 { huf_decode(blob, buf)? } else { fse_decode(blob, buf)? };
         Ok(buf)
     } else {
         cur.take(raw_n)
@@ -506,9 +512,18 @@ pub(crate) fn decode_dict_block(payload: &[u8], dict: &[u8], out: &mut [u8]) -> 
     let raw_len = out.len();
     let mut cur = WireCursor::new(payload);
     let flags = cur.byte()?;
-    if (flags & 0x80) == 0 || (flags & 0x70) != 0 {
+    if (flags & 0x80) == 0 || (flags & 0x60) != 0 {
         return Err(Error::InvalidFrame("dict_lz header flags"));
     }
+    let fse_mask = if (flags & FLAG_FSE) != 0 {
+        let m = cur.byte()?;
+        if m == 0 || (m & 0xf0) != 0 || (m & flags & 0x0f) != 0 {
+            return Err(Error::InvalidFrame("dict_lz fse_mask"));
+        }
+        m
+    } else {
+        0
+    };
     let seq_count = cur.uleb()?;
     let lit_total = cur.uleb()?;
     if lit_total > raw_len || seq_count > raw_len / 3 {
@@ -516,7 +531,9 @@ pub(crate) fn decode_dict_block(payload: &[u8], dict: &[u8], out: &mut [u8]) -> 
     }
 
     if seq_count == 0 {
-        if lit_total != raw_len || flags != (DICT_LZ_MAGIC | FLAG_HUF_LITS) {
+        let is_huf = flags == (DICT_LZ_MAGIC | FLAG_HUF_LITS) && fse_mask == 0;
+        let is_fse = flags == (DICT_LZ_MAGIC | FLAG_FSE) && fse_mask == FLAG_HUF_LITS;
+        if lit_total != raw_len || (!is_huf && !is_fse) {
             return Err(Error::InvalidFrame("dict_lz literal-only header"));
         }
         let clen = cur.uleb()?;
@@ -524,11 +541,11 @@ pub(crate) fn decode_dict_block(payload: &[u8], dict: &[u8], out: &mut [u8]) -> 
         if cur.remaining() != 0 {
             return Err(Error::InvalidFrame("dict_lz trailing bytes"));
         }
-        return huf_decode(blob, out);
+        return if is_huf { huf_decode(blob, out) } else { fse_decode(blob, out) };
     }
 
     // Zero-TLS, zero-Huffman fast path for ultra-compact blocks (e.g. long dictionary matches).
-    if (flags & 0x0f) == 0 {
+    if (flags & 0x1f) == 0 {
         let lits_slice = cur.take(lit_total)?;
         let toks_slice = cur.take(seq_count)?;
         let offs_slice = cur.take(seq_count)?;
@@ -555,14 +572,14 @@ pub(crate) fn decode_dict_block(payload: &[u8], dict: &[u8], out: &mut [u8]) -> 
             ext,
         } = &mut *cell.borrow_mut();
 
-        let lits_slice = unpack_stream(&mut cur, (flags & FLAG_HUF_LITS) != 0, lit_total, lits)?;
-        let toks_slice = unpack_stream(&mut cur, (flags & FLAG_HUF_TOKS) != 0, seq_count, toks)?;
-        let offs_slice = unpack_stream(&mut cur, (flags & FLAG_HUF_OFFS) != 0, seq_count, offs)?;
+        let lits_slice = unpack_stream(&mut cur, stream_mode(flags, fse_mask, FLAG_HUF_LITS), lit_total, lits)?;
+        let toks_slice = unpack_stream(&mut cur, stream_mode(flags, fse_mask, FLAG_HUF_TOKS), seq_count, toks)?;
+        let offs_slice = unpack_stream(&mut cur, stream_mode(flags, fse_mask, FLAG_HUF_OFFS), seq_count, offs)?;
         let ext_raw_len = cur.uleb()?;
         if ext_raw_len > raw_len {
             return Err(Error::InvalidFrame("dict_lz ext length"));
         }
-        let ext_slice = unpack_stream(&mut cur, (flags & FLAG_HUF_EXT) != 0, ext_raw_len, ext)?;
+        let ext_slice = unpack_stream(&mut cur, stream_mode(flags, fse_mask, FLAG_HUF_EXT), ext_raw_len, ext)?;
         let bits_byte_len = cur.uleb()?;
         if bits_byte_len != cur.remaining() {
             return Err(Error::InvalidFrame("dict_lz off_bits length"));
