@@ -1,86 +1,67 @@
 use super::{
-    dict_tag4, dict_tag6, mul4, mul6,
+    mul4, mul6,
     pack::{push_ext_len, serialize_streams, BitWriter, StreamBufs},
-    read_u32, read_u64, PreparedDict, DICT_HT4_BITS, DICT_POS_MASK, LOCAL_HT4_BITS,
-    LOCAL_HT4_SIZE, LOCAL_HT6_BITS, LOCAL_HT6_SIZE,
+    probe::{probe_pos, LOCAL_HT4_SHIFT, LOCAL_HT6_SHIFT},
+    read_u64, PreparedDict, LOCAL_HT4_SIZE, LOCAL_HT6_SIZE,
 };
 
-const MAX_OFFSET: usize = (1 << 21) - 1;
-const MASK6: u64 = 0x0000_ffff_ffff_ffff;
-const LOCAL_HT4_SHIFT: u32 = (32 - LOCAL_HT4_BITS) as u32;
-const LOCAL_HT6_SHIFT: u32 = (64 - LOCAL_HT6_BITS) as u32;
-const DICT_HT4_SHIFT: u32 = (32 - DICT_HT4_BITS) as u32;
+type FastTables = (
+    Box<[[u16; 2]; LOCAL_HT4_SIZE]>,
+    Box<[[u16; 2]; LOCAL_HT6_SIZE]>,
+);
+type DeepTables = (
+    Box<[[u16; 8]; LOCAL_HT4_SIZE]>,
+    Box<[[u16; 8]; LOCAL_HT6_SIZE]>,
+);
 
 pub(crate) struct DictLzScratch {
-    local_ht4: Box<[[u16; 2]; LOCAL_HT4_SIZE]>,
-    local_ht6: Box<[[u16; 2]; LOCAL_HT6_SIZE]>,
+    local_ht4: Box<[[u16; 4]; LOCAL_HT4_SIZE]>,
+    local_ht6: Box<[[u16; 4]; LOCAL_HT6_SIZE]>,
+    fast_tables: Option<FastTables>,
+    deep_tables: Option<DeepTables>,
     sb: StreamBufs,
 }
 
 impl DictLzScratch {
     pub(crate) fn new() -> Self {
         Self {
-            local_ht4: Box::new([[0u16; 2]; LOCAL_HT4_SIZE]),
-            local_ht6: Box::new([[0u16; 2]; LOCAL_HT6_SIZE]),
+            local_ht4: Box::new([[0u16; 4]; LOCAL_HT4_SIZE]),
+            local_ht6: Box::new([[0u16; 4]; LOCAL_HT6_SIZE]),
+            fast_tables: None,
+            deep_tables: None,
             sb: StreamBufs::new(),
         }
     }
 }
 
 #[inline(always)]
-fn match_len_slices(src: &[u8], mut a: usize, dst: &[u8], mut b: usize, limit: usize) -> usize {
-    let start = b;
-    let end = b + limit;
-    while b + 8 <= end {
-        let diff = read_u64(src, a) ^ read_u64(dst, b);
-        if diff != 0 {
-            return (b - start) + (diff.trailing_zeros() as usize >> 3);
-        }
-        a += 8;
-        b += 8;
+fn push_way<const WAYS: usize>(b: &mut [u16; WAYS], val: u16) {
+    let mut i = WAYS - 1;
+    while i > 0 {
+        b[i] = b[i - 1];
+        i -= 1;
     }
-    while b < end && unsafe { *src.get_unchecked(a) == *dst.get_unchecked(b) } {
-        a += 1;
-        b += 1;
-    }
-    b - start
+    b[0] = val;
 }
 
 #[inline(always)]
-fn insert_local(
+fn insert_local<const WAYS: usize>(
     chunk: &[u8],
     pos: usize,
-    local_ht4: &mut [[u16; 2]; LOCAL_HT4_SIZE],
-    local_ht6: &mut [[u16; 2]; LOCAL_HT6_SIZE],
+    local_ht4: &mut [[u16; WAYS]; LOCAL_HT4_SIZE],
+    local_ht6: &mut [[u16; WAYS]; LOCAL_HT6_SIZE],
 ) {
     let w8 = read_u64(chunk, pos);
     let p16 = pos as u16;
     unsafe {
-        let b6 = local_ht6.get_unchecked_mut((mul6(w8) >> LOCAL_HT6_SHIFT) as usize);
-        *b6 = [p16, b6[0]];
-        let b4 = local_ht4.get_unchecked_mut((mul4(w8 as u32) >> LOCAL_HT4_SHIFT) as usize);
-        *b4 = [p16, b4[0]];
-    }
-}
-
-#[inline(always)]
-fn resolve_cand<const SMALL: bool>(pos: usize, raw_u16: u16) -> Option<usize> {
-    if SMALL {
-        Some(raw_u16 as usize)
-    } else {
-        let mut cand = (pos & !0xffff) | (raw_u16 as usize);
-        if cand >= pos {
-            if pos >= 65536 {
-                cand -= 65536;
-            } else {
-                return None;
-            }
-        }
-        if pos - cand <= MAX_OFFSET {
-            Some(cand)
-        } else {
-            None
-        }
+        push_way(
+            local_ht6.get_unchecked_mut((mul6(w8) >> LOCAL_HT6_SHIFT) as usize),
+            p16,
+        );
+        push_way(
+            local_ht4.get_unchecked_mut((mul4(w8 as u32) >> LOCAL_HT4_SHIFT) as usize),
+            p16,
+        );
     }
 }
 
@@ -140,279 +121,37 @@ fn emit_sequence(
     }
 }
 
-#[inline(always)]
-fn off_pen(off: usize) -> i32 {
-    if off <= 256 {
-        0
-    } else if off <= 4096 {
-        2
-    } else if off <= 32768 {
-        4
-    } else {
-        6
-    }
-}
-
-#[inline(always)]
-fn probe_dict6(
-    d: &PreparedDict,
-    chunk: &[u8],
-    pos: usize,
-    rem: usize,
-    w6: u64,
-    m6: u64,
-    mut best_len: usize,
-    mut best_off: usize,
-    mut best_sc: i32,
-) -> (usize, usize, i32) {
-    let d_len = d.raw.len();
-    let t6 = dict_tag6(m6);
-    let b6 = unsafe { *d.ht6.get_unchecked((m6 >> d.ht6_shift) as usize) };
-    let e0 = b6[0];
-    if e0 != 0 {
-        if (e0 ^ t6) <= DICT_POS_MASK {
-            let d_cand = ((e0 & DICT_POS_MASK) - 1) as usize;
-            let dict_back = d_len - d_cand;
-            let off = pos + dict_back;
-            let d_lim = rem.min(dict_back);
-            if off <= MAX_OFFSET
-                && d_lim >= 6
-                && d_cand + 8 <= d_len
-                && (read_u64(&d.raw, d_cand) & MASK6) == w6
-            {
-                let ml = 6 + match_len_slices(&d.raw, d_cand + 6, chunk, pos + 6, d_lim - 6);
-                let sc = (ml as i32) * 4 - off_pen(off);
-                if sc > best_sc {
-                    best_len = ml;
-                    best_off = off;
-                    best_sc = sc;
-                    if best_len >= 256 {
-                        return (best_len, best_off, best_sc);
-                    }
-                }
-            }
-        }
-        let e1 = b6[1];
-        if e1 != 0 && (e1 ^ t6) <= DICT_POS_MASK {
-            let d_cand = ((e1 & DICT_POS_MASK) - 1) as usize;
-            let dict_back = d_len - d_cand;
-            let off = pos + dict_back;
-            let d_lim = rem.min(dict_back);
-            if off <= MAX_OFFSET
-                && d_lim >= 6
-                && d_cand + 8 <= d_len
-                && (read_u64(&d.raw, d_cand) & MASK6) == w6
-            {
-                let ml = 6 + match_len_slices(&d.raw, d_cand + 6, chunk, pos + 6, d_lim - 6);
-                let sc = (ml as i32) * 4 - off_pen(off);
-                if sc > best_sc {
-                    best_len = ml;
-                    best_off = off;
-                    best_sc = sc;
-                }
-            }
-        }
-    }
-    (best_len, best_off, best_sc)
-}
-
-#[inline(always)]
-fn probe_dict4(
-    d: &PreparedDict,
-    chunk: &[u8],
-    pos: usize,
-    rem: usize,
-    w4: u32,
-    p4: u32,
-    mut best_len: usize,
-    mut best_off: usize,
-    mut best_sc: i32,
-) -> (usize, usize, i32) {
-    let d_len = d.raw.len();
-    let t4 = dict_tag4(w4);
-    let b4 = unsafe { *d.ht4.get_unchecked((p4 >> DICT_HT4_SHIFT) as usize) };
-    let e0 = b4[0];
-    if e0 != 0 {
-        if (e0 ^ t4) <= DICT_POS_MASK {
-            let d_cand = ((e0 & DICT_POS_MASK) - 1) as usize;
-            let dict_back = d_len - d_cand;
-            let off = pos + dict_back;
-            let d_lim = rem.min(dict_back);
-            if off <= MAX_OFFSET
-                && d_lim >= 4
-                && d_cand + 4 <= d_len
-                && read_u32(&d.raw, d_cand) == w4
-            {
-                let ml = 4 + match_len_slices(&d.raw, d_cand + 4, chunk, pos + 4, d_lim - 4);
-                if ml >= 5 || off <= 16384 {
-                    let sc = (ml as i32) * 4 - off_pen(off);
-                    if sc > best_sc {
-                        best_len = ml;
-                        best_off = off;
-                        best_sc = sc;
-                    }
-                }
-            }
-        }
-        let e1 = b4[1];
-        if e1 != 0 && best_len < 6 && (e1 ^ t4) <= DICT_POS_MASK {
-            let d_cand = ((e1 & DICT_POS_MASK) - 1) as usize;
-            let dict_back = d_len - d_cand;
-            let off = pos + dict_back;
-            let d_lim = rem.min(dict_back);
-            if off <= MAX_OFFSET
-                && d_lim >= 4
-                && d_cand + 4 <= d_len
-                && read_u32(&d.raw, d_cand) == w4
-            {
-                let ml = 4 + match_len_slices(&d.raw, d_cand + 4, chunk, pos + 4, d_lim - 4);
-                if ml >= 5 || off <= 16384 {
-                    let sc = (ml as i32) * 4 - off_pen(off);
-                    if sc > best_sc {
-                        best_len = ml;
-                        best_off = off;
-                        best_sc = sc;
-                    }
-                }
-            }
-        }
-    }
-    (best_len, best_off, best_sc)
-}
-
-#[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn probe_pos<const SMALL: bool, const NEED_HT4: bool>(
-    chunk: &[u8],
-    n: usize,
-    pos: usize,
-    anchor: usize,
-    r0: usize,
-    dict: Option<&PreparedDict>,
-    local_ht4: &[[u16; 2]; LOCAL_HT4_SIZE],
-    local_ht6: &[[u16; 2]; LOCAL_HT6_SIZE],
-    w8: u64,
-    m6: u64,
-    p4: u32,
-) -> (usize, usize, u8, i32) {
-    let rem = n - pos;
-    let w6 = w8 & MASK6;
-    let w4 = w8 as u32;
-    let mut ml = 0usize;
-    let mut off = 0usize;
-    let mut rep_idx = 255u8;
-    let mut best_sc = 0i32;
-
-    if pos > anchor && r0 <= pos && (read_u32(chunk, pos - r0) & 0x00ff_ffff) == (w4 & 0x00ff_ffff)
-    {
-        ml = 3 + match_len_slices(chunk, pos - r0 + 3, chunk, pos + 3, rem - 3);
-        off = r0;
-        rep_idx = 0;
-        best_sc = (ml as i32) * 4 + 3;
-        if ml >= 48 {
-            return (ml, off, rep_idx, best_sc);
-        }
-    }
-
-    if pos > 0 {
-        let b6 = unsafe { *local_ht6.get_unchecked((m6 >> LOCAL_HT6_SHIFT) as usize) };
-        for raw6 in b6 {
-            if let Some(cand6) = resolve_cand::<SMALL>(pos, raw6) {
-                if (read_u64(chunk, cand6) & MASK6) == w6 {
-                    let c_off = pos - cand6;
-                    let c_ml = 6 + match_len_slices(chunk, cand6 + 6, chunk, pos + 6, rem - 6);
-                    let sc = (c_ml as i32) * 4 - off_pen(c_off);
-                    if sc > best_sc {
-                        ml = c_ml;
-                        off = c_off;
-                        rep_idx = 255;
-                        best_sc = sc;
-                        if ml >= 48 {
-                            return (ml, off, rep_idx, best_sc);
-                        }
-                    }
-                }
-            }
-            if raw6 == 0 {
-                break;
-            }
-        }
-    }
-
-    if ml < 32 {
-        if let Some(d) = dict {
-            let (d_ml, d_off, d_sc) = probe_dict6(d, chunk, pos, rem, w6, m6, ml, off, best_sc);
-            if d_sc > best_sc {
-                ml = d_ml;
-                off = d_off;
-                rep_idx = 255;
-                best_sc = d_sc;
-                if ml >= 48 {
-                    return (ml, off, rep_idx, best_sc);
-                }
-            }
-        }
-    }
-
-    if NEED_HT4 && ml < 6 {
-        if pos > 0 {
-            let b4 = unsafe { *local_ht4.get_unchecked((p4 >> LOCAL_HT4_SHIFT) as usize) };
-            for raw4 in b4 {
-                if let Some(cand4) = resolve_cand::<SMALL>(pos, raw4) {
-                    if read_u32(chunk, cand4) == w4 {
-                        let c_off = pos - cand4;
-                        let c_ml = 4 + match_len_slices(chunk, cand4 + 4, chunk, pos + 4, rem - 4);
-                        if c_ml >= 5 || c_off <= 16384 {
-                            let sc = (c_ml as i32) * 4 - off_pen(c_off);
-                            if sc > best_sc {
-                                ml = c_ml;
-                                off = c_off;
-                                rep_idx = 255;
-                                best_sc = sc;
-                            }
-                        }
-                    }
-                }
-                if raw4 == 0 {
-                    break;
-                }
-            }
-        }
-        if ml < 6 {
-            if let Some(d) = dict {
-                let (d_ml, d_off, d_sc) = probe_dict4(d, chunk, pos, rem, w4, p4, ml, off, best_sc);
-                if d_sc > best_sc {
-                    ml = d_ml;
-                    off = d_off;
-                    rep_idx = 255;
-                    best_sc = d_sc;
-                }
-            }
-        }
-    }
-
-    (ml, off, rep_idx, best_sc)
-}
-
-fn encode_loop<const SMALL: bool>(
+fn encode_loop<const SMALL: bool, const WAYS: usize, const DWAYS: usize>(
     chunk: &[u8],
     dict: Option<&PreparedDict>,
-    sc: &mut DictLzScratch,
+    local_ht4: &mut [[u16; WAYS]; LOCAL_HT4_SIZE],
+    local_ht6: &mut [[u16; WAYS]; LOCAL_HT6_SIZE],
+    sb: &mut StreamBufs,
+    level: u8,
 ) -> usize {
     let n = chunk.len();
-    sc.local_ht4.fill([0u16; 2]);
-    sc.local_ht6.fill([0u16; 2]);
+    local_ht4.fill([0u16; WAYS]);
+    local_ht6.fill([0u16; WAYS]);
     let d_slice: &[u8] = dict.map_or(&[], |d| d.raw.as_slice());
     let d_len = d_slice.len();
     let limit = n.saturating_sub(8);
 
-    sc.sb.reset_for(n);
-    insert_local(chunk, 0, &mut sc.local_ht4, &mut sc.local_ht6);
+    sb.reset_for(n);
+    insert_local(chunk, 0, local_ht4, local_ht6);
 
     let mut rep = [1usize, 4, 8];
     let mut pos = if dict.is_some() { 0usize } else { 1usize };
     let mut anchor = 0usize;
     let mut misses = 0usize;
+    let lazy_max: usize = match level {
+        0 | 1 => 0,
+        2 => 14,
+        3 => 24,
+        4 | 5 => 32,
+        _ => 48,
+    };
+    let lazy_ht4_max: usize = if level >= 6 { 16 } else { 8 };
 
     let StreamBufs {
         lits,
@@ -421,7 +160,7 @@ fn encode_loop<const SMALL: bool>(
         len_ext,
         off_bits,
         ..
-    } = &mut sc.sb;
+    } = sb;
     let mut bw = BitWriter::new(off_bits);
 
     while pos <= limit {
@@ -429,72 +168,92 @@ fn encode_loop<const SMALL: bool>(
         let m6 = mul6(w8);
         let p4 = mul4(w8 as u32);
 
-        let (mut ml, mut off, mut rep_idx, best_sc) = probe_pos::<SMALL, true>(
-            chunk,
-            n,
-            pos,
-            anchor,
-            rep[0],
-            dict,
-            &sc.local_ht4,
-            &sc.local_ht6,
-            w8,
-            m6,
-            p4,
+        let (mut ml, mut off, mut rep_idx, mut best_sc) = probe_pos::<SMALL, WAYS, DWAYS, true>(
+            chunk, n, pos, anchor, &rep, dict, local_ht4, local_ht6, w8, m6, p4,
         );
 
         if pos > 0 {
             let p16 = pos as u16;
             unsafe {
-                let b6 = sc
-                    .local_ht6
-                    .get_unchecked_mut((m6 >> LOCAL_HT6_SHIFT) as usize);
-                *b6 = [p16, b6[0]];
-                let b4 = sc
-                    .local_ht4
-                    .get_unchecked_mut((p4 >> LOCAL_HT4_SHIFT) as usize);
-                *b4 = [p16, b4[0]];
+                push_way(
+                    local_ht6.get_unchecked_mut((m6 >> LOCAL_HT6_SHIFT) as usize),
+                    p16,
+                );
+                push_way(
+                    local_ht4.get_unchecked_mut((p4 >> LOCAL_HT4_SHIFT) as usize),
+                    p16,
+                );
             }
         }
 
         if ml == 0 {
-            misses += 1;
-            let shift = if pos >= 2048 && lits.len() + (pos - anchor) > (pos * 3) / 4 {
-                3
+            if level >= 7 {
+                pos += 1;
             } else {
-                4
-            };
-            pos += 1 + (misses >> shift);
+                misses += 1;
+                let shift = if pos >= 2048 && lits.len() + (pos - anchor) > (pos * 3) / 4 {
+                    3
+                } else if level >= 4 {
+                    5
+                } else {
+                    4
+                };
+                pos += 1 + (misses >> shift);
+            }
             continue;
         }
         misses = 0;
 
-        // Surgical 1-step lazy check on short/medium matches (`ml <= 18`); skips `ht4` when `ml >= 5`!
-        let noisy = pos >= 2048 && lits.len() + (pos - anchor) > (pos * 3) / 4;
-        if !noisy && ml <= 18 && pos + 1 <= limit {
+        let noisy = level < 6 && pos >= 2048 && lits.len() + (pos - anchor) > (pos * 3) / 4;
+        if !noisy && ml <= lazy_max && pos + 1 <= limit {
             let p1 = pos + 1;
             let wn = read_u64(chunk, p1);
             let m6n = mul6(wn);
             let p4n = mul4(wn as u32);
-            let (n_ml, n_off, n_rep, n_sc) = if ml == 4 {
-                probe_pos::<SMALL, true>(
-                    chunk, n, p1, anchor, rep[0], dict, &sc.local_ht4, &sc.local_ht6, wn, m6n, p4n,
+            let (n_ml, n_off, n_rep, n_sc) = if ml <= lazy_ht4_max {
+                probe_pos::<SMALL, WAYS, DWAYS, true>(
+                    chunk, n, p1, anchor, &rep, dict, local_ht4, local_ht6, wn, m6n, p4n,
                 )
             } else {
-                probe_pos::<SMALL, false>(
-                    chunk, n, p1, anchor, rep[0], dict, &sc.local_ht4, &sc.local_ht6, wn, m6n, p4n,
+                probe_pos::<SMALL, WAYS, DWAYS, false>(
+                    chunk, n, p1, anchor, &rep, dict, local_ht4, local_ht6, wn, m6n, p4n,
                 )
             };
-            if n_ml > ml && n_sc > best_sc + 3 {
-                insert_local(chunk, p1, &mut sc.local_ht4, &mut sc.local_ht6);
+            if n_ml > ml && n_sc > best_sc + 2 {
+                insert_local(chunk, p1, local_ht4, local_ht6);
                 pos = p1;
                 ml = n_ml;
                 off = n_off;
                 rep_idx = n_rep;
+                best_sc = n_sc;
+
+                if level >= 7 && ml <= lazy_max && pos + 1 <= limit {
+                    let p2 = pos + 1;
+                    let w2 = read_u64(chunk, p2);
+                    let (m2, o2, r2, s2) = probe_pos::<SMALL, WAYS, DWAYS, true>(
+                        chunk,
+                        n,
+                        p2,
+                        anchor,
+                        &rep,
+                        dict,
+                        local_ht4,
+                        local_ht6,
+                        w2,
+                        mul6(w2),
+                        mul4(w2 as u32),
+                    );
+                    if m2 > ml && s2 > best_sc + 2 {
+                        insert_local(chunk, p2, local_ht4, local_ht6);
+                        pos = p2;
+                        ml = m2;
+                        off = o2;
+                        rep_idx = r2;
+                    }
+                }
             }
         }
 
-        // Backward match extension across skipped literal bytes.
         if off <= pos {
             while pos > anchor
                 && pos > off
@@ -533,25 +292,20 @@ fn encode_loop<const SMALL: bool>(
 
         let match_end = pos + ml;
         let idx_lim = match_end.min(limit + 1);
-        if ml <= 12 {
-            let mut q = pos + 1;
-            while q < idx_lim {
-                insert_local(chunk, q, &mut sc.local_ht4, &mut sc.local_ht6);
-                q += 1;
-            }
-        } else if ml <= 32 {
-            let mut q = pos + 2;
-            while q < idx_lim {
-                insert_local(chunk, q, &mut sc.local_ht4, &mut sc.local_ht6);
-                q += 2;
-            }
-            if idx_lim > pos + 1 {
-                insert_local(chunk, idx_lim - 1, &mut sc.local_ht4, &mut sc.local_ht6);
-            }
-        } else if idx_lim > pos + 3 {
-            insert_local(chunk, pos + 2, &mut sc.local_ht4, &mut sc.local_ht6);
-            insert_local(chunk, idx_lim - 2, &mut sc.local_ht4, &mut sc.local_ht6);
-            insert_local(chunk, idx_lim - 1, &mut sc.local_ht4, &mut sc.local_ht6);
+        let step = if level >= 6 || ml <= 16 {
+            1
+        } else if ml <= 48 {
+            2
+        } else {
+            4
+        };
+        let mut q = pos + step;
+        while q < idx_lim {
+            insert_local(chunk, q, local_ht4, local_ht6);
+            q += step;
+        }
+        if step > 1 && idx_lim > pos + 1 {
+            insert_local(chunk, idx_lim - 1, local_ht4, local_ht6);
         }
 
         pos = match_end;
@@ -567,11 +321,53 @@ pub(super) fn encode_into(
     sc: &mut DictLzScratch,
     out: &mut Vec<u8>,
     max_len: usize,
+    level: u8,
 ) -> Option<(usize, usize)> {
-    let anchor = if chunk.len() <= 65536 {
-        encode_loop::<true>(chunk, dict, sc)
+    let small = chunk.len() <= 65536;
+    let anchor = if level <= 2 {
+        let (ht4, ht6) = sc.fast_tables.get_or_insert_with(|| {
+            (
+                Box::new([[0u16; 2]; LOCAL_HT4_SIZE]),
+                Box::new([[0u16; 2]; LOCAL_HT6_SIZE]),
+            )
+        });
+        if small {
+            encode_loop::<true, 2, 2>(chunk, dict, ht4, ht6, &mut sc.sb, level)
+        } else {
+            encode_loop::<false, 2, 2>(chunk, dict, ht4, ht6, &mut sc.sb, level)
+        }
+    } else if level <= 5 {
+        if small {
+            encode_loop::<true, 4, 4>(
+                chunk,
+                dict,
+                &mut sc.local_ht4,
+                &mut sc.local_ht6,
+                &mut sc.sb,
+                level,
+            )
+        } else {
+            encode_loop::<false, 4, 4>(
+                chunk,
+                dict,
+                &mut sc.local_ht4,
+                &mut sc.local_ht6,
+                &mut sc.sb,
+                level,
+            )
+        }
     } else {
-        encode_loop::<false>(chunk, dict, sc)
+        let (ht4, ht6) = sc.deep_tables.get_or_insert_with(|| {
+            (
+                Box::new([[0u16; 8]; LOCAL_HT4_SIZE]),
+                Box::new([[0u16; 8]; LOCAL_HT6_SIZE]),
+            )
+        });
+        if small {
+            encode_loop::<true, 8, 4>(chunk, dict, ht4, ht6, &mut sc.sb, level)
+        } else {
+            encode_loop::<false, 8, 4>(chunk, dict, ht4, ht6, &mut sc.sb, level)
+        }
     };
     serialize_streams(chunk, anchor, &mut sc.sb, out, max_len)
 }

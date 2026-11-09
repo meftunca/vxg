@@ -30,13 +30,18 @@ CI_SUITE_BASELINES = {
 }
 
 REAL_PUBLIC_BASELINES = {
-    "nyc-taxi-2024-01.ndjson": 0.0592,
-    "nyc-taxi-2024-01.csv": 0.1829,
-    "gharchive-2025-01-15.ndjson": 0.1231,
-    "apache-access.clf": 0.1037,
-    "macos-install.log": 0.0594,
-    "pg100-shakespeare.txt": 0.3884,
-    "kodak-truecolor-16.bmp": 0.8256,
+    "nyc-taxi-2024-01.ndjson": 0.0593,
+    "nyc-taxi-2024-01.csv": 0.1830,
+    "gharchive-2025-01-15.ndjson": 0.1181,
+    "apache-access.clf": 0.0976,
+    "macos-install.log": 0.0549,
+    "pg100-shakespeare.txt": 0.3786,
+    "kodak-truecolor-16.bmp": 0.7987,
+}
+
+COVID_BASELINES = {
+    "time-series-19-covid-combined.csv": 0.0963,
+    "us_confirmed_33m.csv": 0.0456,
 }
 
 
@@ -106,13 +111,14 @@ def main() -> int:
     ap.add_argument("--ci-csv", help="Path to vxg-bench --suite v4 CSV")
     ap.add_argument("--real-csv", help="Path to vxg-bench real-public CSV")
     ap.add_argument("--real-dir", help="Directory containing real public corpora")
+    ap.add_argument("--covid-dir", help="Directory containing datasets/covid-19 CSVs")
     ap.add_argument("--vxg-bin", default="target/release/vxg", help="Path to vxg CLI binary")
     ap.add_argument("--max-regression-pct", type=float, default=1.0)
     ap.add_argument("--extra-json", help="Optional JSON mapping extra file paths -> baseline ratio")
     args = ap.parse_args()
 
-    if not any([args.ci_csv, args.real_csv, args.real_dir, args.extra_json]):
-        ap.error("provide at least one of --ci-csv, --real-csv, --real-dir, or --extra-json")
+    if not any([args.ci_csv, args.real_csv, args.real_dir, args.covid_dir, args.extra_json]):
+        ap.error("provide at least one of --ci-csv, --real-csv, --real-dir, --covid-dir, or --extra-json")
 
     failures: list[str] = []
     if args.ci_csv:
@@ -122,6 +128,10 @@ def main() -> int:
     if args.real_dir:
         failures.extend(
             check_corpus_dir(args.vxg_bin, args.real_dir, REAL_PUBLIC_BASELINES, args.max_regression_pct)
+        )
+    if args.covid_dir:
+        failures.extend(
+            check_corpus_dir(args.vxg_bin, args.covid_dir, COVID_BASELINES, args.max_regression_pct)
         )
     if args.extra_json:
         with open(args.extra_json, encoding="utf-8") as jf:

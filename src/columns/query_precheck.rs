@@ -311,6 +311,17 @@ fn col_can_contain_isolated(col_bytes: &[u8], ones: usize, needle: &[u8]) -> Res
         MODEL_DECIMAL_DELTA => {
             let first = c.u64()?;
             let width = c.byte()?;
+            if (width & PFOR_DELTA_FLAG) != 0 {
+                if (width & 0x7f) >= 64 {
+                    return Ok(true);
+                }
+                if let (Ok(min_val), Ok(span)) = (read_uleb64(&mut c), read_uleb64(&mut c)) {
+                    if let Some(hi) = min_val.checked_add(span) {
+                        return Ok(decimal_range_can_contain(min_val, hi, None, needle));
+                    }
+                }
+                return Ok(true);
+            }
             if width > 64 {
                 return Ok(true);
             }

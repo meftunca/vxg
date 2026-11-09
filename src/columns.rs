@@ -402,6 +402,7 @@ include!("columns/model_pattern.rs");
 include!("columns/model_hex_epoch.rs");
 include!("columns/model_segment_dec.rs");
 include!("columns/model_scaled_dec.rs");
+include!("columns/model_delta_pfor.rs");
 include!("columns/model_periodic_gf2.rs");
 include!("columns/model_timestamp.rs");
 include!("columns/model_select.rs");

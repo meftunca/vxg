@@ -86,7 +86,7 @@ fn append_frame(
     } else {
         frame::VERSION_RELEASE
     };
-    let wire_opt = active_dict.map(|d| (crate::dict_lz::encode_wire_dict(d), d.len()));
+    let wire_opt = active_dict.map(|d| (crate::dict_lz::encode_wire_dict(d, 3), d.len()));
     let dir_bytes = esize.checked_mul(count).ok_or(Error::SizeOverflow)?;
     let var_raw_bytes = if has_var_raw {
         count.checked_mul(4).ok_or(Error::SizeOverflow)?

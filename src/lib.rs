@@ -85,6 +85,9 @@ pub struct Options {
     /// Snap block split points backward to newline (`\n`) boundaries when possible (`VERSION_V5`
     /// `FLAG_VAR_RAW`), eliminating cross-block partial rows on multi-GB tabular/NDJSON frames.
     pub record_aligned: bool,
+    /// Compression effort level (`1..=9`; default `3`). Higher levels search deeper local/dictionary
+    /// hash ways and lazy windows in `BLOCK_DICT_LZ` with zero change to wire format or decode speed.
+    pub level: u8,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -96,6 +99,7 @@ impl Default for Options {
             simd: Simd::Auto,
             legacy_v2: false,
             record_aligned: false,
+            level: 3,
         }
     }
 }
@@ -107,6 +111,9 @@ impl Options {
         }
         if !(1..=64).contains(&self.acceleration) {
             return Err(Error::InvalidOption("acceleration must be 1..64"));
+        }
+        if !(1..=9).contains(&self.level) {
+            return Err(Error::InvalidOption("level must be 1..9"));
         }
         Ok(())
     }
@@ -164,7 +171,7 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
         frame::VERSION_RELEASE
     };
     let prep_dict = if !options.legacy_v2 {
-        dict_lz::prepare_frame_dict(input, options.block_size)
+        dict_lz::prepare_frame_dict(input, options.block_size, options.level)
     } else {
         None
     };
@@ -239,7 +246,7 @@ fn compress_inner<const STATS: bool>(
         frame::VERSION_RELEASE
     };
     let prep_dict = if !options.legacy_v2 {
-        dict_lz::prepare_frame_dict(input, options.block_size)
+        dict_lz::prepare_frame_dict(input, options.block_size, options.level)
     } else {
         None
     };

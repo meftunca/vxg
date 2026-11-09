@@ -13,6 +13,7 @@ use crate::{columns, Error, Result};
 mod decode;
 mod encode;
 mod pack;
+mod probe;
 mod train;
 
 pub(crate) use decode::{decode_dict_block, validate_dict_block};
@@ -34,8 +35,8 @@ pub(crate) struct PreparedDict {
     pub(crate) wire_payload: Vec<u8>,
     pub(crate) prefer_over_grammar: bool,
     pub(crate) try_structured: bool,
-    pub(crate) ht4: Box<[[u32; 2]; DICT_HT4_SIZE]>,
-    pub(crate) ht6: Box<[[u32; 2]]>,
+    pub(crate) ht4: Box<[[u32; 4]; DICT_HT4_SIZE]>,
+    pub(crate) ht6: Box<[[u32; 4]]>,
     pub(crate) ht6_shift: u32,
 }
 
@@ -75,19 +76,19 @@ pub(super) fn dict_tag6(m6: u64) -> u32 {
 
 pub(super) fn build_dict_tables(
     raw: &[u8],
-) -> (Box<[[u32; 2]; DICT_HT4_SIZE]>, Box<[[u32; 2]]>, u32) {
+) -> (Box<[[u32; 4]; DICT_HT4_SIZE]>, Box<[[u32; 4]]>, u32) {
     let ht6_bits: u32 = if raw.len() <= 16_384 {
-        13 // 8192 x 8 B = 64 KiB
+        13 // 8192 x 16 B = 128 KiB
     } else if raw.len() <= 65_536 {
-        14 // 16384 x 8 B = 128 KiB
+        14 // 16384 x 16 B = 256 KiB
     } else if raw.len() <= 131_072 {
-        15 // 32768 x 8 B = 256 KiB
+        15 // 32768 x 16 B = 512 KiB
     } else {
-        16 // 65536 x 8 B = 512 KiB
+        16 // 65536 x 16 B = 1 MiB
     };
     let ht6_shift = 64 - ht6_bits;
-    let mut ht4 = Box::new([[0u32; 2]; DICT_HT4_SIZE]);
-    let mut ht6 = vec![[0u32; 2]; 1usize << ht6_bits].into_boxed_slice();
+    let mut ht4 = Box::new([[0u32; 4]; DICT_HT4_SIZE]);
+    let mut ht6 = vec![[0u32; 4]; 1usize << ht6_bits].into_boxed_slice();
     if raw.len() >= 8 {
         let mut p = 0usize;
         while p + 8 <= raw.len() {
@@ -99,21 +100,19 @@ pub(super) fn build_dict_tables(
             let e4 = dict_tag4(w4) | p1;
             let e6 = dict_tag6(m6) | p1;
             unsafe {
-                if raw.len() <= 32_768 || (p & 1) == 0 {
-                    let b4 = ht4.get_unchecked_mut((mul4(w4) >> (32 - DICT_HT4_BITS)) as usize);
-                    if b4[0] != 0 && (b4[0] ^ e4) <= DICT_POS_MASK {
-                        let prev = ((b4[0] & DICT_POS_MASK) - 1) as usize;
-                        if (read_u64(raw, prev) & 0x0000_00ff_ffff_ffff) == w5 {
-                            b4[0] = e4;
-                        } else {
-                            *b4 = [e4, b4[0]];
-                        }
+                let b4 = ht4.get_unchecked_mut((mul4(w4) >> (32 - DICT_HT4_BITS)) as usize);
+                if b4[0] != 0 && (b4[0] ^ e4) <= DICT_POS_MASK {
+                    let prev = ((b4[0] & DICT_POS_MASK) - 1) as usize;
+                    if (read_u64(raw, prev) & 0x0000_00ff_ffff_ffff) == w5 {
+                        b4[0] = e4;
                     } else {
-                        *b4 = [e4, b4[0]];
+                        *b4 = [e4, b4[0], b4[1], b4[2]];
                     }
+                } else {
+                    *b4 = [e4, b4[0], b4[1], b4[2]];
                 }
                 let b6 = ht6.get_unchecked_mut((m6 >> ht6_shift) as usize);
-                *b6 = [e6, b6[0]];
+                *b6 = [e6, b6[0], b6[1], b6[2]];
             }
             p += 1;
         }
@@ -122,10 +121,10 @@ pub(super) fn build_dict_tables(
 }
 
 /// Compress raw dictionary bytes for storage in a `VERSION_V5` frame header.
-pub(crate) fn encode_wire_dict(raw: &[u8]) -> Vec<u8> {
+pub(crate) fn encode_wire_dict(raw: &[u8], level: u8) -> Vec<u8> {
     if raw.len() >= 128 {
         let mut pkt = Vec::with_capacity(raw.len());
-        if encode_dict_block_into(raw, None, &mut pkt, raw.len() - 8).is_some() {
+        if encode_dict_block_into(raw, None, &mut pkt, raw.len() - 8, level).is_some() {
             return pkt;
         }
     }
@@ -155,8 +154,12 @@ pub(crate) fn decode_wire_dict(wire: &[u8], raw_len: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub(crate) fn prepare_frame_dict(input: &[u8], block_size: usize) -> Option<PreparedDict> {
-    train::build_prepared_dict(input, block_size)
+pub(crate) fn prepare_frame_dict(
+    input: &[u8],
+    block_size: usize,
+    level: u8,
+) -> Option<PreparedDict> {
+    train::build_prepared_dict(input, block_size, level)
 }
 
 pub(crate) fn encode_dict_block_into(
@@ -164,12 +167,13 @@ pub(crate) fn encode_dict_block_into(
     dict: Option<&PreparedDict>,
     out: &mut Vec<u8>,
     max_len: usize,
+    level: u8,
 ) -> Option<(usize, usize)> {
     if chunk.len() < 64 || max_len <= 16 {
         return None;
     }
     DICT_LZ_SCRATCH.with(|cell| {
         let mut sc = cell.borrow_mut();
-        encode::encode_into(chunk, dict, &mut sc, out, max_len)
+        encode::encode_into(chunk, dict, &mut sc, out, max_len, level)
     })
 }

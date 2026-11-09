@@ -256,6 +256,39 @@ impl<'a> PreparedColumn<'a> {
                 }
                 let first = cursor.u64()?;
                 let width = cursor.byte()?;
+                if (width & PFOR_DELTA_FLAG) != 0 {
+                    let u64_offset = scratch.u64_arena.len();
+                    let or_all = decode_pfor_delta_into(
+                        first,
+                        width & 0x7f,
+                        &mut cursor,
+                        count,
+                        &mut scratch.u64_arena,
+                    )?;
+                    if !cursor.done() {
+                        scratch.u64_arena.truncate(u64_offset);
+                        return Err(invalid("column model trailing bytes"));
+                    }
+                    let stream = if or_all < 10_000 {
+                        let u16_offset = scratch.u16_arena.len();
+                        scratch.u16_arena.reserve(count);
+                        for &v in &scratch.u64_arena[u64_offset..u64_offset + count] {
+                            scratch.u16_arena.push(v as u16);
+                        }
+                        scratch.u64_arena.truncate(u64_offset);
+                        ColumnStream::DecimalSmall { u16_offset }
+                    } else {
+                        ColumnStream::DecimalValues { u64_offset }
+                    };
+                    return Ok(Self {
+                        const_full: ConstValue::None,
+                        const_lead: LeadValue::Empty,
+                        const_trail: b"",
+                        dict_slices: None,
+                        max_emit_len: 20,
+                        stream,
+                    });
+                }
                 if width > 64 {
                     return Err(invalid("column decimal delta width"));
                 }

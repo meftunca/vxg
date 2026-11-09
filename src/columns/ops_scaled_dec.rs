@@ -136,7 +136,7 @@ fn dec_col_zone_truth(
                 ScaledResidualCmp::Interval { .. } => TemplateTruth::Maybe,
             })
         }
-        MODEL_DECIMAL_PACKED | MODEL_DECIMAL_AFFINE => match dcmp.to_u64_domain() {
+        MODEL_DECIMAL_PACKED | MODEL_DECIMAL_AFFINE | MODEL_DECIMAL_DELTA => match dcmp.to_u64_domain() {
             crate::ops::dec_num::U64DomainCmp::AlwaysFalse => Some(TemplateTruth::AlwaysFalse),
             crate::ops::dec_num::U64DomainCmp::AlwaysTrue => Some(TemplateTruth::AlwaysTrue),
             crate::ops::dec_num::U64DomainCmp::Cmp(ncmp) => {

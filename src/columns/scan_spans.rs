@@ -523,17 +523,20 @@ fn try_match_clean_template<'a>(
 
 #[inline(always)]
 fn scan_delimited_value(data: &[u8], pos: usize, delim: u8) -> Option<usize> {
+    let relaxed = delim == b',' || delim == b'\t';
     if pos >= data.len() {
-        return None;
+        return relaxed.then_some(pos);
     }
     let first = data[pos];
     if first == b'"' {
         return scan_string(data, pos);
     }
-    if first == delim || first <= b' ' || first >= 0x7f {
+    if first == delim {
+        return relaxed.then_some(pos);
+    }
+    if first < b' ' || first == 0x7f || (!relaxed && (first == b' ' || first > 0x7f)) {
         return None;
     }
-    let relaxed = delim == b',' || delim == b'\t';
     let len = data.len();
     let ptr = data.as_ptr();
     let mut end = pos + 1;

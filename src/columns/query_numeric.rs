@@ -34,34 +34,9 @@ fn can_numeric_col_match_fast(col_bytes: &[u8], ones: usize, cmp: crate::query::
     if ones == 0 {
         return false;
     }
-    let mut c = Cursor::new(col_bytes);
-    let Ok(tag) = c.byte() else { return true };
-    match tag {
-        MODEL_DECIMAL_PACKED => {
-            let Ok(min) = c.u64() else { return true };
-            let Ok(width) = c.byte() else { return true };
-            if width > 64 {
-                return true;
-            }
-            let span = if width == 0 {
-                0
-            } else if width == 64 {
-                u64::MAX
-            } else {
-                (1u64 << width) - 1
-            };
-            num_cmp_overlaps_bounds(cmp, min, min.saturating_add(span))
-        }
-        MODEL_DECIMAL_AFFINE => {
-            let Ok(first) = c.u64() else { return true };
-            let Ok(step) = c.i64() else { return true };
-            let last_i128 = first as i128 + (step as i128) * ((ones - 1) as i128);
-            let Ok(last) = u64::try_from(last_i128) else {
-                return true;
-            };
-            num_cmp_overlaps_bounds(cmp, first.min(last), first.max(last))
-        }
-        _ => true,
+    match decimal_header_bounds(col_bytes, ones) {
+        Some((lo, hi)) => num_cmp_overlaps_bounds(cmp, lo, hi),
+        None => true,
     }
 }
 

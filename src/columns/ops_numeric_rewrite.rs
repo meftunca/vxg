@@ -78,58 +78,19 @@ fn pack_u64_column_direct(vals: &[u64], sum_digits: usize) -> Option<Vec<u8>> {
     }
 
     if !(affine_ok && step128 != 0 && n >= 49 && best_kind == ModelKind::DecimalAffine) {
-        let packed_width = bit_width(max - min);
-        if let Ok(packed_bits) = bit_bytes(n, packed_width) {
-            let packed_size = 10 + packed_bits;
-            let delta_width = bit_width(max_zigzag);
-            let delta_size = if delta_ok {
-                bit_bytes(n - 1, delta_width).ok().map(|b| 10 + b)
-            } else {
-                None
-            };
-            if delta_size.is_some_and(|ds| ds < packed_size) {
-                let ds = delta_size.unwrap();
-                let lim = if best_bytes.is_some() {
-                    effective_limit(best_len, best_kind, ModelKind::DecimalDelta)
-                } else {
-                    raw_limit
-                };
-                if ds < lim {
-                    let mut out = take_model_buf(ds);
-                    out.push(MODEL_DECIMAL_DELTA);
-                    out.extend_from_slice(&first.to_le_bytes());
-                    out.push(delta_width);
-                    push_bit_values(
-                        &mut out,
-                        n - 1,
-                        delta_width,
-                        vals.windows(2).map(|pair| {
-                            let d = (pair[1] as i128 - pair[0] as i128) as i64;
-                            ((d << 1) ^ (d >> 63)) as u64
-                        }),
-                    );
-                    if let Some(old) = best_bytes.replace(out) {
-                        put_model_buf(old);
-                    }
-                }
-            } else {
-                let lim = if best_bytes.is_some() {
-                    effective_limit(best_len, best_kind, ModelKind::DecimalPacked)
-                } else {
-                    raw_limit
-                };
-                if packed_size < lim {
-                    let mut out = take_model_buf(packed_size);
-                    out.push(MODEL_DECIMAL_PACKED);
-                    out.extend_from_slice(&min.to_le_bytes());
-                    out.push(packed_width);
-                    push_bit_values(&mut out, n, packed_width, vals.iter().map(|&v| v - min));
-                    if let Some(old) = best_bytes.replace(out) {
-                        put_model_buf(old);
-                    }
-                }
-            }
-        }
+        select_packed_or_delta_column(
+            vals,
+            first,
+            min,
+            max,
+            delta_ok,
+            max_zigzag,
+            raw_limit,
+            || raw_limit,
+            &mut best_bytes,
+            &mut best_len,
+            &mut best_kind,
+        );
     }
     best_bytes
 }

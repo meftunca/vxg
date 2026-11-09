@@ -129,8 +129,8 @@ fn compression_ratio_regression_gate_1pct() {
     let cases: [(&str, Vec<u8>, usize); 4] = [
         ("non-repeating-rust-and-docs", non_repeating_source_corpus(), 35_030),
         ("apache-clf-access-log", non_repeating_clf_corpus(), 13_279),
-        ("cumulative-timeseries-csv", cumulative_timeseries_csv_corpus(), 37_352),
-        ("free-text-daemon-log", free_text_daemon_logs_corpus(), 34_719),
+        ("cumulative-timeseries-csv", cumulative_timeseries_csv_corpus(), 14_147),
+        ("free-text-daemon-log", free_text_daemon_logs_corpus(), 34_156),
     ];
 
     let enc_opts = Options::default();

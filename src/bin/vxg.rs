@@ -19,7 +19,7 @@ const HELP: &str = r#"VXG — adaptive independent-block lossless codec & compre
 
 Usage:
   vxg c|compress   INPUT OUTPUT [--backend cpu|metal|vulkan|cuda] [--threads N|auto]
-                                [--block-size BYTES] [--acceleration 1..64]
+                                [--block-size BYTES] [--level|-l 1..9] [--acceleration 1..64]
                                 [--simd auto|scalar|sse2|avx2|avx512|neon]
                                 [--record-aligned] [--no-checksum] [--legacy] [--stream]
                                 [--no-mmap] [--gpu-batch BYTES] [--force|-f] [--quiet|-q]
@@ -395,6 +395,7 @@ fn run_args(args: &[String]) -> R<()> {
                 gpu.block_size = n;
             }
             "--acceleration" => enc.acceleration = val(args, &mut i)?.parse()?,
+            "--level" | "-l" => enc.level = val(args, &mut i)?.parse()?,
             "--simd" => {
                 let s = val(args, &mut i)?.parse()?;
                 enc.simd = s;

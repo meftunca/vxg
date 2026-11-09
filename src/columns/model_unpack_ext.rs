@@ -15,23 +15,31 @@ fn unpack_model_ext(
             }
             let first = cursor.u64()?;
             let width = cursor.byte()?;
-            if width > 64 {
-                return Err(invalid("column decimal delta width"));
+            if (width & PFOR_DELTA_FLAG) != 0 {
+                let mut decoded = Vec::with_capacity(count);
+                decode_pfor_delta_into(first, width & 0x7f, cursor, count, &mut decoded)?;
+                for v in decoded {
+                    push_decimal(values, v);
+                }
+            } else {
+                if width > 64 {
+                    return Err(invalid("column decimal delta width"));
+                }
+                let packed_len = bit_bytes(count - 1, width)?;
+                let mut reader = BitReader::new(cursor.take(packed_len)?);
+                push_decimal(values, first);
+                let mut previous = first as i128;
+                for _ in 1..count {
+                    let zigzag = reader.read(width)?;
+                    let delta = ((zigzag >> 1) as i64) ^ -((zigzag & 1) as i64);
+                    let current = previous + i128::from(delta);
+                    let current =
+                        u64::try_from(current).map_err(|_| invalid("column decimal delta range"))?;
+                    push_decimal(&mut values, current);
+                    previous = i128::from(current);
+                }
+                reader.finish_zero_padded()?;
             }
-            let packed_len = bit_bytes(count - 1, width)?;
-            let mut reader = BitReader::new(cursor.take(packed_len)?);
-            push_decimal(values, first);
-            let mut previous = first as i128;
-            for _ in 1..count {
-                let zigzag = reader.read(width)?;
-                let delta = ((zigzag >> 1) as i64) ^ -((zigzag & 1) as i64);
-                let current = previous + i128::from(delta);
-                let current =
-                    u64::try_from(current).map_err(|_| invalid("column decimal delta range"))?;
-                push_decimal(&mut values, current);
-                previous = i128::from(current);
-            }
-            reader.finish_zero_padded()?;
         }
         MODEL_PERIODIC_STRING => {
             if count < 2 {

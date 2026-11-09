@@ -443,8 +443,13 @@ pub fn find_delimited_col_span(line: &[u8], delim: u8, index: usize) -> Option<(
         let first = body[pos];
         let end = if first == b'"' {
             scan_json_str_end(body, pos)?
+        } else if first == delim {
+            if !relaxed {
+                return None;
+            }
+            pos
         } else {
-            if first == delim || first <= b' ' || first >= 0x7f {
+            if first < b' ' || first == 0x7f || (!relaxed && (first == b' ' || first > 0x7f)) {
                 return None;
             }
             let mut e = pos + 1;
@@ -479,6 +484,16 @@ pub fn find_delimited_col_span(line: &[u8], delim: u8, index: usize) -> Option<(
             return None;
         }
         pos += 1;
+        if pos == body_len {
+            if !relaxed {
+                return None;
+            }
+            if count == index {
+                found = Some((pos, pos));
+            }
+            count += 1;
+            break;
+        }
     }
     (count >= 2).then_some(found).flatten()
 }

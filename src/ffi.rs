@@ -234,6 +234,7 @@ pub unsafe extern "C" fn vxg_compress_into(
             simd: Simd::Auto,
             legacy_v2: false,
             record_aligned: false,
+            level: 3,
         };
         match compress_into(input, output, &opt) {
             Ok(written) => isize::try_from(written).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),
@@ -347,6 +348,7 @@ pub unsafe extern "C" fn vxg_compress_alloc(
             simd: Simd::Auto,
             legacy_v2: false,
             record_aligned: false,
+            level: 3,
         };
         let Ok(encoded) = compress(input, &opt) else {
             return std::ptr::null_mut();

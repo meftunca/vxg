@@ -23,6 +23,7 @@ fn encode_one_chunk<const STATS: bool>(
     scratch: &mut block::Scratch,
     engine: simd::Engine,
     acceleration: usize,
+    level: u8,
     stats: &mut WorkStats,
 ) -> Result<(u32, usize, usize)> {
     if !adaptive {
@@ -35,9 +36,13 @@ fn encode_one_chunk<const STATS: bool>(
 
     if let Some(d) = prep_dict {
         if d.prefer_over_grammar {
-            if let Some((dlz_off, dlz_len)) =
-                dict_lz::encode_dict_block_into(chunk, Some(d), scratch.payloads_mut(), chunk.len())
-            {
+            if let Some((dlz_off, dlz_len)) = dict_lz::encode_dict_block_into(
+                chunk,
+                Some(d),
+                scratch.payloads_mut(),
+                chunk.len(),
+                level,
+            ) {
                 if !d.try_structured || dlz_len * 6 <= chunk.len() {
                     return Ok((block::DICT_LZ, dlz_off, dlz_len));
                 }
@@ -61,9 +66,13 @@ fn encode_one_chunk<const STATS: bool>(
                 if col_len * 7 <= chunk.len() {
                     return Ok((block::COLUMN, col_off, col_len));
                 }
-                if let Some((dlz_off, dlz_len)) =
-                    dict_lz::encode_dict_block_into(chunk, Some(d), scratch.payloads_mut(), col_len)
-                {
+                if let Some((dlz_off, dlz_len)) = dict_lz::encode_dict_block_into(
+                    chunk,
+                    Some(d),
+                    scratch.payloads_mut(),
+                    col_len,
+                    level,
+                ) {
                     let payloads = scratch.payloads_mut();
                     payloads.copy_within(dlz_off..dlz_off + dlz_len, col_off);
                     payloads.truncate(col_off + dlz_len);
@@ -71,9 +80,13 @@ fn encode_one_chunk<const STATS: bool>(
                 }
                 return Ok((block::COLUMN, col_off, col_len));
             }
-            if let Some((dlz_off, dlz_len)) =
-                dict_lz::encode_dict_block_into(chunk, Some(d), scratch.payloads_mut(), chunk.len())
-            {
+            if let Some((dlz_off, dlz_len)) = dict_lz::encode_dict_block_into(
+                chunk,
+                Some(d),
+                scratch.payloads_mut(),
+                chunk.len(),
+                level,
+            ) {
                 return Ok((block::DICT_LZ, dlz_off, dlz_len));
             }
         }
@@ -187,6 +200,7 @@ fn encode_single_core<const STATS: bool>(
                 &mut scratch,
                 engine,
                 opt.acceleration,
+                opt.level,
                 &mut stats,
             )?;
             if kind == block::DICT_LZ {
@@ -384,6 +398,7 @@ where
                     &mut scratch,
                     engine,
                     opt.acceleration,
+                    opt.level,
                     &mut stats,
                 )?;
                 parts.push(frame::ArenaPart {

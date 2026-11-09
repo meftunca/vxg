@@ -15,11 +15,16 @@ fn parse_delimited_spans(
         return None;
     }
     let body = &data[..body_len];
+    let relaxed = delim_is_relaxed(delim);
     let mut pos = 0usize;
     let mut count = 0usize;
+    let mut non_empty = 0usize;
     loop {
         let start = pos;
         let end = scan_delimited_value(body, pos, delim)?;
+        if end > start {
+            non_empty += 1;
+        }
         if count >= MAX_SLOTS {
             return None;
         }
@@ -33,8 +38,16 @@ fn parse_delimited_spans(
             return None;
         }
         pos += 1;
+        if pos == body_len {
+            if !relaxed || count >= MAX_SLOTS {
+                return None;
+            }
+            spans[count] = (pos as u32, pos as u32);
+            count += 1;
+            break;
+        }
     }
-    (count >= 2).then_some(count)
+    (count >= 2 && non_empty >= 1 && (count >= 3 || non_empty == count)).then_some(count)
 }
 
 #[inline(always)]
@@ -134,12 +147,25 @@ fn parse_record_spans(
                 }
                 return None;
             }
-            if first >= 0x7f
-                || matches!(
-                    first,
-                    b'(' | b')' | b';' | b'}' | b'[' | b']' | b',' | b'\t' | b'|' | b'='
-                )
-            {
+            if matches!(first, b',' | b'\t') {
+                return parse_delimited_spans(data, first, spans);
+            }
+            if first == 0x7f || matches!(first, b'}' | b']' | b'|' | b'=') {
+                return None;
+            }
+            if first > 0x7f || matches!(first, b'(' | b')' | b';' | b'[') {
+                let lim = len.min(128);
+                for &bj in &data[1..lim] {
+                    if bj == b'\t' {
+                        return parse_delimited_spans(data, b'\t', spans);
+                    }
+                    if bj == b',' {
+                        return parse_delimited_spans(data, b',', spans).filter(|&c| c >= 3);
+                    }
+                    if bj < b' ' || bj == b'"' || bj == 0x7f {
+                        break;
+                    }
+                }
                 return None;
             }
             let ptr = data.as_ptr();
@@ -180,7 +206,26 @@ fn parse_record_spans(
                         return parse_delimited_spans(data, b, spans);
                     }
                     if b == b' ' && first.is_ascii_digit() && i >= 7 {
-                        return parse_clf_or_bracketed_log_spans(data, spans);
+                        if let Some(c) = parse_clf_or_bracketed_log_spans(data, spans) {
+                            return Some(c);
+                        }
+                    }
+                    if b == b' ' || b > 0x7f || matches!(b, b'(' | b')' | b';' | b'[') {
+                        let lim = len.min(i + 128);
+                        for &bj in &data[i + 1..lim] {
+                            if bj == b'\t' {
+                                return parse_delimited_spans(data, b'\t', spans);
+                            }
+                            if bj == b',' {
+                                if data.contains(&b'{') {
+                                    return None;
+                                }
+                                return parse_delimited_spans(data, b',', spans).filter(|&c| c >= 3);
+                            }
+                            if bj < b' ' || matches!(bj, b'"' | b'{' | b'}' | 0x7f) {
+                                break;
+                            }
+                        }
                     }
                     return None;
                 }

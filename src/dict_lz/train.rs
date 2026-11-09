@@ -265,7 +265,12 @@ fn try_macroscopic_dict(sc: &mut TrainScratch, input: &[u8], count: usize) -> Op
     Some(raw)
 }
 
-fn train_raw_dict(input: &[u8], block_size: usize, is_structured: bool) -> Option<Vec<u8>> {
+fn train_raw_dict(
+    input: &[u8],
+    block_size: usize,
+    is_structured: bool,
+    level: u8,
+) -> Option<Vec<u8>> {
     let n = input.len();
     let count = n.div_ceil(block_size);
     if count < 3 || n < 24_576 {
@@ -286,12 +291,25 @@ fn train_raw_dict(input: &[u8], block_size: usize, is_structured: bool) -> Optio
             }
         }
 
-        // FastCover 6-byte shingle vocabulary discovery (`<= 32 KiB`, L1D-resident).
-        let target_len = (n / 8).clamp(4096, 32_768);
-        let windows = count.clamp(4, 64);
+        // FastCover 6-byte shingle vocabulary discovery (`<= 32 KiB` default, `<= 112 KiB` high level).
+        let max_target = if level >= 8 {
+            114_688
+        } else if level >= 6 {
+            65_536
+        } else {
+            32_768
+        };
+        let div = if level >= 6 { 6 } else { 8 };
+        let target_len = (n / div).clamp(4096, max_target);
+        let max_wins = if level >= 6 { 96 } else { 64 };
+        let windows = count.clamp(4, max_wins);
         let win_len = (block_size / 4).clamp(1024, 2048);
         let usable_span = n.saturating_sub(win_len);
-        let step = if n <= 8 * 1024 * 1024 { 1usize } else { 2usize };
+        let step = if level >= 6 || n <= 8 * 1024 * 1024 {
+            1usize
+        } else {
+            2usize
+        };
         let min_score = if step == 1 { 18u32 } else { 10u32 };
         let min_hits = if step == 1 { 9usize } else { 5usize };
         let mut cross_shingles = 0usize;
@@ -413,7 +431,11 @@ fn train_raw_dict(input: &[u8], block_size: usize, is_structured: bool) -> Optio
     })
 }
 
-pub(super) fn build_prepared_dict(input: &[u8], block_size: usize) -> Option<PreparedDict> {
+pub(super) fn build_prepared_dict(
+    input: &[u8],
+    block_size: usize,
+    level: u8,
+) -> Option<PreparedDict> {
     let count = input.len().div_ceil(block_size);
     if count < 3 || input.len() < 24_576 {
         return None;
@@ -430,7 +452,7 @@ pub(super) fn build_prepared_dict(input: &[u8], block_size: usize) -> Option<Pre
         .map(|(_, l)| l);
 
     let strongly_tabular = structured0.is_some_and(|l| l * 4 < chunk0.len());
-    let raw = train_raw_dict(input, block_size, strongly_tabular)?;
+    let raw = train_raw_dict(input, block_size, strongly_tabular, level)?;
     let (ht4, ht6, ht6_shift) = build_dict_tables(&raw);
 
     let mut dict = PreparedDict {
@@ -445,7 +467,7 @@ pub(super) fn build_prepared_dict(input: &[u8], block_size: usize) -> Option<Pre
 
     let mut tmp_dlz = Vec::with_capacity(block_size);
     let (col_sum, dlz_sum, any_structured, pilot_bytes) = if let Some(len0) = structured0 {
-        let dlz0 = encode_dict_block_into(chunk0, Some(&dict), &mut tmp_dlz, len0)
+        let dlz0 = encode_dict_block_into(chunk0, Some(&dict), &mut tmp_dlz, len0, level)
             .map_or(len0, |(_, l)| l);
         let (mut cs, mut ds, mut pb) = (len0, dlz0, chunk0.len());
         let p1 = count / 3;
@@ -459,7 +481,7 @@ pub(super) fn build_prepared_dict(input: &[u8], block_size: usize) -> Option<Pre
                 .flatten()
                 .map_or(chunk1.len(), |(_, l)| l);
             tmp_dlz.clear();
-            let dlz1 = encode_dict_block_into(chunk1, Some(&dict), &mut tmp_dlz, len1)
+            let dlz1 = encode_dict_block_into(chunk1, Some(&dict), &mut tmp_dlz, len1, level)
                 .map_or(len1, |(_, l)| l);
             cs += len1;
             ds += dlz1;
@@ -474,7 +496,7 @@ pub(super) fn build_prepared_dict(input: &[u8], block_size: usize) -> Option<Pre
             .flatten()
             .map_or(sub.len(), |(_, l)| l);
         tmp_dlz.clear();
-        let dlz_len = encode_dict_block_into(sub, Some(&dict), &mut tmp_dlz, col_len)
+        let dlz_len = encode_dict_block_into(sub, Some(&dict), &mut tmp_dlz, col_len, level)
             .map_or(col_len, |(_, l)| l);
         (col_len, dlz_len, false, sub.len())
     };
@@ -486,7 +508,7 @@ pub(super) fn build_prepared_dict(input: &[u8], block_size: usize) -> Option<Pre
         return None;
     }
 
-    dict.wire_payload = encode_wire_dict(&dict.raw);
+    dict.wire_payload = encode_wire_dict(&dict.raw, level);
     let exact_amort = (dict.wire_payload.len() * pilot_bytes) / input.len().max(1) + 6;
     if dlz_sum + exact_amort >= col_sum && !any_fast_lz_win {
         return None;

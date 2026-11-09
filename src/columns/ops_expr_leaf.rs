@@ -49,46 +49,13 @@ fn numeric_col_zone_truth(
     if ones == 0 {
         return Some(TemplateTruth::AlwaysFalse);
     }
-    let mut c = Cursor::new(col_bytes);
-    let tag = c.byte().ok()?;
-    match tag {
-        MODEL_DECIMAL_PACKED => {
-            let min = c.u64().ok()?;
-            let width = c.byte().ok()?;
-            if width > 64 {
-                return None;
-            }
-            let span = if width == 0 {
-                0
-            } else if width == 64 {
-                u64::MAX
-            } else {
-                (1u64 << width) - 1
-            };
-            let hi = min.saturating_add(span);
-            if !num_cmp_overlaps_bounds(cmp, min, hi) {
-                Some(TemplateTruth::AlwaysFalse)
-            } else if num_cmp_always_true(cmp, min, hi) {
-                Some(TemplateTruth::AlwaysTrue)
-            } else {
-                Some(TemplateTruth::Maybe)
-            }
-        }
-        MODEL_DECIMAL_AFFINE => {
-            let first = c.u64().ok()?;
-            let step = c.i64().ok()?;
-            let last_i128 = first as i128 + (step as i128) * ((ones - 1) as i128);
-            let last = u64::try_from(last_i128).ok()?;
-            let (lo, hi) = (first.min(last), first.max(last));
-            if !num_cmp_overlaps_bounds(cmp, lo, hi) {
-                Some(TemplateTruth::AlwaysFalse)
-            } else if num_cmp_always_true(cmp, lo, hi) {
-                Some(TemplateTruth::AlwaysTrue)
-            } else {
-                Some(TemplateTruth::Maybe)
-            }
-        }
-        _ => None,
+    let (lo, hi) = decimal_header_bounds(col_bytes, ones)?;
+    if !num_cmp_overlaps_bounds(cmp, lo, hi) {
+        Some(TemplateTruth::AlwaysFalse)
+    } else if num_cmp_always_true(cmp, lo, hi) {
+        Some(TemplateTruth::AlwaysTrue)
+    } else {
+        Some(TemplateTruth::Maybe)
     }
 }
 

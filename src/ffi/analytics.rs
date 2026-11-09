@@ -137,6 +137,7 @@ pub unsafe extern "C" fn vxg_compress_file(
             simd: Simd::Auto,
             legacy_v2: false,
             record_aligned: false,
+            level: 3,
         };
         match compress_file(in_p, out_p, &opt, force != 0) {
             Ok((_, out_bytes)) => isize::try_from(out_bytes).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),

@@ -176,8 +176,13 @@ pub fn project_line(line: &[u8], cols: &[ColTarget<'_>], dst: &mut Vec<u8>) -> b
                         return false;
                     };
                     e
+                } else if first == delim {
+                    if !relaxed {
+                        return false;
+                    }
+                    pos
                 } else {
-                    if first == delim || first <= b' ' || first >= 0x7f {
+                    if first < b' ' || first == 0x7f || (!relaxed && (first == b' ' || first > 0x7f)) {
                         return false;
                     }
                     let mut e = pos + 1;
@@ -220,6 +225,20 @@ pub fn project_line(line: &[u8], cols: &[ColTarget<'_>], dst: &mut Vec<u8>) -> b
                     return false;
                 }
                 pos += 1;
+                if pos == body_len {
+                    if !relaxed {
+                        return false;
+                    }
+                    for (j, &col) in cols.iter().enumerate() {
+                        if let ColTarget::Delimited { delim: d, index } = col {
+                            if d == delim && index == count {
+                                spans[j] = Some((pos, pos));
+                            }
+                        }
+                    }
+                    count += 1;
+                    break;
+                }
             }
             if count < 2 {
                 return false;

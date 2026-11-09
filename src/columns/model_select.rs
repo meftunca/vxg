@@ -248,71 +248,19 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
                         // When `affine_ok && step128 != 0 && n >= 49`, `DecimalAffine` (17 bytes, rank 2)
                         // cannot be beaten by `DecimalPacked` (`>= 17` bytes, rank 3) or `DecimalDelta` (`>= 17` bytes, rank 12).
                         if !(affine_ok && step128 != 0 && n >= 49 && best_kind == ModelKind::DecimalAffine) {
-                            let packed_width = bit_width(max - min);
-                            if let Ok(packed_bits) = bit_bytes(n, packed_width) {
-                                let packed_size = 10 + packed_bits;
-                                let delta_width = bit_width(max_zigzag);
-                                let delta_size = if delta_ok {
-                                    bit_bytes(n - 1, delta_width).ok().map(|b| 10 + b)
-                                } else {
-                                    None
-                                };
-                                if delta_size.is_some_and(|ds| ds < packed_size) {
-                                    let ds = delta_size.unwrap();
-                                    let lim = if best_bytes.is_some() {
-                                        effective_limit(best_len, best_kind, ModelKind::DecimalDelta)
-                                    } else if ds < min_raw_size {
-                                        usize::MAX
-                                    } else {
-                                        get_raw_size!()
-                                    };
-                                    if ds < lim {
-                                        let mut out = take_model_buf(ds);
-                                        out.push(MODEL_DECIMAL_DELTA);
-                                        out.extend_from_slice(&first_num.to_le_bytes());
-                                        out.push(delta_width);
-                                        push_bit_values(
-                                            &mut out,
-                                            n - 1,
-                                            delta_width,
-                                            sc.parsed_u64.windows(2).map(|pair| {
-                                                let delta = (pair[1] as i128 - pair[0] as i128) as i64;
-                                                ((delta << 1) ^ (delta >> 63)) as u64
-                                            }),
-                                        );
-                                        best_len = ds;
-                                        best_kind = ModelKind::DecimalDelta;
-                                        if let Some(old) = best_bytes.replace(out) {
-                                            put_model_buf(old);
-                                        }
-                                    }
-                                } else {
-                                    let lim = if best_bytes.is_some() {
-                                        effective_limit(best_len, best_kind, ModelKind::DecimalPacked)
-                                    } else if packed_size < min_raw_size {
-                                        usize::MAX
-                                    } else {
-                                        get_raw_size!()
-                                    };
-                                    if packed_size < lim {
-                                        let mut out = take_model_buf(packed_size);
-                                        out.push(MODEL_DECIMAL_PACKED);
-                                        out.extend_from_slice(&min.to_le_bytes());
-                                        out.push(packed_width);
-                                        push_bit_values(
-                                            &mut out,
-                                            n,
-                                            packed_width,
-                                            sc.parsed_u64.iter().map(|&v| v - min),
-                                        );
-                                        best_len = packed_size;
-                                        best_kind = ModelKind::DecimalPacked;
-                                        if let Some(old) = best_bytes.replace(out) {
-                                            put_model_buf(old);
-                                        }
-                                    }
-                                }
-                            }
+                            select_packed_or_delta_column(
+                                &sc.parsed_u64,
+                                first_num,
+                                min,
+                                max,
+                                delta_ok,
+                                max_zigzag,
+                                min_raw_size,
+                                || get_raw_size!(),
+                                &mut best_bytes,
+                                &mut best_len,
+                                &mut best_kind,
+                            );
                         }
                     }
                 });
@@ -337,7 +285,7 @@ fn pack_model_mode_impl(values: &[&[u8]], allow_v3_ext: bool) -> (Vec<u8>, Model
         }
         if allow_v3_ext
             && !is_all_decimal
-            && first_slice.len() <= 21
+            && (1..=21).contains(&first_slice.len())
             && (first_slice[0] == b'-' || first_slice[0].is_ascii_digit())
             && first_slice.last().is_some_and(u8::is_ascii_digit)
         {

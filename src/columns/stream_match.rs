@@ -195,7 +195,7 @@ fn try_match_delimited_stream<'a>(
                         e
                     }
                 };
-                if end == pos || end > len { break 'fast; }
+                if (!delim_is_relaxed(delim) && end == pos) || end > len { break 'fast; }
                 end
             };
             unsafe { *col_ptrs.get_unchecked(slot).add(row_idx) = data.get_unchecked(pos..val_end); }
@@ -261,7 +261,7 @@ fn try_match_delimited_scalar<'a>(
                 }
                 end += 1;
             }
-            if end == pos {
+            if !relaxed && end == pos {
                 return None;
             }
             end
