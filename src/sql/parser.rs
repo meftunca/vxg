@@ -236,6 +236,20 @@ impl<'a> SqlParser<'a> {
             if let Some(d) = DecNum::parse(val.as_bytes()) {
                 return SqlLeafPred::Dec(if is_eq { DecCmp::Eq(d) } else { DecCmp::Ne(d) });
             }
+            if val.eq_ignore_ascii_case("true") {
+                return if is_eq {
+                    SqlLeafPred::StrEq(b"true".to_vec())
+                } else {
+                    SqlLeafPred::StrNe(b"true".to_vec())
+                };
+            }
+            if val.eq_ignore_ascii_case("false") {
+                return if is_eq {
+                    SqlLeafPred::StrEq(b"false".to_vec())
+                } else {
+                    SqlLeafPred::StrNe(b"false".to_vec())
+                };
+            }
         }
         if is_eq {
             SqlLeafPred::StrEq(val.as_bytes().to_vec())

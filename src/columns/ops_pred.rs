@@ -358,7 +358,15 @@ fn can_col_match_pred_fast(
             let Some(m) = col_bytes_alphabet_mask(col_bytes)? else {
                 return Ok(true);
             };
-            if matches!(pred.col, crate::ops::ColTarget::JsonKey(_)) && !mask_has_byte(&m, b'"') {
+            let is_bool_cmp = matches!(
+                sc,
+                crate::ops::StrCmp::Eq(b"true" | b"false")
+                    | crate::ops::StrCmp::Ne(b"true" | b"false")
+            );
+            if matches!(pred.col, crate::ops::ColTarget::JsonKey(_))
+                && !is_bool_cmp
+                && !mask_has_byte(&m, b'"')
+            {
                 return Ok(false);
             }
             let req = sc.required_slice();

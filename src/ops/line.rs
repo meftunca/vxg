@@ -307,7 +307,18 @@ pub fn eval_token_pred(col: ColTarget<'_>, raw_tok: &[u8], pred: ValuePred<'_>) 
         ValuePred::Num(cmp) => parse_canonical_u64(raw_tok).is_some_and(|v| cmp.test(v)),
         ValuePred::Dec(cmp) => DecNum::parse(raw_tok).is_some_and(|d| cmp.test(d)),
         ValuePred::Str(sc) => match col {
-            ColTarget::JsonKey(_) => unescape_json_str(raw_tok).is_some_and(|s| sc.test(&s)),
+            ColTarget::JsonKey(_) => match unescape_json_str(raw_tok) {
+                Some(s) => sc.test(&s),
+                None if matches!(raw_tok, b"true" | b"false")
+                    && matches!(
+                        sc,
+                        StrCmp::Eq(b"true" | b"false") | StrCmp::Ne(b"true" | b"false")
+                    ) =>
+                {
+                    sc.test(raw_tok)
+                }
+                None => false,
+            },
             ColTarget::Delimited { .. } => decode_delim_str(raw_tok).is_some_and(|s| sc.test(&s)),
         },
     }

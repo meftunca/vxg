@@ -15,8 +15,10 @@ use crate::{
 
 mod analytics;
 mod arrow;
+mod arrow_stream;
 pub use analytics::*;
 pub use arrow::*;
+pub use arrow_stream::*;
 
 pub const VXG_OK: isize = 0;
 pub const VXG_ERR_NULL_PTR: isize = -1;

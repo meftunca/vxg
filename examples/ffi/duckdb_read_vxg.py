@@ -3,14 +3,19 @@
 
 Exposes any `.vxg` file or in-memory frame via the standard Apache Arrow C Stream PyCapsule
 protocol (`__arrow_c_stream__`), allowing `DuckDB >= 1.1`, `Polars`, and `PyArrow` to query
-compressed `.vxg` archives directly with **zero `pyarrow` / `numpy` / `pandas` dependencies**.
+compressed `.vxg` archives directly with **zero `pyarrow` / `numpy` / `pandas` dependencies**,
+with compressed-domain `columns` projection and `where` predicate pushdown (`vxg_arrow_query_stream`).
 
 Usage in Python + DuckDB:
     import duckdb
     from duckdb_read_vxg import read_vxg
 
     con = duckdb.connect()
-    trips = read_vxg("nyc-taxi.ndjson.vxg", where="payment_type = 1 AND tip_cents >= 1000")
+    trips = read_vxg(
+        "nyc-taxi.ndjson.vxg",
+        columns=["payment_type", "total_cents"],
+        where="payment_type = 1 AND tip_cents >= 1000",
+    )
     print(con.execute("SELECT payment_type, COUNT(*), SUM(total_cents) FROM trips GROUP BY 1").fetchall())
 """
 
@@ -20,7 +25,6 @@ import ctypes
 import mmap
 import os
 import platform
-import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -69,16 +73,18 @@ ctypes.pythonapi.PyCapsule_New.restype = ctypes.py_object
 ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 ctypes.pythonapi.PyCapsule_GetPointer.restype = ctypes.c_void_p
 
-_ACTIVE_STREAMS: dict[int, _ArrowArrayStream] = {}
+_ACTIVE_STREAMS: dict[int, tuple[_ArrowArrayStream, object]] = {}
 
 
 @_PYCAPSULE_DESTRUCTOR
 def _release_stream_capsule(capsule_ptr: int) -> None:
     ptr = ctypes.pythonapi.PyCapsule_GetPointer(capsule_ptr, _CAPSULE_NAME_BUF)
-    st = _ACTIVE_STREAMS.pop(ptr, None)
-    if st is not None and st.release:
-        rel_fn = _STREAM_RELEASE_FN(st.release)
-        rel_fn(ctypes.addressof(st))
+    entry = _ACTIVE_STREAMS.pop(ptr, None)
+    if entry is not None:
+        st, _owner = entry
+        if st.release:
+            rel_fn = _STREAM_RELEASE_FN(st.release)
+            rel_fn(ctypes.addressof(st))
 
 
 def _bind_vxg(lib_path: str | None = None) -> ctypes.CDLL:
@@ -112,6 +118,15 @@ def _bind_vxg(lib_path: str | None = None) -> ctypes.CDLL:
         ctypes.POINTER(_ArrowArrayStream),
     ]
     lib.vxg_arrow_export_stream.restype = ctypes.c_ssize_t
+    lib.vxg_arrow_query_stream.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(_ArrowArrayStream),
+    ]
+    lib.vxg_arrow_query_stream.restype = ctypes.c_ssize_t
     return lib
 
 
@@ -123,11 +138,14 @@ class VxgArrowDataset:
         source: str | os.PathLike | bytes,
         *,
         sql: str | None = None,
-        columns: Iterable[str] | None = None,
+        columns: Iterable[str] | str | None = None,
         where: str | None = None,
         threads: int = 0,
         lib_path: str | None = None,
     ) -> None:
+        if sql is not None and (columns is not None or where is not None):
+            raise ValueError("Specify either `sql=` OR (`columns=`, `where=`), not both")
+
         self._lib = _bind_vxg(lib_path)
         self._threads = threads
         self._file = None
@@ -149,16 +167,14 @@ class VxgArrowDataset:
             self._ptr = ctypes.addressof(buf)
             self._len = len(mm)
 
-        if sql is not None:
-            self._sql_bytes = sql.encode("utf-8")
-        elif columns is not None or where is not None:
-            proj = ", ".join(columns) if columns is not None else "*"
-            q = f"SELECT {proj} FROM frame"
-            if where:
-                q += f" WHERE {where}"
-            self._sql_bytes = q.encode("utf-8")
+        self._sql_bytes = sql.encode("utf-8") if sql is not None else None
+        if columns is None:
+            self._cols_bytes = None
+        elif isinstance(columns, str):
+            self._cols_bytes = columns.encode("utf-8")
         else:
-            self._sql_bytes = None
+            self._cols_bytes = ",".join(columns).encode("utf-8")
+        self._where_bytes = where.encode("utf-8") if where is not None else None
 
     def close(self) -> None:
         self._buf = None
@@ -178,17 +194,29 @@ class VxgArrowDataset:
     def __arrow_c_stream__(self, requested_schema=None):
         _ = requested_schema
         st = _ArrowArrayStream()
-        rc = self._lib.vxg_arrow_export_stream(
-            self._ptr,
-            self._len,
-            self._sql_bytes,
-            self._threads,
-            ctypes.byref(st),
-        )
-        if rc != 0:
-            raise RuntimeError(f"vxg_arrow_export_stream failed with status {rc}")
+        if self._sql_bytes is not None:
+            rc = self._lib.vxg_arrow_export_stream(
+                self._ptr,
+                self._len,
+                self._sql_bytes,
+                self._threads,
+                ctypes.byref(st),
+            )
+            if rc != 0:
+                raise RuntimeError(f"vxg_arrow_export_stream failed with status {rc}")
+        else:
+            rc = self._lib.vxg_arrow_query_stream(
+                self._ptr,
+                self._len,
+                self._cols_bytes,
+                self._where_bytes,
+                self._threads,
+                ctypes.byref(st),
+            )
+            if rc != 0:
+                raise RuntimeError(f"vxg_arrow_query_stream failed with status {rc}")
         addr = ctypes.addressof(st)
-        _ACTIVE_STREAMS[addr] = st
+        _ACTIVE_STREAMS[addr] = (st, self)
         return ctypes.pythonapi.PyCapsule_New(
             addr, _CAPSULE_NAME_BUF, _release_stream_capsule
         )
@@ -198,7 +226,7 @@ def read_vxg(
     source: str | os.PathLike | bytes,
     *,
     sql: str | None = None,
-    columns: Iterable[str] | None = None,
+    columns: Iterable[str] | str | None = None,
     where: str | None = None,
     threads: int = 0,
     lib_path: str | None = None,
@@ -219,9 +247,10 @@ def _self_test() -> None:
 
     lib = _bind_vxg()
 
-    # 1. Build an NDJSON frame with Int64, Float64, Boolean, Utf8, and NULL values
+    # 1. Build an NDJSON frame (>70,000 rows to exercise multi-batch >65,536-row streaming!)
+    n_rows = 72_000
     ndjson_lines = []
-    for i in range(600):
+    for i in range(n_rows):
         pay = 1 + (i % 3)
         tip = "null" if (i % 7 == 0) else str((i * 25) % 900)
         total = 1000 + (i * 40) % 3500
@@ -234,7 +263,7 @@ def _self_test() -> None:
     ndjson_raw = "".join(ndjson_lines).encode("utf-8")
 
     out_len = ctypes.c_size_t(0)
-    p1 = lib.vxg_compress_alloc(ndjson_raw, len(ndjson_raw), 2, 16384, 1, ctypes.byref(out_len))
+    p1 = lib.vxg_compress_alloc(ndjson_raw, len(ndjson_raw), 4, 65536, 1, ctypes.byref(out_len))
     assert p1
     ndjson_vxg = ctypes.string_at(p1, out_len.value)
     lib.vxg_free(p1, out_len.value)
@@ -254,15 +283,15 @@ def _self_test() -> None:
     lib.vxg_free(p2, out_len.value)
 
     con = duckdb.connect()
-    trips = read_vxg(ndjson_vxg, threads=2)
+    trips = read_vxg(ndjson_vxg, threads=4)
     zones = read_vxg(csv_vxg, threads=1)
 
-    # Verify NULL preservation + Boolean + Int64 + Float64 + cross-archive SQL JOIN inside DuckDB!
+    # 3. Verify multi-batch NULL + Boolean + Int64 + Float64 + cross-archive SQL JOIN inside DuckDB
     res_nulls = con.execute(
         "SELECT COUNT(*), COUNT(tip_cents), SUM(CASE WHEN verified THEN 1 ELSE 0 END) FROM trips"
     ).fetchone()
-    expected_nulls = sum(1 for i in range(600) if i % 7 == 0)
-    assert res_nulls == (600, 600 - expected_nulls, 300), f"unexpected null/bool counts: {res_nulls}"
+    expected_nulls = sum(1 for i in range(n_rows) if i % 7 == 0)
+    assert res_nulls == (n_rows, n_rows - expected_nulls, n_rows // 2), f"unexpected: {res_nulls}"
 
     join_rows = con.execute(
         """
@@ -274,19 +303,52 @@ def _self_test() -> None:
         ORDER BY gross DESC, z.borough ASC
         """
     ).fetchall()
-    assert len(join_rows) == 5 and sum(r[1] for r in join_rows) == 200
+    assert len(join_rows) == 5 and sum(r[1] for r in join_rows) == n_rows // 3
 
-    # Verify compressed-domain SQL pushdown -> Arrow -> DuckDB matches native `vxg_sql_alloc` 100%!
+    # 4. Verify compressed-domain `columns` + `where` pushdown (both SQL & VXG filter syntax!)
+    filtered_sql = read_vxg(
+        ndjson_vxg,
+        columns=["payment_type", "total_cents", "surge"],
+        where="payment_type IN (1, 2) AND total_cents >= 2500",
+        threads=4,
+    )
+    filtered_vxg = read_vxg(
+        ndjson_vxg,
+        columns="payment_type,total_cents,surge",
+        where="(payment_type==1 || payment_type==2) && total_cents>=2500",
+        threads=4,
+    )
+    r_sql = con.execute(
+        "SELECT payment_type, COUNT(*), SUM(total_cents)::BIGINT, ROUND(AVG(surge), 6) FROM filtered_sql GROUP BY 1 ORDER BY 1"
+    ).fetchall()
+    r_vxg = con.execute(
+        "SELECT payment_type, COUNT(*), SUM(total_cents)::BIGINT, ROUND(AVG(surge), 6) FROM filtered_vxg GROUP BY 1 ORDER BY 1"
+    ).fetchall()
+    assert r_sql == r_vxg and len(r_sql) == 2, f"{r_sql} != {r_vxg}"
+
+    # 5. Verify 0-match scan still exposes typed `Int64`/`Float64` schema so `SUM(...)` succeeds!
+    empty_scan = read_vxg(
+        ndjson_vxg,
+        columns=["payment_type", "total_cents", "surge"],
+        where="id < 0",
+        threads=2,
+    )
+    empty_agg = con.execute(
+        "SELECT COUNT(*), SUM(total_cents), AVG(surge) FROM empty_scan"
+    ).fetchone()
+    assert empty_agg == (0, None, None), f"unexpected empty_agg: {empty_agg}"
+
+    # 6. Verify compressed-domain SQL GROUP BY pushdown -> Arrow -> DuckDB matches native `vxg_sql_alloc`
     pushed = read_vxg(
         ndjson_vxg,
         sql="SELECT payment_type, COUNT(*), SUM(total_cents) FROM frame WHERE total_cents >= 2000 GROUP BY payment_type ORDER BY payment_type ASC",
-        threads=2,
+        threads=4,
     )
     duck_pushed = con.execute("SELECT * FROM pushed").fetchall()
 
     sql_q = b"SELECT payment_type, COUNT(*), SUM(total_cents) FROM frame WHERE total_cents >= 2000 GROUP BY payment_type ORDER BY payment_type ASC"
     s_len = ctypes.c_size_t(0)
-    sp = lib.vxg_sql_alloc(ndjson_vxg, len(ndjson_vxg), sql_q, 0, 1, 2, ctypes.byref(s_len))
+    sp = lib.vxg_sql_alloc(ndjson_vxg, len(ndjson_vxg), sql_q, 0, 1, 4, ctypes.byref(s_len))
     assert sp
     native_tsv = ctypes.string_at(sp, s_len.value).decode("utf-8")
     lib.vxg_free(sp, s_len.value)
@@ -295,7 +357,7 @@ def _self_test() -> None:
 
     print(
         f"OK: DuckDB {duckdb.__version__} zero-copy Arrow C Stream scan verified "
-        f"(600 NDJSON rows x 7 typed cols + 5 CSV rows JOIN + compressed SQL pushdown parity)."
+        f"({n_rows} NDJSON rows multi-batch + columns/where pushdown + 0-match schema + CSV JOIN)."
     )
 
 

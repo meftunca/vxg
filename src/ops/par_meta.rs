@@ -195,12 +195,22 @@ pub(crate) fn inspect_par_meta<'a>(
     in_blocks: &[ParInBlock<'a>],
     options: &DecodeOptions,
 ) -> Result<(Vec<ParMeta<'a>>, Vec<usize>, bool)> {
+    let (meta, non_empty, any_unterm, _) = inspect_par_meta_from(in_blocks, false, 0, options)?;
+    Ok((meta, non_empty, any_unterm))
+}
+
+pub(crate) fn inspect_par_meta_from<'a>(
+    in_blocks: &[ParInBlock<'a>],
+    initial_incoming: bool,
+    base_global: usize,
+    options: &DecodeOptions,
+) -> Result<(Vec<ParMeta<'a>>, Vec<usize>, bool, usize)> {
     let nb = in_blocks.len();
     let mut meta: Vec<ParMeta<'a>> = Vec::with_capacity(nb);
     let mut non_empty = Vec::with_capacity(nb);
-    let mut incoming = false;
-    let mut any_unterm = false;
-    let mut cur_global = 0usize;
+    let mut incoming = initial_incoming;
+    let mut any_unterm = initial_incoming;
+    let mut cur_global = base_global;
 
     if options.threads > 1 && nb >= 8 {
         let workers = options.threads.min(nb / 2).max(2);
@@ -318,7 +328,7 @@ pub(crate) fn inspect_par_meta<'a>(
                 }
             }
         }
-        return Ok((meta, non_empty, any_unterm));
+        return Ok((meta, non_empty, any_unterm, cur_global));
     }
 
     for (b, ib) in in_blocks.iter().enumerate() {
@@ -354,7 +364,129 @@ pub(crate) fn inspect_par_meta<'a>(
         }
         meta.push(finish_decoded_meta(raw_vec, rc, ends_nl, had_in, cg));
     }
-    Ok((meta, non_empty, any_unterm))
+    Ok((meta, non_empty, any_unterm, cur_global))
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn build_window_meta_and_boundary<'a>(
+    in_blocks: &[ParInBlock<'a>],
+    carry_in: Option<Vec<u8>>,
+    base_global: usize,
+    is_last_window: bool,
+    options: &DecodeOptions,
+) -> Result<(
+    Vec<ParMeta<'a>>,
+    Vec<usize>,
+    Option<(usize, Vec<u8>)>,
+    BoundarySet,
+    Option<Vec<u8>>,
+    usize,
+)> {
+    let (meta, non_empty, any_unterm, next_global) =
+        inspect_par_meta_from(in_blocks, carry_in.is_some(), base_global, options)?;
+    if !any_unterm && carry_in.is_none() {
+        return Ok((
+            meta,
+            non_empty,
+            None,
+            BoundarySet { arena: Vec::new(), entries: Vec::new() },
+            None,
+            next_global,
+        ));
+    }
+
+    let mut carry_in_row = None;
+    let mut carry_out = None;
+    let mut k_idx = 0usize;
+
+    if let Some(mut prefix) = carry_in {
+        let g_idx = base_global.saturating_sub(1);
+        if non_empty.is_empty() {
+            if is_last_window {
+                carry_in_row = Some((g_idx, prefix));
+            } else {
+                carry_out = Some(prefix);
+            }
+            return Ok((
+                meta,
+                non_empty,
+                carry_in_row,
+                BoundarySet { arena: Vec::new(), entries: Vec::new() },
+                carry_out,
+                next_global,
+            ));
+        }
+        let mut m = 0usize;
+        while m < non_empty.len() {
+            let bm = non_empty[m];
+            let Some(ref fm) = meta[bm].first_frag else {
+                break;
+            };
+            prefix.extend_from_slice(fm);
+            if meta[bm].row_count == 1 && meta[bm].last_unterm_frag.is_some() {
+                m += 1;
+            } else {
+                break;
+            }
+        }
+        k_idx = m;
+        if !prefix.ends_with(b"\n") && !is_last_window {
+            carry_out = Some(prefix);
+            return Ok((
+                meta,
+                non_empty,
+                None,
+                BoundarySet { arena: Vec::new(), entries: Vec::new() },
+                carry_out,
+                next_global,
+            ));
+        }
+        carry_in_row = Some((g_idx, prefix));
+    }
+
+    let mut arena = Vec::with_capacity(non_empty.len() * 128);
+    let mut entries = Vec::with_capacity(non_empty.len());
+    while k_idx < non_empty.len() {
+        let b0 = non_empty[k_idx];
+        let Some(ref f0) = meta[b0].last_unterm_frag else {
+            k_idx += 1;
+            continue;
+        };
+        let base_b0 = meta[b0].cur_global - usize::from(meta[b0].had_in_carry);
+        let start_row = meta[b0].row_count - 1;
+        let start_glob = base_b0 + start_row;
+        let start = arena.len();
+        arena.extend_from_slice(f0);
+        let mut m = k_idx + 1;
+        while m < non_empty.len() {
+            let bm = non_empty[m];
+            let Some(ref fm) = meta[bm].first_frag else {
+                break;
+            };
+            arena.extend_from_slice(fm);
+            if meta[bm].row_count == 1 && meta[bm].last_unterm_frag.is_some() {
+                m += 1;
+            } else {
+                break;
+            }
+        }
+        let end = arena.len();
+        if !arena[start..end].ends_with(b"\n") && !is_last_window {
+            carry_out = Some(arena[start..end].to_vec());
+            arena.truncate(start);
+        } else {
+            entries.push(BoundaryEntry {
+                block_index: b0,
+                row_index: start_row,
+                global_row_index: start_glob,
+                start,
+                end,
+            });
+        }
+        k_idx = m.max(k_idx + 1);
+    }
+
+    Ok((meta, non_empty, carry_in_row, BoundarySet { arena, entries }, carry_out, next_global))
 }
 
 pub(crate) fn build_boundary_set(

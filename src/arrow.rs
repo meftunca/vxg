@@ -298,7 +298,15 @@ fn scan_top_level_json_keys(line: &[u8], out_keys: &mut Vec<String>) {
     }
 }
 
-fn discover_ndjson_columns(frame_bytes: &[u8], dec_options: &DecodeOptions) -> Result<Vec<String>> {
+pub use crate::arrow_scan::{parse_arrow_where, ArrowWhere, DEFAULT_ARROW_BATCH_ROWS};
+pub use crate::arrow_stream_scan::{
+    export_arrow_batch_where, export_arrow_batches_where, export_arrow_ipc_where,
+};
+
+pub(crate) fn discover_ndjson_columns(
+    frame_bytes: &[u8],
+    dec_options: &DecodeOptions,
+) -> Result<Vec<String>> {
     let probe_opts = DecodeOptions {
         threads: 1,
         ..*dec_options
@@ -338,6 +346,10 @@ pub fn export_arrow_batch(
         limit: None,
     };
     let q = query.unwrap_or(&default_star);
+    if let Some(res) = crate::arrow_stream_scan::try_scan_sql_query_arrow(frame_bytes, q, dec_options)
+    {
+        return res;
+    }
 
     if matches!(q.projection, SelectProjection::Star)
         && q.group_by.is_empty()

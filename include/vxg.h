@@ -449,6 +449,39 @@ vxg_ssize_t vxg_arrow_export_stream(
 );
 
 /**
+ * Exports a compressed VXG frame with compressed-domain column projection (`cols_cstr`, comma-
+ * separated column names / `csv:N` targets, or `NULL`/`""`/`"*"` for automatic discovery) and
+ * `WHERE` pushdown (`where_cstr`, accepting SQL `WHERE` or VXG filter syntax, or `NULL`/`""`)
+ * into an Apache Arrow C Data Interface `(ArrowSchema, ArrowArray)` pair.
+ * Returns `VXG_OK` (`0`) on success, or `< 0` error code.
+ */
+vxg_ssize_t vxg_arrow_query(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *cols_cstr,
+    const char *where_cstr,
+    size_t threads,
+    struct ArrowSchema *out_schema,
+    struct ArrowArray *out_array
+);
+
+/**
+ * Exports a compressed VXG frame with compressed-domain column projection (`cols_cstr`) and
+ * `WHERE` pushdown (`where_cstr`) into a windowed multi-batch Apache Arrow C Stream Interface
+ * `ArrowArrayStream` (~64K rows per batch, preserving typed schema even on 0-match scans).
+ * `frame_ptr[0..frame_len]` must remain valid until `out_stream->release(out_stream)` is called.
+ * Returns `VXG_OK` (`0`) on success, or `< 0` error code.
+ */
+vxg_ssize_t vxg_arrow_query_stream(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *cols_cstr,
+    const char *where_cstr,
+    size_t threads,
+    struct ArrowArrayStream *out_stream
+);
+
+/**
  * Exports a compressed VXG frame (with optional SQL `query_cstr`) into a newly allocated
  * Apache Arrow IPC Stream (`application/vnd.apache.arrow.stream`, MetadataVersion V5).
  * Free the returned buffer with `vxg_free(ptr, *out_len)`. Returns `NULL` on error.

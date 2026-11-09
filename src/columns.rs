@@ -468,5 +468,7 @@ include!("columns/ops_project.rs");
 include!("columns/ops_topk_fast.rs");
 include!("columns/ops_topk.rs");
 include!("columns/ops_topk_exec.rs");
+include!("columns/ops_arrow_col.rs");
+include!("columns/ops_arrow.rs");
 include!("columns/tests_models.rs");
 include!("columns/tests_packets.rs");

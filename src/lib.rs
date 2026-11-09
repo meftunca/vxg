@@ -11,7 +11,11 @@
 #[cfg(feature = "bench")]
 pub mod analysis;
 pub mod arrow;
+pub(crate) mod arrow_builder;
 mod arrow_ipc;
+pub(crate) mod arrow_merge;
+pub(crate) mod arrow_scan;
+pub(crate) mod arrow_stream_scan;
 #[cfg(feature = "bench")]
 pub mod baselines;
 mod block;
@@ -37,7 +41,11 @@ pub mod simd;
 pub mod sql;
 pub mod stream;
 pub mod stream_ops;
-pub use arrow::{export_arrow_batch, export_arrow_ipc, ArrowBatch, ArrowCol, ArrowData, ArrowType};
+pub use arrow::{
+    export_arrow_batch, export_arrow_batch_where, export_arrow_batches_where, export_arrow_ipc,
+    export_arrow_ipc_where, parse_arrow_where, ArrowBatch, ArrowCol, ArrowData, ArrowType,
+    ArrowWhere, DEFAULT_ARROW_BATCH_ROWS,
+};
 pub use block::{
     WorkStats, COLUMN as BLOCK_COLUMN, DICT_LZ as BLOCK_DICT_LZ, LZ as BLOCK_LZ, RAW as BLOCK_RAW,
 };
