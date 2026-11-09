@@ -14,7 +14,9 @@ use crate::{
 };
 
 mod analytics;
+mod arrow;
 pub use analytics::*;
+pub use arrow::*;
 
 pub const VXG_OK: isize = 0;
 pub const VXG_ERR_NULL_PTR: isize = -1;

@@ -367,6 +367,100 @@ uint8_t *vxg_sql_alloc(
     size_t *out_len
 );
 
+/* ============================================================================
+ * Apache Arrow C Data Interface & C Stream Interface (Zero-Copy Interop)
+ * ============================================================================ */
+
+#ifndef ARROW_C_DATA_INTERFACE
+#define ARROW_C_DATA_INTERFACE
+
+#define ARROW_FLAG_DICTIONARY_ORDERED 1
+#define ARROW_FLAG_NULLABLE           2
+#define ARROW_FLAG_MAP_KEYS_SORTED    4
+
+struct ArrowSchema {
+    const char *format;
+    const char *name;
+    const char *metadata;
+    int64_t flags;
+    int64_t n_children;
+    struct ArrowSchema **children;
+    struct ArrowSchema *dictionary;
+    void (*release)(struct ArrowSchema *);
+    void *private_data;
+};
+
+struct ArrowArray {
+    int64_t length;
+    int64_t null_count;
+    int64_t offset;
+    int64_t n_buffers;
+    int64_t n_children;
+    const void **buffers;
+    struct ArrowArray **children;
+    struct ArrowArray *dictionary;
+    void (*release)(struct ArrowArray *);
+    void *private_data;
+};
+
+#endif /* ARROW_C_DATA_INTERFACE */
+
+#ifndef ARROW_C_STREAM_INTERFACE
+#define ARROW_C_STREAM_INTERFACE
+
+struct ArrowArrayStream {
+    int (*get_schema)(struct ArrowArrayStream *, struct ArrowSchema *out);
+    int (*get_next)(struct ArrowArrayStream *, struct ArrowArray *out);
+    const char *(*get_last_error)(struct ArrowArrayStream *);
+    void (*release)(struct ArrowArrayStream *);
+    void *private_data;
+};
+
+#endif /* ARROW_C_STREAM_INTERFACE */
+
+/**
+ * Exports a compressed VXG frame (with optional compressed-domain SQL `query_cstr`, or
+ * `NULL`/`""` for automatic CSV header / NDJSON schema discovery) into an Apache Arrow
+ * C Data Interface `(ArrowSchema, ArrowArray)` pair with 64-byte-aligned buffers.
+ * Caller/consumer releases ownership via `out_schema->release(out_schema)` and
+ * `out_array->release(out_array)`. Returns `VXG_OK` (`0`) on success, or `< 0` error code.
+ */
+vxg_ssize_t vxg_arrow_export(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *query_cstr,
+    size_t threads,
+    struct ArrowSchema *out_schema,
+    struct ArrowArray *out_array
+);
+
+/**
+ * Exports a compressed VXG frame (with optional compressed-domain SQL `query_cstr`) into
+ * an Apache Arrow C Stream Interface `ArrowArrayStream` (directly consumable via DuckDB,
+ * Polars, PyArrow, DataFusion, and Arrow PyCapsule `__arrow_c_stream__`).
+ * Returns `VXG_OK` (`0`) on success, or `< 0` error code.
+ */
+vxg_ssize_t vxg_arrow_export_stream(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *query_cstr,
+    size_t threads,
+    struct ArrowArrayStream *out_stream
+);
+
+/**
+ * Exports a compressed VXG frame (with optional SQL `query_cstr`) into a newly allocated
+ * Apache Arrow IPC Stream (`application/vnd.apache.arrow.stream`, MetadataVersion V5).
+ * Free the returned buffer with `vxg_free(ptr, *out_len)`. Returns `NULL` on error.
+ */
+uint8_t *vxg_arrow_ipc_alloc(
+    const uint8_t *frame_ptr,
+    size_t frame_len,
+    const char *query_cstr,
+    size_t threads,
+    size_t *out_len
+);
+
 #ifdef __cplusplus
 }
 #endif

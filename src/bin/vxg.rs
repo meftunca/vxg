@@ -40,7 +40,8 @@ Usage:
   vxg agg          FRAME        [--group-by GCOL] [--col ACOL] [--where EXPR]
                                 [--order-by key|rows|count|sum|avg|min|max [--desc|--asc]]
                                 [--limit N] [--json] [--stream] [--no-mmap] [-t N|auto]
-  vxg sql          FRAME "SELECT ..." [--json|--csv] [--no-header] [--stream] [--no-mmap] [-t N|auto]
+  vxg sql          FRAME "SELECT ..." [--json|--csv|--arrow] [--no-header] [--stream] [--no-mmap] [-t N|auto]
+  vxg arrow        FRAME OUTPUT [--sql "SELECT ..."] [-t N|auto] [--no-mmap] [-f] [-q]
   vxg project      INPUT OUTPUT --cols COL1,COL2,... [--where EXPR] [--stream] [--no-mmap] [-t N|auto] [-f] [-q]
   vxg filter-frame INPUT OUTPUT --where EXPR [--block-size BYTES] [--no-checksum] [--stream] [--no-mmap] [-f] [-q]
   vxg update       INPUT OUTPUT --where SPEC --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [--stream] [--no-mmap] [-f] [-q]
@@ -350,6 +351,7 @@ fn run_args(args: &[String]) -> R<()> {
         "q" | "query" => return run_query_cmd(args),
         "agg" | "group-by" => return run_agg_cmd(args),
         "sql" => return run_sql_cmd(args),
+        "arrow" => return run_arrow_cmd(args),
         "recover" => return run_recover_cmd(args),
         "filter-frame" | "project" | "update" | "map" => return run_ops_cmd(args),
         "c" | "compress" => {}
@@ -547,5 +549,6 @@ include!("cli_support/ops.rs");
 include!("cli_support/query.rs");
 include!("cli_support/agg.rs");
 include!("cli_support/sql.rs");
+include!("cli_support/arrow_cli.rs");
 include!("cli_support/recover.rs");
 include!("cli_support/tests.rs");

@@ -8,6 +8,7 @@ fn execute_sql_to_vec(args: &[String]) -> R<Vec<u8>> {
     let input = &args[1];
     let mut query_str: Option<&str> = None;
     let mut format = vxg::SqlFormat::Tsv;
+    let mut arrow_ipc = false;
     let mut no_header = false;
     let mut stream_mode = false;
     let mut use_mmap = true;
@@ -22,6 +23,7 @@ fn execute_sql_to_vec(args: &[String]) -> R<Vec<u8>> {
             "--json" => format = vxg::SqlFormat::Json,
             "--csv" => format = vxg::SqlFormat::Csv,
             "--tsv" => format = vxg::SqlFormat::Tsv,
+            "--arrow" => arrow_ipc = true,
             "--no-header" | "-H" => no_header = true,
             "--stream" => stream_mode = true,
             "--no-mmap" => use_mmap = false,
@@ -53,6 +55,9 @@ fn execute_sql_to_vec(args: &[String]) -> R<Vec<u8>> {
     let bytes = read_input_bytes(input, use_mmap)?;
     if let vxg::InputBytes::Mapped(ref m) = bytes {
         m.advise_sequential();
+    }
+    if arrow_ipc {
+        return Ok(vxg::export_arrow_ipc(&bytes, Some(&parsed), &dec)?);
     }
     Ok(vxg::execute_sql(&bytes, &parsed, format, no_header, &dec)?)
 }

@@ -10,6 +10,8 @@
 //! not proved. The format is experimental and is not LZ4/Zstandard-compatible.
 #[cfg(feature = "bench")]
 pub mod analysis;
+pub mod arrow;
+mod arrow_ipc;
 #[cfg(feature = "bench")]
 pub mod baselines;
 mod block;
@@ -35,6 +37,7 @@ pub mod simd;
 pub mod sql;
 pub mod stream;
 pub mod stream_ops;
+pub use arrow::{export_arrow_batch, export_arrow_ipc, ArrowBatch, ArrowCol, ArrowData, ArrowType};
 pub use block::{
     WorkStats, COLUMN as BLOCK_COLUMN, DICT_LZ as BLOCK_DICT_LZ, LZ as BLOCK_LZ, RAW as BLOCK_RAW,
 };
