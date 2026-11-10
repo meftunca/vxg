@@ -228,6 +228,7 @@ fn run() -> R<()> {
             checksum: false,
             simd: c.simd,
             legacy_v2: c.legacy_v2,
+            level: c.level,
             ..Options::default()
         };
         let dec_opt = DecodeOptions {

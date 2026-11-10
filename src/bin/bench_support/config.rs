@@ -23,6 +23,7 @@ pub(super) struct Config {
     pub(super) decode_only: bool,
     pub(super) validated_decode: bool,
     pub(super) legacy_v2: bool,
+    pub(super) level: u8,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -156,10 +157,12 @@ impl Config {
             decode_only: false,
             validated_decode: false,
             legacy_v2: false,
+            level: 3,
         };
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
+                "--level" | "-l" => c.level = next(args, &mut i)?.parse::<u8>()?.clamp(1, 9),
                 "--size-mib" => {
                     c.size = next(args, &mut i)?
                         .parse::<usize>()?

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import fcntl
 import glob
 import json
 import mmap
@@ -31,6 +32,40 @@ import duckdb
 
 
 NYC_PARQUET_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-{mm:02d}.parquet"
+F_NOCACHE = 48  # Darwin <sys/fcntl.h> flag to bypass/invalidate XNU Unified Buffer Cache
+
+
+def evict_file_nocache(path: str) -> None:
+    """Evicts `path` from the OS page cache (`sudo -n purge` + Darwin `F_NOCACHE` vnode replacement)."""
+    try:
+        subprocess.run(
+            ["sudo", "-n", "purge"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except Exception:
+        pass
+    tmp_path = path + ".cold_evict"
+    sfd = os.open(path, os.O_RDONLY)
+    try:
+        if sys.platform == "darwin":
+            fcntl.fcntl(sfd, F_NOCACHE, 1)
+        dfd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            if sys.platform == "darwin":
+                fcntl.fcntl(dfd, F_NOCACHE, 1)
+            while True:
+                chunk = os.read(sfd, 4 << 20)
+                if not chunk:
+                    break
+                os.write(dfd, chunk)
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    finally:
+        os.close(sfd)
+    os.replace(tmp_path, path)
 
 
 class VxgAggStats(ctypes.Structure):
@@ -412,6 +447,113 @@ def benchmark_scale_suite(
         },
     ]
 
+    # Measure 8T Cold NVMe Cache (1st run after OS page-cache eviction) before opening warm mmaps
+    cold_8t_by_qi: dict[int, dict[str, float]] = {}
+    con_cold = duckdb.connect()
+    con_cold.execute("SET threads TO 8;")
+    src_pq_snap_c = f"read_parquet('{pq_snap_path}')"
+    src_pq_snap_rg16k_c = f"read_parquet('{pq_snap_rg16k_path}')"
+    src_pq_zstd_c = f"read_parquet('{pq_zstd_path}')"
+    for qi, q in enumerate(queries):
+        qtype = q["type"]
+        label = q["label"]
+
+        def make_cold_vxg_runner(f_ptr: int, f_len: int):
+            if qtype == "count_where":
+                wb = q["vxg_where"].encode()
+                return lambda: int(lib.vxg_count_where_str(f_ptr, f_len, wb, 8))
+            if qtype == "agg":
+                cb = q["vxg_col"].encode()
+                wb = q["vxg_where"].encode() if q.get("vxg_where") else None
+
+                def _agg():
+                    st = VxgAggStats()
+                    rc = lib.vxg_aggregate_col(f_ptr, f_len, cb, wb, 8, ctypes.byref(st))
+                    assert rc == 0
+                    return int(st.num_count)
+
+                return _agg
+            if qtype == "group_by":
+                gb = q["vxg_group"].encode()
+                ab = q["vxg_agg"].encode()
+
+                def _grp():
+                    out_len = ctypes.c_size_t(0)
+                    p = lib.vxg_group_by_alloc(f_ptr, f_len, gb, ab, None, 8, ctypes.byref(out_len))
+                    assert p
+                    lib.vxg_free(p, out_len.value)
+                    return int(out_len.value)
+
+                return _grp
+            if qtype == "top_k":
+                cb = q["vxg_cols"].encode()
+                ob = q["vxg_order"].encode()
+                lim = q["limit"]
+
+                def _topk():
+                    out_len = ctypes.c_size_t(0)
+                    p = lib.vxg_select_alloc(
+                        f_ptr, f_len, cb, None, ob, 1, lim, 8, ctypes.byref(out_len)
+                    )
+                    assert p
+                    lib.vxg_free(p, out_len.value)
+                    return int(out_len.value)
+
+                return _topk
+            raise ValueError(qtype)
+
+        evict_file_nocache(vxg_path)
+        t0 = time.perf_counter()
+        with open(vxg_path, "rb") as fc:
+            mmc = mmap.mmap(fc.fileno(), 0, access=mmap.ACCESS_COPY)
+            _bc, ptr_c, len_c = mmap_ptr_and_len(mmc)
+            _ = make_cold_vxg_runner(ptr_c, len_c)()
+            del _bc
+            mmc.close()
+        vxg_cold_ms = (time.perf_counter() - t0) * 1000.0
+
+        evict_file_nocache(vxg_aligned_path)
+        t0 = time.perf_counter()
+        with open(vxg_aligned_path, "rb") as fc:
+            mmc = mmap.mmap(fc.fileno(), 0, access=mmap.ACCESS_COPY)
+            _bc, ptr_c, len_c = mmap_ptr_and_len(mmc)
+            _ = make_cold_vxg_runner(ptr_c, len_c)()
+            del _bc
+            mmc.close()
+        vxg_aln_cold_ms = (time.perf_counter() - t0) * 1000.0
+
+        con_cold.execute(f"PREPARE cpqs_{qi} AS {q['sql'].format(tbl=src_pq_snap_c)};")
+        evict_file_nocache(pq_snap_path)
+        t0 = time.perf_counter()
+        _ = con_cold.execute(f"EXECUTE cpqs_{qi}").fetchall()
+        pq_snap_cold_ms = (time.perf_counter() - t0) * 1000.0
+
+        con_cold.execute(f"PREPARE cpqs16_{qi} AS {q['sql'].format(tbl=src_pq_snap_rg16k_c)};")
+        evict_file_nocache(pq_snap_rg16k_path)
+        t0 = time.perf_counter()
+        _ = con_cold.execute(f"EXECUTE cpqs16_{qi}").fetchall()
+        pq_snap_rg16k_cold_ms = (time.perf_counter() - t0) * 1000.0
+
+        con_cold.execute(f"PREPARE cpqz_{qi} AS {q['sql'].format(tbl=src_pq_zstd_c)};")
+        evict_file_nocache(pq_zstd_path)
+        t0 = time.perf_counter()
+        _ = con_cold.execute(f"EXECUTE cpqz_{qi}").fetchall()
+        pq_zstd_cold_ms = (time.perf_counter() - t0) * 1000.0
+
+        cold_8t_by_qi[qi] = {
+            "vxg_cold_ms": vxg_cold_ms,
+            "vxg_aligned_cold_ms": vxg_aln_cold_ms,
+            "duck_pq_snap_cold_ms": pq_snap_cold_ms,
+            "duck_pq_snap_rg16k_cold_ms": pq_snap_rg16k_cold_ms,
+            "duck_pq_zstd_cold_ms": pq_zstd_cold_ms,
+        }
+        print(
+            f"  [{name} 8T COLD] {label:43s} VXG={vxg_cold_ms:7.2f}ms | Aligned={vxg_aln_cold_ms:7.2f}ms | "
+            f"ParqSnap={pq_snap_cold_ms:7.2f}ms (RG16K={pq_snap_rg16k_cold_ms:7.2f}ms) | ParqZstd={pq_zstd_cold_ms:7.2f}ms",
+            flush=True,
+        )
+    con_cold.close()
+
     f_std = open(vxg_path, "rb")
     mm_std = mmap.mmap(f_std.fileno(), 0, access=mmap.ACCESS_COPY)
     _buf_std, ptr_std, len_std = mmap_ptr_and_len(mm_std)
@@ -567,23 +709,39 @@ def benchmark_scale_suite(
                     assert v_vals == d_vals, f"{label}: {v_vals} vs {d_vals}"
 
                 mrows = row_count / 1e6
-                q_rows.append(
-                    {
-                        "label": label,
-                        "vxg_ms": vxg_ms,
-                        "vxg_mrows_s": mrows / (vxg_ms / 1000.0),
-                        "vxg_aligned_ms": vxg_aln_ms,
-                        "vxg_aligned_mrows_s": mrows / (vxg_aln_ms / 1000.0),
-                        "vxg_sql_ms": vxg_sql_ms,
-                        "duck_pq_snap_prep_ms": pq_snap_prep_ms,
-                        "duck_pq_snap_prep_mrows_s": mrows / (pq_snap_prep_ms / 1000.0),
-                        "duck_pq_snap_rg16k_prep_ms": pq_snap_rg16k_prep_ms,
-                        "duck_pq_snap_rg16k_prep_mrows_s": mrows / (pq_snap_rg16k_prep_ms / 1000.0),
-                        "duck_pq_zstd_prep_ms": pq_zstd_prep_ms,
-                        "duck_pq_zstd_prep_mrows_s": mrows / (pq_zstd_prep_ms / 1000.0),
-                        "duck_raw_single_run_ms": duck_raw_ms,
-                    }
-                )
+                row_entry = {
+                    "label": label,
+                    "vxg_ms": vxg_ms,
+                    "vxg_mrows_s": mrows / (vxg_ms / 1000.0),
+                    "vxg_aligned_ms": vxg_aln_ms,
+                    "vxg_aligned_mrows_s": mrows / (vxg_aln_ms / 1000.0),
+                    "vxg_sql_ms": vxg_sql_ms,
+                    "duck_pq_snap_prep_ms": pq_snap_prep_ms,
+                    "duck_pq_snap_prep_mrows_s": mrows / (pq_snap_prep_ms / 1000.0),
+                    "duck_pq_snap_rg16k_prep_ms": pq_snap_rg16k_prep_ms,
+                    "duck_pq_snap_rg16k_prep_mrows_s": mrows / (pq_snap_rg16k_prep_ms / 1000.0),
+                    "duck_pq_zstd_prep_ms": pq_zstd_prep_ms,
+                    "duck_pq_zstd_prep_mrows_s": mrows / (pq_zstd_prep_ms / 1000.0),
+                    "duck_raw_single_run_ms": duck_raw_ms,
+                }
+                if threads == 8 and qi in cold_8t_by_qi:
+                    c8 = cold_8t_by_qi[qi]
+                    row_entry.update(
+                        {
+                            "vxg_cold_ms": c8["vxg_cold_ms"],
+                            "vxg_cold_mrows_s": mrows / (c8["vxg_cold_ms"] / 1000.0),
+                            "vxg_aligned_cold_ms": c8["vxg_aligned_cold_ms"],
+                            "vxg_aligned_cold_mrows_s": mrows / (c8["vxg_aligned_cold_ms"] / 1000.0),
+                            "duck_pq_snap_cold_ms": c8["duck_pq_snap_cold_ms"],
+                            "duck_pq_snap_cold_mrows_s": mrows / (c8["duck_pq_snap_cold_ms"] / 1000.0),
+                            "duck_pq_snap_rg16k_cold_ms": c8["duck_pq_snap_rg16k_cold_ms"],
+                            "duck_pq_snap_rg16k_cold_mrows_s": mrows
+                            / (c8["duck_pq_snap_rg16k_cold_ms"] / 1000.0),
+                            "duck_pq_zstd_cold_ms": c8["duck_pq_zstd_cold_ms"],
+                            "duck_pq_zstd_cold_mrows_s": mrows / (c8["duck_pq_zstd_cold_ms"] / 1000.0),
+                        }
+                    )
+                q_rows.append(row_entry)
                 sql_tag = f" (sql={vxg_sql_ms:.1f}ms)" if vxg_sql_ms is not None else ""
                 print(
                     f"  [{name} {threads}T] {label:48s} VXG={vxg_ms:7.2f}ms | Aligned={vxg_aln_ms:7.2f}ms{sql_tag} | "
@@ -697,6 +855,38 @@ def write_markdown(report: dict, md_path: str) -> None:
                     f"- **Bounded-memory CLI streaming (`vxg sql ... --stream -t 8`):** `{tb['vxg_cli_stream_groupby_ms']:.2f} ms` (`O(single_frame)` RAM)."
                 )
             lines.append("")
+
+            if t_key == "8" and tb["queries"] and "vxg_cold_ms" in tb["queries"][0]:
+                lines.append(
+                    "#### `8T` Cold NVMe Cache Query Latency (`ms`) & Throughput (`M rows/s`, 1st run after `F_NOCACHE` OS page-cache eviction)"
+                )
+                lines.append("")
+                lines.append(
+                    "| Query | `VXG` (`64 KiB`, cold) | `VXG --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |"
+                )
+                lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+                for q in tb["queries"]:
+                    c_peers = [
+                        q["vxg_cold_ms"],
+                        q["vxg_aligned_cold_ms"],
+                        q["duck_pq_snap_cold_ms"],
+                        q["duck_pq_snap_rg16k_cold_ms"],
+                        q["duck_pq_zstd_cold_ms"],
+                    ]
+                    c_best = min(c_peers)
+
+                    def fmt_cold(ms_val: float, mrows: float) -> str:
+                        s = f"{ms_val:.2f} ms ({mrows:.1f} M/s)"
+                        return f"**{s}**" if abs(ms_val - c_best) <= 1e-6 else s
+
+                    lines.append(
+                        f"| `{q['label']}` | {fmt_cold(q['vxg_cold_ms'], q['vxg_cold_mrows_s'])} | "
+                        f"{fmt_cold(q['vxg_aligned_cold_ms'], q['vxg_aligned_cold_mrows_s'])} | "
+                        f"{fmt_cold(q['duck_pq_snap_cold_ms'], q['duck_pq_snap_cold_mrows_s'])} | "
+                        f"{fmt_cold(q['duck_pq_snap_rg16k_cold_ms'], q['duck_pq_snap_rg16k_cold_mrows_s'])} | "
+                        f"{fmt_cold(q['duck_pq_zstd_cold_ms'], q['duck_pq_zstd_cold_mrows_s'])} |"
+                    )
+                lines.append("")
 
     with open(md_path, "w") as f:
         f.write("\n".join(lines) + "\n")

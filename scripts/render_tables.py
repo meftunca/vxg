@@ -303,7 +303,7 @@ def render_duckdb_scale_single(ds_name: str) -> str:
     st = ds["storage"]
     rows_m = f"{st['rows'] // 1_000_000}M"
     lines = [
-        f"| `{ds_name}` (`{rows_m}` rows, `{st['raw_gb']:.2f} GB` raw; `1T / 8T` in `ms`) | `VXG` (`64K` std) | `VXG --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |",
+        f"| `{ds_name}` (`{rows_m}` rows, `{st['raw_gb']:.2f} GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG` (`64K` std) | `VXG --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |",
         "| :--- | :---: | :---: | :---: | :---: | :---: |",
     ]
     sz = bold_min(
@@ -341,6 +341,30 @@ def render_duckdb_scale_single(ds_name: str) -> str:
     return "\n".join(lines)
 
 
+def render_duckdb_scale_cold(ds_name: str) -> str:
+    doc = json.loads((ROOT / "reports/scale-duckdb-vs-vxg.json").read_text(encoding="utf-8"))
+    ds = next(d for d in doc["datasets"] if d["name"] == ds_name)
+    st = ds["storage"]
+    rows_m = f"{st['rows'] // 1_000_000}M"
+    lines = [
+        f"| `{ds_name}` (`{rows_m}` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG` (`64K` std, cold) | `VXG --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: |",
+    ]
+    for q8 in ds["threads"]["8"]["queries"]:
+        vc = {
+            "v": q8["vxg_cold_ms"],
+            "va": q8["vxg_aligned_cold_ms"],
+            "ps": q8["duck_pq_snap_cold_ms"],
+            "ps16": q8["duck_pq_snap_rg16k_cold_ms"],
+            "pz": q8["duck_pq_zstd_cold_ms"],
+        }
+        fc = bold_min(vc, "{:.2f}")
+        lines.append(
+            f"| `{q8['label']}` | {fc['v']} | {fc['va']} | {fc['ps']} | {fc['ps16']} | {fc['pz']} |"
+        )
+    return "\n".join(lines)
+
+
 GENERATORS = {
     "real-public-summary-8t": render_real_public_summary_8t,
     "real-public-full-1t": lambda: render_real_public_full(1),
@@ -348,7 +372,9 @@ GENERATORS = {
     "covid-and-src": render_covid_and_src,
     "duckdb-in-cache": render_duckdb_in_cache,
     "duckdb-scale-40m-csv": lambda: render_duckdb_scale_single("nyc-taxi-2024-40m.csv"),
+    "duckdb-scale-40m-csv-cold": lambda: render_duckdb_scale_cold("nyc-taxi-2024-40m.csv"),
     "duckdb-scale-10m-ndjson": lambda: render_duckdb_scale_single("nyc-taxi-2024-10m.ndjson"),
+    "duckdb-scale-10m-ndjson-cold": lambda: render_duckdb_scale_cold("nyc-taxi-2024-10m.ndjson"),
 }
 
 TARGET_FILES = [

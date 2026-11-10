@@ -6,53 +6,73 @@
 
 ### `nyc-taxi-2024-10m.ndjson` (`10,000,000` rows, `2.62 GB` raw, provenance: `official_nyc_tlc_2024_months_01_to_12_unmodified_real_rows`)
 
-- **Archive Size & 8T Ingest/ETL Time:** `VXG` **`152.6 MB`** (`ratio=0.0583`, **`2.65 s`** / `0.99 GB/s`, lossless=`YES`) · `VXG --record-aligned` `140.8 MB` (`ratio=0.0538`, `0.61 s`, lossless=`YES`) · `Parquet-Snappy` `193.3 MB` (`ratio=0.0739`, `0.77 s` ETL, lossless=`NO`) · `Parquet-Snappy (RG=16384)` `203.4 MB` (`ratio=0.0777`, `1.05 s` ETL) · `Parquet-Zstd` `144.7 MB` (`ratio=0.0553`, `0.95 s` ETL, lossless=`NO`).
+- **Archive Size & 8T Ingest/ETL Time:** `VXG` **`152.6 MB`** (`ratio=0.0583`, **`3.24 s`** / `0.81 GB/s`, lossless=`YES`) · `VXG --record-aligned` `140.8 MB` (`ratio=0.0538`, `0.67 s`, lossless=`YES`) · `Parquet-Snappy` `193.3 MB` (`ratio=0.0739`, `0.96 s` ETL, lossless=`NO`) · `Parquet-Snappy (RG=16384)` `203.4 MB` (`ratio=0.0777`, `1.21 s` ETL) · `Parquet-Zstd` `144.6 MB` (`ratio=0.0553`, `0.96 s` ETL, lossless=`NO`).
 
 #### `8T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.09 ms`)
 
 | Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` *(DuckDB raw text: 0.36 s)* | 21.87 ms (457.3 M/s) | **3.93 ms (2543.7 M/s)** | 8.83 ms (1132.2 M/s) | 23.17 ms (431.6 M/s) | 12.08 ms (827.9 M/s) |
-| `SUM/MIN/MAX(total_cents) [full scan]` | 10.14 ms (985.8 M/s) | **1.31 ms (7642.3 M/s)** | 6.91 ms (1446.2 M/s) | 15.15 ms (660.2 M/s) | 8.97 ms (1115.0 M/s) |
-| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 12.60 ms (793.9 M/s) | **2.09 ms (4778.9 M/s)** | 6.94 ms (1440.4 M/s) | 16.19 ms (617.7 M/s) | 9.37 ms (1067.6 M/s) |
-| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 17.14 ms (583.6 M/s) | **4.31 ms (2319.8 M/s)** | 8.83 ms (1132.1 M/s) | 18.86 ms (530.2 M/s) | 10.06 ms (994.2 M/s) |
-| `ORDER BY total_cents DESC LIMIT 10` | 35.06 ms (285.2 M/s) | **1.63 ms (6152.6 M/s)** | 8.79 ms (1137.6 M/s) | 20.79 ms (481.0 M/s) | 11.78 ms (848.9 M/s) |
+| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` *(DuckDB raw text: 0.39 s)* | 20.36 ms (491.1 M/s) | **3.91 ms (2554.9 M/s)** | 13.64 ms (733.0 M/s) | 28.93 ms (345.7 M/s) | 13.48 ms (741.7 M/s) |
+| `SUM/MIN/MAX(total_cents) [full scan]` | 13.98 ms (715.2 M/s) | **2.30 ms (4339.5 M/s)** | 15.43 ms (648.2 M/s) | 21.73 ms (460.2 M/s) | 10.81 ms (925.3 M/s) |
+| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 15.79 ms (633.4 M/s) | **3.14 ms (3188.4 M/s)** | 8.02 ms (1246.4 M/s) | 18.91 ms (528.8 M/s) | 10.08 ms (991.9 M/s) |
+| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 19.15 ms (522.3 M/s) | **5.91 ms (1691.6 M/s)** | 10.62 ms (941.3 M/s) | 23.85 ms (419.2 M/s) | 11.56 ms (865.3 M/s) |
+| `ORDER BY total_cents DESC LIMIT 10` | 38.73 ms (258.2 M/s) | **1.58 ms (6325.4 M/s)** | 9.50 ms (1052.3 M/s) | 27.98 ms (357.4 M/s) | 14.11 ms (708.6 M/s) |
 
-- **Bounded-memory CLI streaming (`vxg sql ... --stream -t 8`):** `135.37 ms` (`O(single_frame)` RAM).
+- **Bounded-memory CLI streaming (`vxg sql ... --stream -t 8`):** `153.81 ms` (`O(single_frame)` RAM).
 
-#### `1T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.04 ms`)
+#### `8T` Cold NVMe Cache Query Latency (`ms`) & Throughput (`M rows/s`, 1st run after `F_NOCACHE` OS page-cache eviction)
 
-| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
+| Query | `VXG` (`64 KiB`, cold) | `VXG --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 127.03 ms (78.7 M/s) | **29.18 ms (342.7 M/s)** | 40.07 ms (249.6 M/s) | 65.78 ms (152.0 M/s) | 68.72 ms (145.5 M/s) |
-| `SUM/MIN/MAX(total_cents) [full scan]` | 70.45 ms (141.9 M/s) | **11.20 ms (892.7 M/s)** | 37.80 ms (264.6 M/s) | 53.66 ms (186.4 M/s) | 52.23 ms (191.5 M/s) |
-| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 91.13 ms (109.7 M/s) | **15.93 ms (627.9 M/s)** | 35.05 ms (285.3 M/s) | 50.69 ms (197.3 M/s) | 49.93 ms (200.3 M/s) |
-| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 108.19 ms (92.4 M/s) | **31.06 ms (321.9 M/s)** | 43.67 ms (229.0 M/s) | 65.46 ms (152.8 M/s) | 59.83 ms (167.1 M/s) |
-| `ORDER BY total_cents DESC LIMIT 10` | 84.93 ms (117.8 M/s) | **8.10 ms (1235.1 M/s)** | 16.20 ms (617.4 M/s) | 22.68 ms (441.0 M/s) | 26.17 ms (382.2 M/s) |
-
-### `nyc-taxi-2024-40m.csv` (`40,000,000` rows, `3.06 GB` raw, provenance: `official_nyc_tlc_2024_months_01_to_12_unmodified_real_rows`)
-
-- **Archive Size & 8T Ingest/ETL Time:** `VXG` **`552.9 MB`** (`ratio=0.1805`, **`5.13 s`** / `0.60 GB/s`, lossless=`YES`) · `VXG --record-aligned` `550.4 MB` (`ratio=0.1797`, `2.93 s`, lossless=`YES`) · `Parquet-Snappy` `773.1 MB` (`ratio=0.2524`, `4.87 s` ETL, lossless=`NO`) · `Parquet-Snappy (RG=16384)` `818.8 MB` (`ratio=0.2673`, `4.74 s` ETL) · `Parquet-Zstd` `579.4 MB` (`ratio=0.1891`, `3.48 s` ETL, lossless=`NO`).
-
-#### `8T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.06 ms`)
-
-| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` *(DuckDB raw text: 1.01 s)* | **23.54 ms (1699.0 M/s)** | 25.04 ms (1597.2 M/s) | 34.32 ms (1165.5 M/s) | 98.53 ms (406.0 M/s) | 43.63 ms (916.9 M/s) |
-| `SUM/MIN/MAX(total_cents) [full scan]` | 15.02 ms (2662.9 M/s) | **13.10 ms (3053.9 M/s)** | 25.85 ms (1547.2 M/s) | 73.95 ms (540.9 M/s) | 36.20 ms (1104.9 M/s) |
-| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 17.90 ms (2234.9 M/s) | **16.67 ms (2400.1 M/s)** | 35.04 ms (1141.5 M/s) | 64.17 ms (623.4 M/s) | 32.22 ms (1241.4 M/s) |
-| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 37.30 ms (1072.4 M/s) | **23.25 ms (1720.4 M/s)** | 32.85 ms (1217.5 M/s) | 76.95 ms (519.8 M/s) | 40.84 ms (979.5 M/s) |
-| `ORDER BY total_cents DESC LIMIT 10` | 20.57 ms (1944.7 M/s) | **10.77 ms (3715.6 M/s)** | 20.47 ms (1953.9 M/s) | 78.73 ms (508.0 M/s) | 24.20 ms (1652.6 M/s) |
-
-- **Bounded-memory CLI streaming (`vxg sql ... --stream -t 8`):** `313.51 ms` (`O(single_frame)` RAM).
+| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 144.43 ms (69.2 M/s) | 103.21 ms (96.9 M/s) | **16.12 ms (620.5 M/s)** | 35.22 ms (283.9 M/s) | 25.91 ms (385.9 M/s) |
+| `SUM/MIN/MAX(total_cents) [full scan]` | 133.06 ms (75.2 M/s) | 103.92 ms (96.2 M/s) | 19.92 ms (501.9 M/s) | 20.31 ms (492.4 M/s) | **13.40 ms (746.2 M/s)** |
+| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 126.63 ms (79.0 M/s) | 140.85 ms (71.0 M/s) | **12.21 ms (819.1 M/s)** | 52.65 ms (189.9 M/s) | 16.17 ms (618.6 M/s) |
+| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 146.90 ms (68.1 M/s) | 146.56 ms (68.2 M/s) | 31.84 ms (314.1 M/s) | 38.57 ms (259.3 M/s) | **15.16 ms (659.5 M/s)** |
+| `ORDER BY total_cents DESC LIMIT 10` | 170.46 ms (58.7 M/s) | 146.93 ms (68.1 M/s) | 52.59 ms (190.1 M/s) | 23.37 ms (427.9 M/s) | **16.86 ms (593.3 M/s)** |
 
 #### `1T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.05 ms`)
 
 | Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 159.37 ms (251.0 M/s) | **150.02 ms (266.6 M/s)** | 159.89 ms (250.2 M/s) | 280.70 ms (142.5 M/s) | 274.23 ms (145.9 M/s) |
-| `SUM/MIN/MAX(total_cents) [full scan]` | 90.08 ms (444.1 M/s) | **80.52 ms (496.8 M/s)** | 148.07 ms (270.1 M/s) | 214.38 ms (186.6 M/s) | 204.03 ms (196.0 M/s) |
-| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 114.03 ms (350.8 M/s) | **106.53 ms (375.5 M/s)** | 133.96 ms (298.6 M/s) | 198.04 ms (202.0 M/s) | 192.40 ms (207.9 M/s) |
-| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 174.01 ms (229.9 M/s) | **156.39 ms (255.8 M/s)** | 172.73 ms (231.6 M/s) | 258.14 ms (155.0 M/s) | 233.14 ms (171.6 M/s) |
-| `ORDER BY total_cents DESC LIMIT 10` | 87.94 ms (454.9 M/s) | 61.76 ms (647.7 M/s) | **29.80 ms (1342.3 M/s)** | 84.93 ms (470.9 M/s) | 45.11 ms (886.8 M/s) |
+| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 126.06 ms (79.3 M/s) | **29.79 ms (335.7 M/s)** | 41.03 ms (243.7 M/s) | 68.89 ms (145.2 M/s) | 70.19 ms (142.5 M/s) |
+| `SUM/MIN/MAX(total_cents) [full scan]` | 70.13 ms (142.6 M/s) | **11.75 ms (850.7 M/s)** | 38.35 ms (260.7 M/s) | 54.11 ms (184.8 M/s) | 53.58 ms (186.6 M/s) |
+| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 129.90 ms (77.0 M/s) | **19.05 ms (524.9 M/s)** | 36.62 ms (273.1 M/s) | 52.38 ms (190.9 M/s) | 52.40 ms (190.8 M/s) |
+| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 111.12 ms (90.0 M/s) | **32.58 ms (306.9 M/s)** | 43.92 ms (227.7 M/s) | 64.45 ms (155.2 M/s) | 59.72 ms (167.4 M/s) |
+| `ORDER BY total_cents DESC LIMIT 10` | 84.78 ms (118.0 M/s) | **9.58 ms (1043.4 M/s)** | 16.10 ms (621.2 M/s) | 24.29 ms (411.7 M/s) | 27.29 ms (366.4 M/s) |
+
+### `nyc-taxi-2024-40m.csv` (`40,000,000` rows, `3.06 GB` raw, provenance: `official_nyc_tlc_2024_months_01_to_12_unmodified_real_rows`)
+
+- **Archive Size & 8T Ingest/ETL Time:** `VXG` **`552.9 MB`** (`ratio=0.1805`, **`5.21 s`** / `0.59 GB/s`, lossless=`YES`) · `VXG --record-aligned` `550.4 MB` (`ratio=0.1797`, `1.69 s`, lossless=`YES`) · `Parquet-Snappy` `773.1 MB` (`ratio=0.2524`, `4.32 s` ETL, lossless=`NO`) · `Parquet-Snappy (RG=16384)` `818.9 MB` (`ratio=0.2673`, `4.74 s` ETL) · `Parquet-Zstd` `579.4 MB` (`ratio=0.1891`, `3.72 s` ETL, lossless=`NO`).
+
+#### `8T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.07 ms`)
+
+| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` *(DuckDB raw text: 1.20 s)* | 26.05 ms (1535.6 M/s) | **25.88 ms (1545.4 M/s)** | 36.79 ms (1087.2 M/s) | 105.64 ms (378.6 M/s) | 60.13 ms (665.2 M/s) |
+| `SUM/MIN/MAX(total_cents) [full scan]` | 15.25 ms (2623.3 M/s) | **12.64 ms (3164.6 M/s)** | 28.03 ms (1426.9 M/s) | 62.24 ms (642.6 M/s) | 34.48 ms (1160.0 M/s) |
+| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 17.03 ms (2348.3 M/s) | **16.06 ms (2490.1 M/s)** | 31.43 ms (1272.9 M/s) | 70.70 ms (565.7 M/s) | 36.11 ms (1107.7 M/s) |
+| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 34.35 ms (1164.6 M/s) | **27.79 ms (1439.5 M/s)** | 35.50 ms (1126.9 M/s) | 84.15 ms (475.3 M/s) | 38.14 ms (1048.8 M/s) |
+| `ORDER BY total_cents DESC LIMIT 10` | 20.98 ms (1906.3 M/s) | **11.07 ms (3613.0 M/s)** | 18.03 ms (2218.0 M/s) | 78.75 ms (507.9 M/s) | 21.97 ms (1820.4 M/s) |
+
+- **Bounded-memory CLI streaming (`vxg sql ... --stream -t 8`):** `374.32 ms` (`O(single_frame)` RAM).
+
+#### `8T` Cold NVMe Cache Query Latency (`ms`) & Throughput (`M rows/s`, 1st run after `F_NOCACHE` OS page-cache eviction)
+
+| Query | `VXG` (`64 KiB`, cold) | `VXG --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 407.15 ms (98.2 M/s) | 382.38 ms (104.6 M/s) | 60.21 ms (664.3 M/s) | 128.25 ms (311.9 M/s) | **58.70 ms (681.5 M/s)** |
+| `SUM/MIN/MAX(total_cents) [full scan]` | 386.27 ms (103.6 M/s) | 569.23 ms (70.3 M/s) | **32.44 ms (1232.9 M/s)** | 148.02 ms (270.2 M/s) | 42.21 ms (947.7 M/s) |
+| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 571.57 ms (70.0 M/s) | 370.81 ms (107.9 M/s) | **40.93 ms (977.3 M/s)** | 112.54 ms (355.4 M/s) | 42.36 ms (944.3 M/s) |
+| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 410.40 ms (97.5 M/s) | 582.47 ms (68.7 M/s) | **62.92 ms (635.8 M/s)** | 193.06 ms (207.2 M/s) | 63.24 ms (632.5 M/s) |
+| `ORDER BY total_cents DESC LIMIT 10` | 529.15 ms (75.6 M/s) | 643.57 ms (62.2 M/s) | 30.23 ms (1323.3 M/s) | 101.47 ms (394.2 M/s) | **27.02 ms (1480.3 M/s)** |
+
+#### `1T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.04 ms`)
+
+| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 162.72 ms (245.8 M/s) | **150.67 ms (265.5 M/s)** | 159.14 ms (251.4 M/s) | 282.92 ms (141.4 M/s) | 275.13 ms (145.4 M/s) |
+| `SUM/MIN/MAX(total_cents) [full scan]` | 91.34 ms (437.9 M/s) | **82.42 ms (485.3 M/s)** | 156.03 ms (256.4 M/s) | 218.78 ms (182.8 M/s) | 210.90 ms (189.7 M/s) |
+| `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 114.70 ms (348.7 M/s) | **107.33 ms (372.7 M/s)** | 138.55 ms (288.7 M/s) | 204.45 ms (195.6 M/s) | 195.58 ms (204.5 M/s) |
+| `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 180.78 ms (221.3 M/s) | **162.75 ms (245.8 M/s)** | 177.54 ms (225.3 M/s) | 262.69 ms (152.3 M/s) | 241.67 ms (165.5 M/s) |
+| `ORDER BY total_cents DESC LIMIT 10` | 88.79 ms (450.5 M/s) | 63.08 ms (634.1 M/s) | **30.05 ms (1331.2 M/s)** | 91.18 ms (438.7 M/s) | 46.00 ms (869.6 M/s) |
 
