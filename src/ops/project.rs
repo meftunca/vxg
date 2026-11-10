@@ -24,14 +24,16 @@ fn eval_select_block(
     }
     let mut out = Vec::new();
     if mb.decoded_raw.is_none() {
-        if let Some(emitted) = crate::columns::select_grammar_block_par_into(
-            ib.payload,
-            mb.had_in_carry,
-            where_expr,
-            cols,
-            blk_limit,
-            &mut out,
-        )? {
+        if let Some(emitted) = crate::columns::with_v6_cols(ib.col_slices, || {
+            crate::columns::select_grammar_block_par_into(
+                ib.payload,
+                mb.had_in_carry,
+                where_expr,
+                cols,
+                blk_limit,
+                &mut out,
+            )
+        })? {
             return Ok((emitted, out));
         }
         out.clear();
@@ -39,7 +41,7 @@ fn eval_select_block(
     let raw: &[u8] = if let Some(ref pre) = mb.decoded_raw {
         pre
     } else {
-        query::decode_block_into(ib.f_bytes, ib.local_blk, ib.info.raw_size, options, dec_buf)?;
+        ib.decode_into(options, dec_buf)?;
         dec_buf
     };
     if raw.is_empty() {
@@ -213,15 +215,14 @@ pub(crate) fn select_columns_impl(
 ) -> Result<Vec<u8>> {
     options.validate()?;
     validate_projection_cols(cols)?;
-    let prepared = crate::mmap::prepare_query_bytes(
+    let frames = Frame::parse_all_for_query(
         frame_bytes,
+        options.max_output,
         where_expr,
         cols,
         true,
         options.threads,
-    );
-    let frame_bytes = prepared.as_ref();
-    let frames = Frame::parse_all(frame_bytes, options.max_output)?;
+    )?;
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -243,15 +244,17 @@ pub(crate) fn select_columns_impl(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload = parsed.blocks[local_blk].payload;
-                if let Some(n) = crate::columns::select_grammar_block_seq_into(
-                    payload,
-                    &mut carry,
-                    where_expr,
-                    cols,
-                    limit - emitted,
-                    &mut out,
-                )? {
+                let b = &parsed.blocks[local_blk];
+                if let Some(n) = crate::columns::with_v6_cols(b.col_slices, || {
+                    crate::columns::select_grammar_block_seq_into(
+                        b.payload,
+                        &mut carry,
+                        where_expr,
+                        cols,
+                        limit - emitted,
+                        &mut out,
+                    )
+                })? {
                     emitted += n;
                     if emitted >= limit && carry.is_none() {
                         return Ok(out);
@@ -332,15 +335,17 @@ fn eval_project_block(
         return Ok(ProjBlockOut::Empty);
     }
     if mb.decoded_raw.is_none() {
-        match crate::columns::project_grammar_block(
-            ib.payload,
-            mb.had_in_carry,
-            opt_tail_row,
-            where_expr,
-            cols,
-            need_checksum,
-            crc_buf,
-        )? {
+        match crate::columns::with_v6_cols(ib.col_slices, || {
+            crate::columns::project_grammar_block(
+                ib.payload,
+                mb.had_in_carry,
+                opt_tail_row,
+                where_expr,
+                cols,
+                need_checksum,
+                crc_buf,
+            )
+        })? {
             crate::columns::GrammarProjectOut::Empty => return Ok(ProjBlockOut::Empty),
             crate::columns::GrammarProjectOut::Spliced {
                 payload,
@@ -360,7 +365,7 @@ fn eval_project_block(
     let raw: &[u8] = if let Some(ref pre) = mb.decoded_raw {
         pre
     } else {
-        query::decode_block_into(ib.f_bytes, ib.local_blk, ib.info.raw_size, dec_options, dec_buf)?;
+        ib.decode_into(dec_options, dec_buf)?;
         dec_buf
     };
     if raw.is_empty() {
@@ -400,7 +405,14 @@ pub(super) fn project_frame_impl(
         return crate::compress(&projected, enc_options);
     }
 
-    let frames = Frame::parse_all(frame_bytes, dec_eff.max_output)?;
+    let frames = Frame::parse_all_for_query(
+        frame_bytes,
+        dec_eff.max_output,
+        where_expr,
+        cols,
+        true,
+        dec_eff.threads,
+    )?;
     let in_blocks = collect_par_blocks(frame_bytes, &frames);
     let nb = in_blocks.len();
     if nb == 0 {

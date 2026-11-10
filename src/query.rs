@@ -189,11 +189,11 @@ pub fn extract_block_row_range(
         .nth(block_index)
         .ok_or(Error::InvalidFrame("block index out of range"))?;
     if info.kind == BLOCK_COLUMN {
-        let payload = parsed.blocks[block_index].payload;
+        let b = &parsed.blocks[block_index];
         let mut out = Vec::new();
-        if let Some(emitted) =
-            crate::columns::unpack_grammar_row_range(payload, start_row, end_row, &mut out)?
-        {
+        if let Some(emitted) = crate::columns::with_v6_cols(b.col_slices, || {
+            crate::columns::unpack_grammar_row_range(b.payload, start_row, end_row, &mut out)
+        })? {
             if emitted == 0 {
                 return Err(Error::InvalidFrame("row index out of range"));
             }
@@ -283,20 +283,24 @@ pub fn extract_row_range(
                 }
                 let info = parsed.blocks[blk_idx].info;
                 if info.kind == BLOCK_COLUMN {
-                    let payload = parsed.blocks[blk_idx].payload;
-                    if let Some((blk_rows, ends_nl)) = crate::columns::grammar_block_row_meta(payload)? {
+                    let b = &parsed.blocks[blk_idx];
+                    if let Some((blk_rows, ends_nl)) =
+                        crate::columns::grammar_block_row_meta(b.payload)?
+                    {
                         if blk_rows != exp_rows || ends_nl != exp_ends_nl {
                             return Err(Error::InvalidFrame("row_index mismatch"));
                         }
                         let local_start = start_row.saturating_sub(base_row).min(blk_rows);
                         let local_end = end_row.saturating_sub(base_row).min(blk_rows);
                         if local_start < local_end {
-                            let _ = crate::columns::unpack_grammar_row_range(
-                                payload,
-                                local_start,
-                                local_end,
-                                &mut out,
-                            )?;
+                            let _ = crate::columns::with_v6_cols(b.col_slices, || {
+                                crate::columns::unpack_grammar_row_range(
+                                    b.payload,
+                                    local_start,
+                                    local_end,
+                                    &mut out,
+                                )
+                            })?;
                         }
                         continue;
                     }
@@ -329,18 +333,22 @@ pub fn extract_row_range(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload = parsed.blocks[blk_idx].payload;
-                if let Some((blk_rows, ends_nl)) = crate::columns::grammar_block_row_meta(payload)? {
+                let b = &parsed.blocks[blk_idx];
+                if let Some((blk_rows, ends_nl)) =
+                    crate::columns::grammar_block_row_meta(b.payload)?
+                {
                     if blk_rows > 0 {
                         let local_start = start_row.saturating_sub(base_row).min(blk_rows);
                         let local_end = end_row.saturating_sub(base_row).min(blk_rows);
                         if local_start < local_end {
-                            let _ = crate::columns::unpack_grammar_row_range(
-                                payload,
-                                local_start,
-                                local_end,
-                                &mut out,
-                            )?;
+                            let _ = crate::columns::with_v6_cols(b.col_slices, || {
+                                crate::columns::unpack_grammar_row_range(
+                                    b.payload,
+                                    local_start,
+                                    local_end,
+                                    &mut out,
+                                )
+                            })?;
                         }
                         cur_global = base_row + blk_rows;
                         prev_open = !ends_nl;

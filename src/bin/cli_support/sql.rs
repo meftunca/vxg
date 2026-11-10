@@ -84,7 +84,7 @@ mod sql_cli_tests {
         let stm_vxg = dir.join("sales_stream.vxg");
 
         let mut csv = String::from("region,payment_type,amount\n");
-        for i in 0..1000usize {
+        for i in 0..1000isize {
             let reg = if i % 2 == 0 { "eu" } else { "us" };
             let pt = (i % 3) + 1;
             let amt = format!("{}.{:02}", (i % 20) - 5, i % 100);

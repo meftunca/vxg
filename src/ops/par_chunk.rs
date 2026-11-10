@@ -144,7 +144,7 @@ where
                 if ib.info.raw_size == 0 {
                     continue;
                 }
-                let step_res: Result<()> = (|| {
+                let step_res: Result<()> = crate::columns::with_v6_cols(ib.col_slices, || {
                     if head_open {
                         if ib.info.kind == BLOCK_COLUMN {
                             if let Some(fb) =
@@ -198,7 +198,7 @@ where
                     ib.decode_into(options, &mut dec_buf)?;
                     feed_decoded_lines(&dec_buf, &mut carry, &mut acc, &eval_line);
                     Ok(())
-                })();
+                });
 
                 if let Err(e) = step_res {
                     unsafe {

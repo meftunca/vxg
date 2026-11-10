@@ -144,14 +144,16 @@ fn verify_single_parsed_frame(
                 b.payload
             } else {
                 let dst = &mut scratch[..b.info.raw_size];
-                block::decode_with_dict(
-                    b.payload,
-                    b.info.kind,
-                    dst,
-                    engine,
-                    short_distance,
-                    dict_ref,
-                )?;
+                crate::columns::with_v6_cols(b.col_slices, || {
+                    block::decode_with_dict(
+                        b.payload,
+                        b.info.kind,
+                        dst,
+                        engine,
+                        short_distance,
+                        dict_ref,
+                    )
+                })?;
                 if verify_csum && crc32c(dst) != b.info.checksum {
                     return Err(Error::Checksum { block: idx });
                 }
@@ -197,14 +199,16 @@ fn verify_single_parsed_frame(
                     b.payload
                 } else {
                     let dst = &mut scratch[..b.info.raw_size];
-                    if let Err(e) = block::decode_with_dict(
-                        b.payload,
-                        b.info.kind,
-                        dst,
-                        engine,
-                        short_distance,
-                        dict_ref,
-                    ) {
+                    if let Err(e) = crate::columns::with_v6_cols(b.col_slices, || {
+                        block::decode_with_dict(
+                            b.payload,
+                            b.info.kind,
+                            dst,
+                            engine,
+                            short_distance,
+                            dict_ref,
+                        )
+                    }) {
                         aborted.store(true, Ordering::Relaxed);
                         return Err(e);
                     }

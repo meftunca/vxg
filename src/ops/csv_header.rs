@@ -214,7 +214,10 @@ pub fn peek_delim_header(frame_bytes: &[u8], options: &DecodeOptions) -> Result<
                 continue;
             }
             let payload = parsed.blocks[b_idx].payload;
-            if let Some(decided) = try_peek_raw_or_grammar_header(f_idx, b_idx, info.kind, payload)? {
+            if let Some(decided) = crate::columns::with_v6_cols(
+                parsed.blocks[b_idx].col_slices,
+                || try_peek_raw_or_grammar_header(f_idx, b_idx, info.kind, payload),
+            )? {
                 return Ok(decided);
             }
             let mut blk = Vec::new();

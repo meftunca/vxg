@@ -178,17 +178,9 @@ fn try_prune_cached_delim_topk(
     if !selector_all_ones(sel_slice, row_count) {
         return Ok(None);
     }
-    let mut order_col_bytes: &[u8] = &[];
-    for s in 0..slots {
-        let len = cursor.uleb()?;
-        let col_s = cursor.take(len)?;
-        if s == os {
-            order_col_bytes = col_s;
-        }
-    }
-    if !cursor.done() {
-        return Err(invalid("column packet trailing bytes"));
-    }
+    let mut col_slices: [&[u8]; MAX_SLOTS] = [&[]; MAX_SLOTS];
+    read_single_tpl_col_slices(&mut cursor, slots, &mut col_slices)?;
+    let order_col_bytes: &[u8] = if os < slots { col_slices[os] } else { &[] };
     let mut row_map = TplRowMap::Offset(0);
     let mut cands = CandTracker::new(heap.capacity_k(), heap.dir());
     let scanned = if os >= slots {

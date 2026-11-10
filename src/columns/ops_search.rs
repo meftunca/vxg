@@ -199,13 +199,7 @@ pub(crate) fn search_grammar_block_col_pred(
         let slots = hdr.slot_counts[0];
         let ones = hdr.tpl_row_counts[0];
         let mut col_slices = [&[][..]; MAX_SLOTS];
-        for col_slot in col_slices.iter_mut().take(slots) {
-            let len = hdr.cursor.uleb()?;
-            *col_slot = hdr.cursor.take(len)?;
-        }
-        if !hdr.cursor.done() {
-            return Err(invalid("column packet trailing bytes"));
-        }
+        read_single_tpl_col_slices(&mut hdr.cursor, slots, &mut col_slices)?;
 
         let t0_segs = hdr.segs(0);
         let lookup = if ones > 0 {

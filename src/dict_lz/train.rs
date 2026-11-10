@@ -396,6 +396,9 @@ pub(super) fn build_prepared_dict(
         .map(|(_, l)| l);
 
     let strongly_tabular = structured0.is_some_and(|l| l * 4 < chunk0.len());
+    if block_size > 65_536 && structured0.is_some_and(|l| l * 5 <= chunk0.len()) {
+        return None;
+    }
     let raw = train_raw_dict(input, block_size, strongly_tabular, level, workers)?;
     let (ht4, ht6, ht6_shift) = build_dict_tables(&raw);
 

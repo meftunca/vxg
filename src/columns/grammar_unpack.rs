@@ -268,13 +268,18 @@ fn unpack_grammar_inner_impl(
                 let raw_slice_offset =
                     read_raw_rows_into(cursor, raw_count, raw_arena, slice_arena)?;
 
+                let v6_cols_opt = if cursor.done() { current_v6_cols() } else { None };
                 for s in 0..slots {
-                    let len = cursor.uleb()?;
-                    let bytes = cursor.take(len)?;
+                    let bytes = if let Some(v6_cols) = v6_cols_opt {
+                        strip_v6_col_uleb(*v6_cols.get(s).ok_or_else(|| invalid("v6 column slice count mismatch"))?)?
+                    } else {
+                        let len = cursor.uleb()?;
+                        cursor.take(len)?
+                    };
                     cols[s] = PreparedColumn::parse_and_validate(bytes, ones, &mut scratch)?;
                 }
-                if !cursor.done() {
-                    return Err(invalid("column packet trailing bytes"));
+                if v6_cols_opt.is_none() && !cursor.done() {
+                    return Err(invalid("trailing grammar column bytes"));
                 }
                 let tpl_segs = if use_inline_tpl {
                     &tpl_inline[0][..=slots]
@@ -346,27 +351,15 @@ fn unpack_grammar_inner_impl(
             }
 
             // Fast path 2: Multi-template or 0-template blocks (`template_count != 1 && selector_width <= 7`)
-            let sel_u8_offset = unpack_and_validate_u8(
-                selector_slice,
-                row_count,
-                selector_width,
-                0,
-                template_count + 1,
-                &mut scratch.u8_arena,
-            )?;
+            let sel_u8_offset = unpack_and_validate_u8(selector_slice, row_count, selector_width, 0, template_count + 1, &mut scratch.u8_arena)?;
             let mut sel_counts = [0usize; 129];
             for &sel in &scratch.u8_arena[sel_u8_offset..sel_u8_offset + row_count] {
                 sel_counts[sel as usize] += 1;
             }
             let raw_total = sel_counts[0];
             reserve_raw_arena_for_block(&mut scratch.raw_arena, cursor, raw_len, raw_total, None)?;
-            let DecodeScratch {
-                ref mut raw_arena,
-                ref mut slice_arena,
-                ..
-            } = *scratch;
-            let raw_slice_offset =
-                read_raw_rows_into(cursor, raw_total, raw_arena, slice_arena)?;
+            let DecodeScratch { ref mut raw_arena, ref mut slice_arena, .. } = *scratch;
+            let raw_slice_offset = read_raw_rows_into(cursor, raw_total, raw_arena, slice_arena)?;
 
             let mut unbound_inline = [UnboundTemplate::default(); 16];
             let mut unbound_overflow = if template_count > 16 {
@@ -380,12 +373,22 @@ fn unpack_grammar_inner_impl(
                 &mut unbound_overflow[..template_count]
             };
 
+            let v6_cols_opt = if cursor.done() { current_v6_cols() } else { None };
+            let mut v6_pos = 0usize;
             for tpl_idx in 0..template_count {
                 let slots = slot_counts[tpl_idx];
                 let count = sel_counts[tpl_idx + 1];
                 for s in 0..slots {
-                    let len = cursor.uleb()?;
-                    let bytes = cursor.take(len)?;
+                    let bytes = if let Some(v6_cols) = v6_cols_opt {
+                        let b = *v6_cols
+                            .get(v6_pos)
+                            .ok_or_else(|| invalid("v6 column slice count mismatch"))?;
+                        v6_pos += 1;
+                        strip_v6_col_uleb(b)?
+                    } else {
+                        let len = cursor.uleb()?;
+                        cursor.take(len)?
+                    };
                     cols[s] = PreparedColumn::parse_and_validate(bytes, count, &mut scratch)?;
                 }
                 let tpl_segs = if use_inline_tpl {
@@ -509,11 +512,21 @@ fn unpack_grammar_inner_impl(
         })
         .collect();
     let mut values = Vec::with_capacity(template_count);
+    let v6_cols_opt = if cursor.done() { current_v6_cols() } else { None };
+    let mut v6_pos = 0usize;
     for (template_index, counts) in column_counts.iter().enumerate() {
         let mut template_values = Vec::with_capacity(counts.len());
         for &count in counts {
-            let len = cursor.uleb()?;
-            let bytes = cursor.take(len)?;
+            let bytes = if let Some(v6_cols) = v6_cols_opt {
+                let b = *v6_cols
+                    .get(v6_pos)
+                    .ok_or_else(|| invalid("v6 column slice count mismatch"))?;
+                v6_pos += 1;
+                strip_v6_col_uleb(b)?
+            } else {
+                let len = cursor.uleb()?;
+                cursor.take(len)?
+            };
             template_values.push(unpack_model_mode(bytes, count, strict)?);
             let _ = template_index;
         }

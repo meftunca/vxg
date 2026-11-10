@@ -85,16 +85,18 @@ fn process_one_block<'a>(
     let has_next = b + 1 < nb;
     let mut fallback_raw: Option<Vec<u8>> = None;
     if predecoded_raw.is_none() {
-        match crate::columns::rewrite_grammar_block(
-            ib.payload,
-            had_in_carry,
-            has_next,
-            ov_first,
-            ov_last,
-            where_pred,
-            target_col,
-            op,
-        )? {
+        match crate::columns::with_v6_cols(ib.col_slices, || {
+            crate::columns::rewrite_grammar_block(
+                ib.payload,
+                had_in_carry,
+                has_next,
+                ov_first,
+                ov_last,
+                where_pred,
+                target_col,
+                op,
+            )
+        })? {
             crate::columns::GrammarRewrite::Untouched => {
                 let csum = if !enc_options.checksum {
                     0
@@ -104,8 +106,18 @@ fn process_one_block<'a>(
                     ib.decode_into(dec_options, crc_buf)?;
                     crc32c(crc_buf)
                 };
+                let payload = if ib.col_slices.is_empty() {
+                    BytesRef::Borrowed(ib.payload)
+                } else {
+                    let mut v = Vec::with_capacity(ib.info.payload_size);
+                    v.extend_from_slice(ib.payload);
+                    for &cs in ib.col_slices {
+                        v.extend_from_slice(cs);
+                    }
+                    BytesRef::Owned(v)
+                };
                 out_ready.push(ReadyBlock {
-                    payload: BytesRef::Borrowed(ib.payload),
+                    payload,
                     dict: ib.dict,
                     kind: ib.info.kind,
                     raw_size: ib.info.raw_size,
@@ -177,8 +189,18 @@ fn process_one_block<'a>(
         } else {
             crc32c(raw_ref)
         };
+        let payload = if ib.col_slices.is_empty() {
+            BytesRef::Borrowed(ib.payload)
+        } else {
+            let mut v = Vec::with_capacity(ib.info.payload_size);
+            v.extend_from_slice(ib.payload);
+            for &cs in ib.col_slices {
+                v.extend_from_slice(cs);
+            }
+            BytesRef::Owned(v)
+        };
         out_ready.push(ReadyBlock {
-            payload: BytesRef::Borrowed(ib.payload),
+            payload,
             dict: ib.dict,
             kind: ib.info.kind,
             raw_size: ib.info.raw_size,
@@ -212,7 +234,14 @@ pub(super) fn transform_frame(
     dec_eff.threads = dec_options.threads.max(enc_options.threads);
     dec_eff.validate()?;
 
-    let frames = Frame::parse_all(frame_bytes, dec_eff.max_output)?;
+    let frames = Frame::parse_all_for_query(
+        frame_bytes,
+        dec_eff.max_output,
+        None,
+        &[],
+        false,
+        dec_eff.threads,
+    )?;
     let in_blocks = collect_par_blocks(frame_bytes, &frames);
     let nb = in_blocks.len();
     if nb == 0 {

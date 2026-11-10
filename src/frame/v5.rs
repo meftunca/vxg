@@ -420,3 +420,127 @@ pub(crate) fn peek_v4_v5_block0(src: &[u8], max_output: usize) -> Option<(u32, u
     let payload = src.get(hdr.payload_start..end)?;
     Some((kind, rn, payload))
 }
+
+pub(crate) fn parse_v5_hybrid<'a>(
+    src: &'a [u8],
+    max_output: usize,
+    fd: i32,
+    file_off: u64,
+    threads: usize,
+    res: crate::mmap::sys::ChunkResidency,
+) -> Result<super::Frame<'a>> {
+    let mut ha = crate::mmap::pread::HybridArena::load(src, fd, file_off, res, threads)
+        .map_err(|e| Error::Backend(e.to_string()))?;
+    let (h_in_src, h_st, h_en) = ha.resolve_range(0, src.len().min(HEADER_SIZE));
+    let hdr_bytes: &[u8] = if h_in_src {
+        &src[h_st..h_en]
+    } else {
+        &ha.arena[h_st..h_en]
+    };
+    let hdr = parse_v1_to_v5_header(hdr_bytes, max_output)?;
+    if hdr.payload_start > src.len() {
+        return Err(Error::Truncated);
+    }
+    let (p_in_src, p_st, p_en) = ha.resolve_range(0, hdr.payload_start);
+    let prefix: &[u8] = if p_in_src {
+        &src[p_st..p_en]
+    } else {
+        &ha.arena[p_st..p_en]
+    };
+    let dict = decode_header_dict(prefix, &hdr)?;
+    let esize = entry_size(hdr.version);
+    let mut row_index = if hdr.has_row_index {
+        Some(Vec::with_capacity(hdr.count))
+    } else {
+        None
+    };
+    let mut infos = Vec::with_capacity(hdr.count);
+    let mut next_payload = hdr.payload_start;
+    let mut next_raw = 0usize;
+    for i in 0..hdr.count {
+        let p = HEADER_SIZE + i * esize;
+        let expected_rn = block_raw_size(prefix, &hdr, i, next_raw)?;
+        if let Some(word) = block_row_meta_raw(prefix, &hdr, i, expected_rn)? {
+            if let Some(ref mut ri) = row_index {
+                ri.push(word);
+            }
+        }
+        let (raw_offset, payload_offset, rn, cn, checksum, kind) = if hdr.version >= VERSION_V4 {
+            let word = read_u32(prefix, p)?;
+            (
+                next_raw,
+                next_payload,
+                expected_rn,
+                (word & V4_SIZE_MASK) as usize,
+                read_u32(prefix, p + 4)?,
+                word >> 30,
+            )
+        } else {
+            (
+                usize::try_from(read_u64(prefix, p)?).map_err(|_| Error::SizeOverflow)?,
+                usize::try_from(read_u64(prefix, p + 8)?).map_err(|_| Error::SizeOverflow)?,
+                read_u32(prefix, p + 16)? as usize,
+                read_u32(prefix, p + 20)? as usize,
+                read_u32(prefix, p + 24)?,
+                read_u32(prefix, p + 28)?,
+            )
+        };
+        if raw_offset != next_raw || payload_offset != next_payload || rn != expected_rn {
+            return Err(Error::InvalidFrame("non-canonical directory"));
+        }
+        if !valid_kind_and_size(hdr.version, kind, cn, rn) || (!hdr.checksummed && checksum != 0) {
+            return Err(Error::InvalidFrame("block kind/size"));
+        }
+        let end = payload_offset.checked_add(cn).ok_or(Error::SizeOverflow)?;
+        if end > src.len() {
+            return Err(Error::Truncated);
+        }
+        infos.push((
+            super::BlockInfo {
+                raw_offset,
+                payload_offset,
+                raw_size: rn,
+                payload_size: cn,
+                checksum,
+                kind,
+            },
+            payload_offset,
+            end,
+        ));
+        next_raw += rn;
+        next_payload = end;
+    }
+    if next_raw != hdr.raw_size || next_payload != src.len() {
+        return Err(Error::InvalidFrame("trailing bytes or incorrect total"));
+    }
+    let resolved: Vec<(bool, usize, usize)> = infos
+        .iter()
+        .map(|&(_, st, en)| ha.resolve_range(st, en))
+        .collect();
+    let arena = ha.arena;
+    let arena_ptr = arena.as_ptr();
+    let mut blocks = Vec::with_capacity(hdr.count);
+    for ((info, _, _), (in_src, st, en)) in infos.into_iter().zip(resolved) {
+        let payload: &'a [u8] = if in_src {
+            &src[st..en]
+        } else {
+            unsafe { std::slice::from_raw_parts(arena_ptr.add(st), en - st) }
+        };
+        blocks.push(super::Block {
+            info,
+            payload,
+            col_slices: &[],
+        });
+    }
+    Ok(super::Frame {
+        blocks,
+        dict,
+        row_index,
+        raw_size: hdr.raw_size,
+        block_size: hdr.block_size,
+        checksummed: hdr.checksummed,
+        version: hdr.version,
+        _owned_arena: arena,
+        _owned_col_slices: Vec::new(),
+    })
+}

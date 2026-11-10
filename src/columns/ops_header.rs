@@ -16,6 +16,87 @@ struct OpsGrammarHeader<'a> {
     cursor: Cursor<'a>,
 }
 
+thread_local! {
+    static ACTIVE_V6_COLS: std::cell::Cell<(*const &'static [u8], usize)> =
+        const { std::cell::Cell::new((std::ptr::null(), 0)) };
+}
+
+pub(crate) struct V6ColsGuard {
+    prev: (*const &'static [u8], usize),
+}
+
+impl Drop for V6ColsGuard {
+    #[inline(always)]
+    fn drop(&mut self) {
+        ACTIVE_V6_COLS.with(|c| c.set(self.prev));
+    }
+}
+
+/// Run `f` with the current thread's active Format v6 column stream slices bound to `cols`.
+#[inline(always)]
+pub(crate) fn with_v6_cols<'a, R>(cols: &'a [&'a [u8]], f: impl FnOnce() -> R) -> R {
+    let ptr = if cols.is_empty() { std::ptr::null() } else { cols.as_ptr() as *const &'static [u8] };
+    let prev = ACTIVE_V6_COLS.with(|c| {
+        let old = c.get();
+        c.set((ptr, cols.len()));
+        old
+    });
+    let _guard = V6ColsGuard { prev };
+    f()
+}
+
+/// Return the active Format v6 column stream slices for the current block, if any.
+#[inline(always)]
+pub(crate) fn current_v6_cols<'a>() -> Option<&'a [&'a [u8]]> {
+    let (ptr, len) = ACTIVE_V6_COLS.with(std::cell::Cell::get);
+    if ptr.is_null() || len == 0 {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(ptr as *const &'a [u8], len) })
+    }
+}
+
+#[inline(always)]
+pub(crate) fn strip_v6_col_uleb(raw: &[u8]) -> Result<&[u8]> {
+    if raw.is_empty() {
+        return Ok(&[]);
+    }
+    let mut c = Cursor::new(raw);
+    let len = c.uleb()?;
+    let s = c.take(len)?;
+    if !c.done() {
+        return Err(invalid("v6 column slice trailing bytes"));
+    }
+    Ok(s)
+}
+
+#[inline(always)]
+fn read_single_tpl_col_slices<'a>(
+    cursor: &mut Cursor<'a>,
+    slots: usize,
+    out: &mut [&'a [u8]; MAX_SLOTS],
+) -> Result<()> {
+    if cursor.done() && slots > 0 {
+        if let Some(v6_cols) = current_v6_cols() {
+            if v6_cols.len() < slots {
+                return Err(invalid("v6 column slice count mismatch"));
+            }
+            for (dst, &raw) in out[..slots].iter_mut().zip(v6_cols[..slots].iter()) {
+                *dst = strip_v6_col_uleb(raw)?;
+            }
+            return Ok(());
+        }
+    }
+    for slot in out.iter_mut().take(slots) {
+        let len = cursor.uleb()?;
+        *slot = cursor.take(len)?;
+    }
+    if !cursor.done() {
+        return Err(invalid("trailing grammar column bytes"));
+    }
+    Ok(())
+}
+
 #[inline(always)]
 fn popcount_bytes(slice: &[u8]) -> usize {
     let mut chunks = slice.chunks_exact(8);
@@ -376,6 +457,24 @@ fn read_all_template_col_slices<'a>(hdr: &mut OpsGrammarHeader<'a>) -> Result<Tp
         overflow: if total_slots > 64 { Vec::with_capacity(total_slots) } else { Vec::new() },
         starts: [0u16; 17],
     };
+    if hdr.cursor.done() && total_slots > 0 {
+        if let Some(v6_cols) = current_v6_cols() {
+            if v6_cols.len() < total_slots {
+                return Err(invalid("v6 column slice count mismatch"));
+            }
+            let mut pos = 0usize;
+            for t in 0..hdr.template_count {
+                out.starts[t] = pos as u16;
+                for _ in 0..hdr.slot_counts[t] {
+                    let s = strip_v6_col_uleb(v6_cols[pos])?;
+                    if total_slots <= 64 { out.inline[pos] = s; } else { out.overflow.push(s); }
+                    pos += 1;
+                }
+            }
+            out.starts[hdr.template_count] = pos as u16;
+            return Ok(out);
+        }
+    }
     let mut pos = 0usize;
     for t in 0..hdr.template_count {
         out.starts[t] = pos as u16;

@@ -519,39 +519,36 @@ pub(crate) fn unpack_grammar_row_range(
             template_count + 1,
             &mut scratch.u8_arena,
         )?;
-        let mut sel_counts = [0usize; 129];
-        let mut skip_counts = [0usize; 129];
-        for (r, &sel) in scratch.u8_arena[sel_u8_offset..sel_u8_offset + row_count]
-            .iter()
-            .enumerate()
-        {
+        let (mut sel_counts, mut skip_counts) = ([0usize; 129], [0usize; 129]);
+        for (r, &sel) in scratch.u8_arena[sel_u8_offset..sel_u8_offset + row_count].iter().enumerate() {
             sel_counts[sel as usize] += 1;
             if r < start_row {
                 skip_counts[sel as usize] += 1;
             }
         }
         let raw_total = sel_counts[0];
-        let DecodeScratch {
-            ref mut raw_arena,
-            ref mut slice_arena,
-            ..
-        } = *scratch;
-        let raw_slice_offset =
-            read_grammar_raw_rows(&mut cursor, raw_total, raw_arena, slice_arena)?;
+        let DecodeScratch { ref mut raw_arena, ref mut slice_arena, .. } = *scratch;
+        let raw_slice_offset = read_grammar_raw_rows(&mut cursor, raw_total, raw_arena, slice_arena)?;
 
         let mut cols_uninit = core::mem::MaybeUninit::<[PreparedColumn; MAX_SLOTS]>::uninit();
         let cols: &mut [PreparedColumn; MAX_SLOTS] = unsafe { cols_uninit.assume_init_mut() };
         let mut unbound_templates = vec![UnboundTemplate::default(); template_count];
+        let v6_cols_opt = if cursor.done() { current_v6_cols() } else { None };
+        let mut v6_pos = 0usize;
         for tpl_idx in 0..template_count {
-            let slots = slot_counts[tpl_idx];
-            let count = sel_counts[tpl_idx + 1];
+            let (slots, count) = (slot_counts[tpl_idx], sel_counts[tpl_idx + 1]);
             for s in 0..slots {
-                let len = cursor.uleb()?;
-                let bytes = cursor.take(len)?;
+                let bytes = if let Some(v6_cols) = v6_cols_opt {
+                    let b = *v6_cols.get(v6_pos).ok_or_else(|| invalid("v6 column slice count mismatch"))?;
+                    v6_pos += 1;
+                    strip_v6_col_uleb(b)?
+                } else {
+                    let len = cursor.uleb()?;
+                    cursor.take(len)?
+                };
                 cols[s] = PreparedColumn::parse_and_validate(bytes, count, &mut scratch)?;
             }
-            unbound_templates[tpl_idx] =
-                UnboundTemplate::build(&tpl_segs[tpl_idx], &cols[..slots], &mut scratch);
+            unbound_templates[tpl_idx] = UnboundTemplate::build(&tpl_segs[tpl_idx], &cols[..slots], &mut scratch);
         }
         if !cursor.done() {
             return Err(invalid("column packet trailing bytes"));

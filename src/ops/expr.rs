@@ -107,15 +107,14 @@ pub(crate) fn count_where_impl(
     if matches!(expr, PredExpr::True) {
         return Ok(query::frame_row_count(frame_bytes)? as u64);
     }
-    let prepared = crate::mmap::prepare_query_bytes(
+    let frames = Frame::parse_all_for_query(
         frame_bytes,
+        options.max_output,
         Some(expr),
         &[],
         true,
         options.threads,
-    );
-    let frame_bytes = prepared.as_ref();
-    let frames = Frame::parse_all(frame_bytes, options.max_output)?;
+    )?;
     if options.threads > 1 {
         if let Some(total) = count_where_parallel(frame_bytes, &frames, expr, options)? {
             return Ok(total);
@@ -129,10 +128,10 @@ pub(crate) fn count_where_impl(
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
         for (local_blk, info) in parsed.blocks().enumerate() {
             if info.kind == BLOCK_COLUMN {
-                let payload = parsed.blocks[local_blk].payload;
-                if let Some(cnt) =
-                    crate::columns::count_grammar_block_expr_seq(payload, &mut carry, expr)?
-                {
+                let b = &parsed.blocks[local_blk];
+                if let Some(cnt) = crate::columns::with_v6_cols(b.col_slices, || {
+                    crate::columns::count_grammar_block_expr_seq(b.payload, &mut carry, expr)
+                })? {
                     total = total.checked_add(cnt).ok_or(Error::SizeOverflow)?;
                     continue;
                 }
@@ -233,7 +232,7 @@ fn filter_where_parallel(
                 }
                 let ib = &in_blocks[b];
                 let blk_lim = limit.saturating_add(usize::from(mb.had_in_carry));
-                let res: Result<Vec<RowMatch>> = (|| {
+                let res: Result<Vec<RowMatch>> = crate::columns::with_v6_cols(ib.col_slices, || {
                     let mut local_out = Vec::new();
                     if mb.decoded_raw.is_none() {
                         let mut dummy = if mb.had_in_carry {
@@ -260,13 +259,7 @@ fn filter_where_parallel(
                     let raw: &[u8] = if let Some(ref pre) = mb.decoded_raw {
                         pre
                     } else {
-                        query::decode_block_into(
-                            ib.f_bytes,
-                            ib.local_blk,
-                            ib.info.raw_size,
-                            options,
-                            &mut dec_buf,
-                        )?;
+                        ib.decode_into(options, &mut dec_buf)?;
                         &dec_buf
                     };
                     if raw.is_empty() {
@@ -291,7 +284,7 @@ fn filter_where_parallel(
                         }
                     }
                     Ok(local_out)
-                })();
+                });
                 match res {
                     Ok(v) => {
                         if limit < usize::MAX && v.len() >= limit {
@@ -354,15 +347,14 @@ pub(crate) fn filter_where_impl(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let prepared = crate::mmap::prepare_query_bytes(
+    let frames = Frame::parse_all_for_query(
         frame_bytes,
+        options.max_output,
         Some(expr),
         &[],
         false,
         options.threads,
-    );
-    let frame_bytes = prepared.as_ref();
-    let frames = Frame::parse_all(frame_bytes, options.max_output)?;
+    )?;
     if options.threads > 1 {
         if let Some(rows) = filter_where_parallel(frame_bytes, &frames, expr, limit, options)? {
             return Ok(rows);
@@ -383,16 +375,18 @@ pub(crate) fn filter_where_impl(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload = parsed.blocks[local_blk].payload;
-                if let Some(new_rows) = crate::columns::search_grammar_block_expr(
-                    payload,
-                    blk_idx,
-                    cur_global,
-                    &mut carry,
-                    expr,
-                    limit,
-                    &mut out,
-                )? {
+                let b = &parsed.blocks[local_blk];
+                if let Some(new_rows) = crate::columns::with_v6_cols(b.col_slices, || {
+                    crate::columns::search_grammar_block_expr(
+                        b.payload,
+                        blk_idx,
+                        cur_global,
+                        &mut carry,
+                        expr,
+                        limit,
+                        &mut out,
+                    )
+                })? {
                     cur_global += new_rows;
                     if out.len() >= limit && carry.is_none() {
                         return Ok(out);

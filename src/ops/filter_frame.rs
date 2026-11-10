@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::{checksum::crc32c, query, DecodeOptions, Frame, Options, Result};
+use crate::{checksum::crc32c, DecodeOptions, Frame, Options, Result};
 
 use super::emit::{emit_ready_blocks, BytesRef, ReadyBlock};
 use super::expr::{line_matches_expr, PredExpr};
@@ -27,20 +27,20 @@ fn eval_one_filter_block(
     }
     if meta.decoded_raw.is_none() {
         let mut out_bytes = Vec::new();
-        let g_res = match *expr {
+        let g_res = crate::columns::with_v6_cols(ib.col_slices, || match *expr {
             PredExpr::Col(ref pred) => crate::columns::filter_grammar_block_into_bytes(
                 ib.payload,
                 meta.had_in_carry,
                 pred,
                 &mut out_bytes,
-            )?,
+            ),
             _ => crate::columns::filter_grammar_block_expr_into_bytes(
                 ib.payload,
                 meta.had_in_carry,
                 expr,
                 &mut out_bytes,
-            )?,
-        };
+            ),
+        })?;
         match g_res {
             crate::columns::GrammarFilterBytesResult::Empty => return Ok(BlockFilterOut::Empty),
             crate::columns::GrammarFilterBytesResult::AllCompleteMatch => {
@@ -60,13 +60,7 @@ fn eval_one_filter_block(
     let raw: &[u8] = if let Some(ref pre) = meta.decoded_raw {
         pre
     } else {
-        query::decode_block_into(
-            ib.f_bytes,
-            ib.local_blk,
-            ib.info.raw_size,
-            dec_options,
-            dec_buf,
-        )?;
+        ib.decode_into(dec_options, dec_buf)?;
         dec_buf
     };
     if raw.is_empty() {
@@ -116,7 +110,14 @@ pub(super) fn filter_frame_expr_impl(
     dec_eff.threads = dec_options.threads.max(enc_options.threads);
     dec_eff.validate()?;
 
-    let frames = Frame::parse_all(frame_bytes, dec_eff.max_output)?;
+    let frames = Frame::parse_all_for_query(
+        frame_bytes,
+        dec_eff.max_output,
+        Some(expr),
+        &[],
+        false,
+        dec_eff.threads,
+    )?;
     let in_blocks = collect_par_blocks(frame_bytes, &frames);
     let nb = in_blocks.len();
     if nb == 0 {
@@ -211,8 +212,18 @@ pub(super) fn filter_frame_expr_impl(
                 ib.decode_into(&dec_eff, &mut crc_buf)?;
                 crc32c(&crc_buf)
             };
+            let payload = if ib.col_slices.is_empty() {
+                BytesRef::Borrowed(ib.payload)
+            } else {
+                let mut v = Vec::with_capacity(ib.info.payload_size);
+                v.extend_from_slice(ib.payload);
+                for &cs in ib.col_slices {
+                    v.extend_from_slice(cs);
+                }
+                BytesRef::Owned(v)
+            };
             ready.push(ReadyBlock {
-                payload: BytesRef::Borrowed(ib.payload),
+                payload,
                 dict: ib.dict,
                 kind: ib.info.kind,
                 raw_size: ib.info.raw_size,

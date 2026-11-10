@@ -59,6 +59,7 @@ pub struct StreamEncoder<W: Write> {
     chunk_size: usize,
     raw_buf: Vec<u8>,
     enc_buf: Vec<u8>,
+    v6_builder: Option<frame::v6::V6StreamBuilder>,
     frames_emitted: u64,
     total_in: u64,
     total_out: u64,
@@ -66,8 +67,17 @@ pub struct StreamEncoder<W: Write> {
 
 impl<W: Write> StreamEncoder<W> {
     /// Creates a new streaming encoder with a bounded default chunk size
-    /// (`4..16 MiB` scaled by `options.threads`, capped at `16 MiB`).
+    /// (`4..16 MiB` scaled by `options.threads` for `v4`/`v5`; a small `1..4`-block micro-batch
+    /// when `options.col_group` is enabled so blocks are encoded immediately into per-column buffers).
     pub fn new(writer: W, options: Options) -> Result<Self> {
+        if options.col_group && !options.legacy_v2 {
+            let micro_blocks = options.threads.clamp(1, 8);
+            let chunk_size = options
+                .block_size
+                .saturating_mul(micro_blocks)
+                .clamp(options.block_size, 4 << 20);
+            return Self::with_chunk_size(writer, options, chunk_size);
+        }
         let blocks = (options.threads.clamp(1, 32) * 16).clamp(64, 256);
         let chunk_size = options
             .block_size
@@ -79,7 +89,12 @@ impl<W: Write> StreamEncoder<W> {
     /// Creates a new streaming encoder flushing a self-contained VXG frame every `chunk_size` bytes.
     pub fn with_chunk_size(writer: W, options: Options, chunk_size: usize) -> Result<Self> {
         options.validate()?;
-        let blocks = chunk_size
+        let eff_chunk = if options.col_group && !options.legacy_v2 {
+            chunk_size.min(4 << 20)
+        } else {
+            chunk_size
+        };
+        let blocks = eff_chunk
             .max(options.block_size)
             .div_ceil(options.block_size);
         let aligned_chunk = blocks
@@ -89,12 +104,15 @@ impl<W: Write> StreamEncoder<W> {
             return Err(Error::InvalidOption("stream chunk_size must be <= 64 MiB"));
         }
         let _max_enc = max_compressed_size(aligned_chunk, options.block_size)?;
+        let v6_builder =
+            (options.col_group && !options.legacy_v2).then(frame::v6::V6StreamBuilder::new);
         Ok(Self {
             writer: Some(writer),
             options,
             chunk_size: aligned_chunk,
             raw_buf: Vec::new(),
             enc_buf: Vec::new(),
+            v6_builder,
             frames_emitted: 0,
             total_in: 0,
             total_out: 0,
@@ -109,6 +127,16 @@ impl<W: Write> StreamEncoder<W> {
     /// Total compressed bytes emitted to the underlying writer so far.
     pub fn total_out(&self) -> u64 {
         self.total_out
+    }
+
+    /// Current total buffer footprint (`raw_buf + enc_buf + active v6 group streams`).
+    pub fn buffered_bytes(&self) -> usize {
+        self.raw_buf.capacity()
+            + self.enc_buf.capacity()
+            + self
+                .v6_builder
+                .as_ref()
+                .map_or(0, frame::v6::V6StreamBuilder::buffered_compressed_bytes)
     }
 
     fn flush_slice(&mut self, len: usize) -> io::Result<()> {
@@ -129,7 +157,74 @@ impl<W: Write> StreamEncoder<W> {
         Ok(())
     }
 
+    fn flush_v6_step(&mut self, is_final: bool) -> io::Result<()> {
+        while !self.raw_buf.is_empty() {
+            let len = self.raw_buf.len();
+            let eff_bs = self.v6_builder.as_mut().unwrap().resolve_eff_bs(
+                &self.raw_buf,
+                &self.options,
+                is_final,
+            );
+            let target_micro = (eff_bs * self.options.threads.clamp(1, 8)).clamp(eff_bs, 4 << 20);
+            self.chunk_size = target_micro;
+            if !is_final && len < target_micro {
+                return Ok(());
+            }
+            let take_raw = len.min(target_micro);
+            let encode_len = if !is_final && self.options.record_aligned && take_raw > eff_bs / 2 {
+                let back = (eff_bs / 4).min(32_768).min(take_raw);
+                self.raw_buf[take_raw - back..take_raw]
+                    .iter()
+                    .rposition(|&c| c == b'\n')
+                    .map_or(take_raw, |rel| take_raw - back + rel + 1)
+            } else {
+                take_raw
+            };
+            let mut micro_opts = self
+                .v6_builder
+                .as_ref()
+                .and_then(|b| b.eff_opts.clone())
+                .unwrap_or_else(|| self.options.clone());
+            micro_opts.col_group = false;
+            let bound = max_compressed_size(encode_len, self.options.block_size).map_err(to_io_err)?;
+            if self.enc_buf.len() < bound {
+                self.enc_buf.resize(bound, 0);
+            }
+            let written = compress_into(&self.raw_buf[..encode_len], &mut self.enc_buf[..bound], &micro_opts)
+                .map_err(to_io_err)?;
+            let writer = self.writer.as_mut().ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
+            let v6_out = self
+                .v6_builder
+                .as_mut()
+                .unwrap()
+                .ingest_v5_micro_frame(&self.enc_buf[..written], writer, &self.options)
+                .map_err(to_io_err)?;
+            self.total_in += encode_len as u64;
+            self.total_out += v6_out;
+            self.frames_emitted += u64::from(v6_out > 0);
+            self.raw_buf.drain(..encode_len);
+        }
+        if is_final {
+            let writer = self.writer.as_mut().ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
+            let v6_out = self
+                .v6_builder
+                .as_mut()
+                .unwrap()
+                .flush_group(writer, &self.options)
+                .map_err(to_io_err)?;
+            self.total_out += v6_out;
+            self.frames_emitted += u64::from(v6_out > 0);
+            if self.frames_emitted == 0 {
+                self.flush_slice(0)?;
+            }
+        }
+        Ok(())
+    }
+
     fn flush_chunk(&mut self) -> io::Result<()> {
+        if self.v6_builder.is_some() {
+            return self.flush_v6_step(false);
+        }
         let len = self.raw_buf.len();
         self.flush_slice(len)?;
         self.raw_buf.clear();
@@ -139,7 +234,9 @@ impl<W: Write> StreamEncoder<W> {
     /// Flushes any remaining buffered bytes (or emits an empty VXG frame if 0 bytes were written)
     /// and returns the underlying writer.
     pub fn finish(mut self) -> io::Result<W> {
-        if !self.raw_buf.is_empty() || self.frames_emitted == 0 {
+        if self.v6_builder.is_some() {
+            self.flush_v6_step(true)?;
+        } else if !self.raw_buf.is_empty() || self.frames_emitted == 0 {
             self.flush_chunk()?;
         }
         let mut writer = self.writer.take().unwrap();
@@ -152,11 +249,11 @@ impl<W: Write> Write for StreamEncoder<W> {
     fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
         let total = buf.len();
         while !buf.is_empty() {
-            let space = self.chunk_size - self.raw_buf.len();
+            let space = self.chunk_size.saturating_sub(self.raw_buf.len()).max(1);
             let take = buf.len().min(space);
             self.raw_buf.extend_from_slice(&buf[..take]);
             buf = &buf[take..];
-            if self.raw_buf.len() == self.chunk_size {
+            if self.raw_buf.len() >= self.chunk_size {
                 self.flush_chunk()?;
             }
         }
@@ -164,7 +261,9 @@ impl<W: Write> Write for StreamEncoder<W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if !self.raw_buf.is_empty() {
+        if self.v6_builder.is_some() {
+            self.flush_v6_step(true)?;
+        } else if !self.raw_buf.is_empty() {
             self.flush_chunk()?;
         }
         if let Some(ref mut w) = self.writer {
@@ -176,8 +275,12 @@ impl<W: Write> Write for StreamEncoder<W> {
 
 impl<W: Write> Drop for StreamEncoder<W> {
     fn drop(&mut self) {
-        if self.writer.is_some() && (!self.raw_buf.is_empty() || self.frames_emitted == 0) {
-            let _ = self.flush_chunk();
+        if self.writer.is_some() {
+            if self.v6_builder.is_some() {
+                let _ = self.flush_v6_step(true);
+            } else if !self.raw_buf.is_empty() || self.frames_emitted == 0 {
+                let _ = self.flush_chunk();
+            }
         }
     }
 }
@@ -308,6 +411,23 @@ pub fn compress_stream<R: Read, W: Write>(
     options: &Options,
 ) -> Result<(u64, u64)> {
     let mut enc = StreamEncoder::new(writer, options.clone())?;
+    if enc.v6_builder.is_some() {
+        let mut io_buf = vec![0u8; 65_536];
+        loop {
+            match reader.read(&mut io_buf) {
+                Ok(0) => break,
+                Ok(n) => enc.write_all(&io_buf[..n]).map_err(from_io_err)?,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(from_io_err(e)),
+            }
+        }
+        let total_in = enc.total_in + enc.raw_buf.len() as u64;
+        let _ = total_in;
+        enc.flush_v6_step(true).map_err(from_io_err)?;
+        let stats = (enc.total_in, enc.total_out);
+        enc.finish().map_err(from_io_err)?;
+        return Ok(stats);
+    }
     enc.raw_buf.resize(enc.chunk_size, 0);
     let mut filled = 0usize;
     loop {
@@ -342,9 +462,7 @@ pub fn decompress_stream<R: Read, W: Write>(
 ) -> Result<u64> {
     let mut dec = StreamDecoder::new(reader, options.clone())?;
     while dec.load_next_frame().map_err(from_io_err)? {
-        writer
-            .write_all(&dec.out_buf[..dec.out_len])
-            .map_err(from_io_err)?;
+        writer.write_all(&dec.out_buf[..dec.out_len]).map_err(from_io_err)?;
     }
     writer.flush().map_err(from_io_err)?;
     Ok(dec.total_out)
@@ -358,9 +476,7 @@ pub(crate) fn scan_concatenated_frames(
     if src.is_empty() {
         return Err(Error::Truncated);
     }
-    let mut pos = 0usize;
-    let mut total_raw = 0usize;
-    let mut spans = Vec::new();
+    let (mut pos, mut total_raw, mut spans) = (0usize, 0usize, Vec::new());
     while pos < src.len() {
         if pos > 0 && (src.len() - pos < 4 || &src[pos..pos + 4] != frame::MAGIC) {
             return Err(Error::InvalidFrame("trailing bytes or incorrect total"));
@@ -381,18 +497,13 @@ pub(crate) fn scan_concatenated_frames(
 pub(crate) fn decompress_concatenated(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     let (total_raw, spans) = scan_concatenated_frames(src, options.max_output)?;
     let mut out = Vec::new();
-    out.try_reserve_exact(total_raw)
-        .map_err(|_| Error::SizeOverflow)?;
+    out.try_reserve_exact(total_raw).map_err(|_| Error::SizeOverflow)?;
     out.resize(total_raw, 0);
     let mut out_pos = 0usize;
     for (start, end, raw_size) in spans {
         let mut f_opt = options.clone();
         f_opt.max_output = raw_size;
-        decompress_into(
-            &src[start..end],
-            &mut out[out_pos..out_pos + raw_size],
-            &f_opt,
-        )?;
+        decompress_into(&src[start..end], &mut out[out_pos..out_pos + raw_size], &f_opt)?;
         out_pos += raw_size;
     }
     Ok(out)
@@ -405,20 +516,13 @@ pub(crate) fn decompress_concatenated_into(
 ) -> Result<()> {
     let (total_raw, spans) = scan_concatenated_frames(src, options.max_output)?;
     if out.len() != total_raw {
-        return Err(Error::OutputSize {
-            expected: total_raw,
-            actual: out.len(),
-        });
+        return Err(Error::OutputSize { expected: total_raw, actual: out.len() });
     }
     let mut out_pos = 0usize;
     for (start, end, raw_size) in spans {
         let mut f_opt = options.clone();
         f_opt.max_output = raw_size;
-        decompress_into(
-            &src[start..end],
-            &mut out[out_pos..out_pos + raw_size],
-            &f_opt,
-        )?;
+        decompress_into(&src[start..end], &mut out[out_pos..out_pos + raw_size], &f_opt)?;
         out_pos += raw_size;
     }
     Ok(())

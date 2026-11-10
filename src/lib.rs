@@ -58,6 +58,11 @@ pub use mmap::{
     compress_file, decompress_file, mmap_supported, verify_file, InputBytes, MappedFile,
     MappedFileMut,
 };
+#[doc(hidden)]
+pub use mmap::{
+    legacy_four_page_probe, mincore_call_count, pread_bytes_count, pread_call_count,
+    reset_mincore_call_count, reset_pread_counters, ChunkResidency, CHUNK_BYTES,
+};
 pub use ops::{
     aggregate_column, count_where, filter_column, filter_frame, filter_frame_where, filter_where,
     group_by, map_column, parse_col_list, parse_col_target, project_frame, select_columns,
@@ -106,8 +111,9 @@ pub struct Options {
     /// neither `record_aligned` nor `BLOCK_DICT_LZ` is active, enabling $O(1)$ `frame_row_count` and
     /// $O(\log B)$ random row seek without touching non-overlapping block payloads.
     pub row_index: bool,
-    /// Emit `VERSION_V6` (`FLAG_COL_GROUP = 0x10`) column-grouped macro-blocks (`~1 MiB`/column stream
-    /// per group), storing $N$ block headers contiguously followed by each column's $N$ blocks contiguously.
+    /// Developer-only experimental flag (`--col-group`): emit `VERSION_V6` (`FLAG_COL_GROUP = 0x10`)
+    /// column-grouped macro-blocks (`~1 MiB`/column stream per group).
+    #[doc(hidden)]
     pub col_group: bool,
 }
 impl Default for Options {
@@ -346,6 +352,20 @@ fn compress_inner<const STATS: bool>(
 
 pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     options.validate()?;
+    if frame::v6::is_v6_frame(src) {
+        let hdr = frame::v5::parse_v1_to_v5_header(src, options.max_output)?;
+        if hdr.raw_size > isize::MAX as usize {
+            return Err(Error::SizeOverflow);
+        }
+        let mut out = vec![0u8; hdr.raw_size];
+        return match frame::v6::decode_v6_direct_into(src, &mut out, options) {
+            Ok(()) => Ok(out),
+            Err(Error::InvalidFrame("trailing bytes or incorrect total")) => {
+                stream::decompress_concatenated(src, options)
+            }
+            Err(e) => Err(e),
+        };
+    }
     let mut v4_offsets = [core::mem::MaybeUninit::<u32>::uninit(); frame::MAX_STACK_DIR_BLOCKS + 1];
     let (raw_size, block_size, count, version, checksummed) =
         match frame::validate_header_and_directory_with_offsets(
@@ -405,6 +425,15 @@ pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
 
 pub fn decompress_into(src: &[u8], out: &mut [u8], options: &DecodeOptions) -> Result<()> {
     options.validate()?;
+    if frame::v6::is_v6_frame(src) {
+        return match frame::v6::decode_v6_direct_into(src, out, options) {
+            Ok(()) => Ok(()),
+            Err(Error::InvalidFrame("trailing bytes or incorrect total")) => {
+                stream::decompress_concatenated_into(src, out, options)
+            }
+            Err(e) => Err(e),
+        };
+    }
     let mut v4_offsets = [core::mem::MaybeUninit::<u32>::uninit(); frame::MAX_STACK_DIR_BLOCKS + 1];
     let (raw_size, block_size, count, version, checksummed) =
         match frame::validate_header_and_directory_with_offsets(

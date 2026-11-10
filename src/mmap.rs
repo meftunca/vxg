@@ -14,7 +14,12 @@ use crate::{
 pub(crate) mod pread;
 pub(crate) mod sys;
 
-pub(crate) use pread::{peek_cold_prefix, prepare_query_bytes};
+pub(crate) use pread::peek_cold_prefix;
+pub use pread::{pread_bytes_count, pread_call_count, reset_pread_counters};
+pub use sys::{
+    legacy_four_page_probe, mincore_call_count, reset_mincore_call_count, ChunkResidency,
+    CHUNK_BYTES,
+};
 
 /// Returns `true` if native OS memory mapping is compiled in for this target.
 #[inline]

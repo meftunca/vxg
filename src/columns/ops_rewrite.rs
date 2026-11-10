@@ -227,6 +227,9 @@ pub(crate) fn rewrite_grammar_block(
         }
 
         let mut tpl_cols: Vec<Vec<(usize, usize, &[u8])>> = Vec::with_capacity(hdr.template_count);
+        if hdr.cursor.done() && hdr.slot_counts[..hdr.template_count].iter().sum::<usize>() > 0 {
+            return Ok(GrammarRewrite::Fallback);
+        }
         for t in 0..hdr.template_count {
             let slots = hdr.slot_counts[t];
             let mut cols_meta = Vec::with_capacity(slots);

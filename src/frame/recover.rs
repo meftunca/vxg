@@ -73,8 +73,8 @@ pub fn recover_frame(src: &[u8], options: &DecodeOptions) -> Result<RecoveryRepo
     if src.is_empty() {
         return Err(Error::Truncated);
     }
-    if super::v6::is_v6_frame(src) {
-        return super::v6::recover_v6_frame(src, options);
+    if super::v6::is_v6_frame(src) || has_v6_group_markers(src) {
+        return recover_v6_frame(src, options);
     }
 
     let mut frame_pos = 0usize;
@@ -234,4 +234,271 @@ pub fn recover_frame(src: &[u8], options: &DecodeOptions) -> Result<RecoveryRepo
     }
 
     Ok(report)
+}
+
+fn has_v6_group_markers(src: &[u8]) -> bool {
+    if src.len() >= HEADER_SIZE && &src[..4] == MAGIC {
+        let ver = u16::from_le_bytes([src[4], src[5]]);
+        if (1..=5).contains(&ver) {
+            return false;
+        }
+    }
+    src.windows(4)
+        .any(|w| w == super::v6::GROUP_MAGIC || w == super::v6::GROUP_TRAILER_MAGIC)
+}
+
+pub(crate) fn recover_v6_frame(src: &[u8], options: &DecodeOptions) -> Result<RecoveryReport> {
+    use super::v6::{parse_v6_group_dir, ParsedGroupHeader, GROUP_MAGIC, GROUP_TRAILER_MAGIC};
+    options.validate()?;
+    let hdr_opt = v5::parse_v1_to_v5_header(src, options.max_output).ok();
+    let dir_opt = hdr_opt
+        .as_ref()
+        .and_then(|h| parse_v6_group_dir(src, h).ok());
+    let dict = hdr_opt
+        .as_ref()
+        .and_then(|h| v5::decode_header_dict(src, h).ok())
+        .unwrap_or_default();
+    let engine = Engine::new(options.simd)?;
+
+    let mut global_infos: Vec<Option<(usize, usize, usize, u32, u32)>> = Vec::new();
+    if let Some(ref hdr) = hdr_opt {
+        global_infos.reserve(hdr.count);
+        let mut next_raw = 0usize;
+        for i in 0..hdr.count {
+            let p = HEADER_SIZE + i * 8;
+            if let (Ok(rn), Ok(word), Ok(csum)) = (
+                v5::block_raw_size(src, hdr, i, next_raw),
+                read_u32(src, p),
+                read_u32(src, p + 4),
+            ) {
+                let cn = (word & V4_SIZE_MASK) as usize;
+                let kind = word >> 30;
+                global_infos.push(Some((next_raw, rn, cn, csum, kind)));
+                next_raw = next_raw.saturating_add(rn);
+            } else {
+                global_infos.push(None);
+                next_raw = next_raw.saturating_add(hdr.block_size);
+            }
+        }
+    }
+
+    let mut found_groups: Vec<(u32, ParsedGroupHeader<'_>, &[u8])> = Vec::new();
+    let mut failed_group_ranges: Vec<(usize, usize, String)> = Vec::new();
+
+    if let (Some(ref hdr), Some((total_v6_payload, ref entries))) = (&hdr_opt, &dir_opt) {
+        let v6_end = hdr
+            .payload_start
+            .saturating_add(*total_v6_payload as usize)
+            .min(src.len());
+        if hdr.payload_start <= v6_end {
+            let v6_payload = &src[hdr.payload_start..v6_end];
+            for (gi, entry) in entries.iter().enumerate() {
+                let g_start = entry.payload_rel_offset as usize;
+                let g_end = entries
+                    .get(gi + 1)
+                    .map(|e| e.payload_rel_offset as usize)
+                    .unwrap_or(*total_v6_payload as usize)
+                    .min(v6_payload.len());
+                if g_start < g_end {
+                    let gs = &v6_payload[g_start..g_end];
+                    match ParsedGroupHeader::parse_resilient(gs, entry.start_block) {
+                        Ok(gh) => found_groups.push((entry.start_block, gh, gs)),
+                        Err(e) => failed_group_ranges.push((
+                            entry.start_block as usize,
+                            entry.block_count as usize,
+                            e.to_string(),
+                        )),
+                    }
+                } else {
+                    failed_group_ranges.push((
+                        entry.start_block as usize,
+                        entry.block_count as usize,
+                        "group truncated".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let scan_start = hdr_opt
+        .as_ref()
+        .map_or(HEADER_SIZE.min(src.len()), |h| h.payload_start.min(src.len()));
+    let mut pos = scan_start;
+    while pos + 16 <= src.len() {
+        if &src[pos..pos + 4] == GROUP_MAGIC {
+            if let Ok(gh) = ParsedGroupHeader::parse_any_start(&src[pos..]) {
+                let end_streams = gh.data_offset.saturating_add(gh.total_streams_bytes());
+                if pos + end_streams <= src.len()
+                    && !found_groups.iter().any(|&(sb, _, _)| sb == gh.start_block)
+                {
+                    failed_group_ranges.retain(|&(sb, _, _)| sb != gh.start_block as usize);
+                    found_groups.push((gh.start_block, gh, &src[pos..pos + end_streams]));
+                    pos += end_streams;
+                    continue;
+                }
+            }
+        } else if &src[pos..pos + 4] == GROUP_TRAILER_MAGIC && pos >= 20 {
+            if let Ok(gh_len_u32) = read_u32(src, pos - 4) {
+                let gh_len = gh_len_u32 as usize;
+                if gh_len >= 16 && pos >= 4 + gh_len {
+                    let bk_start = pos - 4 - gh_len;
+                    if let Ok(gh) =
+                        ParsedGroupHeader::parse_any_start(&src[bk_start..bk_start + gh_len])
+                    {
+                        let st_bytes = gh.total_streams_bytes();
+                        if bk_start >= st_bytes
+                            && !found_groups.iter().any(|&(sb, _, _)| sb == gh.start_block)
+                        {
+                            let data_start = bk_start - st_bytes;
+                            let g_start = data_start.saturating_sub(gh.data_offset);
+                            failed_group_ranges.retain(|&(sb, _, _)| sb != gh.start_block as usize);
+                            found_groups.push((gh.start_block, gh, &src[g_start..pos + 4]));
+                        }
+                    }
+                }
+            }
+        }
+        pos += 1;
+    }
+    found_groups.sort_by_key(|&(sb, _, _)| sb);
+
+    if found_groups.is_empty() && hdr_opt.is_none() {
+        return Err(Error::InvalidFrame("magic/version"));
+    }
+
+    let total_blocks = hdr_opt.as_ref().map_or_else(
+        || {
+            found_groups
+                .iter()
+                .map(|&(sb, ref gh, _)| sb as usize + gh.count)
+                .max()
+                .unwrap_or(0)
+        },
+        |h| h.count,
+    );
+    let expected_raw_size = hdr_opt.as_ref().map_or(0, |h| h.raw_size);
+    let verify_csum = hdr_opt.as_ref().is_none_or(|h| h.checksummed) && options.verify_checksum;
+
+    let mut data = Vec::with_capacity(expected_raw_size.min(16 << 20));
+    let mut recovered_blocks = Vec::new();
+    let mut failed_blocks = Vec::new();
+    let mut scratch = Vec::new();
+
+    for (sb, bc, reason) in failed_group_ranges {
+        for bi in 0..bc {
+            let idx = sb + bi;
+            let (raw_offset, raw_size) = global_infos
+                .get(idx)
+                .and_then(|&x| x)
+                .map_or((0, 0), |(ro, rs, _, _, _)| (ro, rs));
+            failed_blocks.push(FailedBlock {
+                index: idx,
+                raw_offset,
+                raw_size,
+                reason: reason.clone(),
+            });
+        }
+    }
+
+    for (sb_u32, gh, gs) in found_groups {
+        let sb = sb_u32 as usize;
+        let mut stream_bases = Vec::with_capacity(gh.slots + 1);
+        let mut cur = gh.data_offset;
+        for s in 0..=gh.slots {
+            stream_bases.push(cur);
+            cur += gh.stream_total_len(s);
+        }
+        let mut running_raw = global_infos
+            .get(sb)
+            .and_then(|&x| x)
+            .map_or(0, |(ro, _, _, _, _)| ro);
+
+        for bi in 0..gh.count {
+            let idx = sb + bi;
+            let meta_opt = gh
+                .backup_block_meta(bi)
+                .map(|(word, csum, rn)| {
+                    let cn = (word & V4_SIZE_MASK) as usize;
+                    let kind = word >> 30;
+                    (running_raw, rn, cn, csum, kind)
+                })
+                .or_else(|| global_infos.get(idx).and_then(|&x| x));
+            let Some((raw_offset, raw_size, cn, csum, kind)) = meta_opt else {
+                failed_blocks.push(FailedBlock {
+                    index: idx,
+                    raw_offset: running_raw,
+                    raw_size: 0,
+                    reason: "missing block metadata".to_owned(),
+                });
+                continue;
+            };
+            running_raw = raw_offset.saturating_add(raw_size);
+            if data.len().saturating_add(raw_size) > options.max_output {
+                return Err(Error::OutputLimit {
+                    requested: (data.len() + raw_size) as u64,
+                    limit: options.max_output,
+                });
+            }
+            let mut blk_buf = Vec::with_capacity(cn);
+            let mut bounds_ok = true;
+            for (s, &s_base) in stream_bases.iter().enumerate() {
+                let (st, en) = gh.stream_slice_range(s, bi);
+                if let Some(sl) = gs.get(s_base + st..s_base + en) {
+                    blk_buf.extend_from_slice(sl);
+                } else {
+                    bounds_ok = false;
+                    break;
+                }
+            }
+            if !bounds_ok || blk_buf.len() != cn {
+                failed_blocks.push(FailedBlock {
+                    index: idx,
+                    raw_offset,
+                    raw_size,
+                    reason: "v6 block stream slice out of bounds".to_owned(),
+                });
+                continue;
+            }
+            scratch.resize(raw_size, 0);
+            match block::decode_with_dict(&blk_buf, kind, &mut scratch, engine, true, &dict) {
+                Ok(()) if !verify_csum || crc32c(&scratch) == csum => {
+                    let output_offset = data.len();
+                    data.extend_from_slice(&scratch);
+                    recovered_blocks.push(RecoveredBlock {
+                        index: g_idx_val(idx),
+                        raw_offset,
+                        raw_size,
+                        output_offset,
+                        kind,
+                    });
+                }
+                Ok(()) => failed_blocks.push(FailedBlock {
+                    index: idx,
+                    raw_offset,
+                    raw_size,
+                    reason: format!("checksum mismatch in block {idx}"),
+                }),
+                Err(error) => failed_blocks.push(FailedBlock {
+                    index: idx,
+                    raw_offset,
+                    raw_size,
+                    reason: error.to_string(),
+                }),
+            }
+        }
+    }
+    recovered_blocks.sort_by_key(|b| b.index);
+    failed_blocks.sort_by_key(|b| b.index);
+    Ok(RecoveryReport {
+        data,
+        total_blocks,
+        expected_raw_size,
+        recovered_blocks,
+        failed_blocks,
+    })
+}
+
+#[inline]
+const fn g_idx_val(idx: usize) -> usize {
+    idx
 }

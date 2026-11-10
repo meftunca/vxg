@@ -437,26 +437,47 @@ fn v6_corrupt_group_header_recovery_salvages_remaining_groups() {
     let row0 = extract_row(&v6_frame, 0, &DecodeOptions::default()).unwrap();
     assert!(row0.starts_with(b"{\"id\":1000,"));
 
-    // Locate the first "VXG6" group header magic inside the frame and corrupt it
+    // 1. Corrupt Group 0's primary "VXG6" header magic + CRC:
+    //    Strict decompress must reject it, while `recover_frame` recovers 100% of Group 0 (and Group 1)
+    //    via the trailing backup group header (`6GXV`)!
     let g0_magic_pos = v6_frame
         .windows(4)
         .position(|w| w == b"VXG6")
         .expect("must contain VXG6 group header");
-    let mut corrupted = v6_frame.clone();
-    corrupted[g0_magic_pos] ^= 0xff;
-    corrupted[g0_magic_pos + 4] ^= 0xff;
+    let mut corrupted_primary = v6_frame.clone();
+    corrupted_primary[g0_magic_pos] ^= 0xff;
+    corrupted_primary[g0_magic_pos + 4] ^= 0xff;
 
     assert!(
-        decompress(&corrupted, &DecodeOptions::default()).is_err(),
-        "strict decompress must reject corrupted group 0 header"
+        decompress(&corrupted_primary, &DecodeOptions::default()).is_err(),
+        "strict decompress must reject corrupted group 0 primary header"
     );
 
-    let rep = recover_frame(&corrupted, &DecodeOptions::default()).unwrap();
+    let rep_primary = recover_frame(&corrupted_primary, &DecodeOptions::default()).unwrap();
+    assert_eq!(rep_primary.total_blocks, 4);
+    assert_eq!(
+        rep_primary.failed_blocks.len(),
+        0,
+        "Group 0 backup header (6GXV) must recover all blocks in Group 0"
+    );
+    assert_eq!(rep_primary.recovered_blocks.len(), 4);
+    assert_eq!(rep_primary.data, raw);
+
+    // 2. Also corrupt Group 0's backup trailer ("6GXV") in addition to its primary header:
+    //    Group 0 (blocks 0..2) fails, while Group 1 (blocks 2..4) is recovered intact via Group Directory.
+    let g0_trailer_pos = corrupted_primary
+        .windows(4)
+        .position(|w| w == b"6GXV")
+        .expect("must contain 6GXV backup trailer");
+    let mut corrupted_both = corrupted_primary.clone();
+    corrupted_both[g0_trailer_pos] ^= 0xff;
+
+    let rep = recover_frame(&corrupted_both, &DecodeOptions::default()).unwrap();
     assert_eq!(rep.total_blocks, 4);
     assert_eq!(
         rep.failed_blocks.len(),
         2,
-        "Group 0 (blocks 0..2) must be recorded as failed"
+        "Group 0 (blocks 0..2) must be recorded as failed when both primary and backup headers are corrupt"
     );
     assert_eq!(
         rep.recovered_blocks.len(),

@@ -126,18 +126,51 @@ fn reserve_raw_arena_for_block(
     let mut lz_dict_cols = 0usize;
     let mut need_raw = has_lz_raw;
     if let Some(slots) = single_slots.filter(|_| raw_count == 0) {
-        let mut cprobe = *cursor;
-        for _ in 0..slots {
-            let len = cprobe.uleb()?;
-            let cb = cprobe.take(len)?;
-            if let Some(&t) = cb.first() {
-                if matches!(
-                    t,
-                    MODEL_RAW | MODEL_LZ_RAW | MODEL_DICTIONARY | MODEL_FRONT_DICT | MODEL_PATTERN
-                ) {
-                    need_raw = true;
-                    if t == MODEL_FRONT_DICT && cb.get(1).is_some_and(|&h| (h & 0x80) != 0) {
-                        lz_dict_cols += 1;
+        if cursor.done() && slots > 0 {
+            if let Some(v6_cols) = current_v6_cols() {
+                if v6_cols.len() < slots {
+                    return Err(invalid("v6 column slice count mismatch"));
+                }
+                for &raw_cb in &v6_cols[..slots] {
+                    let cb = strip_v6_col_uleb(raw_cb)?;
+                    if let Some(&t) = cb.first() {
+                        if matches!(
+                            t,
+                            MODEL_RAW
+                                | MODEL_LZ_RAW
+                                | MODEL_DICTIONARY
+                                | MODEL_FRONT_DICT
+                                | MODEL_PATTERN
+                        ) {
+                            need_raw = true;
+                            if t == MODEL_FRONT_DICT && cb.get(1).is_some_and(|&h| (h & 0x80) != 0)
+                            {
+                                lz_dict_cols += 1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                return Err(invalid("missing grammar column slices"));
+            }
+        } else {
+            let mut cprobe = *cursor;
+            for _ in 0..slots {
+                let len = cprobe.uleb()?;
+                let cb = cprobe.take(len)?;
+                if let Some(&t) = cb.first() {
+                    if matches!(
+                        t,
+                        MODEL_RAW
+                            | MODEL_LZ_RAW
+                            | MODEL_DICTIONARY
+                            | MODEL_FRONT_DICT
+                            | MODEL_PATTERN
+                    ) {
+                        need_raw = true;
+                        if t == MODEL_FRONT_DICT && cb.get(1).is_some_and(|&h| (h & 0x80) != 0) {
+                            lz_dict_cols += 1;
+                        }
                     }
                 }
             }

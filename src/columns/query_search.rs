@@ -140,13 +140,7 @@ pub(crate) fn search_grammar_block(
 
             let slots = slot_counts[0];
             let mut col_slices = [&[][..]; MAX_SLOTS];
-            for s in 0..slots {
-                let len = cursor.uleb()?;
-                col_slices[s] = cursor.take(len)?;
-            }
-            if !cursor.done() {
-                return Err(invalid("column packet trailing bytes"));
-            }
+            read_single_tpl_col_slices(&mut cursor, slots, &mut col_slices)?;
 
             let had_incoming_carry = carry.is_some();
             let base_row = if had_incoming_carry {
@@ -439,12 +433,27 @@ pub(crate) fn search_grammar_block(
         let cols: &mut [PreparedColumn; MAX_SLOTS] = unsafe { cols_uninit.assume_init_mut() };
         let mut unbound_templates: Vec<Option<UnboundTemplate>> = vec![None; template_count];
         let mut col_slices_tmp = [&[][..]; MAX_SLOTS];
+        let v6_cols_opt = if cursor.done() { current_v6_cols() } else { None };
+        let mut v6_pos = 0usize;
         for tpl_idx in 0..template_count {
             let slots = slot_counts[tpl_idx];
             let count = sel_counts[tpl_idx + 1];
-            for col_out in col_slices_tmp.iter_mut().take(slots) {
-                let len = cursor.uleb()?;
-                *col_out = cursor.take(len)?;
+            if let Some(v6_cols) = v6_cols_opt {
+                if v6_pos + slots > v6_cols.len() {
+                    return Err(invalid("v6 column slice count mismatch"));
+                }
+                for (dst, &raw) in col_slices_tmp[..slots]
+                    .iter_mut()
+                    .zip(v6_cols[v6_pos..v6_pos + slots].iter())
+                {
+                    *dst = strip_v6_col_uleb(raw)?;
+                }
+                v6_pos += slots;
+            } else {
+                for col_out in col_slices_tmp.iter_mut().take(slots) {
+                    let len = cursor.uleb()?;
+                    *col_out = cursor.take(len)?;
+                }
             }
             if count == 0 {
                 continue;

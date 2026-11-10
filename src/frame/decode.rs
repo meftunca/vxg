@@ -82,9 +82,20 @@ pub(super) fn decode_frame_into(
                         b.info.raw_size,
                     )
                 };
-                let res = if let Some(_proof) = proof {
-                    unsafe {
-                        block::decode_validated_with_dict(
+                let res = crate::columns::with_v6_cols(b.col_slices, || {
+                    if let Some(_proof) = proof {
+                        unsafe {
+                            block::decode_validated_with_dict(
+                                b.payload,
+                                b.info.kind,
+                                target,
+                                engine,
+                                short_distance,
+                                dict_ref,
+                            )
+                        }
+                    } else {
+                        block::decode_with_dict(
                             b.payload,
                             b.info.kind,
                             target,
@@ -93,16 +104,7 @@ pub(super) fn decode_frame_into(
                             dict_ref,
                         )
                     }
-                } else {
-                    block::decode_with_dict(
-                        b.payload,
-                        b.info.kind,
-                        target,
-                        engine,
-                        short_distance,
-                        dict_ref,
-                    )
-                };
+                });
                 if let Err(e) = res {
                     aborted.store(true, Ordering::Relaxed);
                     return Err(e);
@@ -343,8 +345,8 @@ pub(crate) fn extract_block_validated_into(
     out: &mut [u8],
     options: &DecodeOptions,
 ) -> Result<usize> {
-    if v6::is_v6_frame(src) {
-        return v6::extract_block_v6_into(src, block_index, out, options);
+    if let Some(res) = v6::try_extract_block_v6_into(src, block_index, out, options) {
+        return res;
     }
     options.validate()?;
     let (_raw_size, block_size, count, version, checksummed) =
@@ -514,7 +516,9 @@ fn decode_group(
     let mut offset = 0;
     for (i, b) in blocks.iter().enumerate() {
         let target = &mut out[offset..offset + b.info.raw_size];
-        block::decode_with_dict(b.payload, b.info.kind, target, engine, short_distance, dict)?;
+        crate::columns::with_v6_cols(b.col_slices, || {
+            block::decode_with_dict(b.payload, b.info.kind, target, engine, short_distance, dict)
+        })?;
         if verify && crc32c(target) != b.info.checksum {
             return Err(Error::Checksum { block: first + i });
         }
@@ -536,7 +540,7 @@ fn decode_validated_group(
     let mut offset = 0;
     for (i, b) in blocks.iter().enumerate() {
         let target = &mut out[offset..offset + b.info.raw_size];
-        unsafe {
+        crate::columns::with_v6_cols(b.col_slices, || unsafe {
             block::decode_validated_with_dict(
                 b.payload,
                 b.info.kind,
@@ -544,8 +548,8 @@ fn decode_validated_group(
                 engine,
                 short_distance,
                 dict,
-            )?;
-        }
+            )
+        })?;
         if verify && crc32c(target) != b.info.checksum {
             return Err(Error::Checksum { block: first + i });
         }

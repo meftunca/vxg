@@ -37,6 +37,7 @@ pub(crate) struct ParInBlock<'a> {
     pub(crate) dict: &'a [u8],
     pub(crate) info: frame::BlockInfo,
     pub(crate) payload: &'a [u8],
+    pub(crate) col_slices: &'a [&'a [u8]],
     pub(crate) row_meta: Option<(usize, bool)>,
 }
 
@@ -45,14 +46,16 @@ impl ParInBlock<'_> {
     pub(crate) fn decode_into(&self, options: &DecodeOptions, buf: &mut Vec<u8>) -> Result<()> {
         buf.clear();
         buf.resize(self.info.raw_size, 0);
-        crate::block::decode_with_dict(
-            self.payload,
-            self.info.kind,
-            buf,
-            crate::simd::Engine::new(options.simd)?,
-            self.version >= 2,
-            self.dict,
-        )?;
+        crate::columns::with_v6_cols(self.col_slices, || {
+            crate::block::decode_with_dict(
+                self.payload,
+                self.info.kind,
+                buf,
+                crate::simd::Engine::new(options.simd)?,
+                self.version >= 2,
+                self.dict,
+            )
+        })?;
         if self.frame_checksummed
             && options.verify_checksum
             && crate::checksum::crc32c(buf) != self.info.checksum
@@ -131,6 +134,7 @@ pub(crate) fn collect_par_blocks<'a>(
                 dict,
                 info,
                 payload: parsed.blocks[local_blk].payload,
+                col_slices: parsed.blocks[local_blk].col_slices,
                 row_meta: parsed.block_row_meta(local_blk),
             });
         }

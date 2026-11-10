@@ -78,6 +78,7 @@ pub struct BlockInfo {
 pub(crate) struct Block<'a> {
     pub info: BlockInfo,
     pub payload: &'a [u8],
+    pub col_slices: &'a [&'a [u8]],
 }
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ArenaPart {
@@ -105,6 +106,7 @@ pub struct Frame<'a> {
     pub(crate) checksummed: bool,
     pub(crate) version: u16,
     pub(crate) _owned_arena: Vec<u8>,
+    pub(crate) _owned_col_slices: Vec<&'static [u8]>,
 }
 /// A frame whose command streams have been checked once and remain immutably
 /// borrowed for repeated CPU decode. Construct it with `Frame::into_validated`.
@@ -309,6 +311,7 @@ impl<'a> Frame<'a> {
                     kind,
                 },
                 payload,
+                col_slices: &[],
             });
             next_raw += rn;
             next_payload = end;
@@ -325,6 +328,7 @@ impl<'a> Frame<'a> {
             checksummed: hdr.checksummed,
             version: hdr.version,
             _owned_arena: Vec::new(),
+            _owned_col_slices: Vec::new(),
         })
     }
     /// Parses one `VXG1` frame or a concatenated sequence of `VXG1` frames.
@@ -341,6 +345,87 @@ impl<'a> Frame<'a> {
             }
             Err(e) => Err(e),
         }
+    }
+    /// Parses one or more frames for query execution: uses a single `mincore(2)` residency probe
+    /// (`take_or_probe_residency`) across `src`, serving resident `1 MiB` chunks zero-copy from
+    /// `mmap` and reading non-resident chunks via parallel `1 MiB` coalesced `pread(2)`.
+    pub(crate) fn parse_all_for_query(
+        src: &'a [u8],
+        max_output: usize,
+        where_expr: Option<&crate::ops::PredExpr<'_>>,
+        extra_cols: &[crate::ops::ColTarget<'_>],
+        allow_partial_cols: bool,
+        threads: usize,
+    ) -> Result<Vec<Self>> {
+        let res = crate::mmap::pread::take_or_probe_residency(src);
+        match Self::parse_one_for_query(
+            src,
+            max_output,
+            where_expr,
+            extra_cols,
+            allow_partial_cols,
+            threads,
+            &res,
+        ) {
+            Ok(f) => Ok(vec![f]),
+            Err(Error::InvalidFrame("trailing bytes or incorrect total")) => {
+                let (_, spans) = crate::stream::scan_concatenated_frames(src, max_output)?;
+                let mut frames = Vec::with_capacity(spans.len());
+                for (start, end, raw_size) in spans {
+                    let sub = &src[start..end];
+                    let sub_res = crate::mmap::pread::probe_residency_if_mapped(sub);
+                    frames.push(Self::parse_one_for_query(
+                        sub,
+                        raw_size,
+                        where_expr,
+                        extra_cols,
+                        allow_partial_cols,
+                        threads,
+                        &sub_res,
+                    )?);
+                }
+                Ok(frames)
+            }
+            Err(e) => Err(e),
+        }
+    }
+    fn parse_one_for_query(
+        src: &'a [u8],
+        max_output: usize,
+        where_expr: Option<&crate::ops::PredExpr<'_>>,
+        extra_cols: &[crate::ops::ColTarget<'_>],
+        allow_partial_cols: bool,
+        threads: usize,
+        res: &crate::mmap::sys::ChunkResidency,
+    ) -> Result<Self> {
+        if res.all_resident() {
+            return Self::parse(src, max_output);
+        }
+        let Some((fd, file_off)) = crate::mmap::pread::resolve_backing_fd(src) else {
+            return Self::parse(src, max_output);
+        };
+        let is_v6 = if res.is_chunk_resident(0) {
+            v6::is_v6_frame(src)
+        } else if src.len() >= HEADER_SIZE {
+            let mut h32 = [0u8; HEADER_SIZE];
+            crate::mmap::pread::pread_at_exact(fd, file_off, &mut h32)
+                .map_err(|e| Error::Backend(e.to_string()))?;
+            v6::is_v6_frame(&h32)
+        } else {
+            false
+        };
+        if is_v6 {
+            return v6::parse_v6_for_query(
+                src,
+                max_output,
+                where_expr,
+                extra_cols,
+                allow_partial_cols,
+                threads,
+                res,
+            );
+        }
+        v5::parse_v5_hybrid(src, max_output, fd, file_off, threads, res.clone())
     }
     pub fn raw_size(&self) -> usize {
         self.raw_size
@@ -395,13 +480,15 @@ impl<'a> Frame<'a> {
     }
     pub fn validate_commands(&self) -> Result<()> {
         for b in &self.blocks {
-            block::validate_with_dict(
-                b.payload,
-                b.info.kind,
-                b.info.raw_size,
-                self.version >= 2,
-                &self.dict,
-            )?;
+            crate::columns::with_v6_cols(b.col_slices, || {
+                block::validate_with_dict(
+                    b.payload,
+                    b.info.kind,
+                    b.info.raw_size,
+                    self.version >= 2,
+                    &self.dict,
+                )
+            })?;
         }
         Ok(())
     }
@@ -453,14 +540,16 @@ impl<'a> Frame<'a> {
             });
         }
         let dst = &mut out[..b.info.raw_size];
-        block::decode_with_dict(
-            b.payload,
-            b.info.kind,
-            dst,
-            Engine::new(options.simd)?,
-            self.version >= 2,
-            &self.dict,
-        )?;
+        crate::columns::with_v6_cols(b.col_slices, || {
+            block::decode_with_dict(
+                b.payload,
+                b.info.kind,
+                dst,
+                Engine::new(options.simd)?,
+                self.version >= 2,
+                &self.dict,
+            )
+        })?;
         if self.checksummed && options.verify_checksum && crc32c(dst) != b.info.checksum {
             return Err(Error::Checksum { block: index });
         }

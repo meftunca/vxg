@@ -325,15 +325,17 @@ pub(crate) fn scan_window_seq(
             continue;
         }
         if ib.info.kind == BLOCK_COLUMN {
-            if let Some(emitted) = crate::columns::scan_arrow_grammar_block_seq(
-                ib.payload,
-                carry,
-                skip_first_row,
-                where_expr,
-                cols,
-                *rem_limit,
-                &mut sinks,
-            )? {
+            if let Some(emitted) = crate::columns::with_v6_cols(ib.col_slices, || {
+                crate::columns::scan_arrow_grammar_block_seq(
+                    ib.payload,
+                    carry,
+                    skip_first_row,
+                    where_expr,
+                    cols,
+                    *rem_limit,
+                    &mut sinks,
+                )
+            })? {
                 *rem_limit -= emitted;
                 continue;
             }
@@ -477,15 +479,17 @@ pub(crate) fn scan_window_par<'a>(
                         let skip_r0 = header_interior_blk == Some(b);
                         let mut done_grammar = false;
                         if ib.info.kind == BLOCK_COLUMN && meta[b].decoded_raw.is_none() {
-                            if let Some(n) = crate::columns::scan_arrow_grammar_block_par(
-                                ib.payload,
-                                meta[b].had_in_carry,
-                                skip_r0,
-                                where_expr,
-                                cols,
-                                cap - emitted,
-                                &mut sinks,
-                            )? {
+                            if let Some(n) = crate::columns::with_v6_cols(ib.col_slices, || {
+                                crate::columns::scan_arrow_grammar_block_par(
+                                    ib.payload,
+                                    meta[b].had_in_carry,
+                                    skip_r0,
+                                    where_expr,
+                                    cols,
+                                    cap - emitted,
+                                    &mut sinks,
+                                )
+                            })? {
                                 emitted += n;
                                 done_grammar = true;
                             }

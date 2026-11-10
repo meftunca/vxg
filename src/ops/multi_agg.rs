@@ -208,15 +208,14 @@ fn aggregate_multi_raw(
     options: &DecodeOptions,
 ) -> Result<MultiAggAcc> {
     options.validate()?;
-    let prepared = crate::mmap::prepare_query_bytes(
+    let frames = Frame::parse_all_for_query(
         frame_bytes,
+        options.max_output,
         where_expr,
         agg_cols,
         true,
         options.threads,
-    );
-    let frame_bytes = prepared.as_ref();
-    let frames = Frame::parse_all(frame_bytes, options.max_output)?;
+    )?;
     let ncols = agg_cols.len();
     if options.threads > 1 {
         let in_blocks = collect_par_blocks(frame_bytes, &frames);
@@ -253,13 +252,15 @@ fn aggregate_multi_raw(
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
         for (local_blk, info) in parsed.blocks().enumerate() {
             if info.kind == BLOCK_COLUMN {
-                let payload = parsed.blocks[local_blk].payload;
-                if let Some(part) = crate::columns::aggregate_multi_grammar_block_seq(
-                    payload,
-                    &mut carry,
-                    where_expr,
-                    agg_cols,
-                )? {
+                let b = &parsed.blocks[local_blk];
+                if let Some(part) = crate::columns::with_v6_cols(b.col_slices, || {
+                    crate::columns::aggregate_multi_grammar_block_seq(
+                        b.payload,
+                        &mut carry,
+                        where_expr,
+                        agg_cols,
+                    )
+                })? {
                     total.merge(&part);
                     continue;
                 }
@@ -333,15 +334,14 @@ fn multi_group_by_raw(
     let mut extra = Vec::with_capacity(group_cols.len() + agg_cols.len());
     extra.extend_from_slice(group_cols);
     extra.extend_from_slice(agg_cols);
-    let prepared = crate::mmap::prepare_query_bytes(
+    let frames = Frame::parse_all_for_query(
         frame_bytes,
+        options.max_output,
         where_expr,
         &extra,
         true,
         options.threads,
-    );
-    let frame_bytes = prepared.as_ref();
-    let frames = Frame::parse_all(frame_bytes, options.max_output)?;
+    )?;
     if options.threads > 1 {
         let in_blocks = collect_par_blocks(frame_bytes, &frames);
         if in_blocks.len() > 1 {
@@ -374,15 +374,17 @@ fn multi_group_by_raw(
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
         for (local_blk, info) in parsed.blocks().enumerate() {
             if info.kind == BLOCK_COLUMN {
-                let payload = parsed.blocks[local_blk].payload;
-                if crate::columns::multi_group_by_grammar_block_seq(
-                    payload,
-                    &mut carry,
-                    where_expr,
-                    group_cols,
-                    agg_cols,
-                    &mut total_map,
-                )? {
+                let b = &parsed.blocks[local_blk];
+                if crate::columns::with_v6_cols(b.col_slices, || {
+                    crate::columns::multi_group_by_grammar_block_seq(
+                        b.payload,
+                        &mut carry,
+                        where_expr,
+                        group_cols,
+                        agg_cols,
+                        &mut total_map,
+                    )
+                })? {
                     continue;
                 }
             }

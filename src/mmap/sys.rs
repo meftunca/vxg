@@ -5,6 +5,7 @@ mod imp {
     use std::io;
     use std::os::unix::io::AsRawFd;
     use std::ptr::{self, NonNull};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const PROT_READ: i32 = 0x01;
     const PROT_WRITE: i32 = 0x02;
@@ -17,29 +18,11 @@ mod imp {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     const MS_SYNC: i32 = 0x0004;
 
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "freebsd"
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd"))]
     const MADV_RANDOM: i32 = 1;
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "freebsd"
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd"))]
     const MADV_SEQUENTIAL: i32 = 2;
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "freebsd"
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd"))]
     const MADV_WILLNEED: i32 = 3;
 
     extern "C" {
@@ -52,52 +35,89 @@ mod imp {
             offset: i64,
         ) -> *mut c_void;
         fn munmap(addr: *mut c_void, len: usize) -> i32;
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "linux",
-            target_os = "android"
-        ))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android"))]
         fn msync(addr: *mut c_void, len: usize, flags: i32) -> i32;
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd"
-        ))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd"))]
         fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd"
-        ))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd"))]
         fn mincore(addr: *const c_void, len: usize, vec: *mut u8) -> i32;
         fn getpagesize() -> i32;
     }
 
-    pub(crate) fn is_slice_resident(slice: &[u8]) -> bool {
+    static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
+    static MINCORE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[inline]
+    fn os_page_size() -> usize {
+        let mut ps = PAGE_SIZE.load(Ordering::Relaxed);
+        if ps == 0 {
+            let raw_ps = unsafe { getpagesize() };
+            ps = if raw_ps > 0 { raw_ps as usize } else { 16384 };
+            PAGE_SIZE.store(ps, Ordering::Relaxed);
+        }
+        ps
+    }
+
+    #[inline]
+    pub fn mincore_call_count() -> usize {
+        MINCORE_CALLS.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn reset_mincore_call_count() {
+        MINCORE_CALLS.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn probe_chunk_residency(slice: &[u8], chunk_bytes: usize) -> (Vec<bool>, usize) {
+        if slice.is_empty() {
+            return (Vec::new(), 0);
+        }
+        let num_chunks = slice.len().div_ceil(chunk_bytes);
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd"))]
+        {
+            let ps = os_page_size();
+            let slice_start = slice.as_ptr() as usize;
+            let slice_end = slice_start + slice.len();
+            let base = slice_start & !(ps - 1);
+            let end = (slice_end + ps - 1) & !(ps - 1);
+            let total_pages = (end - base) / ps;
+            if total_pages == 0 {
+                return (vec![true; num_chunks], num_chunks);
+            }
+            let mut vec = vec![0u8; total_pages];
+            MINCORE_CALLS.fetch_add(1, Ordering::Relaxed);
+            let rc = unsafe { mincore(base as *const c_void, total_pages * ps, vec.as_mut_ptr()) };
+            if rc != 0 {
+                return (vec![true; num_chunks], num_chunks);
+            }
+            let mut chunks = Vec::with_capacity(num_chunks);
+            let mut resident_chunks = 0usize;
+            for c in 0..num_chunks {
+                let c_start = slice_start + c * chunk_bytes;
+                let c_end = (slice_start + (c + 1) * chunk_bytes).min(slice_end);
+                let p_start = (c_start - base) / ps;
+                let p_end = (c_end - 1 - base) / ps;
+                let is_res = vec[p_start..=p_end].iter().all(|&v| (v & 1) != 0);
+                if is_res {
+                    resident_chunks += 1;
+                }
+                chunks.push(is_res);
+            }
+            (chunks, resident_chunks)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd")))]
+        {
+            (vec![true; num_chunks], num_chunks)
+        }
+    }
+
+    pub fn legacy_four_page_probe(slice: &[u8]) -> bool {
         if slice.len() < (1 << 20) {
             return true;
         }
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd"
-        ))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd"))]
         {
-            static PAGE_SIZE: std::sync::atomic::AtomicUsize =
-                std::sync::atomic::AtomicUsize::new(0);
-            let mut ps = PAGE_SIZE.load(std::sync::atomic::Ordering::Relaxed);
-            if ps == 0 {
-                let raw_ps = unsafe { getpagesize() };
-                ps = if raw_ps > 0 { raw_ps as usize } else { 16384 };
-                PAGE_SIZE.store(ps, std::sync::atomic::Ordering::Relaxed);
-            }
+            let ps = os_page_size();
             let base = slice.as_ptr() as usize;
             let len = slice.len();
             let probes = [len / 8, len / 4, len / 2, (len * 3) / 4];
@@ -105,6 +125,7 @@ mod imp {
             for off in probes {
                 let page_addr = (base + off) & !(ps - 1);
                 let mut vec_byte = 0u8;
+                MINCORE_CALLS.fetch_add(1, Ordering::Relaxed);
                 let rc = unsafe { mincore(page_addr as *const c_void, ps, &mut vec_byte) };
                 if rc != 0 || (vec_byte & 1) != 0 {
                     resident_count += 1;
@@ -112,13 +133,7 @@ mod imp {
             }
             resident_count >= 2
         }
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd"
-        )))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android", target_os = "freebsd")))]
         {
             true
         }
@@ -315,9 +330,17 @@ mod imp {
         fn CloseHandle(object: Handle) -> i32;
     }
 
-    pub(crate) fn is_slice_resident(_slice: &[u8]) -> bool {
+    pub(crate) fn probe_chunk_residency(slice: &[u8], chunk_bytes: usize) -> (Vec<bool>, usize) {
+        let n = slice.len().div_ceil(chunk_bytes);
+        (vec![true; n], n)
+    }
+    pub fn legacy_four_page_probe(_slice: &[u8]) -> bool {
         true
     }
+    pub fn mincore_call_count() -> usize {
+        0
+    }
+    pub fn reset_mincore_call_count() {}
 
     pub(crate) struct RawMap {
         pub(crate) ptr: NonNull<u8>,
@@ -433,9 +456,17 @@ mod imp {
     use std::io;
     use std::ptr::NonNull;
 
-    pub(crate) fn is_slice_resident(_slice: &[u8]) -> bool {
+    pub(crate) fn probe_chunk_residency(slice: &[u8], chunk_bytes: usize) -> (Vec<bool>, usize) {
+        let n = slice.len().div_ceil(chunk_bytes);
+        (vec![true; n], n)
+    }
+    pub fn legacy_four_page_probe(_slice: &[u8]) -> bool {
         true
     }
+    pub fn mincore_call_count() -> usize {
+        0
+    }
+    pub fn reset_mincore_call_count() {}
 
     pub(crate) struct RawMap {
         pub(crate) ptr: NonNull<u8>,
@@ -465,4 +496,69 @@ mod imp {
     pub(crate) const SUPPORTED: bool = false;
 }
 
-pub(crate) use imp::{is_slice_resident, RawMap, SUPPORTED};
+pub(crate) use imp::{RawMap, SUPPORTED};
+pub use imp::{legacy_four_page_probe, mincore_call_count, reset_mincore_call_count};
+
+/// Granularity (`1 MiB`) for per-chunk hybrid `mmap` / coalesced `pread` decisions.
+pub const CHUNK_BYTES: usize = 1 << 20;
+
+/// Per-`1 MiB` chunk residency bitmap produced by a single `mincore(2)` syscall over a slice.
+#[derive(Clone, Debug)]
+pub struct ChunkResidency {
+    /// `chunks[c]` is `true` iff every OS page in chunk `c` (`[c * 1 MiB .. (c + 1) * 1 MiB)`)
+    /// is currently resident in the OS page cache.
+    pub chunks: Vec<bool>,
+    /// Number of resident `1 MiB` chunks.
+    pub resident_chunks: usize,
+}
+
+impl ChunkResidency {
+    /// Probe the entire `slice` with a single `mincore(2)` syscall and classify each `1 MiB` chunk.
+    #[inline]
+    pub fn probe(slice: &[u8]) -> Self {
+        let (chunks, resident_chunks) = imp::probe_chunk_residency(slice, CHUNK_BYTES);
+        Self {
+            chunks,
+            resident_chunks,
+        }
+    }
+
+    /// Construct a `ChunkResidency` marking all `1 MiB` chunks as resident without calling `mincore`.
+    #[inline]
+    pub fn all_resident_for_len(len: usize) -> Self {
+        let n = len.div_ceil(CHUNK_BYTES);
+        Self {
+            chunks: vec![true; n],
+            resident_chunks: n,
+        }
+    }
+
+    #[inline]
+    pub fn all_resident(&self) -> bool {
+        self.resident_chunks == self.chunks.len()
+    }
+
+    #[inline]
+    pub fn none_resident(&self) -> bool {
+        self.resident_chunks == 0
+    }
+
+    #[inline]
+    pub fn is_chunk_resident(&self, chunk_idx: usize) -> bool {
+        self.chunks.get(chunk_idx).copied().unwrap_or(false)
+    }
+
+    /// Return `true` if every `1 MiB` chunk overlapped by byte range `[start..end)` is resident.
+    #[inline]
+    pub fn is_range_resident(&self, start: usize, end: usize) -> bool {
+        if start >= end {
+            return true;
+        }
+        let c0 = start / CHUNK_BYTES;
+        let c1 = (end - 1) / CHUNK_BYTES;
+        if c1 >= self.chunks.len() {
+            return false;
+        }
+        self.chunks[c0..=c1].iter().all(|&r| r)
+    }
+}

@@ -15,15 +15,14 @@ pub(crate) fn scan_frame_into_heap(
     if let Some(pcols) = project_cols {
         extra.extend_from_slice(pcols);
     }
-    let prepared = crate::mmap::prepare_query_bytes(
+    let frames = Frame::parse_all_for_query(
         frame_bytes,
+        options.max_output,
         where_expr,
         &extra,
         project_cols.is_some(),
         options.threads,
-    );
-    let frame_bytes = prepared.as_ref();
-    let frames = Frame::parse_all(frame_bytes, options.max_output)?;
+    )?;
     if heap.capacity_k() == 0 {
         return Ok((0, 0));
     }
@@ -89,7 +88,7 @@ pub(crate) fn scan_frame_into_heap(
                     let ib = &in_blocks[b];
                     let g_blk = global_block_offset + b;
                     let g_cur = global_row_offset + mb.cur_global;
-                    let res: Result<()> = (|| {
+                    let res: Result<()> = crate::columns::with_v6_cols(ib.col_slices, || {
                         if mb.decoded_raw.is_none() {
                             let mut dummy = mb.had_in_carry.then(|| (usize::MAX, 0, 0, Vec::new()));
                             if crate::columns::topk_grammar_block(
@@ -112,13 +111,7 @@ pub(crate) fn scan_frame_into_heap(
                         let raw: &[u8] = if let Some(ref pre) = mb.decoded_raw {
                             pre
                         } else {
-                            query::decode_block_into(
-                                ib.f_bytes,
-                                ib.local_blk,
-                                ib.info.raw_size,
-                                options,
-                                &mut dec_buf,
-                            )?;
+                            ib.decode_into(options, &mut dec_buf)?;
                             &dec_buf
                         };
                         if raw.is_empty() {
@@ -142,7 +135,7 @@ pub(crate) fn scan_frame_into_heap(
                             );
                         }
                         Ok(())
-                    })();
+                    });
                     if let Err(e) = res {
                         unsafe {
                             *worker_heaps[wid].get() = Some(Err(e));
@@ -176,18 +169,20 @@ pub(crate) fn scan_frame_into_heap(
             let blk_idx = global_block_offset + local_idx;
             local_idx += 1;
             if blk.info.kind == BLOCK_COLUMN {
-                if let Some(new_rows) = crate::columns::topk_grammar_block(
-                    blk.payload,
-                    blk_idx,
-                    cur_global,
-                    &mut carry,
-                    true,
-                    where_expr,
-                    project_cols,
-                    order_col,
-                    None,
-                    heap,
-                )? {
+                if let Some(new_rows) = crate::columns::with_v6_cols(blk.col_slices, || {
+                    crate::columns::topk_grammar_block(
+                        blk.payload,
+                        blk_idx,
+                        cur_global,
+                        &mut carry,
+                        true,
+                        where_expr,
+                        project_cols,
+                        order_col,
+                        None,
+                        heap,
+                    )
+                })? {
                     cur_global += new_rows;
                     continue;
                 }

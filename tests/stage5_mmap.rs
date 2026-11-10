@@ -251,3 +251,254 @@ fn verify_frame_and_verify_stream_zero_alloc_and_corruption_checks() {
     assert!(fr_bad.next_frame().unwrap().is_some());
     assert!(fr_bad.next_frame().is_err());
 }
+
+#[cfg(unix)]
+fn write_cold_file(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    #[cfg(target_os = "macos")]
+    unsafe {
+        extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        const F_NOCACHE: i32 = 48;
+        let _ = fcntl(f.as_raw_fd(), F_NOCACHE, 1);
+    }
+    f.write_all(bytes).unwrap();
+    f.sync_all().unwrap();
+    #[cfg(target_os = "linux")]
+    unsafe {
+        extern "C" {
+            fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
+        }
+        const POSIX_FADV_DONTNEED: i32 = 4;
+        let _ = posix_fadvise(f.as_raw_fd(), 0, 0, POSIX_FADV_DONTNEED);
+    }
+}
+
+#[cfg(unix)]
+fn fault_in_range(slice: &[u8], start: usize, end: usize) -> u8 {
+    let mut acc = 0u8;
+    let mut off = start;
+    while off < end.min(slice.len()) {
+        acc ^= unsafe { std::ptr::read_volatile(&slice[off]) };
+        off += 4096;
+    }
+    if end > start && end <= slice.len() {
+        acc ^= unsafe { std::ptr::read_volatile(&slice[end - 1]) };
+    }
+    std::hint::black_box(acc)
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_cache_30_70_and_scattered_residency_and_single_mincore_per_query() {
+    use vxg::{
+        aggregate_column, count_where, execute_sql, legacy_four_page_probe, mincore_call_count,
+        pread_bytes_count, pread_call_count, reset_mincore_call_count, reset_pread_counters,
+        ChunkResidency, ColPred, ColTarget, NumCmp, PredExpr, SqlFormat, SqlQuery, CHUNK_BYTES,
+    };
+
+    let dir = std::env::temp_dir().join(format!("vxg_partial_cache_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    // Generate a >= 6.5 MiB compressed archive (7 x 1 MiB chunks) using incompressible + structured blocks
+    // so both v5 and v6 frames span multiple 1 MiB chunks on disk.
+    let mut raw = Vec::with_capacity(20 * 1024 * 1024);
+    let mut state = 0x1234_5678_9abc_def0u64;
+    for i in 0..180_000usize {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let p1 = state;
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let p2 = state;
+        let line = format!(
+            "{{\"id\":{i},\"grp\":{},\"amt\":{},\"blob\":\"{:016x}{:016x}{:016x}{:016x}\"}}\n",
+            i % 8,
+            (i % 100) + 1,
+            p1,
+            p2,
+            p1 ^ p2,
+            p1.rotate_left(19)
+        );
+        raw.extend_from_slice(line.as_bytes());
+    }
+    let v5_bytes = compress(
+        &raw,
+        &Options {
+            block_size: 65_536,
+            threads: 4,
+            record_aligned: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let v6_bytes = compress(
+        &raw,
+        &Options {
+            block_size: 65_536,
+            threads: 4,
+            record_aligned: true,
+            col_group: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        v5_bytes.len() >= 3 * CHUNK_BYTES && v6_bytes.len() >= 3 * CHUNK_BYTES,
+        "test archive must span multiple 1 MiB chunks (v5={}, v6={})",
+        v5_bytes.len(),
+        v6_bytes.len()
+    );
+
+    let dec = DecodeOptions {
+        threads: 4,
+        max_output: usize::MAX,
+        ..DecodeOptions::default()
+    };
+    let q = SqlQuery::parse("SELECT grp, COUNT(*), SUM(amt) FROM frame WHERE amt > 50 GROUP BY grp ORDER BY grp ASC").unwrap();
+    let expected_sql = execute_sql(&v5_bytes, &q, SqlFormat::Csv, false, &dec).unwrap();
+
+    for (label, frame_bytes) in [("v5", &v5_bytes), ("v6", &v6_bytes)] {
+        let path = dir.join(format!("test_{label}.vxg"));
+        let num_chunks = frame_bytes.len().div_ceil(CHUNK_BYTES);
+
+        // 1. 30% hot chunks (fault in first 30% of 1 MiB chunks with MADV_RANDOM so OS readahead doesn't warm cold chunks):
+        write_cold_file(&path, frame_bytes);
+        let map30 = unsafe { MappedFile::open(&path).unwrap() };
+        map30.advise_random();
+        let hot30 = (num_chunks * 30 / 100).max(1);
+        for c in 0..hot30 {
+            fault_in_range(&map30, c * CHUNK_BYTES, (c + 1) * CHUNK_BYTES);
+        }
+        reset_mincore_call_count();
+        let res30 = ChunkResidency::probe(&map30);
+        assert_eq!(
+            mincore_call_count(),
+            1,
+            "{label}: ChunkResidency::probe must issue exactly 1 mincore syscall"
+        );
+        assert!(
+            res30.resident_chunks >= hot30 && !res30.all_resident(),
+            "{label}: 30% hot file must have partial chunk residency ({}/{})",
+            res30.resident_chunks,
+            num_chunks
+        );
+
+        reset_mincore_call_count();
+        reset_pread_counters();
+        let out30 = execute_sql(&map30, &q, SqlFormat::Csv, false, &dec).unwrap();
+        assert_eq!(out30, expected_sql);
+        assert!(
+            mincore_call_count() <= 1,
+            "{label}: execute_sql must call mincore at most once per query (got {})",
+            mincore_call_count()
+        );
+        if label == "v5" {
+            // HybridArena must NOT pread the already-resident 30% chunks:
+            let cold_bytes_expected = frame_bytes.len() - hot30 * CHUNK_BYTES;
+            assert!(
+                pread_bytes_count() <= cold_bytes_expected + 65_536 && pread_bytes_count() > 0,
+                "v5 30% hot must pread only non-resident chunks (pread={}, expected<={})",
+                pread_bytes_count(),
+                cold_bytes_expected
+            );
+        } else {
+            // v6 selective stream pread reads only Stream 0 + grp + amt streams (much less than total file):
+            assert!(
+                pread_bytes_count() < frame_bytes.len() / 2 && pread_call_count() > 0,
+                "v6 30% hot must selectively pread only needed column streams (pread={})",
+                pread_bytes_count()
+            );
+        }
+        drop(map30);
+
+        // 2. 70% hot chunks (fault in 70% of 1 MiB chunks with MADV_RANDOM):
+        write_cold_file(&path, frame_bytes);
+        let map70 = unsafe { MappedFile::open(&path).unwrap() };
+        map70.advise_random();
+        let hot70 = (num_chunks * 70 / 100).max(hot30 + 1).min(num_chunks - 1);
+        for c in 0..hot70 {
+            fault_in_range(&map70, c * CHUNK_BYTES, (c + 1) * CHUNK_BYTES);
+        }
+        reset_mincore_call_count();
+        reset_pread_counters();
+        let out70 = execute_sql(&map70, &q, SqlFormat::Csv, false, &dec).unwrap();
+        assert_eq!(out70, expected_sql);
+        assert!(mincore_call_count() <= 1);
+        if label == "v5" {
+            let cold_bytes_expected = frame_bytes.len() - hot70 * CHUNK_BYTES;
+            assert!(
+                pread_bytes_count() <= cold_bytes_expected + 65_536 && pread_bytes_count() > 0,
+                "v5 70% hot must pread only remaining 30% non-resident chunks (pread={}, expected<={})",
+                pread_bytes_count(),
+                cold_bytes_expected
+            );
+        }
+        drop(map70);
+
+        // 3. Randomly scattered hot pages (including the 4 legacy probe points len/8, len/4, len/2, 3*len/4):
+        //    Old 4-page probe falsely classifies the file as 100% warm (`true`) in 4 syscalls,
+        //    whereas single-call `ChunkResidency::probe` detects that chunks have missing pages!
+        write_cold_file(&path, frame_bytes);
+        let map_scat = unsafe { MappedFile::open(&path).unwrap() };
+        map_scat.advise_random();
+        let len = map_scat.len();
+        for &off in &[len / 8, len / 4, len / 2, (len * 3) / 4] {
+            fault_in_range(&map_scat, off, off + 4096);
+        }
+        // Also fault in 1 page at the start of every 512 KiB window (~3% scattered pages across every 1 MiB chunk):
+        let mut p_off = 0usize;
+        while p_off < len {
+            fault_in_range(&map_scat, p_off, p_off + 4096);
+            p_off += 512 * 1024;
+        }
+        reset_mincore_call_count();
+        let legacy_warm = legacy_four_page_probe(&map_scat);
+        let legacy_calls = mincore_call_count();
+        assert!(
+            legacy_warm && legacy_calls == 4,
+            "legacy 4-page probe is fooled by scattered hot pages into returning true with 4 syscalls"
+        );
+
+        reset_mincore_call_count();
+        let scat_res = ChunkResidency::probe(&map_scat);
+        assert_eq!(mincore_call_count(), 1);
+        assert!(
+            !scat_res.all_resident(),
+            "ChunkResidency::probe detects that 1 MiB chunks have missing pages under scattered residency"
+        );
+
+        reset_mincore_call_count();
+        reset_pread_counters();
+        let out_scat = execute_sql(&map_scat, &q, SqlFormat::Csv, false, &dec).unwrap();
+        assert_eq!(out_scat, expected_sql);
+        assert!(mincore_call_count() <= 1);
+        assert!(pread_call_count() > 0);
+
+        // 4. Fully warm file: 1 mincore call, 0 pread calls:
+        fault_in_range(&map_scat, 0, len);
+        reset_mincore_call_count();
+        reset_pread_counters();
+        let pred = PredExpr::col(ColPred::json_num("amt", NumCmp::Gt(50)));
+        let cnt = count_where(&map_scat, &pred, &dec).unwrap();
+        assert!(cnt > 0);
+        assert!(mincore_call_count() <= 1);
+        assert_eq!(pread_call_count(), 0, "{label}: warm query must make 0 pread calls");
+
+        reset_mincore_call_count();
+        let _agg = aggregate_column(&map_scat, Some(&pred), ColTarget::JsonKey("amt"), &dec).unwrap();
+        assert!(mincore_call_count() <= 1);
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}

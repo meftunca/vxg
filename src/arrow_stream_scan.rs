@@ -41,9 +41,16 @@ fn execute_full_scan(
             raw_record_batches(frame_bytes, where_expr, batch_size, lim, dec_options)
         }
         ResolvedPlan::Columns { names, cols, hdr_opt, skip_header_row } => {
-            let frames = Frame::parse_all(frame_bytes, dec_options.max_output)?;
-            let in_blocks = collect_par_blocks(frame_bytes, &frames);
             let targets: Vec<ColTarget<'_>> = cols.iter().map(OwnedCol::as_target).collect();
+            let frames = Frame::parse_all_for_query(
+                frame_bytes,
+                dec_options.max_output,
+                where_expr,
+                &targets,
+                true,
+                dec_options.threads,
+            )?;
+            let in_blocks = collect_par_blocks(frame_bytes, &frames);
             let mapped = match (where_expr, hdr_opt.as_ref()) {
                 (Some(w), Some(hdr)) => Some(MappedExpr::from_expr(w, hdr)),
                 _ => None,
@@ -237,6 +244,9 @@ struct SavedBlockLoc {
     checksummed: bool,
     dict_idx: usize,
     info: BlockInfo,
+    s0_len: usize,
+    col_slices_start: usize,
+    col_slices_len: usize,
     row_meta: Option<(usize, bool)>,
 }
 
@@ -247,6 +257,7 @@ pub(crate) struct ArrowWindowStream {
     frame_ptr: *const u8,
     frame_len: usize,
     dicts: Vec<Vec<u8>>,
+    col_slices_pool: Vec<&'static [u8]>,
     locs: Vec<SavedBlockLoc>,
     names: Vec<String>,
     col_types: Vec<ArrowType>,
@@ -294,6 +305,7 @@ impl ArrowWindowStream {
             frame_ptr: core::ptr::null(),
             frame_len: 0,
             dicts: Vec::new(),
+            col_slices_pool: Vec::new(),
             locs: Vec::new(),
             names: Vec::new(),
             col_types: Vec::new(),
@@ -342,12 +354,19 @@ impl ArrowWindowStream {
         let frames = Frame::parse_all(frame_bytes, dec_options.max_output)?;
         let base_addr = frame_bytes.as_ptr() as usize;
         let mut dicts = Vec::with_capacity(frames.len());
+        let mut col_slices_pool: Vec<&'static [u8]> = Vec::new();
         let mut locs = Vec::new();
         for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
             let f_offset = (f_bytes.as_ptr() as usize) - base_addr;
             let dict_idx = dicts.len();
             dicts.push(parsed.dict().to_vec());
             for (local_blk, info) in parsed.blocks().enumerate() {
+                let blk = &parsed.blocks[local_blk];
+                let cs_start = col_slices_pool.len();
+                for &cs in blk.col_slices {
+                    let static_cs: &'static [u8] = unsafe { core::mem::transmute(cs) };
+                    col_slices_pool.push(static_cs);
+                }
                 locs.push(SavedBlockLoc {
                     f_offset,
                     f_len: f_bytes.len(),
@@ -356,6 +375,9 @@ impl ArrowWindowStream {
                     checksummed: parsed.checksummed(),
                     dict_idx,
                     info,
+                    s0_len: blk.payload.len(),
+                    col_slices_start: cs_start,
+                    col_slices_len: blk.col_slices.len(),
                     row_meta: parsed.block_row_meta(local_blk),
                 });
             }
@@ -367,6 +389,7 @@ impl ArrowWindowStream {
             frame_ptr: frame_bytes.as_ptr(),
             frame_len: frame_bytes.len(),
             dicts,
+            col_slices_pool,
             locs,
             names,
             col_types: Vec::new(),
@@ -436,6 +459,11 @@ impl ArrowWindowStream {
         for loc in &self.locs[w_start..w_end] {
             let f_bytes = &frame_bytes[loc.f_offset..loc.f_offset + loc.f_len];
             let dict = self.dicts[loc.dict_idx].as_slice();
+            let col_slices = if loc.col_slices_len > 0 {
+                &self.col_slices_pool[loc.col_slices_start..loc.col_slices_start + loc.col_slices_len]
+            } else {
+                &[]
+            };
             window.push(ParInBlock {
                 f_bytes,
                 local_blk: loc.local_blk,
@@ -443,8 +471,8 @@ impl ArrowWindowStream {
                 frame_checksummed: loc.checksummed,
                 dict,
                 info: loc.info,
-                payload: &f_bytes
-                    [loc.info.payload_offset..loc.info.payload_offset + loc.info.payload_size],
+                payload: &f_bytes[loc.info.payload_offset..loc.info.payload_offset + loc.s0_len],
+                col_slices,
                 row_meta: loc.row_meta,
             });
         }
@@ -497,27 +525,9 @@ impl ArrowWindowStream {
 
         match &self.where_clause {
             Some(aw) => aw.with_pred_expr(|w| {
-                run(
-                    Some(w),
-                    self.hdr_opt.as_ref(),
-                    &self.names,
-                    &mut self.carry,
-                    &mut self.skip_seq_r0,
-                    &mut self.cur_global,
-                    &mut self.rem_limit,
-                    &self.dec_options,
-                )
+                run(Some(w), self.hdr_opt.as_ref(), &self.names, &mut self.carry, &mut self.skip_seq_r0, &mut self.cur_global, &mut self.rem_limit, &self.dec_options)
             }),
-            None => run(
-                None,
-                self.hdr_opt.as_ref(),
-                &self.names,
-                &mut self.carry,
-                &mut self.skip_seq_r0,
-                &mut self.cur_global,
-                &mut self.rem_limit,
-                &self.dec_options,
-            ),
+            None => run(None, self.hdr_opt.as_ref(), &self.names, &mut self.carry, &mut self.skip_seq_r0, &mut self.cur_global, &mut self.rem_limit, &self.dec_options),
         }
     }
 
@@ -532,14 +542,7 @@ impl ArrowWindowStream {
         if q.group_by.is_empty() && q.order_by.is_empty() {
             match &q.projection {
                 SelectProjection::Star => {
-                    return Self::open(
-                        frame_bytes,
-                        None,
-                        q.where_clause.clone().map(ArrowWhere::from_sql_where),
-                        q.limit,
-                        DEFAULT_ARROW_BATCH_ROWS,
-                        dec_options,
-                    );
+                    return Self::open(frame_bytes, None, q.where_clause.clone().map(ArrowWhere::from_sql_where), q.limit, DEFAULT_ARROW_BATCH_ROWS, dec_options);
                 }
                 SelectProjection::Items(items)
                     if !items.is_empty() && !items.iter().any(|it| it.expr.is_agg()) =>
@@ -557,14 +560,7 @@ impl ArrowWindowStream {
                         }
                     }
                     if all_cols {
-                        return Self::open(
-                            frame_bytes,
-                            Some((names, owned)),
-                            q.where_clause.clone().map(ArrowWhere::from_sql_where),
-                            q.limit,
-                            DEFAULT_ARROW_BATCH_ROWS,
-                            dec_options,
-                        );
+                        return Self::open(frame_bytes, Some((names, owned)), q.where_clause.clone().map(ArrowWhere::from_sql_where), q.limit, DEFAULT_ARROW_BATCH_ROWS, dec_options);
                     }
                 }
                 _ => {}
