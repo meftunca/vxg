@@ -52,7 +52,7 @@ pub use block::{
 pub use error::{Error, Result};
 pub use frame::{
     max_compressed_size, recover_frame, BlockInfo, FailedBlock, Frame, RecoveredBlock,
-    RecoveryReport, ValidatedFrame,
+    RecoveryReport, ValidatedFrame, VERSION_V6,
 };
 pub use mmap::{
     compress_file, decompress_file, mmap_supported, verify_file, InputBytes, MappedFile,
@@ -106,6 +106,9 @@ pub struct Options {
     /// neither `record_aligned` nor `BLOCK_DICT_LZ` is active, enabling $O(1)$ `frame_row_count` and
     /// $O(\log B)$ random row seek without touching non-overlapping block payloads.
     pub row_index: bool,
+    /// Emit `VERSION_V6` (`FLAG_COL_GROUP = 0x10`) column-grouped macro-blocks (`~1 MiB`/column stream
+    /// per group), storing $N$ block headers contiguously followed by each column's $N$ blocks contiguously.
+    pub col_group: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -120,6 +123,7 @@ impl Default for Options {
             target_block_rows: 0,
             level: 3,
             row_index: false,
+            col_group: false,
         }
     }
 }
@@ -244,10 +248,17 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
         Ok(written)
     };
 
-    match run(out, prep_dict.as_ref()) {
-        Err(Error::InvalidFrame("dict_expansion")) => run(out, None),
-        res => res,
+    let written = match run(out, prep_dict.as_ref()) {
+        Err(Error::InvalidFrame("dict_expansion")) => run(out, None)?,
+        res => res?,
+    };
+    if options.col_group && !options.legacy_v2 {
+        let repacked = frame::v6::repack_v4_v5_to_v6(&out[..written], out.len())?;
+        let rlen = repacked.len();
+        out[..rlen].copy_from_slice(&repacked);
+        return Ok(rlen);
     }
+    Ok(written)
 }
 
 fn compress_inner<const STATS: bool>(
@@ -322,10 +333,15 @@ fn compress_inner<const STATS: bool>(
         Ok((out, stats))
     };
 
-    match run(prep_dict.as_ref()) {
-        Err(Error::InvalidFrame("dict_expansion")) => run(None),
-        res => res,
+    let (out, stats) = match run(prep_dict.as_ref()) {
+        Err(Error::InvalidFrame("dict_expansion")) => run(None)?,
+        res => res?,
+    };
+    if options.col_group && !options.legacy_v2 {
+        let repacked = frame::v6::repack_v4_v5_to_v6(&out, usize::MAX)?;
+        return Ok((repacked, stats));
     }
+    Ok((out, stats))
 }
 
 pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
@@ -348,10 +364,11 @@ pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {
     }
     let has_var_raw =
         version >= frame::VERSION_V5 && (src[6] & (frame::v5::FLAG_VAR_RAW as u8)) != 0;
-    if options.threads == 1
-        || (!has_var_raw
-            && (version < frame::VERSION_V4
-                || (count <= frame::MAX_STACK_DIR_BLOCKS && src.len() <= u32::MAX as usize)))
+    if version != frame::VERSION_V6
+        && (options.threads == 1
+            || (!has_var_raw
+                && (version < frame::VERSION_V4
+                    || (count <= frame::MAX_STACK_DIR_BLOCKS && src.len() <= u32::MAX as usize))))
     {
         let mut out = vec![0u8; raw_size];
         if options.threads == 1 {
@@ -401,6 +418,9 @@ pub fn decompress_into(src: &[u8], out: &mut [u8], options: &DecodeOptions) -> R
             }
             Err(e) => return Err(e),
         };
+    if version == frame::VERSION_V6 {
+        return Frame::parse(src, options.max_output)?.decode_into(out, options);
+    }
     if options.threads == 1 {
         return frame::decode_validated_dir_single_thread(
             src,

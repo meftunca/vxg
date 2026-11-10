@@ -11,6 +11,18 @@ pub(crate) fn scan_frame_into_heap(
     options: &DecodeOptions,
     heap: &mut TopKHeap,
 ) -> Result<(usize, usize)> {
+    let mut extra = vec![order_col];
+    if let Some(pcols) = project_cols {
+        extra.extend_from_slice(pcols);
+    }
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        where_expr,
+        &extra,
+        project_cols.is_some(),
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if heap.capacity_k() == 0 {
         return Ok((0, 0));

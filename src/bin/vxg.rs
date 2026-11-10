@@ -412,6 +412,7 @@ fn run_args(args: &[String]) -> R<()> {
             "--v3" | "--v4" | "--v5" => {} // unified adaptive v4/v5 pipeline is the default
             "--record-aligned" => enc.record_aligned = true,
             "--row-index" => enc.row_index = true,
+            "--col-group" | "--v6" => enc.col_group = true,
             "--target-rows" => enc.target_block_rows = val(args, &mut i)?.parse()?,
             "--legacy" => enc.legacy_v2 = true,
             "--max-output" => {

@@ -208,6 +208,14 @@ fn aggregate_multi_raw(
     options: &DecodeOptions,
 ) -> Result<MultiAggAcc> {
     options.validate()?;
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        where_expr,
+        agg_cols,
+        true,
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     let ncols = agg_cols.len();
     if options.threads > 1 {
@@ -245,7 +253,7 @@ fn aggregate_multi_raw(
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
         for (local_blk, info) in parsed.blocks().enumerate() {
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if let Some(part) = crate::columns::aggregate_multi_grammar_block_seq(
                     payload,
                     &mut carry,
@@ -322,6 +330,17 @@ fn multi_group_by_raw(
     options: &DecodeOptions,
 ) -> Result<Vec<MultiGroupRow>> {
     options.validate()?;
+    let mut extra = Vec::with_capacity(group_cols.len() + agg_cols.len());
+    extra.extend_from_slice(group_cols);
+    extra.extend_from_slice(agg_cols);
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        where_expr,
+        &extra,
+        true,
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if options.threads > 1 {
         let in_blocks = collect_par_blocks(frame_bytes, &frames);
@@ -355,7 +374,7 @@ fn multi_group_by_raw(
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
         for (local_blk, info) in parsed.blocks().enumerate() {
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if crate::columns::multi_group_by_grammar_block_seq(
                     payload,
                     &mut carry,

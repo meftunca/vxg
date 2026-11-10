@@ -5,16 +5,18 @@ use crate::{dict_lz, Error, Result};
 
 use super::{
     check_block_size, entry_size, read_u32, read_u64, valid_kind_and_size, HEADER_SIZE, MAGIC,
-    MAX_VERSION, MIN_VERSION, V4_SIZE_MASK, VERSION_V4, VERSION_V5,
+    MAX_VERSION, MIN_VERSION, V4_SIZE_MASK, VERSION_V4, VERSION_V5, VERSION_V6,
 };
 
 pub const FLAG_CHECKSUM: u16 = 0x0001;
 pub const FLAG_FRAME_DICT: u16 = 0x0002;
 pub const FLAG_VAR_RAW: u16 = 0x0004;
 pub const FLAG_ROW_INDEX: u16 = 0x0008;
+pub const FLAG_COL_GROUP: u16 = 0x0010;
 pub const ROW_ENDS_NL_BIT: u32 = 0x8000_0000;
 pub const ROW_COUNT_MASK: u32 = 0x7fff_ffff;
 const VALID_V5_FLAGS: u16 = FLAG_CHECKSUM | FLAG_FRAME_DICT | FLAG_VAR_RAW | FLAG_ROW_INDEX;
+const VALID_V6_FLAGS: u16 = VALID_V5_FLAGS | FLAG_COL_GROUP;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ParsedHeader {
@@ -31,7 +33,9 @@ pub(crate) struct ParsedHeader {
     pub dict_wire_len: usize,
     pub dict_raw_len: usize,
     pub row_index_offset: usize,
-    /// Offset where block 0's compressed payload begins (`HEADER_SIZE + dir + var_raw + dict + row_index`).
+    pub group_count: usize,
+    pub group_dir_offset: usize,
+    /// Offset where block 0's compressed payload (or `v6` group 0) begins.
     pub payload_start: usize,
 }
 
@@ -64,7 +68,11 @@ pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<Par
         if flags & !FLAG_CHECKSUM != 0 || read_u64(src, 24)? != 0 {
             return Err(Error::InvalidFrame("unknown flags/reserved data"));
         }
-    } else if flags & !VALID_V5_FLAGS != 0 {
+    } else if version == VERSION_V5 {
+        if flags & !VALID_V5_FLAGS != 0 {
+            return Err(Error::InvalidFrame("unknown flags/reserved data"));
+        }
+    } else if (flags & !VALID_V6_FLAGS) != 0 || (flags & FLAG_COL_GROUP) == 0 {
         return Err(Error::InvalidFrame("unknown flags/reserved data"));
     }
 
@@ -104,7 +112,29 @@ pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<Par
         }
     }
 
-    let (dict_wire_len, dict_raw_len) = if version >= VERSION_V5 {
+    let (dict_wire_len, dict_raw_len, group_count) = if version == VERSION_V6 {
+        let dw = read_u32(src, 24)? as usize;
+        let raw_dr = read_u32(src, 28)?;
+        let gc = (raw_dr >> 20) as usize;
+        let dr = (raw_dr & 0x000f_ffff) as usize;
+        if (count == 0 && gc != 0) || (count > 0 && !(1..=count.min(4095)).contains(&gc)) {
+            return Err(Error::InvalidFrame("invalid v6 group count"));
+        }
+        if has_dict {
+            if !(dict_lz::MIN_DICT_RAW..=dict_lz::MAX_DICT_RAW).contains(&dr)
+                || dw == 0
+                || dw > dr
+            {
+                return Err(Error::InvalidFrame("invalid frame dictionary header"));
+            }
+            (dw, dr, gc)
+        } else {
+            if dw != 0 || dr != 0 {
+                return Err(Error::InvalidFrame("unknown flags/reserved data"));
+            }
+            (0, 0, gc)
+        }
+    } else if version == VERSION_V5 {
         let dw = read_u32(src, 24)? as usize;
         let dr = read_u32(src, 28)? as usize;
         if has_dict {
@@ -114,15 +144,15 @@ pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<Par
             {
                 return Err(Error::InvalidFrame("invalid frame dictionary header"));
             }
-            (dw, dr)
+            (dw, dr, 0)
         } else {
             if dw != 0 || dr != 0 {
                 return Err(Error::InvalidFrame("unknown flags/reserved data"));
             }
-            (0, 0)
+            (0, 0, 0)
         }
     } else {
-        (0, 0)
+        (0, 0, 0)
     };
 
     let esize = entry_size(version);
@@ -146,8 +176,19 @@ pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<Par
     let row_index_offset = dict_offset
         .checked_add(dict_wire_len)
         .ok_or(Error::SizeOverflow)?;
-    let payload_start = row_index_offset
+    let group_dir_offset = row_index_offset
         .checked_add(row_index_bytes)
+        .ok_or(Error::SizeOverflow)?;
+    let group_dir_bytes = if version == VERSION_V6 && count > 0 {
+        group_count
+            .checked_mul(16)
+            .and_then(|v| v.checked_add(16))
+            .ok_or(Error::SizeOverflow)?
+    } else {
+        0
+    };
+    let payload_start = group_dir_offset
+        .checked_add(group_dir_bytes)
         .ok_or(Error::SizeOverflow)?;
 
     Ok(ParsedHeader {
@@ -164,6 +205,8 @@ pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<Par
         dict_wire_len,
         dict_raw_len,
         row_index_offset,
+        group_count,
+        group_dir_offset,
         payload_start,
     })
 }

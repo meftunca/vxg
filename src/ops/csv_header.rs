@@ -185,8 +185,17 @@ pub(crate) fn peek_delim_header_fast(
     options: &DecodeOptions,
 ) -> Result<Option<DelimHeader>> {
     options.validate()?;
-    if let Some((kind, _rn, payload)) = v5::peek_v4_v5_block0(frame_bytes, options.max_output) {
+    let cold_buf = crate::mmap::peek_cold_prefix(frame_bytes, 131_072);
+    let probe = cold_buf.as_deref().unwrap_or(frame_bytes);
+    if let Some((kind, _rn, payload)) = v5::peek_v4_v5_block0(probe, options.max_output) {
         if let Ok(Some(decided)) = try_peek_raw_or_grammar_header(0, 0, kind, payload) {
+            return Ok(decided);
+        }
+    }
+    if let Some((kind, _rn, stream0)) =
+        crate::frame::v6::peek_v6_block0_stream0(probe, options.max_output)
+    {
+        if let Ok(Some(decided)) = try_peek_raw_or_grammar_header(0, 0, kind, stream0) {
             return Ok(decided);
         }
     }
@@ -204,7 +213,7 @@ pub fn peek_delim_header(frame_bytes: &[u8], options: &DecodeOptions) -> Result<
             if info.raw_size == 0 {
                 continue;
             }
-            let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+            let payload = parsed.blocks[b_idx].payload;
             if let Some(decided) = try_peek_raw_or_grammar_header(f_idx, b_idx, info.kind, payload)? {
                 return Ok(decided);
             }

@@ -11,7 +11,10 @@ use crate::{
     DecodeOptions, Error, Frame, Options, Result,
 };
 
-mod sys;
+pub(crate) mod pread;
+pub(crate) mod sys;
+
+pub(crate) use pread::{peek_cold_prefix, prepare_query_bytes};
 
 /// Returns `true` if native OS memory mapping is compiled in for this target.
 #[inline]

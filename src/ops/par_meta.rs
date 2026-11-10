@@ -130,7 +130,7 @@ pub(crate) fn collect_par_blocks<'a>(
                 frame_checksummed: csum,
                 dict,
                 info,
-                payload: &f_bytes[info.payload_offset..info.payload_offset + info.payload_size],
+                payload: parsed.blocks[local_blk].payload,
                 row_meta: parsed.block_row_meta(local_blk),
             });
         }

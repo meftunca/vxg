@@ -17,11 +17,13 @@ pub const VERSION_V4: u16 = 4;
 /// v5 extends v4 with an optional frame-shared prefix dictionary (`FLAG_FRAME_DICT = 0x02`)
 /// and optional variable-size record-aligned block directory (`FLAG_VAR_RAW = 0x04`).
 pub const VERSION_V5: u16 = 5;
+/// v6 extends v5 with column-grouped macro-blocks (`FLAG_COL_GROUP = 0x10`) for cold analytical archives.
+pub const VERSION_V6: u16 = 6;
 /// Version emitted by default when neither frame dictionary nor record-aligned variable blocks are active.
 pub const VERSION_RELEASE: u16 = VERSION_V4;
 pub const ENTRY_SIZE_V4: usize = 8;
 const MIN_VERSION: u16 = 1;
-const MAX_VERSION: u16 = VERSION_V5;
+const MAX_VERSION: u16 = VERSION_V6;
 const V4_SIZE_MASK: u32 = 0x3fff_ffff;
 
 /// Directory entry size for a given frame version.
@@ -102,6 +104,7 @@ pub struct Frame<'a> {
     pub(crate) block_size: usize,
     pub(crate) checksummed: bool,
     pub(crate) version: u16,
+    pub(crate) _owned_arena: Vec<u8>,
 }
 /// A frame whose command streams have been checked once and remain immutably
 /// borrowed for repeated CPU decode. Construct it with `Frame::into_validated`.
@@ -183,6 +186,9 @@ pub(crate) fn parse_header_and_dir(src: &[u8], max_output: usize) -> Result<(usi
     if src.len() < hdr.payload_start {
         return Err(Error::Truncated);
     }
+    if hdr.version == VERSION_V6 {
+        return v6::validate_v6_header_and_dir(src, &hdr);
+    }
     let esize = entry_size(hdr.version);
     let mut next_payload = hdr.payload_start;
     let mut next_raw = 0usize;
@@ -234,6 +240,9 @@ impl<'a> Frame<'a> {
         let hdr = v5::parse_v1_to_v5_header(src, max_output)?;
         if hdr.payload_start > src.len() {
             return Err(Error::Truncated);
+        }
+        if hdr.version == VERSION_V6 {
+            return v6::parse_v6_frame(src, &hdr);
         }
         let dict = v5::decode_header_dict(src, &hdr)?;
         let esize = entry_size(hdr.version);
@@ -315,6 +324,7 @@ impl<'a> Frame<'a> {
             block_size: hdr.block_size,
             checksummed: hdr.checksummed,
             version: hdr.version,
+            _owned_arena: Vec::new(),
         })
     }
     /// Parses one `VXG1` frame or a concatenated sequence of `VXG1` frames.
@@ -479,6 +489,7 @@ mod assemble;
 mod decode;
 pub mod recover;
 pub(crate) mod v5;
+pub(crate) mod v6;
 
 pub(crate) use assemble::{assemble, parallel_encode_assemble, AssembleDest, Part};
 use decode::decode_frame_into;

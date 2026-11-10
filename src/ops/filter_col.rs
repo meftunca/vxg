@@ -174,6 +174,15 @@ pub(super) fn filter_column_impl(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let expr = super::expr::PredExpr::Col(*pred);
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        Some(&expr),
+        &[],
+        false,
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if options.threads > 1 {
         let in_blocks = collect_par_blocks(frame_bytes, &frames);
@@ -196,8 +205,7 @@ pub(super) fn filter_column_impl(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload =
-                    &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if let Some(new_rows) = crate::columns::search_grammar_block_col_pred(
                     payload, blk_idx, cur_global, &mut carry, pred, limit, &mut out,
                 )? {

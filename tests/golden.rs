@@ -1,7 +1,8 @@
 use std::process::Command;
 use vxg::{
-    decompress, execute_sql, frame_row_count, recover_frame, verify_frame, DecodeOptions, Frame,
-    Simd, SqlFormat, SqlQuery, BLOCK_COLUMN, BLOCK_DICT_LZ, BLOCK_LZ, BLOCK_RAW,
+    compress, decompress, execute_sql, extract_block_into, extract_row, frame_row_count,
+    recover_frame, verify_frame, DecodeOptions, Frame, Options, Simd, SqlFormat, SqlQuery,
+    BLOCK_COLUMN, BLOCK_DICT_LZ, BLOCK_LZ, BLOCK_RAW, VERSION_V6,
 };
 
 struct FrozenVector {
@@ -163,6 +164,15 @@ const FROZEN_VECTORS: &[FrozenVector] = &[
         expected_kind: Some(BLOCK_COLUMN),
         expect_dict: false,
     },
+    // Format v6 (column-grouped macro-blocks)
+    FrozenVector {
+        name: "v6-col-group",
+        frame: include_bytes!("vectors/v6-col-group.vxg"),
+        raw: include_bytes!("vectors/v5-record-aligned.raw"),
+        expected_version: 6,
+        expected_kind: Some(BLOCK_COLUMN),
+        expect_dict: false,
+    },
 ];
 
 #[test]
@@ -273,6 +283,20 @@ fn frozen_structured_vectors_preserve_sql_semantics() {
     .unwrap();
     let text_csv = String::from_utf8(sql_csv).unwrap();
     assert_eq!(text_csv.trim(), "87,28623");
+
+    let v6_vxg = include_bytes!("vectors/v6-col-group.vxg");
+    let sql_v6 = execute_sql(
+        v6_vxg,
+        &q_csv,
+        SqlFormat::Csv,
+        true,
+        &DecodeOptions {
+            threads: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8(sql_v6).unwrap().trim(), "87,28623");
 }
 
 #[test]
@@ -363,4 +387,83 @@ fn partial_recovery_salvages_intact_blocks_from_corrupt_and_truncated_frames() {
     assert!(rec_status.success(), "CLI --recover must succeed when intact blocks exist");
     assert_eq!(std::fs::read(&out_path).unwrap(), expected_salvaged);
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn v6_corrupt_group_header_recovery_salvages_remaining_groups() {
+    let mut raw = Vec::new();
+    // Group 0: 2 blocks (8192 bytes) of 4-column NDJSON records
+    while raw.len() < 8192 {
+        let i = raw.len() / 64;
+        let line = format!(
+            "{{\"id\":{},\"region\":\"eu-west-1\",\"status\":\"ok\",\"cents\":{}}}\n",
+            1000 + i,
+            (i * 37) % 10000
+        );
+        let take = line.len().min(8192 - raw.len());
+        raw.extend_from_slice(&line.as_bytes()[..take]);
+    }
+    raw[8191] = b'\n';
+    // Group 1: 2 blocks (8192 bytes) of 6-column NDJSON records (distinct slot count -> separate VXG6 group!)
+    while raw.len() < 16384 {
+        let i = raw.len() / 64;
+        let line = format!(
+            "{{\"id\":{},\"region\":\"us-east-1\",\"status\":\"ok\",\"cents\":{},\"tax\":{},\"zone\":\"A\"}}\n",
+            5000 + i,
+            (i * 53) % 10000,
+            i % 99
+        );
+        let take = line.len().min(16384 - raw.len());
+        raw.extend_from_slice(&line.as_bytes()[..take]);
+    }
+    raw[16383] = b'\n';
+
+    let opt = Options {
+        block_size: 4096,
+        threads: 2,
+        row_index: true,
+        col_group: true,
+        ..Options::default()
+    };
+    let v6_frame = compress(&raw, &opt).unwrap();
+    let parsed = Frame::parse(&v6_frame, 1 << 20).unwrap();
+    assert_eq!(parsed.version(), VERSION_V6);
+    assert_eq!(parsed.block_count(), 4);
+
+    // Verify random single-block and single-row access on intact v6 frame
+    let mut blk2 = vec![0u8; 4096];
+    let n2 = extract_block_into(&v6_frame, 2, &mut blk2, &DecodeOptions::default()).unwrap();
+    assert_eq!(&blk2[..n2], &raw[8192..12288]);
+    let row0 = extract_row(&v6_frame, 0, &DecodeOptions::default()).unwrap();
+    assert!(row0.starts_with(b"{\"id\":1000,"));
+
+    // Locate the first "VXG6" group header magic inside the frame and corrupt it
+    let g0_magic_pos = v6_frame
+        .windows(4)
+        .position(|w| w == b"VXG6")
+        .expect("must contain VXG6 group header");
+    let mut corrupted = v6_frame.clone();
+    corrupted[g0_magic_pos] ^= 0xff;
+    corrupted[g0_magic_pos + 4] ^= 0xff;
+
+    assert!(
+        decompress(&corrupted, &DecodeOptions::default()).is_err(),
+        "strict decompress must reject corrupted group 0 header"
+    );
+
+    let rep = recover_frame(&corrupted, &DecodeOptions::default()).unwrap();
+    assert_eq!(rep.total_blocks, 4);
+    assert_eq!(
+        rep.failed_blocks.len(),
+        2,
+        "Group 0 (blocks 0..2) must be recorded as failed"
+    );
+    assert_eq!(
+        rep.recovered_blocks.len(),
+        2,
+        "Group 1 (blocks 2..4) must be recovered intact via Group Directory"
+    );
+    assert_eq!(rep.recovered_blocks[0].index, 2);
+    assert_eq!(rep.recovered_blocks[1].index, 3);
+    assert_eq!(rep.data, &raw[8192..16384]);
 }

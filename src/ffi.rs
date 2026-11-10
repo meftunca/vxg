@@ -241,6 +241,7 @@ pub unsafe extern "C" fn vxg_compress_into(
             target_block_rows: 0,
             level: 3,
             row_index: false,
+            col_group: false,
         };
         match compress_into(input, output, &opt) {
             Ok(written) => isize::try_from(written).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),
@@ -357,6 +358,7 @@ pub unsafe extern "C" fn vxg_compress_alloc(
             target_block_rows: 0,
             level: 3,
             row_index: false,
+            col_group: false,
         };
         let Ok(encoded) = compress(input, &opt) else {
             return std::ptr::null_mut();

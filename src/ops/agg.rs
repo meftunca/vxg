@@ -381,6 +381,15 @@ pub(crate) fn aggregate_column_impl(
     options: &DecodeOptions,
 ) -> Result<AggStats> {
     options.validate()?;
+    let extra = [agg_col];
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        where_expr,
+        &extra,
+        true,
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if options.threads > 1 {
         let in_blocks = collect_par_blocks(frame_bytes, &frames);
@@ -414,7 +423,7 @@ pub(crate) fn aggregate_column_impl(
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
         for (local_blk, info) in parsed.blocks().enumerate() {
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if let Some(st) = crate::columns::aggregate_grammar_block_seq(
                     payload,
                     &mut carry,
@@ -465,6 +474,18 @@ pub(crate) fn group_by_impl(
     options: &DecodeOptions,
 ) -> Result<Vec<GroupRow>> {
     options.validate()?;
+    let mut extra = vec![group_col];
+    if let Some(ac) = agg_col {
+        extra.push(ac);
+    }
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        where_expr,
+        &extra,
+        true,
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if options.threads > 1 {
         let in_blocks = collect_par_blocks(frame_bytes, &frames);
@@ -496,7 +517,7 @@ pub(crate) fn group_by_impl(
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
         for (local_blk, info) in parsed.blocks().enumerate() {
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if crate::columns::group_by_grammar_block_seq(
                     payload,
                     &mut carry,

@@ -107,6 +107,14 @@ pub(crate) fn count_where_impl(
     if matches!(expr, PredExpr::True) {
         return Ok(query::frame_row_count(frame_bytes)? as u64);
     }
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        Some(expr),
+        &[],
+        true,
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if options.threads > 1 {
         if let Some(total) = count_where_parallel(frame_bytes, &frames, expr, options)? {
@@ -121,7 +129,7 @@ pub(crate) fn count_where_impl(
     for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
         for (local_blk, info) in parsed.blocks().enumerate() {
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if let Some(cnt) =
                     crate::columns::count_grammar_block_expr_seq(payload, &mut carry, expr)?
                 {
@@ -346,6 +354,14 @@ pub(crate) fn filter_where_impl(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        Some(expr),
+        &[],
+        false,
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if options.threads > 1 {
         if let Some(rows) = filter_where_parallel(frame_bytes, &frames, expr, limit, options)? {
@@ -367,7 +383,7 @@ pub(crate) fn filter_where_impl(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if let Some(new_rows) = crate::columns::search_grammar_block_expr(
                     payload,
                     blk_idx,

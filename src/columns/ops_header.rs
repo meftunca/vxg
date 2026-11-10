@@ -427,3 +427,75 @@ fn ensure_col_raw_arena(col_bytes: &[u8], raw_len: usize, raw_arena: &mut Vec<u8
         ensure_full_raw_arena(raw_len, raw_arena);
     }
 }
+
+pub(crate) fn split_grammar_packet_streams(
+    payload: &[u8],
+) -> Option<(usize, Vec<(usize, usize)>)> {
+    let mut hdr = parse_grammar_for_ops(payload).ok()??;
+    for _ in 0..hdr.raw_count {
+        let len = hdr.cursor.uleb().ok()?;
+        let _ = hdr.cursor.take(len).ok()?;
+    }
+    let stream0_len = 1 + hdr.cursor.pos;
+    let total_slots: usize = hdr.slot_counts[..hdr.template_count].iter().sum();
+    if total_slots == 0 || total_slots > 64 {
+        return None;
+    }
+    let mut spans = Vec::with_capacity(total_slots);
+    for _ in 0..total_slots {
+        let start = 1 + hdr.cursor.pos;
+        let len = hdr.cursor.uleb().ok()?;
+        let _ = hdr.cursor.take(len).ok()?;
+        let end = 1 + hdr.cursor.pos;
+        spans.push((start, end));
+    }
+    if !hdr.cursor.done() {
+        return None;
+    }
+    Some((stream0_len, spans))
+}
+
+pub(crate) fn resolve_stream0_required_slots(
+    stream0: &[u8],
+    targets: &[crate::ops::ColTarget<'_>],
+) -> Option<u64> {
+    let hdr = parse_grammar_for_ops(stream0).ok()??;
+    let total_slots: usize = hdr.slot_counts[..hdr.template_count].iter().sum();
+    if total_slots == 0 || total_slots > 64 {
+        return None;
+    }
+    let mut mask = 0u64;
+    let mut slot_base = 0usize;
+    for t in 0..hdr.template_count {
+        let segs = hdr.segs(t);
+        let slots = hdr.slot_counts[t];
+        if !segs.last().is_some_and(|s| s.ends_with(b"\n")) {
+            return None;
+        }
+        let tpl_delim = if t == 0 {
+            hdr.tpl0_delim
+        } else {
+            delimited_template_delim(segs)
+        };
+        for &col in targets {
+            match col {
+                crate::ops::ColTarget::JsonKey(key) => {
+                    let found = json_single_line_template_slot(segs, key.as_bytes())?;
+                    if let Some(s) = found {
+                        mask |= 1u64 << (slot_base + s);
+                    }
+                }
+                crate::ops::ColTarget::Delimited { delim, index } => {
+                    if tpl_delim != Some(delim) {
+                        return None;
+                    }
+                    if index < slots {
+                        mask |= 1u64 << (slot_base + index);
+                    }
+                }
+            }
+        }
+        slot_base += slots;
+    }
+    Some(mask)
+}

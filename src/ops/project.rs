@@ -213,6 +213,14 @@ pub(crate) fn select_columns_impl(
 ) -> Result<Vec<u8>> {
     options.validate()?;
     validate_projection_cols(cols)?;
+    let prepared = crate::mmap::prepare_query_bytes(
+        frame_bytes,
+        where_expr,
+        cols,
+        true,
+        options.threads,
+    );
+    let frame_bytes = prepared.as_ref();
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     if limit == 0 {
         return Ok(Vec::new());
@@ -235,7 +243,7 @@ pub(crate) fn select_columns_impl(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if let Some(n) = crate::columns::select_grammar_block_seq_into(
                     payload,
                     &mut carry,

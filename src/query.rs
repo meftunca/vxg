@@ -78,7 +78,7 @@ pub fn block_row_count(frame_bytes: &[u8], block_index: usize) -> Result<usize> 
         return Ok(rows);
     }
     if info.kind == BLOCK_COLUMN {
-        let payload = &frame_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+        let payload = parsed.blocks[block_index].payload;
         if let Some(count) = crate::columns::grammar_block_row_count(payload)? {
             return Ok(count);
         }
@@ -95,6 +95,9 @@ pub fn block_row_count(frame_bytes: &[u8], block_index: usize) -> Result<usize> 
 /// Return the total number of structured records across all blocks in `frame_bytes`
 /// (supporting both single `VXG1` frames and concatenated multi-frame `VXG1` streams).
 pub fn frame_row_count(frame_bytes: &[u8]) -> Result<usize> {
+    if let Some(res) = crate::frame::v6::fast_frame_row_count(frame_bytes) {
+        return res;
+    }
     let frames = Frame::parse_all(frame_bytes, usize::MAX)?;
     let mut total = 0usize;
     let mut prev_open = false;
@@ -114,7 +117,7 @@ pub fn frame_row_count(frame_bytes: &[u8]) -> Result<usize> {
         }
         for (idx, info) in parsed.blocks().enumerate() {
             let (rows, ends_nl) = if info.kind == BLOCK_COLUMN {
-                let payload = &f_start[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[idx].payload;
                 if let Some(meta) = crate::columns::grammar_block_row_meta(payload)? {
                     meta
                 } else {
@@ -186,7 +189,7 @@ pub fn extract_block_row_range(
         .nth(block_index)
         .ok_or(Error::InvalidFrame("block index out of range"))?;
     if info.kind == BLOCK_COLUMN {
-        let payload = &frame_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+        let payload = parsed.blocks[block_index].payload;
         let mut out = Vec::new();
         if let Some(emitted) =
             crate::columns::unpack_grammar_row_range(payload, start_row, end_row, &mut out)?
@@ -243,6 +246,11 @@ pub fn extract_row_range(
     if start_row >= end_row {
         return Ok(Vec::new());
     }
+    if let Some(res) =
+        crate::frame::v6::extract_row_range_v6_indexed(frame_bytes, start_row, end_row, options)
+    {
+        return res;
+    }
     let frames = Frame::parse_all(frame_bytes, options.max_output)?;
     let mut out = Vec::new();
     let mut cur_global = 0usize;
@@ -275,7 +283,7 @@ pub fn extract_row_range(
                 }
                 let info = parsed.blocks[blk_idx].info;
                 if info.kind == BLOCK_COLUMN {
-                    let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                    let payload = parsed.blocks[blk_idx].payload;
                     if let Some((blk_rows, ends_nl)) = crate::columns::grammar_block_row_meta(payload)? {
                         if blk_rows != exp_rows || ends_nl != exp_ends_nl {
                             return Err(Error::InvalidFrame("row_index mismatch"));
@@ -321,7 +329,7 @@ pub fn extract_row_range(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[blk_idx].payload;
                 if let Some((blk_rows, ends_nl)) = crate::columns::grammar_block_row_meta(payload)? {
                     if blk_rows > 0 {
                         let local_start = start_row.saturating_sub(base_row).min(blk_rows);
@@ -460,7 +468,11 @@ pub unsafe extern "C" fn vxg_extract_row_range_into(
         return crate::ffi::VXG_ERR_NULL_PTR;
     }
     let frame = unsafe { std::slice::from_raw_parts(frame_ptr, frame_len) };
-    match extract_row_range(frame, start_row, end_row, &DecodeOptions::default()) {
+    let opts = DecodeOptions {
+        max_output: usize::MAX,
+        ..DecodeOptions::default()
+    };
+    match extract_row_range(frame, start_row, end_row, &opts) {
         Ok(bytes) => {
             if bytes.len() > dst_cap {
                 return crate::ffi::VXG_ERR_BUFFER_TOO_SMALL;
@@ -506,7 +518,11 @@ pub unsafe extern "C" fn vxg_find_first_into(
     } else {
         unsafe { std::slice::from_raw_parts(needle_ptr, needle_len) }
     };
-    match find_first(frame, needle, &DecodeOptions::default()) {
+    let opts = DecodeOptions {
+        max_output: usize::MAX,
+        ..DecodeOptions::default()
+    };
+    match find_first(frame, needle, &opts) {
         Ok(Some(m)) => {
             if m.bytes.len() > dst_cap {
                 return crate::ffi::VXG_ERR_BUFFER_TOO_SMALL;

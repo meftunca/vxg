@@ -73,6 +73,9 @@ pub fn recover_frame(src: &[u8], options: &DecodeOptions) -> Result<RecoveryRepo
     if src.is_empty() {
         return Err(Error::Truncated);
     }
+    if super::v6::is_v6_frame(src) {
+        return super::v6::recover_v6_frame(src, options);
+    }
 
     let mut frame_pos = 0usize;
     let mut global_block_idx = 0usize;

@@ -67,11 +67,67 @@ mod imp {
             target_os = "freebsd"
         ))]
         fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd"
+        ))]
+        fn mincore(addr: *const c_void, len: usize, vec: *mut u8) -> i32;
+        fn getpagesize() -> i32;
+    }
+
+    pub(crate) fn is_slice_resident(slice: &[u8]) -> bool {
+        if slice.len() < (1 << 20) {
+            return true;
+        }
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd"
+        ))]
+        {
+            static PAGE_SIZE: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let mut ps = PAGE_SIZE.load(std::sync::atomic::Ordering::Relaxed);
+            if ps == 0 {
+                let raw_ps = unsafe { getpagesize() };
+                ps = if raw_ps > 0 { raw_ps as usize } else { 16384 };
+                PAGE_SIZE.store(ps, std::sync::atomic::Ordering::Relaxed);
+            }
+            let base = slice.as_ptr() as usize;
+            let len = slice.len();
+            let probes = [len / 8, len / 4, len / 2, (len * 3) / 4];
+            let mut resident_count = 0usize;
+            for off in probes {
+                let page_addr = (base + off) & !(ps - 1);
+                let mut vec_byte = 0u8;
+                let rc = unsafe { mincore(page_addr as *const c_void, ps, &mut vec_byte) };
+                if rc != 0 || (vec_byte & 1) != 0 {
+                    resident_count += 1;
+                }
+            }
+            resident_count >= 2
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd"
+        )))]
+        {
+            true
+        }
     }
 
     pub(crate) struct RawMap {
         pub(crate) ptr: NonNull<u8>,
         pub(crate) len: usize,
+        pub(crate) fd: i32,
     }
 
     impl RawMap {
@@ -80,6 +136,7 @@ mod imp {
                 return Ok(Self {
                     ptr: NonNull::dangling(),
                     len: 0,
+                    fd: -1,
                 });
             }
             let raw = unsafe {
@@ -95,10 +152,15 @@ mod imp {
             if raw == MAP_FAILED || raw.is_null() {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Self {
-                ptr: unsafe { NonNull::new_unchecked(raw as *mut u8) },
-                len,
-            })
+            let ptr = unsafe { NonNull::new_unchecked(raw as *mut u8) };
+            let fd = file
+                .try_clone()
+                .map(std::os::unix::io::IntoRawFd::into_raw_fd)
+                .unwrap_or(-1);
+            if fd >= 0 {
+                crate::mmap::pread::register_mapping(ptr.as_ptr() as usize, len, fd);
+            }
+            Ok(Self { ptr, len, fd })
         }
 
         pub(crate) unsafe fn map_rw(file: &File, len: usize) -> io::Result<Self> {
@@ -106,6 +168,7 @@ mod imp {
                 return Ok(Self {
                     ptr: NonNull::dangling(),
                     len: 0,
+                    fd: -1,
                 });
             }
             let raw = unsafe {
@@ -124,6 +187,7 @@ mod imp {
             Ok(Self {
                 ptr: unsafe { NonNull::new_unchecked(raw as *mut u8) },
                 len,
+                fd: -1,
             })
         }
 
@@ -201,6 +265,9 @@ mod imp {
 
     impl Drop for RawMap {
         fn drop(&mut self) {
+            if self.fd >= 0 {
+                crate::mmap::pread::unregister_mapping(self.ptr.as_ptr() as usize, self.len, self.fd);
+            }
             if self.len > 0 {
                 unsafe {
                     let _ = munmap(self.ptr.as_ptr() as *mut c_void, self.len);
@@ -246,6 +313,10 @@ mod imp {
         fn FlushViewOfFile(base: *const c_void, bytes_to_flush: usize) -> i32;
         fn UnmapViewOfFile(base: *const c_void) -> i32;
         fn CloseHandle(object: Handle) -> i32;
+    }
+
+    pub(crate) fn is_slice_resident(_slice: &[u8]) -> bool {
+        true
     }
 
     pub(crate) struct RawMap {
@@ -362,6 +433,10 @@ mod imp {
     use std::io;
     use std::ptr::NonNull;
 
+    pub(crate) fn is_slice_resident(_slice: &[u8]) -> bool {
+        true
+    }
+
     pub(crate) struct RawMap {
         pub(crate) ptr: NonNull<u8>,
         pub(crate) len: usize,
@@ -390,4 +465,4 @@ mod imp {
     pub(crate) const SUPPORTED: bool = false;
 }
 
-pub(super) use imp::{RawMap, SUPPORTED};
+pub(crate) use imp::{is_slice_resident, RawMap, SUPPORTED};

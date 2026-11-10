@@ -1,8 +1,8 @@
 use crate::{block, checksum::crc32c, simd::Engine, DecodeOptions, Error, Result};
 
 use super::{
-    entry_size, read_u32, read_u64, v5, valid_kind_and_size, Block, Frame, ValidatedCommandStreams,
-    HEADER_SIZE, V4_SIZE_MASK, VERSION_V4,
+    entry_size, read_u32, read_u64, v5, v6, valid_kind_and_size, Block, Frame,
+    ValidatedCommandStreams, HEADER_SIZE, V4_SIZE_MASK, VERSION_V4, VERSION_V6,
 };
 
 pub(super) fn decode_frame_into(
@@ -133,6 +133,22 @@ pub(crate) fn validate_header_and_directory_with_offsets(
     let hdr = v5::parse_v1_to_v5_header(src, max_output)?;
     if hdr.payload_start > src.len() {
         return Err(Error::Truncated);
+    }
+    if hdr.version == VERSION_V6 {
+        let (total_frame, _) = v6::validate_v6_header_and_dir(src, &hdr)?;
+        if src.len() < total_frame {
+            return Err(Error::Truncated);
+        }
+        if src.len() != total_frame {
+            return Err(Error::InvalidFrame("trailing bytes or incorrect total"));
+        }
+        return Ok((
+            hdr.raw_size,
+            hdr.block_size,
+            hdr.count,
+            hdr.version,
+            hdr.checksummed,
+        ));
     }
     let esize = entry_size(hdr.version);
     let record_v4 = hdr.version >= VERSION_V4
@@ -327,6 +343,9 @@ pub(crate) fn extract_block_validated_into(
     out: &mut [u8],
     options: &DecodeOptions,
 ) -> Result<usize> {
+    if v6::is_v6_frame(src) {
+        return v6::extract_block_v6_into(src, block_index, out, options);
+    }
     options.validate()?;
     let (_raw_size, block_size, count, version, checksummed) =
         validate_header_and_directory(src, usize::MAX)?;

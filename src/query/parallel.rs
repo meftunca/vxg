@@ -225,7 +225,7 @@ pub(super) fn filter_impl(
                 return Ok(out);
             }
             if info.kind == BLOCK_COLUMN {
-                let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                let payload = parsed.blocks[local_blk].payload;
                 if let Some(new_rows) = crate::columns::search_grammar_block(
                     payload,
                     blk_idx,
