@@ -251,7 +251,7 @@ def fmt_1t_8t_pair(v1_dict, v8_dict):
 def render_duckdb_in_cache() -> str:
     doc = json.loads((ROOT / "reports/duckdb-vs-vxg.json").read_text(encoding="utf-8"))
     lines = [
-        "| Corpus & Query (`1T / 8T` latency in `ms`, lower is faster) | `VXG` (`64K` std) | `VXG --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* | DuckDB Raw |",
+        "| Corpus & Query (`1T / 8T` latency in `ms`, lower is faster) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* | DuckDB Raw |",
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
     ]
     for ds in doc["datasets"]:
@@ -269,7 +269,7 @@ def render_duckdb_in_cache() -> str:
             "{:.2f} MB",
         )
         lines.append(
-            f"| **`{name}`** *({raw_mb}, {rows_k} rows)* | {sz['v']} (`{st['vxg_enc_8t_ms']:.1f} ms`, YES) | {sz['va']} (`{st['vxg_aligned_enc_8t_ms']:.1f} ms`, YES) | {sz['ps']} (`{st['pq_snap_etl_8t_ms']:.1f} ms` ETL, NO) | {sz['ps16']} (`{st['pq_snap_rg16k_etl_8t_ms']:.1f} ms`, NO) | {sz['pz']} (`{st['pq_zstd_etl_8t_ms']:.1f} ms` ETL, NO) | `{st['raw_mb']:.2f} MB` (YES) |"
+            f"| **`{name}`** *({raw_mb}, {rows_k} rows)* | {sz['v']} (`{st['vxg_enc_8t_ms']:.1f} ms` `-l 3`, YES) | {sz['va']} (`{st['vxg_aligned_enc_8t_ms']:.1f} ms` `-l 3`, YES) | {sz['ps']} (`{st['pq_snap_etl_8t_ms']:.1f} ms` ETL, NO) | {sz['ps16']} (`{st['pq_snap_rg16k_etl_8t_ms']:.1f} ms`, NO) | {sz['pz']} (`{st['pq_zstd_etl_8t_ms']:.1f} ms` ETL, NO) | `{st['raw_mb']:.2f} MB` (YES) |"
         )
         q1_list = ds["threads"]["1"]["queries"]
         q8_list = ds["threads"]["8"]["queries"]
@@ -303,7 +303,7 @@ def render_duckdb_scale_single(ds_name: str) -> str:
     st = ds["storage"]
     rows_m = f"{st['rows'] // 1_000_000}M"
     lines = [
-        f"| `{ds_name}` (`{rows_m}` rows, `{st['raw_gb']:.2f} GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG` (`64K` std) | `VXG --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |",
+        f"| `{ds_name}` (`{rows_m}` rows, `{st['raw_gb']:.2f} GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |",
         "| :--- | :---: | :---: | :---: | :---: | :---: |",
     ]
     sz = bold_min(
@@ -317,7 +317,7 @@ def render_duckdb_scale_single(ds_name: str) -> str:
         "{:.1f} MB",
     )
     lines.append(
-        f"| **Archive Size & `8T` Ingest / ETL** | {sz['v']} (`{st['vxg_enc_8t_ms']/1000:.2f} s`, YES) | {sz['va']} (`{st['vxg_aligned_enc_8t_ms']/1000:.2f} s`, YES) | {sz['ps']} (`{st['pq_snap_etl_8t_ms']/1000:.2f} s`, NO) | {sz['ps16']} (`{st['pq_snap_rg16k_etl_8t_ms']/1000:.2f} s`, NO) | {sz['pz']} (`{st['pq_zstd_etl_8t_ms']/1000:.2f} s`, NO) |"
+        f"| **Archive Size & `8T` Ingest (`-l 3`) / ETL** | {sz['v']} (`{st['vxg_enc_8t_ms']/1000:.2f} s` `-l 3`, YES) | {sz['va']} (`{st['vxg_aligned_enc_8t_ms']/1000:.2f} s` `-l 3`, YES) | {sz['ps']} (`{st['pq_snap_etl_8t_ms']/1000:.2f} s`, NO) | {sz['ps16']} (`{st['pq_snap_rg16k_etl_8t_ms']/1000:.2f} s`, NO) | {sz['pz']} (`{st['pq_zstd_etl_8t_ms']/1000:.2f} s`, NO) |"
     )
     for q1, q8 in zip(ds["threads"]["1"]["queries"], ds["threads"]["8"]["queries"]):
         v1 = {
@@ -347,7 +347,7 @@ def render_duckdb_scale_cold(ds_name: str) -> str:
     st = ds["storage"]
     rows_m = f"{st['rows'] // 1_000_000}M"
     lines = [
-        f"| `{ds_name}` (`{rows_m}` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG` (`64K` std, cold) | `VXG --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |",
+        f"| `{ds_name}` (`{rows_m}` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG -l 3` (`64K` std, cold) | `VXG -l 3 --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |",
         "| :--- | :---: | :---: | :---: | :---: | :---: |",
     ]
     for q8 in ds["threads"]["8"]["queries"]:

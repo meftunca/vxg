@@ -803,9 +803,9 @@ def write_markdown(report: dict, md_path: str) -> None:
         )
         lines.append("")
         lines.append(
-            f"- **Archive Size & 8T Ingest/ETL Time:** "
-            f"`VXG` **`{st['vxg_bytes']/1e6:.1f} MB`** (`ratio={st['vxg_ratio']:.4f}`, **`{st['vxg_enc_8t_ms']/1000.0:.2f} s`** / `{st['vxg_enc_8t_gbps']:.2f} GB/s`, lossless=`YES`) · "
-            f"`VXG --record-aligned` `{st['vxg_aligned_bytes']/1e6:.1f} MB` (`ratio={st['vxg_aligned_ratio']:.4f}`, `{st['vxg_aligned_enc_8t_ms']/1000.0:.2f} s`, lossless=`YES`) · "
+            f"- **Archive Size & 8T Ingest (`--level 3` default) / ETL Time:** "
+            f"`VXG -l 3` **`{st['vxg_bytes']/1e6:.1f} MB`** (`ratio={st['vxg_ratio']:.4f}`, **`{st['vxg_enc_8t_ms']/1000.0:.2f} s`** / `{st['vxg_enc_8t_gbps']:.2f} GB/s`, lossless=`YES`) · "
+            f"`VXG -l 3 --record-aligned` `{st['vxg_aligned_bytes']/1e6:.1f} MB` (`ratio={st['vxg_aligned_ratio']:.4f}`, `{st['vxg_aligned_enc_8t_ms']/1000.0:.2f} s`, lossless=`YES`) · "
             f"`Parquet-Snappy` `{st['pq_snap_bytes']/1e6:.1f} MB` (`ratio={st['pq_snap_ratio']:.4f}`, `{st['pq_snap_etl_8t_ms']/1000.0:.2f} s` ETL, lossless=`NO`) · "
             f"`Parquet-Snappy (RG=16384)` `{st['pq_snap_rg16k_bytes']/1e6:.1f} MB` (`ratio={st['pq_snap_rg16k_ratio']:.4f}`, `{st['pq_snap_rg16k_etl_8t_ms']/1000.0:.2f} s` ETL) · "
             f"`Parquet-Zstd` `{st['pq_zstd_bytes']/1e6:.1f} MB` (`ratio={st['pq_zstd_ratio']:.4f}`, `{st['pq_zstd_etl_8t_ms']/1000.0:.2f} s` ETL, lossless=`NO`)."
@@ -820,7 +820,7 @@ def write_markdown(report: dict, md_path: str) -> None:
             )
             lines.append("")
             lines.append(
-                "| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |"
+                "| Query | `VXG -l 3` (`64 KiB`) | `VXG -l 3 --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |"
             )
             lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
             for q in tb["queries"]:
@@ -862,7 +862,7 @@ def write_markdown(report: dict, md_path: str) -> None:
                 )
                 lines.append("")
                 lines.append(
-                    "| Query | `VXG` (`64 KiB`, cold) | `VXG --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |"
+                    "| Query | `VXG -l 3` (`64 KiB`, cold) | `VXG -l 3 --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |"
                 )
                 lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
                 for q in tb["queries"]:

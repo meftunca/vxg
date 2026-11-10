@@ -6,11 +6,11 @@
 
 ### `nyc-taxi-2024-10m.ndjson` (`10,000,000` rows, `2.62 GB` raw, provenance: `official_nyc_tlc_2024_months_01_to_12_unmodified_real_rows`)
 
-- **Archive Size & 8T Ingest/ETL Time:** `VXG` **`152.6 MB`** (`ratio=0.0583`, **`3.24 s`** / `0.81 GB/s`, lossless=`YES`) · `VXG --record-aligned` `140.8 MB` (`ratio=0.0538`, `0.67 s`, lossless=`YES`) · `Parquet-Snappy` `193.3 MB` (`ratio=0.0739`, `0.96 s` ETL, lossless=`NO`) · `Parquet-Snappy (RG=16384)` `203.4 MB` (`ratio=0.0777`, `1.21 s` ETL) · `Parquet-Zstd` `144.6 MB` (`ratio=0.0553`, `0.96 s` ETL, lossless=`NO`).
+- **Archive Size & 8T Ingest (`--level 3` default) / ETL Time:** `VXG -l 3` **`152.6 MB`** (`ratio=0.0583`, **`3.24 s`** / `0.81 GB/s`, lossless=`YES`) · `VXG -l 3 --record-aligned` `140.8 MB` (`ratio=0.0538`, `0.67 s`, lossless=`YES`) · `Parquet-Snappy` `193.3 MB` (`ratio=0.0739`, `0.96 s` ETL, lossless=`NO`) · `Parquet-Snappy (RG=16384)` `203.4 MB` (`ratio=0.0777`, `1.21 s` ETL) · `Parquet-Zstd` `144.6 MB` (`ratio=0.0553`, `0.96 s` ETL, lossless=`NO`).
 
 #### `8T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.09 ms`)
 
-| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
+| Query | `VXG -l 3` (`64 KiB`) | `VXG -l 3 --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` *(DuckDB raw text: 0.39 s)* | 20.36 ms (491.1 M/s) | **3.91 ms (2554.9 M/s)** | 13.64 ms (733.0 M/s) | 28.93 ms (345.7 M/s) | 13.48 ms (741.7 M/s) |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 13.98 ms (715.2 M/s) | **2.30 ms (4339.5 M/s)** | 15.43 ms (648.2 M/s) | 21.73 ms (460.2 M/s) | 10.81 ms (925.3 M/s) |
@@ -22,7 +22,7 @@
 
 #### `8T` Cold NVMe Cache Query Latency (`ms`) & Throughput (`M rows/s`, 1st run after `F_NOCACHE` OS page-cache eviction)
 
-| Query | `VXG` (`64 KiB`, cold) | `VXG --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |
+| Query | `VXG -l 3` (`64 KiB`, cold) | `VXG -l 3 --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 144.43 ms (69.2 M/s) | 103.21 ms (96.9 M/s) | **16.12 ms (620.5 M/s)** | 35.22 ms (283.9 M/s) | 25.91 ms (385.9 M/s) |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 133.06 ms (75.2 M/s) | 103.92 ms (96.2 M/s) | 19.92 ms (501.9 M/s) | 20.31 ms (492.4 M/s) | **13.40 ms (746.2 M/s)** |
@@ -32,7 +32,7 @@
 
 #### `1T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.05 ms`)
 
-| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
+| Query | `VXG -l 3` (`64 KiB`) | `VXG -l 3 --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 126.06 ms (79.3 M/s) | **29.79 ms (335.7 M/s)** | 41.03 ms (243.7 M/s) | 68.89 ms (145.2 M/s) | 70.19 ms (142.5 M/s) |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 70.13 ms (142.6 M/s) | **11.75 ms (850.7 M/s)** | 38.35 ms (260.7 M/s) | 54.11 ms (184.8 M/s) | 53.58 ms (186.6 M/s) |
@@ -42,11 +42,11 @@
 
 ### `nyc-taxi-2024-40m.csv` (`40,000,000` rows, `3.06 GB` raw, provenance: `official_nyc_tlc_2024_months_01_to_12_unmodified_real_rows`)
 
-- **Archive Size & 8T Ingest/ETL Time:** `VXG` **`552.9 MB`** (`ratio=0.1805`, **`5.21 s`** / `0.59 GB/s`, lossless=`YES`) · `VXG --record-aligned` `550.4 MB` (`ratio=0.1797`, `1.69 s`, lossless=`YES`) · `Parquet-Snappy` `773.1 MB` (`ratio=0.2524`, `4.32 s` ETL, lossless=`NO`) · `Parquet-Snappy (RG=16384)` `818.9 MB` (`ratio=0.2673`, `4.74 s` ETL) · `Parquet-Zstd` `579.4 MB` (`ratio=0.1891`, `3.72 s` ETL, lossless=`NO`).
+- **Archive Size & 8T Ingest (`--level 3` default) / ETL Time:** `VXG -l 3` **`552.9 MB`** (`ratio=0.1805`, **`5.21 s`** / `0.59 GB/s`, lossless=`YES`) · `VXG -l 3 --record-aligned` `550.4 MB` (`ratio=0.1797`, `1.69 s`, lossless=`YES`) · `Parquet-Snappy` `773.1 MB` (`ratio=0.2524`, `4.32 s` ETL, lossless=`NO`) · `Parquet-Snappy (RG=16384)` `818.9 MB` (`ratio=0.2673`, `4.74 s` ETL) · `Parquet-Zstd` `579.4 MB` (`ratio=0.1891`, `3.72 s` ETL, lossless=`NO`).
 
 #### `8T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.07 ms`)
 
-| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
+| Query | `VXG -l 3` (`64 KiB`) | `VXG -l 3 --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` *(DuckDB raw text: 1.20 s)* | 26.05 ms (1535.6 M/s) | **25.88 ms (1545.4 M/s)** | 36.79 ms (1087.2 M/s) | 105.64 ms (378.6 M/s) | 60.13 ms (665.2 M/s) |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 15.25 ms (2623.3 M/s) | **12.64 ms (3164.6 M/s)** | 28.03 ms (1426.9 M/s) | 62.24 ms (642.6 M/s) | 34.48 ms (1160.0 M/s) |
@@ -58,7 +58,7 @@
 
 #### `8T` Cold NVMe Cache Query Latency (`ms`) & Throughput (`M rows/s`, 1st run after `F_NOCACHE` OS page-cache eviction)
 
-| Query | `VXG` (`64 KiB`, cold) | `VXG --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |
+| Query | `VXG -l 3` (`64 KiB`, cold) | `VXG -l 3 --record-aligned` (cold) | `DuckDB Parquet-Snappy` *(cold)* | `DuckDB Parquet-Snappy` *(`RG=16384`, cold)* | `DuckDB Parquet-Zstd` *(cold)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 407.15 ms (98.2 M/s) | 382.38 ms (104.6 M/s) | 60.21 ms (664.3 M/s) | 128.25 ms (311.9 M/s) | **58.70 ms (681.5 M/s)** |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 386.27 ms (103.6 M/s) | 569.23 ms (70.3 M/s) | **32.44 ms (1232.9 M/s)** | 148.02 ms (270.2 M/s) | 42.21 ms (947.7 M/s) |
@@ -68,7 +68,7 @@
 
 #### `1T` Query Latency (`ms`) & Throughput (`M rows/s`, `DuckDB SELECT 1 prep = 0.04 ms`)
 
-| Query | `VXG` (`64 KiB`) | `VXG --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
+| Query | `VXG -l 3` (`64 KiB`) | `VXG -l 3 --record-aligned` | `DuckDB Parquet-Snappy` *(prep)* | `DuckDB Parquet-Snappy` *(`RG=16384`)* | `DuckDB Parquet-Zstd` *(prep)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 162.72 ms (245.8 M/s) | **150.67 ms (265.5 M/s)** | 159.14 ms (251.4 M/s) | 282.92 ms (141.4 M/s) | 275.13 ms (145.4 M/s) |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 91.34 ms (437.9 M/s) | **82.42 ms (485.3 M/s)** | 156.03 ms (256.4 M/s) | 218.78 ms (182.8 M/s) | 210.90 ms (189.7 M/s) |

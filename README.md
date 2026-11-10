@@ -72,21 +72,21 @@ Measured sequentially on an uncontested host via `vxg-bench` (`Apple Silicon aar
 Measured standalone with zero background CPU contention (`libvxg.dylib` vs `duckdb 2.0.0`, warm OS cache, median of 5–7 runs, **100% result equality verified** via [`scripts/bench_vs_duckdb.py`](scripts/bench_vs_duckdb.py); raw artifact: [`reports/duckdb-vs-vxg.json`](reports/duckdb-vs-vxg.json)). Both **`1T` and `8T` latencies (`1T / 8T` in `ms`)** are shown side-by-side, and `DuckDB + Parquet` is tested at both default `ROW_GROUP_SIZE = 122880` and fine-grained `ROW_GROUP_SIZE = 16384` (`SELECT 1` `PREPARE/EXECUTE` overhead = `0.04 ms` `1T`, `0.09 ms` `8T`). **None of the 15 in-cache or 10 scale queries below read precomputed block `sum/min/max` metadata:** `MODEL_DECIMAL_PACKED` / `MODEL_SCALED_DECIMAL` headers store only `(min, bit_width)` and unpack every row's bit-packed residual $r_i$ in 64-row SIMD chunks (`unpack_u16_chunk64` + NEON `vaddlvq_u16` / `vminvq_u16` / `vmaxvq_u16` in `src/columns/ops_agg_fast.rs`); only unfiltered `SELECT COUNT(*)` (`frame_row_count`, not included in these 15/10 queries) reads $O(1)$ `FLAG_ROW_INDEX` header metadata. With `v0.5.3` zero-alloc `GroupAccumSoa` fused group buckets, dynamic `Top-K` zone-map/delta pruning, and atomic work-stealing, **`VXG --record-aligned` wins `15 / 15` on `8T` (`0.03–0.23 ms`) and `15 / 15` on `1T` (`0.12–1.07 ms`)**, while fixed-`64 KiB` `VXG` wins `15 / 15` on `8T` and `11 / 15` on `1T`.
 
 <!-- BEGIN GENERATED TABLE: duckdb-in-cache -->
-| Corpus & Query (`1T / 8T` latency in `ms`, lower is faster) | `VXG` (`64K` std) | `VXG --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* | DuckDB Raw |
+| Corpus & Query (`1T / 8T` latency in `ms`, lower is faster) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* | DuckDB Raw |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`nyc-taxi-2024-01.ndjson`** *(52.3 MB, 200k rows)* | 3.10 MB (`6.8 ms`, YES) | **2.86 MB** (`29.4 ms`, YES) | 3.94 MB (`83.6 ms` ETL, NO) | 4.17 MB (`75.7 ms`, NO) | 2.96 MB (`92.0 ms` ETL, NO) | `52.33 MB` (YES) |
+| **`nyc-taxi-2024-01.ndjson`** *(52.3 MB, 200k rows)* | 3.10 MB (`6.8 ms` `-l 3`, YES) | **2.86 MB** (`29.4 ms` `-l 3`, YES) | 3.94 MB (`83.6 ms` ETL, NO) | 4.17 MB (`75.7 ms`, NO) | 2.96 MB (`92.0 ms` ETL, NO) | `52.33 MB` (YES) |
 | ↳ `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 2.46 / 0.61 | **0.53** / **0.15** | 1.69 / 1.13 | 2.38 / 1.57 | 2.30 / 1.37 | 81.27 / 57.39 |
 | ↳ `SUM/MIN/MAX(total_cents) [all 200k rows]` | 1.35 / 0.47 | **0.15** / **0.10** | 2.11 / 0.91 | 1.49 / 0.93 | 1.77 / 1.15 | 81.30 / 56.10 |
 | ↳ `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 1.73 / 0.44 | **0.28** / **0.09** | 1.18 / 0.98 | 1.47 / 0.91 | 1.46 / 1.22 | 81.51 / 57.32 |
 | ↳ `GROUP BY payment_type: COUNT(*), SUM(total)` | 2.08 / 0.49 | **0.52** / **0.10** | 1.22 / 0.98 | 1.56 / 0.86 | 1.57 / 1.14 | 84.65 / 55.83 |
 | ↳ `ORDER BY total_cents DESC LIMIT 10` | 1.61 / 0.87 | **0.46** / **0.18** | 2.56 / 2.16 | 2.47 / 2.33 | 4.59 / 3.41 | 92.09 / 58.27 |
 | ↳ `SELECT 4 cols WHERE tip_cents >= 2500` | 2.08 / 0.92 | **1.07** / **0.23** | 3.22 / 3.11 | 3.61 / 3.57 | 5.55 / 5.28 | 94.70 / 59.56 |
-| **`nyc-taxi-2024-01.csv`** *(23.0 MB, 300k rows)* | 4.21 MB (`9.1 ms`, YES) | **4.19 MB** (`27.0 ms`, YES) | 5.86 MB (`105.3 ms` ETL, NO) | 6.19 MB (`88.9 ms`, NO) | 4.39 MB (`97.7 ms` ETL, NO) | `23.00 MB` (YES) |
+| **`nyc-taxi-2024-01.csv`** *(23.0 MB, 300k rows)* | 4.21 MB (`9.1 ms` `-l 3`, YES) | **4.19 MB** (`27.0 ms` `-l 3`, YES) | 5.86 MB (`105.3 ms` ETL, NO) | 6.19 MB (`88.9 ms`, NO) | 4.39 MB (`97.7 ms` ETL, NO) | `23.00 MB` (YES) |
 | ↳ `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 0.90 / 0.19 | **0.80** / **0.13** | 1.92 / 1.21 | 2.64 / 1.27 | 2.80 / 1.57 | 77.86 / 51.57 |
 | ↳ `SUM/MIN/MAX(total_cents) [all 300k rows]` | 0.40 / 0.18 | **0.35** / **0.16** | 1.45 / 0.97 | 1.81 / 0.92 | 1.91 / 1.10 | 79.03 / 50.90 |
 | ↳ `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 0.60 / 0.17 | **0.52** / **0.09** | 1.53 / 1.15 | 1.94 / 1.09 | 1.95 / 1.33 | 79.73 / 50.40 |
 | ↳ `GROUP BY payment_type: COUNT(*), SUM(total)` | 1.06 / 0.25 | **0.91** / **0.21** | 1.62 / 1.04 | 2.13 / 1.17 | 2.09 / 1.22 | 77.72 / 50.85 |
-| **`ndjson_varied.ndjson`** *(56.5 MB, 300k rows)* | 5.17 MB (`8.8 ms`, YES) | **4.70 MB** (`41.6 ms`, YES) | 9.70 MB (`116.4 ms` ETL, NO) | 9.72 MB (`102.7 ms`, NO) | 5.56 MB (`121.0 ms` ETL, NO) | `56.50 MB` (YES) |
+| **`ndjson_varied.ndjson`** *(56.5 MB, 300k rows)* | 5.17 MB (`8.8 ms` `-l 3`, YES) | **4.70 MB** (`41.6 ms` `-l 3`, YES) | 9.70 MB (`116.4 ms` ETL, NO) | 9.72 MB (`102.7 ms`, NO) | 5.56 MB (`121.0 ms` ETL, NO) | `56.50 MB` (YES) |
 | ↳ `COUNT(*) WHERE fraud & status=500 & lat>=150` | 2.79 / 0.61 | **0.89** / **0.21** | 1.23 / 0.92 | 1.74 / 1.06 | 1.43 / 1.01 | 99.73 / 62.44 |
 | ↳ `SUM/MIN/MAX(bytes) [all 300k rows]` | 1.17 / 0.32 | **0.12** / **0.03** | 2.35 / 1.24 | 2.57 / 0.94 | 3.61 / 1.80 | 88.87 / 58.29 |
 | ↳ `GROUP BY service: COUNT(*), SUM(bytes)` | 2.60 / 0.54 | **0.83** / **0.16** | 2.97 / 1.73 | 3.31 / 1.57 | 4.25 / 2.25 | 100.75 / 62.54 |
@@ -104,9 +104,9 @@ Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data**
 - **Cold NVMe Cache (`8T` 1st run after `F_NOCACHE` OS page-cache eviction):** In true cold-disk execution, **`DuckDB + Parquet` wins `10 / 10` queries** (`12.21–52.59 ms` on `10M` NDJSON and `27.02–62.92 ms` on `40M` CSV vs `VXG --record-aligned` `103.21–146.93 ms` and `370.81–643.57 ms`). Because `Parquet` groups `122,880` rows into macro column chunks, `DuckDB` issues large sequential `pread()` calls for only the queried columns' `~18–45 MB` byte ranges, whereas `VXG`'s self-contained `PAX` block layout stores all 13 columns inside each block (`2,442`–`47,892` blocks) so `mmap` page-faults across the full `140.8 MB` / `550.4 MB` archive from NVMe SSD (notice that shrinking `Parquet` to `ROW_GROUP_SIZE = 16384` similarly slows cold `Parquet-Snappy` `30.23 -> 101.47 ms` and `32.44 -> 148.02 ms` on `40M` CSV).
 
 <!-- BEGIN GENERATED TABLE: duckdb-scale-40m-csv -->
-| `nyc-taxi-2024-40m.csv` (`40M` rows, `3.06 GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG` (`64K` std) | `VXG --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |
+| `nyc-taxi-2024-40m.csv` (`40M` rows, `3.06 GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Archive Size & `8T` Ingest / ETL** | 552.9 MB (`5.21 s`, YES) | **550.4 MB** (`1.69 s`, YES) | 773.1 MB (`4.32 s`, NO) | 818.9 MB (`4.74 s`, NO) | 579.4 MB (`3.72 s`, NO) |
+| **Archive Size & `8T` Ingest (`-l 3`) / ETL** | 552.9 MB (`5.21 s` `-l 3`, YES) | **550.4 MB** (`1.69 s` `-l 3`, YES) | 773.1 MB (`4.32 s`, NO) | 818.9 MB (`4.74 s`, NO) | 579.4 MB (`3.72 s`, NO) |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 162.72 / 26.05 | **150.67** / **25.88** | 159.14 / 36.79 | 282.92 / 105.64 | 275.13 / 60.13 |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 91.34 / 15.25 | **82.42** / **12.64** | 156.03 / 28.03 | 218.78 / 62.24 | 210.90 / 34.48 |
 | `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 114.70 / 17.03 | **107.33** / **16.06** | 138.55 / 31.43 | 204.45 / 70.70 | 195.58 / 36.11 |
@@ -115,7 +115,7 @@ Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data**
 <!-- END GENERATED TABLE: duckdb-scale-40m-csv -->
 
 <!-- BEGIN GENERATED TABLE: duckdb-scale-40m-csv-cold -->
-| `nyc-taxi-2024-40m.csv` (`40M` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG` (`64K` std, cold) | `VXG --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |
+| `nyc-taxi-2024-40m.csv` (`40M` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG -l 3` (`64K` std, cold) | `VXG -l 3 --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 407.15 | 382.38 | 60.21 | 128.25 | **58.70** |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 386.27 | 569.23 | **32.44** | 148.02 | 42.21 |
@@ -125,9 +125,9 @@ Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data**
 <!-- END GENERATED TABLE: duckdb-scale-40m-csv-cold -->
 
 <!-- BEGIN GENERATED TABLE: duckdb-scale-10m-ndjson -->
-| `nyc-taxi-2024-10m.ndjson` (`10M` rows, `2.62 GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG` (`64K` std) | `VXG --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |
+| `nyc-taxi-2024-10m.ndjson` (`10M` rows, `2.62 GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Archive Size & `8T` Ingest / ETL** | 152.6 MB (`3.24 s`, YES) | **140.8 MB** (`0.67 s`, YES) | 193.3 MB (`0.96 s`, NO) | 203.4 MB (`1.21 s`, NO) | 144.6 MB (`0.96 s`, NO) |
+| **Archive Size & `8T` Ingest (`-l 3`) / ETL** | 152.6 MB (`3.24 s` `-l 3`, YES) | **140.8 MB** (`0.67 s` `-l 3`, YES) | 193.3 MB (`0.96 s`, NO) | 203.4 MB (`1.21 s`, NO) | 144.6 MB (`0.96 s`, NO) |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 126.06 / 20.36 | **29.79** / **3.91** | 41.03 / 13.64 | 68.89 / 28.93 | 70.19 / 13.48 |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 70.13 / 13.98 | **11.75** / **2.30** | 38.35 / 15.43 | 54.11 / 21.73 | 53.58 / 10.81 |
 | `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 129.90 / 15.79 | **19.05** / **3.14** | 36.62 / 8.02 | 52.38 / 18.91 | 52.40 / 10.08 |
@@ -136,7 +136,7 @@ Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data**
 <!-- END GENERATED TABLE: duckdb-scale-10m-ndjson -->
 
 <!-- BEGIN GENERATED TABLE: duckdb-scale-10m-ndjson-cold -->
-| `nyc-taxi-2024-10m.ndjson` (`10M` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG` (`64K` std, cold) | `VXG --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |
+| `nyc-taxi-2024-10m.ndjson` (`10M` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG -l 3` (`64K` std, cold) | `VXG -l 3 --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 144.43 | 103.21 | **16.12** | 35.22 | 25.91 |
 | `SUM/MIN/MAX(total_cents) [full scan]` | 133.06 | 103.92 | 19.92 | 20.31 | **13.40** |
