@@ -22,6 +22,9 @@ fn block_ends_unterminated(ib: &ParInBlock<'_>, options: &DecodeOptions) -> Resu
     if ib.info.raw_size == 0 {
         return Ok(false);
     }
+    if let Some((rows, ends_nl)) = ib.row_meta {
+        return Ok(rows > 0 && !ends_nl);
+    }
     if ib.info.kind == BLOCK_COLUMN {
         if let Some(gb) = crate::columns::peek_grammar_boundary_indep(ib.payload)? {
             if gb.row_count == 0 {

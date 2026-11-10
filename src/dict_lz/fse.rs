@@ -428,13 +428,13 @@ pub(super) fn fse_decode(blob: &[u8], out: &mut [u8]) -> Result<()> {
 
     let mut next_occ = norm;
     let mut dec_table = [0u32; MAX_STATES];
-    for state in 0..n_states {
-        let s = table_sym[state] as usize;
+    for (slot, &sym) in dec_table[..n_states].iter_mut().zip(&table_sym[..n_states]) {
+        let s = sym as usize;
         let x = next_occ[s] as u32;
         next_occ[s] = (x + 1) as u16;
         let nb = table_log - (31 - x.leading_zeros());
         let base = ((x as usize) << nb) - n_states;
-        dec_table[state] = (base as u32) | (nb << 16) | ((s as u32) << 24);
+        *slot = (base as u32) | (nb << 16) | ((s as u32) << 24);
     }
 
     let mut rbr = RevBitReader::init(stream)?;
@@ -443,8 +443,56 @@ pub(super) fn fse_decode(blob: &[u8], out: &mut [u8]) -> Result<()> {
 
     let body = m - 2;
     let pairs = body / 2;
+    let mut pair_idx = 0usize;
     let mut idx = 0usize;
-    for _ in 0..pairs {
+    let s_ptr = stream.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    // Fast 2-pair (4-symbol) register-buffered path: while `rbr.bit_cursor >= 64`, one
+    // unaligned `u64` load at `top_byte - 7` holds `57..=64` unread bits, sufficient for
+    // 4 tANS transitions (`<= 4 * 10 = 40` bits) with zero per-symbol reloads or branches.
+    while pair_idx + 2 <= pairs && rbr.bit_cursor >= 64 {
+        let top_byte = (rbr.bit_cursor - 1) >> 3;
+        let base_byte = top_byte - 7;
+        let raw64 = unsafe { s_ptr.add(base_byte).cast::<u64>().read_unaligned().to_le() };
+        let local_top = rbr.bit_cursor - (base_byte << 3);
+        let mut buf = raw64 << (64 - local_top);
+
+        let e0 = unsafe { *dec_table.get_unchecked(st0) };
+        let e1 = unsafe { *dec_table.get_unchecked(st1) };
+        unsafe {
+            *out_ptr.add(idx) = (e0 >> 24) as u8;
+            *out_ptr.add(idx + 1) = (e1 >> 24) as u8;
+        }
+        let nb0 = (e0 >> 16) & 0xff;
+        let nb1 = (e1 >> 16) & 0xff;
+        let add0 = ((buf >> 32) >> (32 - nb0)) as usize;
+        buf <<= nb0;
+        let add1 = ((buf >> 32) >> (32 - nb1)) as usize;
+        buf <<= nb1;
+        st0 = ((e0 & 0xffff) as usize) + add0;
+        st1 = ((e1 & 0xffff) as usize) + add1;
+
+        let e2 = unsafe { *dec_table.get_unchecked(st0) };
+        let e3 = unsafe { *dec_table.get_unchecked(st1) };
+        unsafe {
+            *out_ptr.add(idx + 2) = (e2 >> 24) as u8;
+            *out_ptr.add(idx + 3) = (e3 >> 24) as u8;
+        }
+        let nb2 = (e2 >> 16) & 0xff;
+        let nb3 = (e3 >> 16) & 0xff;
+        let add2 = ((buf >> 32) >> (32 - nb2)) as usize;
+        buf <<= nb2;
+        let add3 = ((buf >> 32) >> (32 - nb3)) as usize;
+        st0 = ((e2 & 0xffff) as usize) + add2;
+        st1 = ((e3 & 0xffff) as usize) + add3;
+
+        rbr.bit_cursor -= (nb0 + nb1 + nb2 + nb3) as usize;
+        idx += 4;
+        pair_idx += 2;
+    }
+
+    for _ in pair_idx..pairs {
         let e0 = unsafe { *dec_table.get_unchecked(st0) };
         let e1 = unsafe { *dec_table.get_unchecked(st1) };
         out[idx] = (e0 >> 24) as u8;

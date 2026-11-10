@@ -111,6 +111,7 @@ fn append_frame(
         version,
         checksummed,
         has_var_raw,
+        false,
         wire_opt.as_ref().map(|(w, l)| (w.as_slice(), *l)),
         raw_total,
         block_size,

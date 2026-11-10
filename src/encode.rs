@@ -145,6 +145,9 @@ fn encode_single_core<const STATS: bool>(
     let bound = max_compressed_size(input.len(), opt.block_size)?;
     let adaptive = !opt.legacy_v2;
     let has_var_raw = ranges.is_some();
+    let want_row_index = adaptive && opt.row_index;
+    let may_row_index =
+        adaptive && version >= frame::VERSION_V4 && count > 0 && (want_row_index || has_var_raw || prep_dict.is_some());
     let esize = frame::entry_size(version);
     let base_dir_end = frame::HEADER_SIZE
         .checked_add(esize.checked_mul(count).ok_or(Error::SizeOverflow)?)
@@ -154,9 +157,15 @@ fn encode_single_core<const STATS: bool>(
     } else {
         0
     };
+    let max_ri_bytes = if may_row_index {
+        count.checked_mul(4).ok_or(Error::SizeOverflow)?
+    } else {
+        0
+    };
     let max_table_end = base_dir_end
         .checked_add(var_raw_bytes)
         .and_then(|x| x.checked_add(prep_dict.map_or(0, |d| d.wire_payload.len())))
+        .and_then(|x| x.checked_add(max_ri_bytes))
         .ok_or(Error::SizeOverflow)?;
 
     ENCODE_SCRATCH_POOL.with(|cell| -> Result<(Vec<u8>, usize, WorkStats)> {
@@ -172,7 +181,7 @@ fn encode_single_core<const STATS: bool>(
 
         let mut stats = WorkStats::default();
         let mut any_dict_lz = false;
-        let mut meta_entries: Vec<(usize, usize, usize, u32, u32)> = Vec::with_capacity(count);
+        let mut meta_entries: Vec<(usize, usize, usize, u32, u32, u32)> = Vec::with_capacity(count);
 
         for index in 0..count {
             let (raw_offset, chunk) = slice_for_index(input, opt.block_size, ranges, index);
@@ -211,7 +220,12 @@ fn encode_single_core<const STATS: bool>(
             } else {
                 0
             };
-            meta_entries.push((raw_offset, offset, len, csum, kind));
+            let row_meta = if may_row_index {
+                frame::v5::pack_block_row_meta(chunk)
+            } else {
+                0
+            };
+            meta_entries.push((raw_offset, offset, len, csum, kind, row_meta));
         }
 
         let active_dict = if any_dict_lz {
@@ -219,22 +233,38 @@ fn encode_single_core<const STATS: bool>(
         } else {
             None
         };
+        let dict_wire_bytes = active_dict.map_or(0, |(w, _)| w.len());
+        let base_table_end = base_dir_end + var_raw_bytes + dict_wire_bytes;
+        let payloads = scratch.payloads_mut();
+        let total_payload_len = payloads.len() - max_table_end;
+        let base_exact_len = base_table_end + total_payload_len;
+        if active_dict.is_some() && base_exact_len > bound {
+            return Err(Error::InvalidFrame("dict_expansion"));
+        }
+        let cand_row_index = version >= frame::VERSION_V4
+            && count > 0
+            && (want_row_index || has_var_raw || active_dict.is_some());
+        let has_row_index = if cand_row_index {
+            match base_exact_len.checked_add(max_ri_bytes) {
+                Some(with_ri) if with_ri <= bound => true,
+                _ if want_row_index && active_dict.is_some() => {
+                    return Err(Error::InvalidFrame("dict_expansion"));
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        let row_index_bytes = if has_row_index { max_ri_bytes } else { 0 };
         let actual_version = if version < frame::VERSION_V4 {
             version
-        } else if active_dict.is_some() || has_var_raw {
+        } else if active_dict.is_some() || has_var_raw || has_row_index {
             frame::VERSION_V5
         } else {
             frame::VERSION_V4
         };
-        let actual_table_end = base_dir_end
-            + var_raw_bytes
-            + active_dict.map_or(0, |(w, _)| w.len());
-        let payloads = scratch.payloads_mut();
-        let total_payload_len = payloads.len() - max_table_end;
-        let exact_len = actual_table_end + total_payload_len;
-        if active_dict.is_some() && exact_len > bound {
-            return Err(Error::InvalidFrame("dict_expansion"));
-        }
+        let actual_table_end = base_table_end + row_index_bytes;
+        let exact_len = base_exact_len + row_index_bytes;
         if actual_table_end < max_table_end && total_payload_len > 0 {
             payloads.copy_within(max_table_end..max_table_end + total_payload_len, actual_table_end);
         }
@@ -245,13 +275,15 @@ fn encode_single_core<const STATS: bool>(
             actual_version,
             opt.checksum,
             has_var_raw,
+            has_row_index,
             active_dict,
             input.len(),
             opt.block_size,
             count,
         );
         let shift = max_table_end - actual_table_end;
-        for (i, &(raw_off, old_p_off, len, csum, kind)) in meta_entries.iter().enumerate() {
+        let ri_base = base_dir_end + var_raw_bytes + dict_wire_bytes;
+        for (i, &(raw_off, old_p_off, len, csum, kind, row_meta)) in meta_entries.iter().enumerate() {
             let (_s, chunk) = slice_for_index(input, opt.block_size, ranges, i);
             frame::write_entry(
                 payloads,
@@ -268,6 +300,10 @@ fn encode_single_core<const STATS: bool>(
                 let vr_pos = base_dir_end + i * 4;
                 payloads[vr_pos..vr_pos + 4]
                     .copy_from_slice(&(chunk.len() as u32).to_le_bytes());
+            }
+            if has_row_index {
+                let ri_pos = ri_base + i * 4;
+                payloads[ri_pos..ri_pos + 4].copy_from_slice(&row_meta.to_le_bytes());
             }
         }
         if let Some((wire, _)) = active_dict {
@@ -409,6 +445,11 @@ where
                     raw_size: chunk.len(),
                     checksum: if opt.checksum {
                         checksum::crc32c(chunk)
+                    } else {
+                        0
+                    },
+                    row_meta: if adaptive && (opt.row_index || ranges.is_some() || prep_dict.is_some()) {
+                        frame::v5::pack_block_row_meta(chunk)
                     } else {
                         0
                     },

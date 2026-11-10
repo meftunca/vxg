@@ -315,7 +315,7 @@ fn train_raw_dict(
         if candidates.is_empty() {
             return None;
         }
-        candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
         let mut selected: Vec<(usize, usize)> = Vec::with_capacity(target_len / SEG_LEN + 8);
         let mut total_bytes = 0usize;

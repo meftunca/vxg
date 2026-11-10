@@ -149,6 +149,7 @@ pub(crate) fn validate_header_and_directory_with_offsets(
     for i in 0..hdr.count {
         let p = HEADER_SIZE + i * esize;
         let expected_rn = v5::block_raw_size(src, &hdr, i, next_raw)?;
+        let _ = v5::block_row_meta_raw(src, &hdr, i, expected_rn)?;
         let (raw_offset, payload_offset, rn, cn, checksum, kind) = if hdr.version >= VERSION_V4 {
             let word = read_u32(src, p)?;
             (

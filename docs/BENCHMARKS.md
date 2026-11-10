@@ -7,7 +7,7 @@ For **Real-World Public & System Corpora** (`NYC TLC Yellow Taxi`, `GitHub Archi
 
 ## Historical `v0.4.1` Pre-`v5` Synthetic Qualification Baseline (`--suite v4`, Apple Silicon `aarch64`, SIMD=`Neon`, `16 MiB`, `block=65536`)
 
-> **Corpus & version note (`v0.4.1` pre-`Format v5` vs `v0.5.1+`):** `--suite v4` consists of deterministic procedurally generated qualification inputs (`8` structured/text streams + `2` procedural flat-shaded UI/gradient `.bmp` renders). In particular, `source-and-docs.txt` in `--suite v4` repeats a `~190 KiB` 10-file documentation/source seed via `fill_repeated` to reach `16 MiB`: pre-`v5` (`v0.4.1`, `64 KiB` block-local `FAST_LZ` shown below) compresses it to `0.2698`, whereas `v0.5.1+` (`Format v5` `<= 256 KiB` frame dictionary) captures the repeating `~190 KiB` seed at `0.0036` (just as whole-file `zstd -19 --long` gets `0.0029`). On **non-repeating** source code (`--suite src-unique` / `vxg-src-nonrepeating.rs`, `2.65 MB` with `0%` repetition), `VXG v0.5.2` achieves **`0.1933`** vs `Zstd-9` `0.1954` and `Zstd+Dict-9` `0.1889`. See [CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md) for current `v0.5.2` tables.
+> **Corpus & version note (`v0.4.1` pre-`Format v5` vs `v0.5.1+`):** `--suite v4` consists of deterministic procedurally generated qualification inputs (`8` structured/text streams + `2` procedural flat-shaded UI/gradient `.bmp` renders). In particular, `source-and-docs.txt` in `--suite v4` repeats a `~190 KiB` 10-file documentation/source seed via `fill_repeated` to reach `16 MiB`: pre-`v5` (`v0.4.1`, `64 KiB` block-local `FAST_LZ` shown below) compresses it to `0.2698`, whereas `v0.5.1+` (`Format v5` `<= 256 KiB` frame dictionary) captures the repeating `~190 KiB` seed at `0.0036` (just as whole-file `zstd -19 --long` gets `0.0029`). On **non-repeating** source code (`--suite src-unique` / `vxg-src-nonrepeating.rs`, `2.65 MB` with `0%` repetition), `VXG v0.5.2` achieves **`0.1933`** vs `Zstd-9` `0.1954` and `Zstd+Dict-9` `0.1889`. See [CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md) for current `v0.5.3` tables.
 
 Measured on Apple Silicon (`aarch64`, SIMD=`Neon`, `liblz4 1.10.0`, `libzstd 1.5.7`, `16 MiB` per dataset, 5 samples of `0.08 s` per phase, checksums OFF) via `vxg-bench --suite v4 --size-mib 16`.
 - **VXG Performance Index (`VPI`):** $\text{VPI} = \frac{\sqrt{\text{Encode}_{\text{GB/s}} \cdot \text{Decode}_{\text{GB/s}}}}{\text{Ratio}}$ (higher is better; summarizes space-speed trade-off and does not imply higher raw speed where `LZ4` leads in `Enc` or `Dec`).
@@ -651,7 +651,7 @@ Measured single-threaded on Apple Silicon (`aarch64` NEON, `block_size = 65536`,
 
 ### 1. Varied NDJSON (`ndjson_varied.ndjson`, 56.5 MB, 300,000 rows, 863 blocks, input ratio `0.091`)
 
-> **Historical note (`v0.4.2`–`v0.4.4` Stage 2–6 logs):** Query/mutation tables report wall-clock latency (`ms`) and row scan rate (`M rows/s`), never `raw_bytes / query_time`. For current `v0.5.2` worker-pool latencies and head-to-head `DuckDB 2.0 + Parquet` comparisons, see [CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md).
+> **Historical note (`v0.4.2`–`v0.4.4` Stage 2–6 logs):** Query/mutation tables report wall-clock latency (`ms`) and row scan rate (`M rows/s`), never `raw_bytes / query_time`. For current `v0.5.3` worker-pool latencies and head-to-head `DuckDB 2.0 + Parquet` comparisons, see [CHIMERA_BENCHMARKS.md](CHIMERA_BENCHMARKS.md).
 
 | Operation | Naive (`dec + op [+ enc]`) | VXG Compressed-Domain | Speedup | Row Scan Rate | Output Ratio / Hits |
 | :--- | ---: | ---: | ---: | ---: | :--- |

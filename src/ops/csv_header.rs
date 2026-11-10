@@ -284,7 +284,7 @@ pub fn strip_delim_header_bytes<'a>(
         let f0_hdr = v5::parse_v1_to_v5_header(f0_bytes, options.max_output)?;
         let tail_raw: usize = tail_blocks.iter().map(|b| b.info.raw_size).sum();
         let tcount = tail_blocks.len();
-        let use_v5 = f0_hdr.has_var_raw || f0_hdr.has_dict;
+        let use_v5 = f0_hdr.has_var_raw || f0_hdr.has_dict || f0_hdr.has_row_index;
         let ver = if use_v5 { VERSION_V5 } else { VERSION_V4 };
         let dict_wire = if f0_hdr.has_dict {
             Some((
@@ -301,6 +301,7 @@ pub fn strip_delim_header_bytes<'a>(
             ver,
             csum,
             f0_hdr.has_var_raw,
+            f0_hdr.has_row_index,
             dict_wire,
             tail_raw,
             bsize,
@@ -328,6 +329,10 @@ pub fn strip_delim_header_bytes<'a>(
         }
         if let Some((dw, _)) = dict_wire {
             out.extend_from_slice(dw);
+        }
+        if f0_hdr.has_row_index {
+            let ri_start = f0_hdr.row_index_offset + (hdr.b0_idx + 1) * 4;
+            out.extend_from_slice(&f0_bytes[ri_start..ri_start + tcount * 4]);
         }
         let pay_start = tail_blocks[0].info.payload_offset;
         let last_info = tail_blocks[tcount - 1].info;

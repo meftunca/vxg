@@ -80,7 +80,11 @@ impl FramePeeler {
             return Ok(None);
         }
         let blocks: Vec<crate::frame::BlockInfo> = parsed.blocks().collect();
-        let last_ends_nl_fast = Self::block_ends_with_nl_fast(f_bytes, &blocks[nb - 1])?;
+        let last_ends_nl_fast = if let Some((rows, ends_nl)) = parsed.block_row_meta(nb - 1) {
+            (rows > 0).then_some(ends_nl)
+        } else {
+            Self::block_ends_with_nl_fast(f_bytes, &blocks[nb - 1])?
+        };
 
         if self.carry.is_empty() && last_ends_nl_fast == Some(true) {
             return Ok(Some(f_bytes));

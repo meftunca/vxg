@@ -37,6 +37,14 @@ fn bump_sketch16(sc: &mut TrainScratch, h: usize, tag: u8) {
     }
 }
 
+#[inline(always)]
+fn mark_used16(sc: &mut TrainScratch, h: usize) {
+    let f = unsafe { sc.freq16.get_unchecked_mut(h) };
+    if *f != 0 {
+        *f |= 0x80;
+    }
+}
+
 fn scan_macro_range(
     sc: &mut TrainScratch,
     input: &[u8],
@@ -209,7 +217,7 @@ pub(super) fn try_macroscopic_dict(
             if fallback {
                 let mut p = 0usize;
                 while p + 16 <= seg.len() {
-                    unsafe { *sc.freq16.get_unchecked_mut(sketch_hash16(seg, p)) |= 0x80 };
+                    mark_used16(sc, sketch_hash16(seg, p));
                     p += 16;
                 }
             } else {
@@ -219,7 +227,7 @@ pub(super) fn try_macroscopic_dict(
                     while m != 0 {
                         let k = (m.trailing_zeros() >> 3) as usize;
                         m &= m - 1;
-                        unsafe { *sc.freq16.get_unchecked_mut(sketch_hash16(seg, p + k)) |= 0x80 };
+                        mark_used16(sc, sketch_hash16(seg, p + k));
                     }
                     p += 8;
                 }

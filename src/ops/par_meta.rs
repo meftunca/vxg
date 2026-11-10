@@ -37,6 +37,7 @@ pub(crate) struct ParInBlock<'a> {
     pub(crate) dict: &'a [u8],
     pub(crate) info: frame::BlockInfo,
     pub(crate) payload: &'a [u8],
+    pub(crate) row_meta: Option<(usize, bool)>,
 }
 
 impl ParInBlock<'_> {
@@ -130,6 +131,7 @@ pub(crate) fn collect_par_blocks<'a>(
                 dict,
                 info,
                 payload: &f_bytes[info.payload_offset..info.payload_offset + info.payload_size],
+                row_meta: parsed.block_row_meta(local_blk),
             });
         }
     }
@@ -211,6 +213,38 @@ pub(crate) fn inspect_par_meta_from<'a>(
     let mut incoming = initial_incoming;
     let mut any_unterm = initial_incoming;
     let mut cur_global = base_global;
+
+    // Zero-barrier O(nb) header fast path when every non-empty block carries `FLAG_ROW_INDEX`
+    // and terminates on `\n` (such as `--record-aligned` frames). Avoids touching any block
+    // payload or spawning a pre-scan thread-pool pass across multi-GB archives.
+    if !initial_incoming
+        && nb > 0
+        && in_blocks
+            .iter()
+            .all(|ib| ib.info.raw_size == 0 || ib.row_meta.is_some_and(|(_, ends_nl)| ends_nl))
+    {
+        for (b, ib) in in_blocks.iter().enumerate() {
+            let rc = if ib.info.raw_size == 0 {
+                0
+            } else {
+                ib.row_meta.map_or(0, |(r, _)| r)
+            };
+            let cg = cur_global;
+            if rc > 0 {
+                cur_global += rc;
+                non_empty.push(b);
+            }
+            meta.push(ParMeta {
+                decoded_raw: None,
+                row_count: rc,
+                had_in_carry: false,
+                cur_global: cg,
+                first_frag: None,
+                last_unterm_frag: None,
+            });
+        }
+        return Ok((meta, non_empty, false, cur_global));
+    }
 
     if options.threads > 1 && nb >= 8 {
         let workers = options.threads.min(nb / 2).max(2);

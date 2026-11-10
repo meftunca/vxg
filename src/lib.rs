@@ -102,6 +102,10 @@ pub struct Options {
     /// Compression effort level (`1..=9`; default `3`). Higher levels search deeper local/dictionary
     /// hash ways and lazy windows in `BLOCK_DICT_LZ` with zero change to wire format or decode speed.
     pub level: u8,
+    /// Emit `VERSION_V5` `FLAG_ROW_INDEX` (`4` bytes/block row count & trailing-newline flag) even when
+    /// neither `record_aligned` nor `BLOCK_DICT_LZ` is active, enabling $O(1)$ `frame_row_count` and
+    /// $O(\log B)$ random row seek without touching non-overlapping block payloads.
+    pub row_index: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -115,6 +119,7 @@ impl Default for Options {
             record_aligned: false,
             target_block_rows: 0,
             level: 3,
+            row_index: false,
         }
     }
 }
@@ -218,6 +223,7 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
             options.checksum,
             version,
             ranges.is_some(),
+            options.row_index && !options.legacy_v2,
             dict_ref.map(|d| (d.wire_payload.as_slice(), d.raw.len())),
             frame::AssembleDest::Slice(out_buf),
             |worker, finish| {
@@ -295,6 +301,7 @@ fn compress_inner<const STATS: bool>(
             options.checksum,
             version,
             ranges.is_some(),
+            options.row_index && !options.legacy_v2,
             dict_ref.map(|d| (d.wire_payload.as_slice(), d.raw.len())),
             frame::AssembleDest::Alloc(&mut out),
             |worker, finish| {

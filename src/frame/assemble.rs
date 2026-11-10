@@ -87,6 +87,7 @@ fn build_assembly_plan(
     checksummed: bool,
     version: u16,
     has_var_raw: bool,
+    want_row_index: bool,
     opt_dict: Option<(&[u8], usize)>,
     bound: usize,
     dest: &mut AssembleDest<'_>,
@@ -128,14 +129,7 @@ fn build_assembly_plan(
         return Err(Error::InvalidFrame("encoder block order"));
     }
     let active_dict = if any_dict_lz { opt_dict } else { None };
-    let actual_version = if version < VERSION_V4 {
-        version
-    } else if active_dict.is_some() || has_var_raw {
-        VERSION_V5
-    } else {
-        VERSION_V4
-    };
-    let esize = entry_size(actual_version);
+    let esize = entry_size(if version < VERSION_V4 { version } else { VERSION_V4 });
     let base_dir_end = HEADER_SIZE
         .checked_add(esize.checked_mul(count).ok_or(Error::SizeOverflow)?)
         .ok_or(Error::SizeOverflow)?;
@@ -145,16 +139,44 @@ fn build_assembly_plan(
         0
     };
     let dict_wire_bytes = active_dict.map_or(0, |(w, _)| w.len());
-    let table_end = base_dir_end
+    let base_table_end = base_dir_end
         .checked_add(var_raw_bytes)
         .and_then(|x| x.checked_add(dict_wire_bytes))
         .ok_or(Error::SizeOverflow)?;
-    let exact_len = table_end
+    let base_exact_len = base_table_end
         .checked_add(total_payload_len)
         .ok_or(Error::SizeOverflow)?;
-    if active_dict.is_some() && exact_len > bound {
+    if active_dict.is_some() && base_exact_len > bound {
         return Err(Error::InvalidFrame("dict_expansion"));
     }
+    let cand_row_index =
+        version >= VERSION_V4 && count > 0 && (want_row_index || has_var_raw || active_dict.is_some());
+    let ri_bytes_cand = if cand_row_index {
+        count.checked_mul(4).ok_or(Error::SizeOverflow)?
+    } else {
+        0
+    };
+    let has_row_index = if cand_row_index {
+        match base_exact_len.checked_add(ri_bytes_cand) {
+            Some(with_ri) if with_ri <= bound => true,
+            _ if want_row_index && active_dict.is_some() => {
+                return Err(Error::InvalidFrame("dict_expansion"));
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    let row_index_bytes = if has_row_index { ri_bytes_cand } else { 0 };
+    let actual_version = if version < VERSION_V4 {
+        version
+    } else if active_dict.is_some() || has_var_raw || has_row_index {
+        VERSION_V5
+    } else {
+        VERSION_V4
+    };
+    let table_end = base_table_end + row_index_bytes;
+    let exact_len = base_exact_len + row_index_bytes;
     let header_slice: &mut [u8] = match dest {
         AssembleDest::Alloc(vec) => {
             vec.clear();
@@ -178,11 +200,13 @@ fn build_assembly_plan(
         actual_version,
         checksummed,
         has_var_raw,
+        has_row_index,
         active_dict,
         n,
         block_size,
         count,
     );
+    let ri_base = base_dir_end + var_raw_bytes + dict_wire_bytes;
     let mut dst_offsets = Vec::with_capacity(count);
     let mut raw_offset = 0usize;
     let mut payload_offset = table_end;
@@ -202,6 +226,10 @@ fn build_assembly_plan(
         if has_var_raw {
             let vr_pos = base_dir_end + i * 4;
             header_slice[vr_pos..vr_pos + 4].copy_from_slice(&(part.raw_size as u32).to_le_bytes());
+        }
+        if has_row_index {
+            let ri_pos = ri_base + i * 4;
+            header_slice[ri_pos..ri_pos + 4].copy_from_slice(&part.row_meta.to_le_bytes());
         }
         dst_offsets.push(payload_offset);
         raw_offset = raw_offset
@@ -252,6 +280,7 @@ pub(crate) fn parallel_encode_assemble<F>(
     checksummed: bool,
     version: u16,
     has_var_raw: bool,
+    want_row_index: bool,
     opt_dict: Option<(&[u8], usize)>,
     dest: AssembleDest<'_>,
     encode_fn: F,
@@ -307,6 +336,7 @@ where
                         checksummed,
                         version,
                         has_var_raw,
+                        want_row_index,
                         opt_dict,
                         bound,
                         dest_mut,

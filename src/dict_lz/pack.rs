@@ -145,6 +145,7 @@ impl StreamBufs {
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn pick_stream_mode(
     raw: &[u8],
     huf_buf: &mut Vec<u8>,
@@ -153,7 +154,8 @@ fn pick_stream_mode(
     huf_margin: usize,
     try_fse: bool,
     fse_min: usize,
-    fse_margin: usize,
+    fse_margin_floor: usize,
+    fse_rel_shift: u32,
 ) -> (StreamMode, usize, usize) {
     let raw_len = raw.len();
     huf_buf.clear();
@@ -168,6 +170,11 @@ fn pick_stream_mode(
     };
 
     fse_buf.clear();
+    let fse_margin = if fse_rel_shift == 0 {
+        fse_margin_floor
+    } else {
+        (non_fse_wire >> fse_rel_shift).max(fse_margin_floor)
+    };
     if try_fse && raw_len >= fse_min && non_fse_wire > fse_margin + 3 {
         let fse_cap = non_fse_wire - fse_margin - 2;
         if fse_encode_min(raw, fse_buf, fse_cap, fse_min) {
@@ -260,7 +267,13 @@ pub(super) fn serialize_streams(
     }
     let lit_total = sb.lits.len();
     let ext_raw_len = sb.len_ext.len();
-    let fse_margin = if level >= 5 { 1usize } else { 3usize };
+    let (fse_margin, fse_rel_shift, min_block_fse) = if level >= 6 {
+        (1usize, 0u32, 2usize)
+    } else if level == 5 {
+        (2usize, 7u32, 4usize)
+    } else {
+        (4usize, 6u32, 8usize)
+    };
     let try_fse_seq = level >= 2;
     let try_fse_lits = level >= 5;
 
@@ -273,6 +286,7 @@ pub(super) fn serialize_streams(
         try_fse_lits,
         96,
         fse_margin + 2,
+        fse_rel_shift,
     );
     let (mut m_toks, mut w_toks, nf_toks) = pick_stream_mode(
         &sb.toks,
@@ -283,6 +297,7 @@ pub(super) fn serialize_streams(
         try_fse_seq,
         48,
         fse_margin,
+        fse_rel_shift,
     );
     let (mut m_offs, mut w_offs, nf_offs) = pick_stream_mode(
         &sb.off_codes,
@@ -293,6 +308,7 @@ pub(super) fn serialize_streams(
         try_fse_seq,
         32,
         fse_margin,
+        fse_rel_shift,
     );
     let (mut m_ext, mut w_ext, nf_ext) = pick_stream_mode(
         &sb.len_ext,
@@ -303,11 +319,12 @@ pub(super) fn serialize_streams(
         try_fse_seq,
         32,
         fse_margin,
+        fse_rel_shift,
     );
 
     let fse_saved =
         (nf_lits - w_lits) + (nf_toks - w_toks) + (nf_offs - w_offs) + (nf_ext - w_ext);
-    if fse_saved < 2 {
+    if fse_saved < min_block_fse {
         if m_lits == StreamMode::Fse {
             m_lits = if !sb.huf_lits.is_empty() && nf_lits < lit_total {
                 StreamMode::Huf

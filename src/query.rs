@@ -74,6 +74,9 @@ pub fn block_row_count(frame_bytes: &[u8], block_index: usize) -> Result<usize> 
         .blocks()
         .nth(block_index)
         .ok_or(Error::InvalidFrame("block index out of range"))?;
+    if let Some((rows, _)) = parsed.block_row_meta(block_index) {
+        return Ok(rows);
+    }
     if info.kind == BLOCK_COLUMN {
         let payload = &frame_bytes[info.payload_offset..info.payload_offset + info.payload_size];
         if let Some(count) = crate::columns::grammar_block_row_count(payload)? {
@@ -97,6 +100,18 @@ pub fn frame_row_count(frame_bytes: &[u8]) -> Result<usize> {
     let mut prev_open = false;
     let dec = DecodeOptions::default();
     for (f_start, parsed) in frame_slices(frame_bytes, &frames) {
+        if parsed.has_row_index() {
+            for idx in 0..parsed.block_count() {
+                if let Some((rows, ends_nl)) = parsed.block_row_meta(idx) {
+                    if rows > 0 {
+                        let new_rows = if prev_open { rows - 1 } else { rows };
+                        total = total.checked_add(new_rows).ok_or(Error::SizeOverflow)?;
+                        prev_open = !ends_nl;
+                    }
+                }
+            }
+            continue;
+        }
         for (idx, info) in parsed.blocks().enumerate() {
             let (rows, ends_nl) = if info.kind == BLOCK_COLUMN {
                 let payload = &f_start[info.payload_offset..info.payload_offset + info.payload_size];
@@ -234,6 +249,72 @@ pub fn extract_row_range(
     let mut prev_open = false;
 
     for (f_bytes, parsed) in frame_slices(frame_bytes, &frames) {
+        if let Some(ref ri) = parsed.row_index {
+            // Fast O(B) contiguous header-table scan + O(log B)-style direct block jump:
+            // skips non-overlapping `DICT_LZ`, `LZ`, `RAW`, and `COLUMN` blocks with zero
+            // payload touches while still validating decoded overlapping blocks against `ri`.
+            let mut spans: Vec<(usize, usize)> = Vec::with_capacity(ri.len());
+            for &word in ri {
+                let (blk_rows, ends_nl) = crate::frame::v5::unpack_block_row_meta(word);
+                let base_row = if prev_open { cur_global - 1 } else { cur_global };
+                if blk_rows > 0 {
+                    cur_global = base_row + blk_rows;
+                    prev_open = !ends_nl;
+                }
+                spans.push((base_row, base_row + blk_rows));
+            }
+            let first_blk = spans.partition_point(|&(_, end_excl)| end_excl <= start_row);
+            for blk_idx in first_blk..spans.len() {
+                let (base_row, end_excl) = spans[blk_idx];
+                if base_row >= end_row {
+                    return Ok(out);
+                }
+                let (exp_rows, exp_ends_nl) = crate::frame::v5::unpack_block_row_meta(ri[blk_idx]);
+                if exp_rows == 0 || end_excl <= start_row {
+                    continue;
+                }
+                let info = parsed.blocks[blk_idx].info;
+                if info.kind == BLOCK_COLUMN {
+                    let payload = &f_bytes[info.payload_offset..info.payload_offset + info.payload_size];
+                    if let Some((blk_rows, ends_nl)) = crate::columns::grammar_block_row_meta(payload)? {
+                        if blk_rows != exp_rows || ends_nl != exp_ends_nl {
+                            return Err(Error::InvalidFrame("row_index mismatch"));
+                        }
+                        let local_start = start_row.saturating_sub(base_row).min(blk_rows);
+                        let local_end = end_row.saturating_sub(base_row).min(blk_rows);
+                        if local_start < local_end {
+                            let _ = crate::columns::unpack_grammar_row_range(
+                                payload,
+                                local_start,
+                                local_end,
+                                &mut out,
+                            )?;
+                        }
+                        continue;
+                    }
+                }
+                let raw = decode_non_grammar_block(f_bytes, blk_idx, info.raw_size, options)?;
+                let act_meta = crate::frame::v5::pack_block_row_meta(&raw);
+                if act_meta != ri[blk_idx] {
+                    return Err(Error::InvalidFrame("row_index mismatch"));
+                }
+                for (r, line) in raw.split_inclusive(|&b| b == b'\n').enumerate() {
+                    let g_row = base_row + r;
+                    if g_row >= start_row && g_row < end_row {
+                        out.extend_from_slice(line);
+                    }
+                }
+            }
+            let next_frame_base = if prev_open {
+                cur_global.saturating_sub(1)
+            } else {
+                cur_global
+            };
+            if next_frame_base >= end_row {
+                return Ok(out);
+            }
+            continue;
+        }
         for (blk_idx, info) in parsed.blocks().enumerate() {
             let base_row = if prev_open { cur_global - 1 } else { cur_global };
             if base_row >= end_row {

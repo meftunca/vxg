@@ -139,6 +139,7 @@ pub unsafe extern "C" fn vxg_compress_file(
             record_aligned: false,
             target_block_rows: 0,
             level: 3,
+            row_index: false,
         };
         match compress_file(in_p, out_p, &opt, force != 0) {
             Ok((_, out_bytes)) => isize::try_from(out_bytes).unwrap_or(VXG_ERR_BUFFER_TOO_SMALL),

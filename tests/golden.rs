@@ -1,7 +1,7 @@
 use std::process::Command;
 use vxg::{
-    decompress, execute_sql, recover_frame, verify_frame, DecodeOptions, Frame, Simd, SqlFormat,
-    SqlQuery, BLOCK_COLUMN, BLOCK_DICT_LZ, BLOCK_LZ, BLOCK_RAW,
+    decompress, execute_sql, frame_row_count, recover_frame, verify_frame, DecodeOptions, Frame,
+    Simd, SqlFormat, SqlQuery, BLOCK_COLUMN, BLOCK_DICT_LZ, BLOCK_LZ, BLOCK_RAW,
 };
 
 struct FrozenVector {
@@ -155,6 +155,14 @@ const FROZEN_VECTORS: &[FrozenVector] = &[
         expected_kind: Some(BLOCK_DICT_LZ),
         expect_dict: true,
     },
+    FrozenVector {
+        name: "v5-row-index",
+        frame: include_bytes!("vectors/v5-row-index.vxg"),
+        raw: include_bytes!("vectors/v5-row-index.raw"),
+        expected_version: 5,
+        expected_kind: Some(BLOCK_COLUMN),
+        expect_dict: false,
+    },
 ];
 
 #[test]
@@ -188,6 +196,12 @@ fn frozen_v1_to_v5_compatibility_vectors() {
                     .any(|b| b.payload_size > 0 && (vec_case.frame[b.payload_offset] & 0x10) != 0),
                 "v5-dict-lz-fse vector must exercise FLAG_FSE (0x10)"
             );
+        }
+        if vec_case.name == "v5-row-index" {
+            assert!(parsed.has_row_index(), "v5-row-index must carry FLAG_ROW_INDEX (0x0008)");
+            let expected_rows = vec_case.raw.split_inclusive(|&b| b == b'\n').count();
+            assert_eq!(parsed.indexed_row_count(), Some(expected_rows));
+            assert_eq!(frame_row_count(vec_case.frame).unwrap(), expected_rows);
         }
         parsed
             .validate_commands()

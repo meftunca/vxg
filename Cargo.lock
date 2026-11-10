@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "vxg"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "mimalloc",
  "tikv-jemallocator",

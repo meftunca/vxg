@@ -1,4 +1,5 @@
-//! `VERSION_V5` header extensions (`FLAG_FRAME_DICT`, `FLAG_VAR_RAW`) and record-aligned splitting.
+//! `VERSION_V5` header extensions (`FLAG_FRAME_DICT`, `FLAG_VAR_RAW`, `FLAG_ROW_INDEX`) and
+//! record-aligned splitting.
 
 use crate::{dict_lz, Error, Result};
 
@@ -10,7 +11,10 @@ use super::{
 pub const FLAG_CHECKSUM: u16 = 0x0001;
 pub const FLAG_FRAME_DICT: u16 = 0x0002;
 pub const FLAG_VAR_RAW: u16 = 0x0004;
-const VALID_V5_FLAGS: u16 = FLAG_CHECKSUM | FLAG_FRAME_DICT | FLAG_VAR_RAW;
+pub const FLAG_ROW_INDEX: u16 = 0x0008;
+pub const ROW_ENDS_NL_BIT: u32 = 0x8000_0000;
+pub const ROW_COUNT_MASK: u32 = 0x7fff_ffff;
+const VALID_V5_FLAGS: u16 = FLAG_CHECKSUM | FLAG_FRAME_DICT | FLAG_VAR_RAW | FLAG_ROW_INDEX;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ParsedHeader {
@@ -21,12 +25,30 @@ pub(crate) struct ParsedHeader {
     pub checksummed: bool,
     pub has_dict: bool,
     pub has_var_raw: bool,
+    pub has_row_index: bool,
     pub var_raw_offset: usize,
     pub dict_offset: usize,
     pub dict_wire_len: usize,
     pub dict_raw_len: usize,
-    /// Offset where block 0's compressed payload begins (`HEADER_SIZE + dir + var_raw + dict`).
+    pub row_index_offset: usize,
+    /// Offset where block 0's compressed payload begins (`HEADER_SIZE + dir + var_raw + dict + row_index`).
     pub payload_start: usize,
+}
+
+#[inline]
+pub(crate) fn pack_block_row_meta(chunk: &[u8]) -> u32 {
+    if chunk.is_empty() {
+        return 0;
+    }
+    let nl = chunk.iter().filter(|&&b| b == b'\n').count();
+    let ends_nl = chunk[chunk.len() - 1] == b'\n';
+    let rows = nl + usize::from(!ends_nl);
+    (rows as u32) | if ends_nl { ROW_ENDS_NL_BIT } else { 0 }
+}
+
+#[inline]
+pub(crate) const fn unpack_block_row_meta(word: u32) -> (usize, bool) {
+    ((word & ROW_COUNT_MASK) as usize, (word & ROW_ENDS_NL_BIT) != 0)
 }
 
 pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<ParsedHeader> {
@@ -60,6 +82,10 @@ pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<Par
 
     let has_dict = version >= VERSION_V5 && (flags & FLAG_FRAME_DICT) != 0;
     let has_var_raw = version >= VERSION_V5 && (flags & FLAG_VAR_RAW) != 0;
+    let has_row_index = version >= VERSION_V5 && (flags & FLAG_ROW_INDEX) != 0;
+    if has_row_index && count == 0 {
+        return Err(Error::InvalidFrame("empty frame with row_index"));
+    }
 
     if !has_var_raw {
         let expected_count = raw_size / block_size + usize::from(raw_size % block_size != 0);
@@ -109,11 +135,19 @@ pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<Par
     } else {
         0
     };
+    let row_index_bytes = if has_row_index {
+        count.checked_mul(4).ok_or(Error::SizeOverflow)?
+    } else {
+        0
+    };
     let dict_offset = base_dir_end
         .checked_add(var_raw_bytes)
         .ok_or(Error::SizeOverflow)?;
-    let payload_start = dict_offset
+    let row_index_offset = dict_offset
         .checked_add(dict_wire_len)
+        .ok_or(Error::SizeOverflow)?;
+    let payload_start = row_index_offset
+        .checked_add(row_index_bytes)
         .ok_or(Error::SizeOverflow)?;
 
     Ok(ParsedHeader {
@@ -124,12 +158,32 @@ pub(crate) fn parse_v1_to_v5_header(src: &[u8], max_output: usize) -> Result<Par
         checksummed: (flags & FLAG_CHECKSUM) != 0,
         has_dict,
         has_var_raw,
+        has_row_index,
         var_raw_offset: base_dir_end,
         dict_offset,
         dict_wire_len,
         dict_raw_len,
+        row_index_offset,
         payload_start,
     })
+}
+
+#[inline]
+pub(crate) fn block_row_meta_raw(
+    src: &[u8],
+    hdr: &ParsedHeader,
+    index: usize,
+    rn: usize,
+) -> Result<Option<u32>> {
+    if !hdr.has_row_index {
+        return Ok(None);
+    }
+    let word = read_u32(src, hdr.row_index_offset + index * 4)?;
+    let (rows, _) = unpack_block_row_meta(word);
+    if rows == 0 || rows > rn {
+        return Err(Error::InvalidFrame("invalid block row_index entry"));
+    }
+    Ok(Some(word))
 }
 
 #[inline]
@@ -162,6 +216,7 @@ pub(crate) fn write_header_bytes(
     version: u16,
     checksummed: bool,
     has_var_raw: bool,
+    has_row_index: bool,
     dict_wire: Option<(&[u8], usize)>,
     raw_len: usize,
     block_size: usize,
@@ -176,6 +231,9 @@ pub(crate) fn write_header_bytes(
     };
     if has_var_raw {
         flags |= FLAG_VAR_RAW;
+    }
+    if has_row_index {
+        flags |= FLAG_ROW_INDEX;
     }
     buf[0..4].copy_from_slice(MAGIC);
     buf[4..6].copy_from_slice(&version.to_le_bytes());
@@ -288,9 +346,9 @@ pub(crate) fn compute_block_ranges(
     if !any_shifted {
         return None;
     }
-    // Guarantee `12 * count <= 32 * fixed_blocks` so `max_compressed_size` bound always holds.
+    // Guarantee `16 * count <= 32 * fixed_blocks` (dir + var_raw + row_index) so `max_compressed_size` holds.
     let fixed_blocks = n.div_ceil(block_size);
-    if ranges.len() * 12 > fixed_blocks * 32 {
+    if ranges.len() * 16 > fixed_blocks * 32 {
         return None;
     }
     Some(ranges)

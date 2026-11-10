@@ -1,5 +1,5 @@
 /*
- * VXG v0.5.2 — Unified Adaptive Multi-Format Lossless Block Codec & SQL Engine (Format v4/v5)
+ * VXG v0.5.3 — Unified Adaptive Multi-Format Lossless Block Codec & SQL Engine (Format v4/v5)
  * Official C99 / C++11 Header for Static (`libvxg.a` / `vxg.lib`) and Dynamic
  * (`libvxg.dylib` / `libvxg.so` / `vxg.dll`) Library Integration.
  *
@@ -35,7 +35,7 @@ extern "C" {
 #define VXG_ERR_INTERNAL           ((vxg_ssize_t)-7)
 
 /**
- * Returns the null-terminated library version string (e.g. "0.5.2").
+ * Returns the null-terminated library version string (e.g. "0.5.3").
  */
 const char *vxg_version_string(void);
 

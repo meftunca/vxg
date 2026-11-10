@@ -631,9 +631,9 @@ def benchmark_scale_suite(
 
 def write_markdown(report: dict, md_path: str) -> None:
     lines = [
-        "## Out-of-Cache Multi-GB Scale Benchmark (`10M`–`40M` Rows): `VXG v0.5.2` vs `DuckDB + Parquet`",
+        "## Out-of-Cache Multi-GB Scale Benchmark (`10M`–`40M` Rows): `VXG v0.5.3` vs `DuckDB + Parquet`",
         "",
-        f"- **Engine versions:** `VXG v0.5.2` (`mmap` zero-copy C-FFI + `--record-aligned` + `--stream`) vs `DuckDB {report['duckdb_version']}` (`PREPARE / EXECUTE` calibrated with `SELECT 1`, testing both default `ROW_GROUP_SIZE=122880` and fine-grained `ROW_GROUP_SIZE=16384`).",
+        f"- **Engine versions:** `VXG v0.5.3` (`mmap` zero-copy C-FFI + `--record-aligned` + `--stream`) vs `DuckDB {report['duckdb_version']}` (`PREPARE / EXECUTE` calibrated with `SELECT 1`, testing both default `ROW_GROUP_SIZE=122880` and fine-grained `ROW_GROUP_SIZE=16384`).",
         "- **Verification:** Every query asserts 100% exact result equality between `VXG` and `DuckDB`, and every `.vxg` archive passes full `vxg_verify_file` lossless verification.",
         "- **Key distinction:** `VXG` stores the original `.csv` / `.ndjson` **100% losslessly byte-for-byte** (`1` step, zero schema ETL), whereas `Parquet` requires an upfront lossy-to-formatting schema conversion (`COPY ... TO PARQUET`).",
         "",

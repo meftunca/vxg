@@ -85,6 +85,7 @@ pub(crate) struct ArenaPart {
     pub kind: u32,
     pub checksum: u32,
     pub raw_size: usize,
+    pub row_meta: u32,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct WorkerSlice<'a> {
@@ -96,6 +97,7 @@ pub(crate) struct WorkerSlice<'a> {
 pub struct Frame<'a> {
     pub(crate) blocks: Vec<Block<'a>>,
     pub(crate) dict: Vec<u8>,
+    pub(crate) row_index: Option<Vec<u32>>,
     pub(crate) raw_size: usize,
     pub(crate) block_size: usize,
     pub(crate) checksummed: bool,
@@ -187,6 +189,7 @@ pub(crate) fn parse_header_and_dir(src: &[u8], max_output: usize) -> Result<(usi
     for i in 0..hdr.count {
         let p = HEADER_SIZE + i * esize;
         let expected_rn = v5::block_raw_size(src, &hdr, i, next_raw)?;
+        let _ = v5::block_row_meta_raw(src, &hdr, i, expected_rn)?;
         let (raw_offset, payload_offset, rn, cn, checksum, kind) = if hdr.version >= VERSION_V4 {
             let word = read_u32(src, p)?;
             (
@@ -238,11 +241,24 @@ impl<'a> Frame<'a> {
         blocks
             .try_reserve_exact(hdr.count)
             .map_err(|_| Error::SizeOverflow)?;
+        let mut row_index = if hdr.has_row_index {
+            let mut v = Vec::new();
+            v.try_reserve_exact(hdr.count)
+                .map_err(|_| Error::SizeOverflow)?;
+            Some(v)
+        } else {
+            None
+        };
         let mut next_payload = hdr.payload_start;
         let mut next_raw = 0;
         for i in 0..hdr.count {
             let p = HEADER_SIZE + i * esize;
             let expected_rn = v5::block_raw_size(src, &hdr, i, next_raw)?;
+            if let Some(word) = v5::block_row_meta_raw(src, &hdr, i, expected_rn)? {
+                if let Some(ref mut ri) = row_index {
+                    ri.push(word);
+                }
+            }
             let (raw_offset, payload_offset, rn, cn, checksum, kind) = if hdr.version >= VERSION_V4 {
                 let word = read_u32(src, p)?;
                 (
@@ -294,6 +310,7 @@ impl<'a> Frame<'a> {
         Ok(Self {
             blocks,
             dict,
+            row_index,
             raw_size: hdr.raw_size,
             block_size: hdr.block_size,
             checksummed: hdr.checksummed,
@@ -338,6 +355,33 @@ impl<'a> Frame<'a> {
     #[inline]
     pub fn dict(&self) -> &[u8] {
         &self.dict
+    }
+    /// Returns `true` when this `VERSION_V5` frame carries an $O(1)$ per-block row-count index (`FLAG_ROW_INDEX`).
+    #[inline]
+    pub fn has_row_index(&self) -> bool {
+        self.row_index.is_some()
+    }
+    /// Returns `(row_count, ends_with_newline)` for `index` in $O(1)$ time when `FLAG_ROW_INDEX` is present.
+    #[inline]
+    pub fn block_row_meta(&self, index: usize) -> Option<(usize, bool)> {
+        self.row_index
+            .as_ref()
+            .and_then(|ri| ri.get(index).copied())
+            .map(v5::unpack_block_row_meta)
+    }
+    /// Returns total structured records across this frame in $O(B)$ header arithmetic when `FLAG_ROW_INDEX` is present.
+    pub fn indexed_row_count(&self) -> Option<usize> {
+        let ri = self.row_index.as_ref()?;
+        let mut total = 0usize;
+        let mut prev_open = false;
+        for &word in ri {
+            let (rows, ends_nl) = v5::unpack_block_row_meta(word);
+            if rows > 0 {
+                total = total.checked_add(if prev_open { rows - 1 } else { rows })?;
+                prev_open = !ends_nl;
+            }
+        }
+        Some(total)
     }
     pub fn validate_commands(&self) -> Result<()> {
         for b in &self.blocks {

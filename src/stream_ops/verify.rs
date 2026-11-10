@@ -128,18 +128,20 @@ fn verify_single_parsed_frame(
     let short_distance = parsed.version >= 2;
     let max_blk = parsed.block_size;
     let dict_ref = parsed.dict.as_slice();
+    let ri_ref = parsed.row_index.as_deref();
     let workers = options.threads.min(blocks.len());
 
     if workers <= 1 {
         let mut scratch = vec![0u8; max_blk];
         for (idx, b) in blocks.iter().enumerate() {
-            if b.info.kind == block::RAW {
+            let decoded: &[u8] = if b.info.kind == block::RAW {
                 if b.payload.len() != b.info.raw_size {
                     return Err(Error::InvalidFrame("raw block size mismatch"));
                 }
                 if verify_csum && crc32c(b.payload) != b.info.checksum {
                     return Err(Error::Checksum { block: idx });
                 }
+                b.payload
             } else {
                 let dst = &mut scratch[..b.info.raw_size];
                 block::decode_with_dict(
@@ -152,6 +154,12 @@ fn verify_single_parsed_frame(
                 )?;
                 if verify_csum && crc32c(dst) != b.info.checksum {
                     return Err(Error::Checksum { block: idx });
+                }
+                dst
+            };
+            if let Some(ri) = ri_ref {
+                if frame::v5::pack_block_row_meta(decoded) != ri[idx] {
+                    return Err(Error::InvalidFrame("row_index mismatch"));
                 }
             }
         }
@@ -181,11 +189,12 @@ fn verify_single_parsed_frame(
             let end = (start + step).min(blocks.len());
             for (local_off, b) in blocks[start..end].iter().enumerate() {
                 let idx = start + local_off;
-                if b.info.kind == block::RAW {
+                let decoded: &[u8] = if b.info.kind == block::RAW {
                     if verify_csum && crc32c(b.payload) != b.info.checksum {
                         aborted.store(true, Ordering::Relaxed);
                         return Err(Error::Checksum { block: idx });
                     }
+                    b.payload
                 } else {
                     let dst = &mut scratch[..b.info.raw_size];
                     if let Err(e) = block::decode_with_dict(
@@ -202,6 +211,13 @@ fn verify_single_parsed_frame(
                     if verify_csum && crc32c(dst) != b.info.checksum {
                         aborted.store(true, Ordering::Relaxed);
                         return Err(Error::Checksum { block: idx });
+                    }
+                    dst
+                };
+                if let Some(ri) = ri_ref {
+                    if frame::v5::pack_block_row_meta(decoded) != ri[idx] {
+                        aborted.store(true, Ordering::Relaxed);
+                        return Err(Error::InvalidFrame("row_index mismatch"));
                     }
                 }
             }

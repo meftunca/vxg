@@ -235,9 +235,9 @@ struct SavedBlockLoc {
     local_blk: usize,
     version: u16,
     checksummed: bool,
-    dict_offset: usize,
-    dict_len: usize,
+    dict_idx: usize,
     info: BlockInfo,
+    row_meta: Option<(usize, bool)>,
 }
 
 /// Windowed compressed-domain `ArrowArrayStream` cursor scanning `128` blocks (~8 MiB) per step.
@@ -246,6 +246,7 @@ pub(crate) struct ArrowWindowStream {
     pending: VecDeque<ArrowBatch>,
     frame_ptr: *const u8,
     frame_len: usize,
+    dicts: Vec<Vec<u8>>,
     locs: Vec<SavedBlockLoc>,
     names: Vec<String>,
     col_types: Vec<ArrowType>,
@@ -292,6 +293,7 @@ impl ArrowWindowStream {
             pending,
             frame_ptr: core::ptr::null(),
             frame_len: 0,
+            dicts: Vec::new(),
             locs: Vec::new(),
             names: Vec::new(),
             col_types: Vec::new(),
@@ -339,15 +341,12 @@ impl ArrowWindowStream {
 
         let frames = Frame::parse_all(frame_bytes, dec_options.max_output)?;
         let base_addr = frame_bytes.as_ptr() as usize;
+        let mut dicts = Vec::with_capacity(frames.len());
         let mut locs = Vec::new();
         for (f_bytes, parsed) in query::frame_slices(frame_bytes, &frames) {
             let f_offset = (f_bytes.as_ptr() as usize) - base_addr;
-            let dict = parsed.dict();
-            let dict_offset = if dict.is_empty() {
-                0
-            } else {
-                (dict.as_ptr() as usize) - (f_bytes.as_ptr() as usize)
-            };
+            let dict_idx = dicts.len();
+            dicts.push(parsed.dict().to_vec());
             for (local_blk, info) in parsed.blocks().enumerate() {
                 locs.push(SavedBlockLoc {
                     f_offset,
@@ -355,9 +354,9 @@ impl ArrowWindowStream {
                     local_blk,
                     version: parsed.version(),
                     checksummed: parsed.checksummed(),
-                    dict_offset,
-                    dict_len: dict.len(),
+                    dict_idx,
                     info,
+                    row_meta: parsed.block_row_meta(local_blk),
                 });
             }
         }
@@ -367,6 +366,7 @@ impl ArrowWindowStream {
             pending: VecDeque::new(),
             frame_ptr: frame_bytes.as_ptr(),
             frame_len: frame_bytes.len(),
+            dicts,
             locs,
             names,
             col_types: Vec::new(),
@@ -435,11 +435,7 @@ impl ArrowWindowStream {
         let mut window = Vec::with_capacity(w_end - w_start);
         for loc in &self.locs[w_start..w_end] {
             let f_bytes = &frame_bytes[loc.f_offset..loc.f_offset + loc.f_len];
-            let dict = if loc.dict_len == 0 {
-                &[][..]
-            } else {
-                &f_bytes[loc.dict_offset..loc.dict_offset + loc.dict_len]
-            };
+            let dict = self.dicts[loc.dict_idx].as_slice();
             window.push(ParInBlock {
                 f_bytes,
                 local_blk: loc.local_blk,
@@ -449,6 +445,7 @@ impl ArrowWindowStream {
                 info: loc.info,
                 payload: &f_bytes
                     [loc.info.payload_offset..loc.info.payload_offset + loc.info.payload_size],
+                row_meta: loc.row_meta,
             });
         }
 
