@@ -272,6 +272,11 @@ where
 }
 
 #[inline]
+pub(crate) fn ensure_warm(workers: usize) {
+    parallel_run(workers.min(16), |_| {});
+}
+
+#[inline]
 pub(crate) fn parallel_run<F>(workers: usize, f: F)
 where
     F: Fn(usize) + Sync,

@@ -180,6 +180,7 @@ impl<W: Write> StreamEncoder<W> {
             } else {
                 take_raw
             };
+            let skip_dict = self.v6_builder.as_ref().is_some_and(|b| b.saw_columnar_no_dict);
             let mut micro_opts = self
                 .v6_builder
                 .as_ref()
@@ -190,7 +191,7 @@ impl<W: Write> StreamEncoder<W> {
             if self.enc_buf.len() < bound {
                 self.enc_buf.resize(bound, 0);
             }
-            let written = compress_into(&self.raw_buf[..encode_len], &mut self.enc_buf[..bound], &micro_opts)
+            let written = crate::compress_into_micro(&self.raw_buf[..encode_len], &mut self.enc_buf[..bound], &micro_opts, skip_dict)
                 .map_err(to_io_err)?;
             let writer = self.writer.as_mut().ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
             let v6_out = self

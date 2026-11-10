@@ -399,9 +399,19 @@ impl<'a> Frame<'a> {
         res: &crate::mmap::sys::ChunkResidency,
     ) -> Result<Self> {
         if res.all_resident() {
+            if v6::is_v6_frame(src) {
+                return v6::parse_v6_for_query(
+                    src, max_output, where_expr, extra_cols, allow_partial_cols, threads, res,
+                );
+            }
             return Self::parse(src, max_output);
         }
         let Some((fd, file_off)) = crate::mmap::pread::resolve_backing_fd(src) else {
+            if v6::is_v6_frame(src) {
+                return v6::parse_v6_for_query(
+                    src, max_output, where_expr, extra_cols, allow_partial_cols, threads, res,
+                );
+            }
             return Self::parse(src, max_output);
         };
         let is_v6 = if res.is_chunk_resident(0) {

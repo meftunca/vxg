@@ -273,6 +273,56 @@ fn v6_corruption_fuzzer_1250_trials_bitflip_truncate_zeroing() {
     assert!(total_blocks >= 8);
 
     let dec = DecodeOptions::default();
+    let pred_eu = PredExpr::col(ColPred::json_str("region", StrCmp::Eq(b"eu-west-1")));
+    let t_cents = ColTarget::JsonKey("cents");
+    let t_reg = ColTarget::JsonKey("region");
+    let proj_cols = [ColTarget::JsonKey("id"), t_cents];
+
+    let ref_count = count_where(&frame, &pred_eu, &dec).unwrap();
+    let ref_agg = aggregate_column(&frame, Some(&pred_eu), t_cents, &dec).unwrap();
+    let ref_gb = group_by(&frame, None, t_reg, Some(t_cents), &dec).unwrap();
+    let ref_sel = select_columns(&frame, Some(&pred_eu), &proj_cols, 50, &dec).unwrap();
+    let ref_topk = top_k_by(&frame, Some(&pred_eu), t_cents, SortDir::Desc, 15, &dec).unwrap();
+    let ref_row_0 = extract_row(&frame, 0, &dec).unwrap();
+    let ref_row_mid = extract_row(&frame, 425, &dec).unwrap();
+    let mut ref_blk0 = vec![0u8; blocks[0].raw_size];
+    extract_block_into(&frame, 0, &mut ref_blk0, &dec).unwrap();
+    let mid_blk_idx = total_blocks / 2;
+    let mut ref_blk_mid = vec![0u8; blocks[mid_blk_idx].raw_size];
+    extract_block_into(&frame, mid_blk_idx, &mut ref_blk_mid, &dec).unwrap();
+
+    let verify_query_path_no_silent_corruption = |corrupt: &[u8], label: &str, trial: usize| {
+        if let Ok(c) = count_where(corrupt, &pred_eu, &dec) {
+            assert_eq!(c, ref_count, "silent wrong count_where in {label} trial {trial}");
+        }
+        if let Ok(a) = aggregate_column(corrupt, Some(&pred_eu), t_cents, &dec) {
+            assert_eq!(a, ref_agg, "silent wrong aggregate_column in {label} trial {trial}");
+        }
+        if let Ok(g) = group_by(corrupt, None, t_reg, Some(t_cents), &dec) {
+            assert_eq!(g, ref_gb, "silent wrong group_by in {label} trial {trial}");
+        }
+        if let Ok(s) = select_columns(corrupt, Some(&pred_eu), &proj_cols, 50, &dec) {
+            assert_eq!(s, ref_sel, "silent wrong select_columns in {label} trial {trial}");
+        }
+        if let Ok(tk) = top_k_by(corrupt, Some(&pred_eu), t_cents, SortDir::Desc, 15, &dec) {
+            assert_eq!(tk, ref_topk, "silent wrong top_k_by in {label} trial {trial}");
+        }
+        if let Ok(r0) = extract_row(corrupt, 0, &dec) {
+            assert_eq!(r0, ref_row_0, "silent wrong extract_row(0) in {label} trial {trial}");
+        }
+        if let Ok(rm) = extract_row(corrupt, 425, &dec) {
+            assert_eq!(rm, ref_row_mid, "silent wrong extract_row(425) in {label} trial {trial}");
+        }
+        let mut b0 = vec![0u8; ref_blk0.len()];
+        if let Ok(n) = extract_block_into(corrupt, 0, &mut b0, &dec) {
+            assert_eq!(&b0[..n], &ref_blk0[..], "silent wrong extract_block(0) in {label} trial {trial}");
+        }
+        let mut bm = vec![0u8; ref_blk_mid.len()];
+        if let Ok(n) = extract_block_into(corrupt, mid_blk_idx, &mut bm, &dec) {
+            assert_eq!(&bm[..n], &ref_blk_mid[..], "silent wrong extract_block(mid) in {label} trial {trial}");
+        }
+    };
+
     let mut rng = XorShift64(0xCAFE_BABE_DEAD_BEEFu64);
     let mut total_possible_blocks = 0usize;
     let mut total_recovered_blocks = 0usize;
@@ -309,6 +359,7 @@ fn v6_corruption_fuzzer_1250_trials_bitflip_truncate_zeroing() {
         if let Ok(strict_out) = decompress(&mutated, &dec) {
             assert_eq!(strict_out, raw, "silent wrong output in bit-flip trial {trial}");
         }
+        verify_query_path_no_silent_corruption(&mutated, "bit-flip", trial);
         // Recovery: must NEVER panic and every recovered block must match original raw block!
         if let Ok(rep) = recover_frame(&mutated, &dec) {
             let mut cursor = 0usize;
@@ -338,6 +389,7 @@ fn v6_corruption_fuzzer_1250_trials_bitflip_truncate_zeroing() {
         if let Ok(strict_out) = decompress(truncated, &dec) {
             assert_eq!(strict_out, raw, "silent wrong output in truncation trial {trial}");
         }
+        verify_query_path_no_silent_corruption(truncated, "truncation", trial);
         if let Ok(rep) = recover_frame(truncated, &dec) {
             let mut cursor = 0usize;
             for rb in &rep.recovered_blocks {
@@ -378,6 +430,7 @@ fn v6_corruption_fuzzer_1250_trials_bitflip_truncate_zeroing() {
         if let Ok(strict_out) = decompress(&mutated, &dec) {
             assert_eq!(strict_out, raw, "silent wrong output in zeroing trial {trial}");
         }
+        verify_query_path_no_silent_corruption(&mutated, "zeroing", trial);
         if let Ok(rep) = recover_frame(&mutated, &dec) {
             let mut cursor = 0usize;
             for rb in &rep.recovered_blocks {

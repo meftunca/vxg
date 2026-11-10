@@ -33,7 +33,9 @@ pub(super) fn decode_frame_into(
     let short_distance = frame.version >= 2;
     let dict_ref = frame.dict.as_slice();
     if workers == 1 {
-        return if let Some(proof) = proof {
+        let prev = crate::columns::v6_verify_slice_crc();
+        crate::columns::set_v6_verify_slice_crc(verify);
+        let res = if let Some(proof) = proof {
             decode_validated_group(
                 &frame.blocks,
                 out,
@@ -47,6 +49,8 @@ pub(super) fn decode_frame_into(
         } else {
             decode_group(&frame.blocks, out, engine, verify, 0, short_distance, dict_ref)
         };
+        crate::columns::set_v6_verify_slice_crc(prev);
+        return res;
     }
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let next_idx = AtomicUsize::new(0);
@@ -56,36 +60,45 @@ pub(super) fn decode_frame_into(
     let max_batch = (blocks.len() / (workers * 8)).clamp(1, 4);
     let tail_cutoff = blocks.len().saturating_sub(workers * 4);
     crate::pool::parallel_try_run(workers, |_| {
-        loop {
-            if aborted.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            let step = if next_idx.load(Ordering::Relaxed) < tail_cutoff {
-                max_batch
-            } else {
-                1
-            };
-            let start = next_idx.fetch_add(step, Ordering::Relaxed);
-            if start >= blocks.len() {
-                return Ok(());
-            }
-            let end = (start + step).min(blocks.len());
-            for idx in start..end {
-                let b = &blocks[idx];
-                // SAFETY: `Frame::parse` verified that all blocks `0..blocks.len()` cover
-                // disjoint ranges `b.info.raw_offset .. b.info.raw_offset + b.info.raw_size`
-                // within `0..frame.raw_size` (`== out.len()`), and each `idx` is claimed
-                // by at most one worker via `fetch_add(batch)`.
-                let target = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        (out_addr + b.info.raw_offset) as *mut u8,
-                        b.info.raw_size,
-                    )
+        let prev_v6 = crate::columns::v6_verify_slice_crc();
+        crate::columns::set_v6_verify_slice_crc(verify);
+        let run_res = (|| -> Result<()> {
+            loop {
+                if aborted.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                let step = if next_idx.load(Ordering::Relaxed) < tail_cutoff {
+                    max_batch
+                } else {
+                    1
                 };
-                let res = crate::columns::with_v6_cols(b.col_slices, || {
-                    if let Some(_proof) = proof {
-                        unsafe {
-                            block::decode_validated_with_dict(
+                let start = next_idx.fetch_add(step, Ordering::Relaxed);
+                if start >= blocks.len() {
+                    return Ok(());
+                }
+                let end = (start + step).min(blocks.len());
+                for idx in start..end {
+                    let b = &blocks[idx];
+                    let target = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            (out_addr + b.info.raw_offset) as *mut u8,
+                            b.info.raw_size,
+                        )
+                    };
+                    let res = crate::columns::with_v6_cols(b.col_slices, || {
+                        if let Some(_proof) = proof {
+                            unsafe {
+                                block::decode_validated_with_dict(
+                                    b.payload,
+                                    b.info.kind,
+                                    target,
+                                    engine,
+                                    short_distance,
+                                    dict_ref,
+                                )
+                            }
+                        } else {
+                            block::decode_with_dict(
                                 b.payload,
                                 b.info.kind,
                                 target,
@@ -94,27 +107,23 @@ pub(super) fn decode_frame_into(
                                 dict_ref,
                             )
                         }
-                    } else {
-                        block::decode_with_dict(
-                            b.payload,
-                            b.info.kind,
-                            target,
-                            engine,
-                            short_distance,
-                            dict_ref,
-                        )
+                    });
+                    if let Err(e) = res {
+                        aborted.store(true, Ordering::Relaxed);
+                        return Err(match e {
+                            Error::Checksum { .. } => Error::Checksum { block: idx },
+                            other => other,
+                        });
                     }
-                });
-                if let Err(e) = res {
-                    aborted.store(true, Ordering::Relaxed);
-                    return Err(e);
-                }
-                if verify && crc32c(target) != b.info.checksum {
-                    aborted.store(true, Ordering::Relaxed);
-                    return Err(Error::Checksum { block: idx });
+                    if verify && crc32c(target) != b.info.checksum {
+                        aborted.store(true, Ordering::Relaxed);
+                        return Err(Error::Checksum { block: idx });
+                    }
                 }
             }
-        }
+        })();
+        crate::columns::set_v6_verify_slice_crc(prev_v6);
+        run_res
     })
 }
 
@@ -518,6 +527,10 @@ fn decode_group(
         let target = &mut out[offset..offset + b.info.raw_size];
         crate::columns::with_v6_cols(b.col_slices, || {
             block::decode_with_dict(b.payload, b.info.kind, target, engine, short_distance, dict)
+        })
+        .map_err(|e| match e {
+            Error::Checksum { .. } => Error::Checksum { block: first + i },
+            other => other,
         })?;
         if verify && crc32c(target) != b.info.checksum {
             return Err(Error::Checksum { block: first + i });

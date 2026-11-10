@@ -1,25 +1,23 @@
 //! `VERSION_V6` (`6`): Column-grouped macro-block layout with dynamic `~1 MiB`/column sizing,
-//! cumulative $O(1)$ per-block stream offset tables, trailing backup group headers (`b"6GXV"`),
-//! per-block directory redundancy, and zero-copy in-place query execution.
-
-use std::sync::atomic::{AtomicUsize, Ordering};
+//! canonical `Stream 0` header deduplication + separate `raw_rows` stream (`GROUP_V2_FLAG`),
+//! per-stream-slice hardware `CRC32C` verification, cumulative $O(1)$ per-block stream offset
+//! tables, trailing backup group headers (`b"6GXV"`), and zero-copy in-place query execution.
 
 use crate::checksum::crc32c;
-use crate::{block, columns, Error, Result};
+use crate::{columns, Error, Result};
 
 use super::v5::{
-    block_raw_size, block_row_meta_raw, decode_header_dict, parse_v1_to_v5_header,
-    write_header_bytes, ParsedHeader, FLAG_COL_GROUP,
+    block_raw_size, block_row_meta_raw, parse_v1_to_v5_header, unpack_block_row_meta, ParsedHeader,
 };
 use super::{
-    entry_size, read_u32, read_u64, valid_kind_and_size, Block, BlockInfo, Frame, HEADER_SIZE,
-    V4_SIZE_MASK,
+    entry_size, read_u32, read_u64, valid_kind_and_size, BlockInfo, HEADER_SIZE, V4_SIZE_MASK,
 };
 
 pub const VERSION_V6: u16 = 6;
 pub const GROUP_MAGIC: &[u8; 4] = b"VXG6";
 pub const GROUP_TRAILER_MAGIC: &[u8; 4] = b"6GXV";
 pub const GROUP_CUM_FLAG: u16 = 0x4000;
+pub const GROUP_V2_FLAG: u16 = 0x2000;
 pub const TARGET_COL_STREAM_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy)]
@@ -37,268 +35,382 @@ pub(crate) fn is_v6_frame(src: &[u8]) -> bool {
         && u16::from_le_bytes([src[4], src[5]]) == VERSION_V6
 }
 
-#[derive(Clone)]
-pub(crate) struct BlockSplit<'a> {
-    pub payload: &'a [u8],
-    pub stream0_len: usize,
-    pub spans: Vec<(usize, usize)>,
-    pub word: u32,
-    pub csum: u32,
-    pub raw_size: u32,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn append_serialized_v6_group(
-    v6_payload: &mut Vec<u8>,
-    start_block: u32,
-    slots: usize,
-    b_meta: &[(u32, u32, u32)],
-    s0_slices: &[&[u8]],
-    col_slices_per_stream: &[Vec<&[u8]>],
-) {
-    let count = s0_slices.len();
-    debug_assert_eq!(count, b_meta.len());
-    debug_assert_eq!(slots, col_slices_per_stream.len());
-    let slot_flags = (slots as u16) | GROUP_CUM_FLAG;
-    let bdir_len = count * 12;
-    let cum_len = (slots + 1) * count * 4;
-    let gh_len = 16 + bdir_len + cum_len;
-
-    let mut gh = Vec::with_capacity(gh_len);
-    gh.extend_from_slice(GROUP_MAGIC);
-    gh.extend_from_slice(&0u32.to_le_bytes());
-    gh.extend_from_slice(&start_block.to_le_bytes());
-    gh.extend_from_slice(&(count as u16).to_le_bytes());
-    gh.extend_from_slice(&slot_flags.to_le_bytes());
-
-    for &(word, csum, rn) in b_meta {
-        gh.extend_from_slice(&word.to_le_bytes());
-        gh.extend_from_slice(&csum.to_le_bytes());
-        gh.extend_from_slice(&rn.to_le_bytes());
+#[inline]
+pub(crate) fn uleb_len_usize(mut v: usize) -> usize {
+    let mut n = 1usize;
+    while v >= 0x80 {
+        v >>= 7;
+        n += 1;
     }
-
-    let mut acc0 = 0u32;
-    for s0 in s0_slices {
-        acc0 += s0.len() as u32;
-        gh.extend_from_slice(&acc0.to_le_bytes());
-    }
-    let mut total_col_bytes = 0usize;
-    for s_cols in col_slices_per_stream {
-        let mut acc = 0u32;
-        for sl in s_cols {
-            acc += sl.len() as u32;
-            gh.extend_from_slice(&acc.to_le_bytes());
-        }
-        total_col_bytes += acc as usize;
-    }
-    let hdr_crc = crc32c(&gh[8..]);
-    gh[4..8].copy_from_slice(&hdr_crc.to_le_bytes());
-
-    v6_payload.reserve(gh_len + (acc0 as usize) + total_col_bytes + gh_len + 8);
-    v6_payload.extend_from_slice(&gh);
-    for s0 in s0_slices {
-        v6_payload.extend_from_slice(s0);
-    }
-    for s_cols in col_slices_per_stream {
-        for sl in s_cols {
-            v6_payload.extend_from_slice(sl);
-        }
-    }
-    // Trailing backup copy of the group header + `(gh_len as u32)` + `b"6GXV"` trailer.
-    v6_payload.extend_from_slice(&gh);
-    v6_payload.extend_from_slice(&(gh_len as u32).to_le_bytes());
-    v6_payload.extend_from_slice(GROUP_TRAILER_MAGIC);
+    n
 }
 
 #[inline]
-fn make_block_split(payload: &[u8], word: u32, csum: u32, raw_size: u32) -> BlockSplit<'_> {
-    if (word >> 30) == block::COLUMN {
-        if let Some((s0, spans)) = columns::split_grammar_packet_streams(payload) {
-            return BlockSplit {
-                payload,
-                stream0_len: s0,
-                spans,
-                word,
-                csum,
-                raw_size,
-            };
-        }
+pub(crate) fn put_uleb_usize(out: &mut Vec<u8>, mut v: usize) {
+    while v >= 0x80 {
+        out.push((v as u8) | 0x80);
+        v >>= 7;
     }
-    BlockSplit {
-        payload,
-        stream0_len: payload.len(),
-        spans: Vec::new(),
-        word,
-        csum,
-        raw_size,
-    }
+    out.push(v as u8);
 }
 
-pub(crate) fn repack_v4_v5_to_v6(v5_bytes: &[u8], bound: usize) -> Result<Vec<u8>> {
-    let hdr = parse_v1_to_v5_header(v5_bytes, usize::MAX)?;
-    if hdr.version < super::VERSION_V4 || hdr.version > super::VERSION_V5 {
-        return Ok(v5_bytes.to_vec());
-    }
-    let esize = entry_size(hdr.version);
-    let mut block_ranges: Vec<(usize, usize, u32, u32, u32)> = Vec::with_capacity(hdr.count);
-    let mut next_payload = hdr.payload_start;
-    let mut next_raw = 0usize;
-    for i in 0..hdr.count {
-        let p = HEADER_SIZE + i * esize;
-        let rn = block_raw_size(v5_bytes, &hdr, i, next_raw)?;
-        next_raw += rn;
-        let word = read_u32(v5_bytes, p)?;
-        let cn = (word & V4_SIZE_MASK) as usize;
-        let csum = read_u32(v5_bytes, p + 4)?;
-        let end = next_payload.checked_add(cn).ok_or(Error::SizeOverflow)?;
-        if end > v5_bytes.len() {
+#[inline]
+pub(crate) fn compute_v6_dir_crc(prefix_before_crc: &[u8], entries_raw: &[u8]) -> u32 {
+    crc32c(prefix_before_crc) ^ crc32c(entries_raw).rotate_left(1)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ParsedGroupHeader<'a> {
+    pub start_block: u32,
+    pub count: usize,
+    pub slots: usize,
+    pub num_streams: usize,
+    pub is_cum: bool,
+    pub is_v2: bool,
+    pub use_u32: bool,
+    pub block_dir_bytes: &'a [u8],
+    pub lens_bytes: &'a [u8],
+    pub canon_s0: &'a [u8],
+    pub data_offset: usize,
+}
+
+impl<'a> ParsedGroupHeader<'a> {
+    fn parse_raw(group_slice: &'a [u8]) -> Result<(Self, u32, &'a [u8])> {
+        if group_slice.len() < 16 {
             return Err(Error::Truncated);
         }
-        block_ranges.push((next_payload, end, word, csum, rn as u32));
-        next_payload = end;
+        if &group_slice[0..4] != GROUP_MAGIC {
+            return Err(Error::InvalidFrame("bad v6 group magic"));
+        }
+        let expected_crc = read_u32(group_slice, 4)?;
+        let sb = read_u32(group_slice, 8)?;
+        let count = u16::from_le_bytes([group_slice[12], group_slice[13]]) as usize;
+        let slot_flags = u16::from_le_bytes([group_slice[14], group_slice[15]]);
+        let (is_cum, is_v2, slots) = (
+            (slot_flags & GROUP_CUM_FLAG) != 0,
+            (slot_flags & GROUP_V2_FLAG) != 0,
+            (slot_flags & 0x1fff) as usize,
+        );
+        let use_u32 = is_cum || (slot_flags & 0x8000) != 0;
+        if count == 0 || slots > 64 {
+            return Err(Error::InvalidFrame("bad v6 group header fields"));
+        }
+        let (fixed_hdr, canon_s0_len) = if is_v2 {
+            if group_slice.len() < 18 {
+                return Err(Error::Truncated);
+            }
+            (18usize, u16::from_le_bytes([group_slice[16], group_slice[17]]) as usize)
+        } else {
+            (16usize, 0usize)
+        };
+        let num_streams = if is_v2 && slots > 0 { slots + 2 } else { slots + 1 };
+        let bdir_len = if is_cum { count * 12 } else { 0 };
+        let num_lens = num_streams.checked_mul(count).ok_or(Error::SizeOverflow)?;
+        let lens_byte_len = num_lens * if use_u32 { 4 } else { 2 };
+        let canon_start = fixed_hdr
+            .checked_add(bdir_len)
+            .and_then(|v| v.checked_add(lens_byte_len))
+            .ok_or(Error::SizeOverflow)?;
+        let data_offset = canon_start.checked_add(canon_s0_len).ok_or(Error::SizeOverflow)?;
+        let hdr_body = group_slice.get(8..data_offset).ok_or(Error::Truncated)?;
+        Ok((
+            Self {
+                start_block: sb,
+                count,
+                slots,
+                num_streams,
+                is_cum,
+                is_v2,
+                use_u32,
+                block_dir_bytes: &group_slice[fixed_hdr..fixed_hdr + bdir_len],
+                lens_bytes: &group_slice[fixed_hdr + bdir_len..canon_start],
+                canon_s0: &group_slice[canon_start..data_offset],
+                data_offset,
+            },
+            expected_crc,
+            hdr_body,
+        ))
     }
 
-    let mut splits: Vec<BlockSplit<'_>> = vec![make_block_split(&[], 0, 0, 0); hdr.count];
-    if hdr.count > 0 {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(8)
-            .clamp(1, 16)
-            .min(hdr.count);
-        if workers <= 1 || hdr.count < 8 {
-            for (i, &(st, en, word, csum, raw_size)) in block_ranges.iter().enumerate() {
-                splits[i] = make_block_split(&v5_bytes[st..en], word, csum, raw_size);
-            }
-        } else {
-            let next = AtomicUsize::new(0);
-            let splits_ptr = splits.as_mut_ptr() as usize;
-            let br_slice = block_ranges.as_slice();
-            crate::pool::parallel_try_run(workers, |_| {
-                loop {
-                    let base = next.fetch_add(16, Ordering::Relaxed);
-                    if base >= br_slice.len() {
-                        return Ok(());
+    pub fn parse_any_start(group_slice: &'a [u8]) -> Result<Self> {
+        let (gh, expected_crc, hdr_body) = Self::parse_raw(group_slice)?;
+        if crc32c(hdr_body) != expected_crc {
+            return Err(Error::InvalidFrame("v6 group header crc mismatch"));
+        }
+        if gh.is_cum {
+            for s in 0..gh.num_streams {
+                let mut prev = 0usize;
+                for bi in 0..gh.count {
+                    let (st, en) = gh.stream_slice_range(s, bi);
+                    if st != prev || en < st {
+                        return Err(Error::InvalidFrame("v6 non-monotonic cumulative offset"));
                     }
-                    let end = (base + 16).min(br_slice.len());
-                    for i in base..end {
-                        let (st, en, word, csum, raw_size) = br_slice[i];
-                        let item = make_block_split(&v5_bytes[st..en], word, csum, raw_size);
-                        unsafe {
-                            *(splits_ptr as *mut BlockSplit<'_>).add(i) = item;
-                        }
+                    prev = en;
+                }
+            }
+        }
+        Ok(gh)
+    }
+
+    pub fn parse(group_slice: &'a [u8], expected_start: u32) -> Result<Self> {
+        let gh = Self::parse_any_start(group_slice)?;
+        if gh.start_block != expected_start {
+            return Err(Error::InvalidFrame("bad v6 group start_block"));
+        }
+        Ok(gh)
+    }
+
+    pub fn parse_for_block(group_slice: &'a [u8], expected_start: u32, bi: usize) -> Result<Self> {
+        let (gh, expected_crc, hdr_body) = Self::parse_raw(group_slice)?;
+        if gh.start_block != expected_start || bi >= gh.count {
+            return Err(Error::InvalidFrame("bad v6 group header fields"));
+        }
+        if crc32c(hdr_body) != expected_crc {
+            return Err(Error::InvalidFrame("v6 group header crc mismatch"));
+        }
+        Ok(gh)
+    }
+
+    pub fn parse_resilient(group_slice: &'a [u8], expected_start: u32) -> Result<Self> {
+        if let Ok(gh) = Self::parse(group_slice, expected_start) {
+            if gh.data_offset.saturating_add(gh.total_streams_bytes()) <= group_slice.len() {
+                return Ok(gh);
+            }
+        }
+        if group_slice.len() >= 24 && &group_slice[group_slice.len() - 4..] == GROUP_TRAILER_MAGIC {
+            let gh_len = read_u32(group_slice, group_slice.len() - 8)? as usize;
+            if gh_len >= 16 && gh_len + 8 <= group_slice.len() {
+                let bk_start = group_slice.len() - 8 - gh_len;
+                if let Ok(gh) = Self::parse(&group_slice[bk_start..bk_start + gh_len], expected_start) {
+                    if gh.data_offset.saturating_add(gh.total_streams_bytes()) <= bk_start {
+                        return Ok(gh);
                     }
                 }
-            })?;
+            }
         }
+        Err(Error::InvalidFrame("v6 group header and backup both corrupt"))
     }
 
-    let mut groups: Vec<(usize, usize, usize)> = Vec::new();
-    let mut idx = 0usize;
-    while idx < splits.len() {
-        let slots = splits[idx].spans.len();
-        let target_bytes = if slots > 0 {
-            slots.saturating_mul(TARGET_COL_STREAM_BYTES)
+    #[inline]
+    pub fn unwrap_verified_slice<'b>(raw: &'b [u8], is_v2: bool, block: usize) -> Result<&'b [u8]> {
+        if !is_v2 || raw.is_empty() {
+            return Ok(raw);
+        }
+        if raw.len() < 4 {
+            return Err(Error::InvalidFrame("v6 stream slice shorter than crc"));
+        }
+        let (body, crc_bytes) = raw.split_at(raw.len() - 4);
+        if columns::v6_verify_slice_crc() {
+            let exp = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+            if crc32c(body) != exp {
+                return Err(Error::Checksum { block });
+            }
+        }
+        Ok(body)
+    }
+
+    #[inline]
+    pub fn verify_block_cn(&self, bi: usize, rn: usize, exp_s0_len: usize, expected_cn: usize) -> bool {
+        if !self.is_v2 {
+            return (0..self.num_streams).map(|s| self.stream_len(s, bi)).sum::<usize>() == expected_cn;
+        }
+        if self.slots == 0 {
+            return self.stream_len(0, bi).checked_sub(4) == Some(expected_cn);
+        }
+        let s0_wire = self.stream_len(0, bi);
+        if s0_wire != 0 && s0_wire < 4 {
+            return false;
+        }
+        let mut total = if s0_wire == exp_s0_len + 4 {
+            exp_s0_len
         } else {
-            TARGET_COL_STREAM_BYTES
-        };
-        let start = idx;
-        let mut acc_bytes = 0usize;
-        while idx < splits.len() && splits[idx].spans.len() == slots && (idx - start) < 4095 {
-            let b_bytes = if slots > 0 {
-                splits[idx].payload.len() - splits[idx].stream0_len
-            } else {
-                splits[idx].payload.len()
+            let Some(rel) = self.canon_s0.get(1..).and_then(|s| s.iter().position(|&b| (b & 0x80) == 0)) else {
+                return false;
             };
-            if idx > start && acc_bytes + b_bytes > target_bytes {
-                break;
-            }
-            acc_bytes += b_bytes;
-            idx += 1;
+            let Some(tail_len) = exp_s0_len.checked_sub(2 + rel) else { return false };
+            1 + uleb_len_usize(rn) + tail_len
+        };
+        for c in 0..self.slots {
+            let cw = self.stream_len(c + 1, bi);
+            if cw < 4 { return false; }
+            total += cw - 4;
         }
-        groups.push((start, idx - start, slots));
-    }
-    if groups.len() > 4095 {
-        return Ok(v5_bytes.to_vec());
+        let rrw = self.stream_len(self.slots + 1, bi);
+        if rrw > 0 {
+            if rrw < 4 { return false; }
+            total += rrw - 4;
+        }
+        total == expected_cn
     }
 
-    let group_dir_bytes = 16 + 16 * groups.len();
-    let prefix_len = hdr.group_dir_offset + group_dir_bytes;
-    let mut out: Vec<u8> = Vec::with_capacity(v5_bytes.len() + group_dir_bytes + groups.len() * 16_384);
-    out.resize(prefix_len, 0);
-    let mut dir_entries: Vec<GroupDirEntry> = Vec::with_capacity(groups.len());
-    for &(start, count, slots) in &groups {
-        let rel_off = (out.len() - prefix_len) as u64;
-        dir_entries.push(GroupDirEntry {
-            payload_rel_offset: rel_off,
-            start_block: start as u32,
-            block_count: count as u16,
-            slot_count: slots as u16,
-        });
-        let mut b_meta = Vec::with_capacity(count);
-        let mut s0_slices = Vec::with_capacity(count);
-        let mut col_slices_per_stream: Vec<Vec<&[u8]>> =
-            (0..slots).map(|_| Vec::with_capacity(count)).collect();
-        for b in &splits[start..start + count] {
-            b_meta.push((b.word, b.csum, b.raw_size));
-            s0_slices.push(&b.payload[..b.stream0_len]);
-            for (c, &(s, e)) in b.spans.iter().enumerate() {
-                col_slices_per_stream[c].push(&b.payload[s..e]);
+    pub fn resolve_req_mask(
+        &self,
+        g_slice: &[u8],
+        stream_bases: &[usize; 66],
+        targets: Option<&[crate::ops::ColTarget<'_>]>,
+    ) -> u64 {
+        let Some(t_list) = targets else { return u64::MAX };
+        if self.slots == 0 || self.count == 0 { return u64::MAX; }
+        if t_list.is_empty() { return 0; }
+        if self.is_v2 && !self.canon_s0.is_empty() && self.stream_total_len(0) == 0 {
+            return columns::resolve_stream0_required_slots(self.canon_s0, t_list).unwrap_or(u64::MAX);
+        }
+        let mut mask = 0u64;
+        for bi in [0usize, self.count - 1] {
+            let (st, en) = self.stream_slice_range(0, bi);
+            let Some(raw) = g_slice.get(stream_bases[0] + st..stream_bases[0] + en) else { return u64::MAX };
+            let s0_hdr = if self.is_v2 && !self.canon_s0.is_empty() && (raw.is_empty() || raw.len() == 6 || raw.first() == Some(&0)) {
+                self.canon_s0
+            } else if self.is_v2 && raw.len() >= 4 {
+                &raw[..raw.len() - 4]
+            } else {
+                raw
+            };
+            match columns::resolve_stream0_required_slots(s0_hdr, t_list) {
+                Some(m) => mask |= m,
+                None => return u64::MAX,
+            }
+            if self.count == 1 { break; }
+        }
+        mask
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_block_s0(
+        &self,
+        g_slice: &'a [u8],
+        stream_bases: &[usize; 66],
+        bi: usize,
+        blk_idx: usize,
+        stitch_arena: &mut Vec<u8>,
+        stitched_ranges: &mut Vec<(usize, usize, usize)>,
+        rc_cache: &mut Vec<(u16, usize, usize)>,
+        block_vec_idx: usize,
+    ) -> Result<(&'a [u8], usize, usize)> {
+        let (s0_st, s0_en) = self.stream_slice_range(0, bi);
+        if s0_en < s0_st {
+            return Err(Error::InvalidFrame("v6 non-monotonic cumulative offset"));
+        }
+        if !self.is_v2 {
+            let s0_off = stream_bases[0] + s0_st;
+            let s0_slice = g_slice.get(s0_off..stream_bases[0] + s0_en).ok_or(Error::Truncated)?;
+            return Ok((s0_slice, s0_off, s0_slice.len()));
+        }
+        let s0_raw = g_slice.get(stream_bases[0] + s0_st..stream_bases[0] + s0_en).ok_or(Error::Truncated)?;
+        let mut s0_in_arena = None;
+        let (s0_hdr, s0_off, exp_len) = if s0_raw.is_empty() {
+            if self.canon_s0.is_empty() {
+                return Err(Error::InvalidFrame("missing v6 canon_s0"));
+            }
+            (self.canon_s0, self.data_offset - self.canon_s0.len(), self.canon_s0.len())
+        } else {
+            let body = Self::unwrap_verified_slice(s0_raw, true, blk_idx)?;
+            if body.len() == 2 {
+                let rc = u16::from_le_bytes([body[0], body[1]]);
+                let (st, en) = if let Some(&(_, st, en)) = rc_cache.iter().find(|&&(r, _, _)| r == rc) {
+                    (st, en)
+                } else {
+                    let (st, en) = columns::expand_v6_compact_s0(self.canon_s0, rc as usize, stitch_arena)
+                        .ok_or(Error::InvalidFrame("bad v6 compact s0"))?;
+                    rc_cache.push((rc, st, en));
+                    (st, en)
+                };
+                s0_in_arena = Some((st, en));
+                (&[][..], stream_bases[0] + s0_st, en - st)
+            } else if body.first() == Some(&0) {
+                let (st, en) = columns::expand_v6_tpl_s0(self.canon_s0, &body[1..], stitch_arena)
+                    .ok_or(Error::InvalidFrame("bad v6 tpl s0"))?;
+                s0_in_arena = Some((st, en));
+                (&[][..], stream_bases[0] + s0_st, en - st)
+            } else {
+                (body, stream_bases[0] + s0_st, body.len())
+            }
+        };
+        if self.slots > 0 {
+            let (rr_st, rr_en) = self.stream_slice_range(self.slots + 1, bi);
+            if rr_en < rr_st {
+                return Err(Error::InvalidFrame("v6 non-monotonic cumulative offset"));
+            }
+            if rr_en > rr_st {
+                let rr_raw = g_slice.get(stream_bases[self.slots + 1] + rr_st..stream_bases[self.slots + 1] + rr_en).ok_or(Error::Truncated)?;
+                let rr_body = Self::unwrap_verified_slice(rr_raw, true, blk_idx)?;
+                let st = stitch_arena.len();
+                if let Some((a_st, a_en)) = s0_in_arena {
+                    stitch_arena.extend_from_within(a_st..a_en);
+                } else {
+                    stitch_arena.extend_from_slice(s0_hdr);
+                }
+                stitch_arena.extend_from_slice(rr_body);
+                stitched_ranges.push((block_vec_idx, st, stitch_arena.len()));
+                return Ok((&[], s0_off, exp_len));
             }
         }
-        append_serialized_v6_group(
-            &mut out,
-            start as u32,
-            slots,
-            &b_meta,
-            &s0_slices,
-            &col_slices_per_stream,
-        );
+        if let Some((a_st, a_en)) = s0_in_arena {
+            stitched_ranges.push((block_vec_idx, a_st, a_en));
+        }
+        Ok((s0_hdr, s0_off, exp_len))
     }
 
-    let total_len = out.len();
-    if total_len > bound {
-        return Ok(v5_bytes.to_vec());
+    #[inline]
+    pub fn stream_slice_range(&self, stream_idx: usize, block_in_group: usize) -> (usize, usize) {
+        let base = stream_idx * self.count;
+        if self.is_cum {
+            let start = if block_in_group == 0 {
+                0
+            } else {
+                let p = (base + block_in_group - 1) * 4;
+                u32::from_le_bytes(self.lens_bytes[p..p + 4].try_into().unwrap()) as usize
+            };
+            let ep = (base + block_in_group) * 4;
+            let end = u32::from_le_bytes(self.lens_bytes[ep..ep + 4].try_into().unwrap()) as usize;
+            (start, end)
+        } else {
+            let mut off = 0usize;
+            for b in 0..block_in_group {
+                off += self.stream_len(stream_idx, b);
+            }
+            (off, off + self.stream_len(stream_idx, block_in_group))
+        }
     }
-    let v6_payload_len = (total_len - prefix_len) as u64;
-    out[..hdr.group_dir_offset].copy_from_slice(&v5_bytes[..hdr.group_dir_offset]);
-    let dict_wire = if hdr.has_dict {
-        Some((
-            &v5_bytes[hdr.dict_offset..hdr.dict_offset + hdr.dict_wire_len],
-            hdr.dict_raw_len,
-        ))
-    } else {
-        None
-    };
-    write_header_bytes(
-        &mut out[..HEADER_SIZE],
-        VERSION_V6,
-        hdr.checksummed,
-        hdr.has_var_raw,
-        hdr.has_row_index,
-        dict_wire,
-        hdr.raw_size,
-        hdr.block_size,
-        hdr.count,
-    );
-    let flags = u16::from_le_bytes([out[6], out[7]]) | FLAG_COL_GROUP;
-    out[6..8].copy_from_slice(&flags.to_le_bytes());
-    let dr_packed = (hdr.dict_raw_len as u32) | ((dir_entries.len() as u32) << 20);
-    out[28..32].copy_from_slice(&dr_packed.to_le_bytes());
 
-    let mut entries_raw = Vec::with_capacity(16 * dir_entries.len());
-    for e in &dir_entries {
-        entries_raw.extend_from_slice(&e.payload_rel_offset.to_le_bytes());
-        entries_raw.extend_from_slice(&e.start_block.to_le_bytes());
-        entries_raw.extend_from_slice(&e.block_count.to_le_bytes());
-        entries_raw.extend_from_slice(&e.slot_count.to_le_bytes());
+    #[inline]
+    pub fn stream_total_len(&self, stream_idx: usize) -> usize {
+        if self.count == 0 { 0 } else { self.stream_slice_range(stream_idx, self.count - 1).1 }
     }
-    let dir_crc = crc32c(&entries_raw);
-    let gd = &mut out[hdr.group_dir_offset..prefix_len];
-    gd[0..4].copy_from_slice(&(dir_entries.len() as u32).to_le_bytes());
-    gd[4..12].copy_from_slice(&v6_payload_len.to_le_bytes());
-    gd[12..16].copy_from_slice(&dir_crc.to_le_bytes());
-    gd[16..].copy_from_slice(&entries_raw);
-    Ok(out)
+
+    #[inline]
+    pub fn total_streams_bytes(&self) -> usize {
+        (0..self.num_streams).map(|s| self.stream_total_len(s)).sum()
+    }
+
+    #[inline]
+    pub fn stream_len(&self, stream_idx: usize, block_in_group: usize) -> usize {
+        if self.is_cum {
+            let (st, en) = self.stream_slice_range(stream_idx, block_in_group);
+            en - st
+        } else {
+            let idx = stream_idx * self.count + block_in_group;
+            if self.use_u32 {
+                let p = idx * 4;
+                u32::from_le_bytes(self.lens_bytes[p..p + 4].try_into().unwrap()) as usize
+            } else {
+                let p = idx * 2;
+                u16::from_le_bytes(self.lens_bytes[p..p + 2].try_into().unwrap()) as usize
+            }
+        }
+    }
+
+    #[inline]
+    pub fn backup_block_meta(&self, bi: usize) -> Option<(u32, u32, usize)> {
+        if !self.is_cum {
+            return None;
+        }
+        let p = bi * 12;
+        let word = u32::from_le_bytes(self.block_dir_bytes[p..p + 4].try_into().ok()?);
+        let csum = u32::from_le_bytes(self.block_dir_bytes[p + 4..p + 8].try_into().ok()?);
+        let rn = u32::from_le_bytes(self.block_dir_bytes[p + 8..p + 12].try_into().ok()?) as usize;
+        Some((word, csum, rn))
+    }
 }
 
 pub(crate) fn parse_v6_group_dir(
@@ -323,7 +435,8 @@ pub(crate) fn parse_v6_group_dir(
         return Err(Error::InvalidFrame("group directory offset mismatch"));
     }
     let entries_slice = src.get(entries_start..entries_end).ok_or(Error::Truncated)?;
-    if crc32c(entries_slice) != expected_crc {
+    let v2_crc = compute_v6_dir_crc(&src[..p + 12], entries_slice);
+    if v2_crc != expected_crc && crc32c(entries_slice) != expected_crc {
         return Err(Error::InvalidFrame("group directory crc mismatch"));
     }
     let mut entries = Vec::with_capacity(gc);
@@ -337,9 +450,7 @@ pub(crate) fn parse_v6_group_dir(
         if sb != expected_start || bc == 0 || sc > 64 || rel > total_v6_payload {
             return Err(Error::InvalidFrame("invalid group directory entry"));
         }
-        expected_start = expected_start
-            .checked_add(bc as u32)
-            .ok_or(Error::SizeOverflow)?;
+        expected_start = expected_start.checked_add(bc as u32).ok_or(Error::SizeOverflow)?;
         entries.push(GroupDirEntry {
             payload_rel_offset: rel,
             start_block: sb,
@@ -358,11 +469,7 @@ pub(crate) fn parse_v6_block_infos_and_ri(
     hdr: &ParsedHeader,
 ) -> Result<(Vec<BlockInfo>, Option<Vec<u32>>)> {
     let esize = entry_size(hdr.version);
-    let mut row_index = if hdr.has_row_index {
-        Some(Vec::with_capacity(hdr.count))
-    } else {
-        None
-    };
+    let mut row_index = hdr.has_row_index.then(|| Vec::with_capacity(hdr.count));
     let mut infos = Vec::with_capacity(hdr.count);
     let mut next_raw = 0usize;
     for i in 0..hdr.count {
@@ -406,185 +513,88 @@ pub(crate) fn validate_v6_header_and_dir(src: &[u8], hdr: &ParsedHeader) -> Resu
     Ok((total_frame, hdr.raw_size))
 }
 
-/// Zero-copy `VERSION_V6` parser: binds `Block::payload` to `Stream 0` and `Block::col_slices`
-/// directly to `Stream 1..=S` without copying or reassembling blocks into `v5` layout.
-pub(crate) fn parse_v6_frame<'a>(src: &'a [u8], hdr: &ParsedHeader) -> Result<Frame<'a>> {
-    parse_v6_frame_selective(src, hdr, None)
-}
-
-pub(crate) fn parse_v6_frame_selective<'a>(
-    src: &'a [u8],
-    hdr: &ParsedHeader,
-    targets: Option<&[crate::ops::ColTarget<'_>]>,
-) -> Result<Frame<'a>> {
-    let (total_v6_payload, entries) = parse_v6_group_dir(src, hdr)?;
-    let total_frame = hdr
-        .payload_start
-        .checked_add(usize::try_from(total_v6_payload).map_err(|_| Error::SizeOverflow)?)
-        .ok_or(Error::SizeOverflow)?;
-    if src.len() != total_frame {
-        return Err(Error::InvalidFrame("trailing bytes or incorrect total"));
-    }
-    let dict = decode_header_dict(src, hdr)?;
-    let (infos, row_index) = parse_v6_block_infos_and_ri(src, hdr)?;
-
-    let total_col_refs: usize = entries
-        .iter()
-        .map(|e| (e.block_count as usize) * (e.slot_count as usize))
-        .sum();
-    let mut owned_col_slices: Vec<&'static [u8]> = Vec::with_capacity(total_col_refs);
-    let mut blocks: Vec<Block<'a>> = Vec::with_capacity(hdr.count);
-    let v6_payload = &src[hdr.payload_start..total_frame];
-
-    for (gi, entry) in entries.iter().enumerate() {
-        let g_start = entry.payload_rel_offset as usize;
-        let g_end = entries
-            .get(gi + 1)
-            .map(|e| e.payload_rel_offset as usize)
-            .unwrap_or(v6_payload.len());
-        let g_slice = v6_payload.get(g_start..g_end).ok_or(Error::Truncated)?;
-        let gh = if targets.is_some() {
-            ParsedGroupHeader::parse_for_block(g_slice, entry.start_block, 0)?
-        } else {
-            ParsedGroupHeader::parse(g_slice, entry.start_block)?
-        };
-        if gh.count != entry.block_count as usize || gh.slots != entry.slot_count as usize {
-            return Err(Error::InvalidFrame("v6 group header mismatch with dir"));
-        }
-        let sb = entry.start_block as usize;
-        let mut stream_bases = [0usize; 65];
-        let mut cur = gh.data_offset;
-        for s in 0..=gh.slots {
-            stream_bases[s] = cur;
-            let st_len = gh.stream_total_len(s);
-            cur = cur.checked_add(st_len).ok_or(Error::SizeOverflow)?;
-        }
-        let expected_trailer = if gh.is_cum { gh.data_offset + 8 } else { 0 };
-        if cur > g_slice.len()
-            || (cur != g_slice.len() && cur + expected_trailer != g_slice.len())
-        {
-            return Err(Error::InvalidFrame("v6 group trailing bytes"));
-        }
-        let req_mask: u64 = match targets {
-            Some(t_list) if gh.slots > 0 => {
-                if t_list.is_empty() {
-                    0
-                } else {
-                    let mut m = 0u64;
-                    let mut ok = true;
-                    for bi in [0usize, gh.count - 1] {
-                        let (st, en) = gh.stream_slice_range(0, bi);
-                        let s0 = g_slice
-                            .get(stream_bases[0] + st..stream_bases[0] + en)
-                            .ok_or(Error::Truncated)?;
-                        match columns::resolve_stream0_required_slots(s0, t_list) {
-                            Some(bits) => m |= bits,
-                            None => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                        if gh.count == 1 {
-                            break;
-                        }
-                    }
-                    if ok { m } else { u64::MAX }
-                }
-            }
-            _ => u64::MAX,
-        };
-
-        for bi in 0..gh.count {
-            let mut info = infos[sb + bi];
-            let (s0_st, s0_en) = gh.stream_slice_range(0, bi);
-            if s0_en < s0_st {
-                return Err(Error::InvalidFrame("v6 non-monotonic cumulative offset"));
-            }
-            let s0_off_in_group = stream_bases[0] + s0_st;
-            let s0_len = s0_en - s0_st;
-            let s0_slice = g_slice
-                .get(s0_off_in_group..s0_off_in_group + s0_len)
-                .ok_or(Error::Truncated)?;
-            info.payload_offset = hdr.payload_start + g_start + s0_off_in_group;
-            let mut sum_cn = s0_len;
-            let col_slices: &'a [&'a [u8]] = if gh.slots > 0 {
-                let base_idx = owned_col_slices.len();
-                for s in 0..gh.slots {
-                    if ((req_mask >> s) & 1) == 0 {
-                        owned_col_slices.push(&[]);
-                        continue;
-                    }
-                    let (c_st, c_en) = gh.stream_slice_range(s + 1, bi);
-                    if c_en < c_st {
-                        return Err(Error::InvalidFrame("v6 non-monotonic cumulative offset"));
-                    }
-                    let c_off = stream_bases[s + 1] + c_st;
-                    let c_len = c_en - c_st;
-                    sum_cn += c_len;
-                    let c_slice = g_slice.get(c_off..c_off + c_len).ok_or(Error::Truncated)?;
-                    let static_c: &'static [u8] = unsafe { std::mem::transmute(c_slice) };
-                    owned_col_slices.push(static_c);
-                }
-                unsafe {
-                    std::slice::from_raw_parts(
-                        owned_col_slices.as_ptr().add(base_idx) as *const &'a [u8],
-                        gh.slots,
-                    )
-                }
-            } else {
-                &[]
-            };
-            if req_mask == u64::MAX && sum_cn != info.payload_size {
-                return Err(Error::InvalidFrame("v6 block cn mismatch"));
-            }
-            blocks.push(Block {
-                info,
-                payload: s0_slice,
-                col_slices,
-            });
-        }
-    }
-
-    Ok(Frame {
-        blocks,
-        dict,
-        row_index,
-        raw_size: hdr.raw_size,
-        block_size: hdr.block_size,
-        checksummed: hdr.checksummed,
-        version: hdr.version,
-        _owned_arena: Vec::new(),
-        _owned_col_slices: owned_col_slices,
-    })
-}
-
 pub(crate) fn peek_v6_block0_stream0(src: &[u8], max_output: usize) -> Option<(u32, usize, &[u8])> {
     let hdr = parse_v1_to_v5_header(src, max_output).ok()?;
     if hdr.version != VERSION_V6 || hdr.count == 0 || src.len() < hdr.payload_start {
         return None;
     }
     let rn = block_raw_size(src, &hdr, 0, 0).ok()?;
-    let word = read_u32(src, HEADER_SIZE).ok()?;
-    let kind = word >> 30;
+    let kind = read_u32(src, HEADER_SIZE).ok()? >> 30;
     let g_slice = src.get(hdr.payload_start..)?;
-    let gh = ParsedGroupHeader::parse(g_slice, 0).ok()?;
+    let gh = ParsedGroupHeader::parse_for_block(g_slice, 0, 0).ok()?;
     let s0_len = gh.stream_len(0, 0);
-    let stream0 = g_slice.get(gh.data_offset..gh.data_offset.checked_add(s0_len)?)?;
+    let raw = g_slice.get(gh.data_offset..gh.data_offset.checked_add(s0_len)?)?;
+    if gh.is_v2 && !gh.canon_s0.is_empty() && (s0_len == 0 || s0_len == 6 || raw.first() == Some(&0)) {
+        return Some((kind, rn, gh.canon_s0));
+    }
+    let stream0 = ParsedGroupHeader::unwrap_verified_slice(raw, gh.is_v2, 0).ok()?;
     Some((kind, rn, stream0))
+}
+
+pub(crate) fn fast_frame_row_count(frame_bytes: &[u8]) -> Option<Result<usize>> {
+    let first_res = crate::mmap::pread::is_first_page_resident(frame_bytes);
+    if !is_v6_frame(frame_bytes) && first_res {
+        return None;
+    }
+    let cold = (!first_res)
+        .then(|| crate::mmap::peek_cold_prefix(frame_bytes, 262_144))
+        .flatten();
+    let probe = cold.as_deref().unwrap_or(frame_bytes);
+    let hdr = parse_v1_to_v5_header(probe, usize::MAX).ok()?;
+    if !hdr.has_row_index || probe.len() < hdr.payload_start {
+        return None;
+    }
+    if hdr.version == VERSION_V6 {
+        let (total_frame, _) = validate_v6_header_and_dir(probe, &hdr).ok()?;
+        if total_frame != frame_bytes.len() {
+            return None;
+        }
+    } else if hdr.version == crate::frame::VERSION_V5 {
+        let esize = entry_size(hdr.version);
+        let (mut next_payload, mut next_raw) = (hdr.payload_start, 0usize);
+        for i in 0..hdr.count {
+            let p = HEADER_SIZE + i * esize;
+            let rn = block_raw_size(probe, &hdr, i, next_raw).ok()?;
+            let word = read_u32(probe, p).ok()?;
+            let (cn, csum, kind) = (
+                (word & V4_SIZE_MASK) as usize,
+                read_u32(probe, p + 4).ok()?,
+                word >> 30,
+            );
+            if !valid_kind_and_size(hdr.version, kind, cn, rn) || (!hdr.checksummed && csum != 0) {
+                return None;
+            }
+            next_payload = next_payload.checked_add(cn)?;
+            next_raw += rn;
+        }
+        if next_raw != hdr.raw_size || next_payload != frame_bytes.len() {
+            return None;
+        }
+    } else {
+        return None;
+    }
+    let (mut total, mut prev_open, mut next_raw) = (0usize, false, 0usize);
+    for i in 0..hdr.count {
+        let rn = block_raw_size(probe, &hdr, i, next_raw).ok()?;
+        next_raw += rn;
+        let word = block_row_meta_raw(probe, &hdr, i, rn).ok()??;
+        let (rows, ends_nl) = unpack_block_row_meta(word);
+        if rows > 0 {
+            total = total.checked_add(if prev_open { rows - 1 } else { rows })?;
+            prev_open = !ends_nl;
+        }
+    }
+    Some(Ok(total))
 }
 
 #[path = "v6_point.rs"]
 pub(crate) mod v6_point;
-pub(crate) use v6_point::{
-    extract_row_range_v6_indexed, try_extract_block_v6_into, ParsedGroupHeader,
-};
+pub(crate) use v6_point::{extract_row_range_v6_indexed, try_extract_block_v6_into};
 
 #[path = "v6_query.rs"]
 mod v6_query;
-pub(crate) use v6_query::{
-    decode_v6_direct_into, fast_frame_row_count, parse_v6_for_query,
-};
+pub(crate) use v6_query::{decode_v6_direct_into, parse_v6_for_query, parse_v6_frame};
 
 #[path = "v6_stream.rs"]
 mod v6_stream;
-pub(crate) use v6_stream::V6StreamBuilder;
+pub(crate) use v6_stream::{repack_v4_v5_to_v6, V6StreamBuilder};

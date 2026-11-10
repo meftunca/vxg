@@ -19,17 +19,35 @@ struct OpsGrammarHeader<'a> {
 thread_local! {
     static ACTIVE_V6_COLS: std::cell::Cell<(*const &'static [u8], usize)> =
         const { std::cell::Cell::new((std::ptr::null(), 0)) };
+    static V6_VERIFY_SLICE_CRC: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 pub(crate) struct V6ColsGuard {
     prev: (*const &'static [u8], usize),
+    prev_verify: bool,
 }
 
 impl Drop for V6ColsGuard {
     #[inline(always)]
     fn drop(&mut self) {
         ACTIVE_V6_COLS.with(|c| c.set(self.prev));
+        V6_VERIFY_SLICE_CRC.with(|v| v.set(self.prev_verify));
     }
+}
+
+/// Set whether `strip_v6_col_uleb` verifies per-slice CRC32C trailers on the current thread.
+#[inline(always)]
+pub(crate) fn set_v6_verify_slice_crc(verify: bool) -> bool {
+    V6_VERIFY_SLICE_CRC.with(|v| {
+        let old = v.get();
+        v.set(verify);
+        old
+    })
+}
+
+#[inline(always)]
+pub(crate) fn v6_verify_slice_crc() -> bool {
+    V6_VERIFY_SLICE_CRC.with(std::cell::Cell::get)
 }
 
 /// Run `f` with the current thread's active Format v6 column stream slices bound to `cols`.
@@ -41,7 +59,8 @@ pub(crate) fn with_v6_cols<'a, R>(cols: &'a [&'a [u8]], f: impl FnOnce() -> R) -
         c.set((ptr, cols.len()));
         old
     });
-    let _guard = V6ColsGuard { prev };
+    let prev_verify = V6_VERIFY_SLICE_CRC.with(std::cell::Cell::get);
+    let _guard = V6ColsGuard { prev, prev_verify };
     f()
 }
 
@@ -57,6 +76,20 @@ pub(crate) fn current_v6_cols<'a>() -> Option<&'a [&'a [u8]]> {
 }
 
 #[inline(always)]
+pub(crate) fn peek_v6_col_uleb(raw: &[u8]) -> Result<&[u8]> {
+    if raw.is_empty() {
+        return Ok(&[]);
+    }
+    let mut c = Cursor::new(raw);
+    let len = c.uleb()?;
+    let s = c.take(len)?;
+    if !c.done() && c.pos + 4 != raw.len() {
+        return Err(invalid("v6 column slice trailing bytes"));
+    }
+    Ok(s)
+}
+
+#[inline(always)]
 pub(crate) fn strip_v6_col_uleb(raw: &[u8]) -> Result<&[u8]> {
     if raw.is_empty() {
         return Ok(&[]);
@@ -64,6 +97,15 @@ pub(crate) fn strip_v6_col_uleb(raw: &[u8]) -> Result<&[u8]> {
     let mut c = Cursor::new(raw);
     let len = c.uleb()?;
     let s = c.take(len)?;
+    if c.pos + 4 == raw.len() {
+        if V6_VERIFY_SLICE_CRC.with(std::cell::Cell::get) {
+            let exp = u32::from_le_bytes(raw[c.pos..c.pos + 4].try_into().unwrap());
+            if crate::checksum::crc32c(&raw[..c.pos]) != exp {
+                return Err(Error::Checksum { block: 0 });
+            }
+        }
+        return Ok(s);
+    }
     if !c.done() {
         return Err(invalid("v6 column slice trailing bytes"));
     }
@@ -525,76 +567,4 @@ fn ensure_col_raw_arena(col_bytes: &[u8], raw_len: usize, raw_arena: &mut Vec<u8
     if raw_arena.is_empty() && col_bytes.first().is_some() {
         ensure_full_raw_arena(raw_len, raw_arena);
     }
-}
-
-pub(crate) fn split_grammar_packet_streams(
-    payload: &[u8],
-) -> Option<(usize, Vec<(usize, usize)>)> {
-    let mut hdr = parse_grammar_for_ops(payload).ok()??;
-    for _ in 0..hdr.raw_count {
-        let len = hdr.cursor.uleb().ok()?;
-        let _ = hdr.cursor.take(len).ok()?;
-    }
-    let stream0_len = 1 + hdr.cursor.pos;
-    let total_slots: usize = hdr.slot_counts[..hdr.template_count].iter().sum();
-    if total_slots == 0 || total_slots > 64 {
-        return None;
-    }
-    let mut spans = Vec::with_capacity(total_slots);
-    for _ in 0..total_slots {
-        let start = 1 + hdr.cursor.pos;
-        let len = hdr.cursor.uleb().ok()?;
-        let _ = hdr.cursor.take(len).ok()?;
-        let end = 1 + hdr.cursor.pos;
-        spans.push((start, end));
-    }
-    if !hdr.cursor.done() {
-        return None;
-    }
-    Some((stream0_len, spans))
-}
-
-pub(crate) fn resolve_stream0_required_slots(
-    stream0: &[u8],
-    targets: &[crate::ops::ColTarget<'_>],
-) -> Option<u64> {
-    let hdr = parse_grammar_for_ops(stream0).ok()??;
-    let total_slots: usize = hdr.slot_counts[..hdr.template_count].iter().sum();
-    if total_slots == 0 || total_slots > 64 {
-        return None;
-    }
-    let mut mask = 0u64;
-    let mut slot_base = 0usize;
-    for t in 0..hdr.template_count {
-        let segs = hdr.segs(t);
-        let slots = hdr.slot_counts[t];
-        if !segs.last().is_some_and(|s| s.ends_with(b"\n")) {
-            return None;
-        }
-        let tpl_delim = if t == 0 {
-            hdr.tpl0_delim
-        } else {
-            delimited_template_delim(segs)
-        };
-        for &col in targets {
-            match col {
-                crate::ops::ColTarget::JsonKey(key) => {
-                    let found = json_single_line_template_slot(segs, key.as_bytes())?;
-                    if let Some(s) = found {
-                        mask |= 1u64 << (slot_base + s);
-                    }
-                }
-                crate::ops::ColTarget::Delimited { delim, index } => {
-                    if tpl_delim != Some(delim) {
-                        return None;
-                    }
-                    if index < slots {
-                        mask |= 1u64 << (slot_base + index);
-                    }
-                }
-            }
-        }
-        slot_base += slots;
-    }
-    Some(mask)
 }

@@ -89,12 +89,50 @@ fn select_columns_parallel(
     let next = AtomicUsize::new(0);
     let cutoff = AtomicUsize::new(nb);
     let failed = AtomicBool::new(false);
-    let slots: Vec<SyncCell<Option<Result<(usize, Vec<u8>)>>>> =
-        (0..nb).map(|_| SyncCell::new(None)).collect();
-    let step = if limit == usize::MAX && nb >= workers * 8 {
-        4
+    let done_emitted: Vec<AtomicUsize> = if limit < usize::MAX {
+        (0..nb).map(|_| AtomicUsize::new(usize::MAX)).collect()
     } else {
-        1
+        Vec::new()
+    };
+    let (prefix_lock, prefix_idx, prefix_sum) =
+        (AtomicBool::new(false), AtomicUsize::new(0), AtomicUsize::new(0));
+    let slots: Vec<SyncCell<Option<Result<(usize, Vec<u8>)>>>> = (0..nb).map(|_| SyncCell::new(None)).collect();
+    let step = if nb >= workers * 8 { 4 } else { 1 };
+
+    let advance_prefix = |b: usize, emitted: usize| {
+        if done_emitted.is_empty() {
+            return;
+        }
+        done_emitted[b].store(emitted, Ordering::Release);
+        if prefix_idx.load(Ordering::Acquire) <= b
+            && prefix_lock
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+        {
+            let (mut idx, mut sum) = (
+                prefix_idx.load(Ordering::Relaxed),
+                prefix_sum.load(Ordering::Relaxed),
+            );
+            while idx < nb {
+                let e = done_emitted[idx].load(Ordering::Acquire);
+                if e == usize::MAX {
+                    break;
+                }
+                sum = sum.saturating_add(e);
+                if let Some(Some(_)) = boundary_after.get(idx) {
+                    sum = sum.saturating_add(1);
+                }
+                if sum >= limit {
+                    cutoff.fetch_min(idx, Ordering::Relaxed);
+                    idx += 1;
+                    break;
+                }
+                idx += 1;
+            }
+            prefix_sum.store(sum, Ordering::Relaxed);
+            prefix_idx.store(idx, Ordering::Release);
+            prefix_lock.store(false, Ordering::Release);
+        }
     };
 
     let run_worker = |_wid: usize| {
@@ -113,32 +151,22 @@ fn select_columns_parallel(
                     break;
                 }
                 if meta[b].row_count == 0 {
+                    advance_prefix(b, 0);
                     continue;
                 }
-                let res = eval_select_block(
-                    &in_blocks[b],
-                    &meta[b],
-                    where_expr,
-                    cols,
-                    limit,
-                    options,
-                    &mut dec_buf,
-                );
+                let res = eval_select_block(&in_blocks[b], &meta[b], where_expr, cols, limit, options, &mut dec_buf);
                 match res {
                     Ok((emitted, v)) => {
+                        if emitted > 0 {
+                            unsafe { *slots[b].get() = Some(Ok((emitted, v))); }
+                        }
                         if limit < usize::MAX && emitted >= limit {
                             cutoff.fetch_min(b, Ordering::Relaxed);
                         }
-                        if emitted > 0 {
-                            unsafe {
-                                *slots[b].get() = Some(Ok((emitted, v)));
-                            }
-                        }
+                        advance_prefix(b, emitted);
                     }
                     Err(e) => {
-                        unsafe {
-                            *slots[b].get() = Some(Err(e));
-                        }
+                        unsafe { *slots[b].get() = Some(Err(e)); }
                         failed.store(true, Ordering::Relaxed);
                         return;
                     }

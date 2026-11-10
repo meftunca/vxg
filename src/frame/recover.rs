@@ -249,6 +249,14 @@ fn has_v6_group_markers(src: &[u8]) -> bool {
 
 pub(crate) fn recover_v6_frame(src: &[u8], options: &DecodeOptions) -> Result<RecoveryReport> {
     use super::v6::{parse_v6_group_dir, ParsedGroupHeader, GROUP_MAGIC, GROUP_TRAILER_MAGIC};
+    let prev_verify = crate::columns::set_v6_verify_slice_crc(options.verify_checksum);
+    struct VerifyGuard(bool);
+    impl Drop for VerifyGuard {
+        fn drop(&mut self) {
+            let _ = crate::columns::set_v6_verify_slice_crc(self.0);
+        }
+    }
+    let _guard = VerifyGuard(prev_verify);
     options.validate()?;
     let hdr_opt = v5::parse_v1_to_v5_header(src, options.max_output).ok();
     let dir_opt = hdr_opt
@@ -256,12 +264,13 @@ pub(crate) fn recover_v6_frame(src: &[u8], options: &DecodeOptions) -> Result<Re
         .and_then(|h| parse_v6_group_dir(src, h).ok());
     let dict = hdr_opt
         .as_ref()
+        .filter(|_| dir_opt.is_some())
         .and_then(|h| v5::decode_header_dict(src, h).ok())
         .unwrap_or_default();
     let engine = Engine::new(options.simd)?;
 
     let mut global_infos: Vec<Option<(usize, usize, usize, u32, u32)>> = Vec::new();
-    if let Some(ref hdr) = hdr_opt {
+    if let (Some(ref hdr), Some(_)) = (&hdr_opt, &dir_opt) {
         global_infos.reserve(hdr.count);
         let mut next_raw = 0usize;
         for i in 0..hdr.count {
@@ -402,9 +411,9 @@ pub(crate) fn recover_v6_frame(src: &[u8], options: &DecodeOptions) -> Result<Re
 
     for (sb_u32, gh, gs) in found_groups {
         let sb = sb_u32 as usize;
-        let mut stream_bases = Vec::with_capacity(gh.slots + 1);
+        let mut stream_bases = Vec::with_capacity(gh.num_streams);
         let mut cur = gh.data_offset;
-        for s in 0..=gh.slots {
+        for s in 0..gh.num_streams {
             stream_bases.push(cur);
             cur += gh.stream_total_len(s);
         }
@@ -439,18 +448,83 @@ pub(crate) fn recover_v6_frame(src: &[u8], options: &DecodeOptions) -> Result<Re
                     limit: options.max_output,
                 });
             }
-            let mut blk_buf = Vec::with_capacity(cn);
+            let (s0_st, s0_en) = gh.stream_slice_range(0, bi);
+            let Some(s0_raw) = gs.get(stream_bases[0] + s0_st..stream_bases[0] + s0_en) else {
+                failed_blocks.push(FailedBlock {
+                    index: idx,
+                    raw_offset,
+                    raw_size,
+                    reason: "v6 block stream 0 out of bounds".to_owned(),
+                });
+                continue;
+            };
+            let mut stitched_s0 = Vec::new();
+            let s0_in_stitch = if s0_raw.is_empty() && gh.is_v2 {
+                false
+            } else {
+                match ParsedGroupHeader::unwrap_verified_slice(s0_raw, gh.is_v2, idx) {
+                    Ok(b) if gh.is_v2 && b.len() == 2 => {
+                        let rc = u16::from_le_bytes([b[0], b[1]]) as usize;
+                        if crate::columns::expand_v6_compact_s0(gh.canon_s0, rc, &mut stitched_s0).is_none() {
+                            failed_blocks.push(FailedBlock { index: idx, raw_offset, raw_size, reason: "bad v6 compact s0".to_owned() });
+                            continue;
+                        }
+                        true
+                    }
+                    Ok(b) if gh.is_v2 && b.first() == Some(&0) => {
+                        if crate::columns::expand_v6_tpl_s0(gh.canon_s0, &b[1..], &mut stitched_s0).is_none() {
+                            failed_blocks.push(FailedBlock { index: idx, raw_offset, raw_size, reason: "bad v6 tpl s0".to_owned() });
+                            continue;
+                        }
+                        true
+                    }
+                    Ok(b) => {
+                        stitched_s0.extend_from_slice(b);
+                        true
+                    }
+                    Err(e) => {
+                        failed_blocks.push(FailedBlock { index: idx, raw_offset, raw_size, reason: e.to_string() });
+                        continue;
+                    }
+                }
+            };
+            let exp_s0_len = if s0_in_stitch { stitched_s0.len() } else { gh.canon_s0.len() };
+            if !gh.verify_block_cn(bi, raw_size, exp_s0_len, cn) {
+                failed_blocks.push(FailedBlock { index: idx, raw_offset, raw_size, reason: "v6 block cn mismatch".to_owned() });
+                continue;
+            }
+            if gh.is_v2 && gh.slots > 0 {
+                let (rr_st, rr_en) = gh.stream_slice_range(gh.slots + 1, bi);
+                if rr_en > rr_st {
+                    let Some(rr_raw) = gs.get(stream_bases[gh.slots + 1] + rr_st..stream_bases[gh.slots + 1] + rr_en) else {
+                        failed_blocks.push(FailedBlock { index: idx, raw_offset, raw_size, reason: "v6 block raw_rows slice out of bounds".to_owned() });
+                        continue;
+                    };
+                    match ParsedGroupHeader::unwrap_verified_slice(rr_raw, true, idx) {
+                        Ok(rr_body) => {
+                            if !s0_in_stitch { stitched_s0.extend_from_slice(gh.canon_s0); }
+                            stitched_s0.extend_from_slice(rr_body);
+                        }
+                        Err(e) => {
+                            failed_blocks.push(FailedBlock { index: idx, raw_offset, raw_size, reason: e.to_string() });
+                            continue;
+                        }
+                    }
+                }
+            }
+            let s0_payload: &[u8] = if stitched_s0.is_empty() { gh.canon_s0 } else { &stitched_s0 };
+            let mut col_slices: Vec<&[u8]> = Vec::with_capacity(gh.slots);
             let mut bounds_ok = true;
-            for (s, &s_base) in stream_bases.iter().enumerate() {
-                let (st, en) = gh.stream_slice_range(s, bi);
-                if let Some(sl) = gs.get(s_base + st..s_base + en) {
-                    blk_buf.extend_from_slice(sl);
+            for s in 0..gh.slots {
+                let (c_st, c_en) = gh.stream_slice_range(s + 1, bi);
+                if let Some(sl) = gs.get(stream_bases[s + 1] + c_st..stream_bases[s + 1] + c_en) {
+                    col_slices.push(sl);
                 } else {
                     bounds_ok = false;
                     break;
                 }
             }
-            if !bounds_ok || blk_buf.len() != cn {
+            if !bounds_ok {
                 failed_blocks.push(FailedBlock {
                     index: idx,
                     raw_offset,
@@ -460,7 +534,14 @@ pub(crate) fn recover_v6_frame(src: &[u8], options: &DecodeOptions) -> Result<Re
                 continue;
             }
             scratch.resize(raw_size, 0);
-            match block::decode_with_dict(&blk_buf, kind, &mut scratch, engine, true, &dict) {
+            let res = if col_slices.is_empty() {
+                block::decode_with_dict(s0_payload, kind, &mut scratch, engine, true, &dict)
+            } else {
+                crate::columns::with_v6_cols(&col_slices, || {
+                    block::decode_with_dict(s0_payload, kind, &mut scratch, engine, true, &dict)
+                })
+            };
+            match res {
                 Ok(()) if !verify_csum || crc32c(&scratch) == csum => {
                     let output_offset = data.len();
                     data.extend_from_slice(&scratch);

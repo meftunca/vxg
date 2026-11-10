@@ -397,3 +397,188 @@ fn json_single_line_template_slot_cached(
     debug_assert_eq!(res, json_single_line_template_slot_uncached(segs, target_key));
     res
 }
+
+pub(crate) fn split_grammar_packet_streams(
+    payload: &[u8],
+) -> Option<(usize, usize, usize, usize, Option<u16>, Vec<(usize, usize)>)> {
+    let mut hdr = parse_grammar_for_ops(payload).ok()??;
+    let s0_hdr_end = 1 + hdr.cursor.pos;
+    let mut rc_tmp = hdr.row_count;
+    let mut rc_uleb_len = 1usize;
+    while rc_tmp >= 0x80 {
+        rc_tmp >>= 7;
+        rc_uleb_len += 1;
+    }
+    let s0_tpl_end = s0_hdr_end.checked_sub(rc_uleb_len + 1 + hdr.selector_slice.len())?;
+    let end_raws = if hdr.row_count <= 1 {
+        usize::from(hdr.first_is_raw)
+    } else {
+        usize::from(hdr.first_is_raw) + usize::from(hdr.last_is_raw)
+    };
+    let all_ones_rc = (hdr.template_count == 1
+        && hdr.row_count > 0
+        && hdr.row_count <= 0x3FFF
+        && hdr.raw_count == end_raws
+        && !(hdr.row_count == 1 && (hdr.first_is_raw || hdr.last_is_raw)))
+        .then(|| {
+            (hdr.row_count as u16)
+                | (u16::from(hdr.first_is_raw) << 14)
+                | (u16::from(hdr.last_is_raw) << 15)
+        });
+    if hdr.raw_count > 0 {
+        if hdr.cursor.bytes.get(hdr.cursor.pos) == Some(&0) {
+            hdr.cursor.pos += 1;
+            let lz_len = hdr.cursor.uleb().ok()?;
+            let _ = hdr.cursor.take(lz_len).ok()?;
+        } else {
+            for _ in 0..hdr.raw_count {
+                let len = hdr.cursor.uleb().ok()?;
+                let _ = hdr.cursor.take(len).ok()?;
+            }
+        }
+    }
+    let s0_raw_end = 1 + hdr.cursor.pos;
+    let total_slots: usize = hdr.slot_counts[..hdr.template_count].iter().sum();
+    if total_slots == 0 || total_slots > 64 {
+        return None;
+    }
+    let mut spans = Vec::with_capacity(total_slots);
+    for _ in 0..total_slots {
+        let start = 1 + hdr.cursor.pos;
+        let len = hdr.cursor.uleb().ok()?;
+        let _ = hdr.cursor.take(len).ok()?;
+        let end = 1 + hdr.cursor.pos;
+        spans.push((start, end));
+    }
+    if !hdr.cursor.done() {
+        return None;
+    }
+    Some((
+        hdr.p_after_raw_len,
+        s0_tpl_end,
+        s0_hdr_end,
+        s0_raw_end,
+        all_ones_rc,
+        spans,
+    ))
+}
+
+pub(crate) fn expand_v6_compact_s0(
+    canon_s0: &[u8],
+    rc_packed: usize,
+    out: &mut Vec<u8>,
+) -> Option<(usize, usize)> {
+    let rc = rc_packed & 0x3FFF;
+    let first_raw = (rc_packed & 0x4000) != 0;
+    let last_raw = (rc_packed & 0x8000) != 0;
+    if rc == 0 || (rc == 1 && (first_raw || last_raw)) {
+        return None;
+    }
+    let hdr = parse_grammar_for_ops(canon_s0).ok()??;
+    if hdr.template_count != 1 || rc > hdr.raw_len.saturating_add(1) {
+        return None;
+    }
+    let s0_hdr_end = 1 + hdr.cursor.pos;
+    let mut rc_tmp = hdr.row_count;
+    let mut rc_uleb_len = 1usize;
+    while rc_tmp >= 0x80 {
+        rc_tmp >>= 7;
+        rc_uleb_len += 1;
+    }
+    let tpl_end = s0_hdr_end.checked_sub(rc_uleb_len + 1 + hdr.selector_slice.len())?;
+    let start = out.len();
+    out.extend_from_slice(&canon_s0[..tpl_end]);
+    let mut v = rc;
+    while v >= 0x80 {
+        out.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+    out.push(1u8);
+    let sel_start = out.len();
+    out.resize(sel_start + (rc >> 3), 0xFF);
+    if (rc & 7) != 0 {
+        out.push((1u8 << (rc & 7)) - 1);
+    }
+    if first_raw {
+        out[sel_start] &= !1u8;
+    }
+    if last_raw {
+        out[sel_start + ((rc - 1) >> 3)] &= !(1u8 << ((rc - 1) & 7));
+    }
+    Some((start, out.len()))
+}
+
+pub(crate) fn expand_v6_tpl_s0(
+    canon_s0: &[u8],
+    sel_tail: &[u8],
+    out: &mut Vec<u8>,
+) -> Option<(usize, usize)> {
+    if sel_tail.len() < 3 {
+        return None;
+    }
+    let hdr = parse_grammar_for_ops(canon_s0).ok()??;
+    let s0_hdr_end = 1 + hdr.cursor.pos;
+    let mut rc_tmp = hdr.row_count;
+    let mut rc_uleb_len = 1usize;
+    while rc_tmp >= 0x80 {
+        rc_tmp >>= 7;
+        rc_uleb_len += 1;
+    }
+    let tpl_end = s0_hdr_end.checked_sub(rc_uleb_len + 1 + hdr.selector_slice.len())?;
+    let start = out.len();
+    out.extend_from_slice(&canon_s0[..tpl_end]);
+    out.extend_from_slice(sel_tail);
+    match parse_grammar_for_ops(&out[start..]) {
+        Ok(Some(h2)) if h2.cursor.done() => Some((start, out.len())),
+        _ => {
+            out.truncate(start);
+            None
+        }
+    }
+}
+
+pub(crate) fn resolve_stream0_required_slots(
+    stream0: &[u8],
+    targets: &[crate::ops::ColTarget<'_>],
+) -> Option<u64> {
+    let hdr = parse_grammar_for_ops(stream0).ok()??;
+    let total_slots: usize = hdr.slot_counts[..hdr.template_count].iter().sum();
+    if total_slots == 0 || total_slots > 64 {
+        return None;
+    }
+    let mut mask = 0u64;
+    let mut slot_base = 0usize;
+    for t in 0..hdr.template_count {
+        let segs = hdr.segs(t);
+        let slots = hdr.slot_counts[t];
+        if !segs.last().is_some_and(|s| s.ends_with(b"\n")) {
+            return None;
+        }
+        let tpl_delim = if t == 0 {
+            hdr.tpl0_delim
+        } else {
+            delimited_template_delim(segs)
+        };
+        for &col in targets {
+            match col {
+                crate::ops::ColTarget::JsonKey(key) => {
+                    let found = json_single_line_template_slot(segs, key.as_bytes())?;
+                    if let Some(s) = found {
+                        mask |= 1u64 << (slot_base + s);
+                    }
+                }
+                crate::ops::ColTarget::Delimited { delim, index } => {
+                    if tpl_delim != Some(delim) {
+                        return None;
+                    }
+                    if index < slots {
+                        mask |= 1u64 << (slot_base + index);
+                    }
+                }
+            }
+        }
+        slot_base += slots;
+    }
+    Some(mask)
+}

@@ -132,7 +132,7 @@ fn reserve_raw_arena_for_block(
                     return Err(invalid("v6 column slice count mismatch"));
                 }
                 for &raw_cb in &v6_cols[..slots] {
-                    let cb = strip_v6_col_uleb(raw_cb)?;
+                    let cb = peek_v6_col_uleb(raw_cb)?;
                     if let Some(&t) = cb.first() {
                         if matches!(
                             t,

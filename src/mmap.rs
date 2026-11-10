@@ -50,6 +50,7 @@ impl MappedFile {
         let len = usize::try_from(meta.len()).map_err(|_| Error::SizeOverflow)?;
         let raw =
             unsafe { sys::RawMap::map_ro(file, len) }.map_err(|e| Error::Backend(e.to_string()))?;
+        crate::pool::ensure_warm(16);
         Ok(Self { raw })
     }
 

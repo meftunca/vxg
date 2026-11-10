@@ -54,10 +54,15 @@ fn unpack_grammar_inner_impl(
     strict: bool,
     mut sink: OutSink,
 ) -> Result<usize> {
-    let raw_len = cursor.uleb()?;
-    if raw_len > MAX_BLOCK_SIZE {
+    let hdr_raw_len = cursor.uleb()?;
+    if hdr_raw_len > MAX_BLOCK_SIZE {
         return Err(invalid("column raw length"));
     }
+    let raw_len = if current_v6_cols().is_some() {
+        sink.capacity
+    } else {
+        hdr_raw_len
+    };
     let template_count = cursor.uleb()?;
     if template_count > MAX_TEMPLATES {
         return Err(invalid("column template count"));

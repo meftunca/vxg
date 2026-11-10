@@ -186,6 +186,15 @@ pub fn compress_with_stats(input: &[u8], options: &Options) -> Result<(Vec<u8>, 
 /// Compresses `input` directly into caller-supplied `out[..written]`, avoiding per-call output
 /// buffer allocation on both single-threaded and multi-threaded paths by reusing thread-local scratch arenas.
 pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<usize> {
+    compress_into_micro(input, out, options, false)
+}
+
+pub(crate) fn compress_into_micro(
+    input: &[u8],
+    out: &mut [u8],
+    options: &Options,
+    skip_dict: bool,
+) -> Result<usize> {
     options.validate()?;
     max_compressed_size(input.len(), options.block_size)?;
     let eff = frame::v5::resolve_effective_options(input, options);
@@ -205,7 +214,7 @@ pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<
     } else {
         frame::VERSION_RELEASE
     };
-    let prep_dict = if !options.legacy_v2 {
+    let prep_dict = if !options.legacy_v2 && !skip_dict {
         dict_lz::prepare_frame_dict(input, options.block_size, options.level, workers)
     } else {
         None
