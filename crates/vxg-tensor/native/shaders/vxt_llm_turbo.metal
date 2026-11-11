@@ -2576,6 +2576,67 @@ kernel void vxt_llm_turbo3_gemm4(
     uint p_h4 = p.padded_cols >> 2u;
     uint gh = lane >> 4u;
 
+    if (use_sk2 && p.batch_m == 4u && (p.tiles_per_sg & 1024u) != 0u) {
+        // Dual-tile split-K: each simdgroup evaluates 2 adjacent row tiles per step so the
+        // 8 per-lane activation loads (4 tokens x 2 half4) are amortized over 2x the weights.
+        threadgroup float4 sk_part2[32];
+        uint sub = sg_id >> 1u;
+        uint k_par = sg_id & 1u;
+        uint tile0 = (tg_pos.x * 4u + sub) * 2u;
+        uint h_s = (steps + 1u) >> 1u;
+        uint kp_beg = min(k_par * h_s, steps);
+        uint kp_end = min(kp_beg + h_s, steps);
+        float4 a00 = 0.0f, a01 = 0.0f, a02 = 0.0f, a03 = 0.0f;
+        float4 a10 = 0.0f, a11 = 0.0f, a12 = 0.0f, a13 = 0.0f;
+        bool has0 = (tile0 << 2u) < p.rows;
+        bool has1 = ((tile0 + 1u) << 2u) < p.rows;
+        if (has0) {
+            uint tile1 = has1 ? (tile0 + 1u) : tile0;
+            device const ushort* sc0 = scales_f16 + ulong(tile0) * ulong(steps) * 8ul;
+            device const ushort* sc1 = scales_f16 + ulong(tile1) * ulong(steps) * 8ul;
+            device const uint* pw0 = packed_words + ulong(tile0) * ulong(steps) * 96ul;
+            device const uint* pw1 = packed_words + ulong(tile1) * ulong(steps) * 96ul;
+            for (uint step = kp_beg; step < kp_end; ++step) {
+                uint x_h4 = (step << 6u) + (lane << 1u);
+                half4 x0a = x_rot_h_batch[x_h4], x0b = x_rot_h_batch[x_h4 + 1u];
+                half4 x1a = x_rot_h_batch[p_h4 + x_h4], x1b = x_rot_h_batch[p_h4 + x_h4 + 1u];
+                half4 x2a = x_rot_h_batch[2u * p_h4 + x_h4], x2b = x_rot_h_batch[2u * p_h4 + x_h4 + 1u];
+                half4 x3a = x_rot_h_batch[3u * p_h4 + x_h4], x3b = x_rot_h_batch[3u * p_h4 + x_h4 + 1u];
+                uint soff = (step << 3u) + (gh << 2u);
+                device const uint* q0 = pw0 + step * 96u;
+                device const uint* q1 = pw1 + step * 96u;
+                uint2 r0 = ((device const uint2*)q0)[lane];
+                uint2 r1 = ((device const uint2*)q1)[lane];
+                uint s0w = q0[64u + lane], s1w = q1[64u + lane];
+                half4 h0 = *(device const half4*)(sc0 + soff);
+                half4 h1 = *(device const half4*)(sc1 + soff);
+                a00 = vxt_eval_t3_lut(lut64, r0, s0w, h0, x0a, x0b, a00);
+                a01 = vxt_eval_t3_lut(lut64, r0, s0w, h0, x1a, x1b, a01);
+                a02 = vxt_eval_t3_lut(lut64, r0, s0w, h0, x2a, x2b, a02);
+                a03 = vxt_eval_t3_lut(lut64, r0, s0w, h0, x3a, x3b, a03);
+                a10 = vxt_eval_t3_lut(lut64, r1, s1w, h1, x0a, x0b, a10);
+                a11 = vxt_eval_t3_lut(lut64, r1, s1w, h1, x1a, x1b, a11);
+                a12 = vxt_eval_t3_lut(lut64, r1, s1w, h1, x2a, x2b, a12);
+                a13 = vxt_eval_t3_lut(lut64, r1, s1w, h1, x3a, x3b, a13);
+            }
+        }
+        float4 s[8] = {
+            simd_sum(a00) * 16.0f, simd_sum(a01) * 16.0f, simd_sum(a02) * 16.0f, simd_sum(a03) * 16.0f,
+            simd_sum(a10) * 16.0f, simd_sum(a11) * 16.0f, simd_sum(a12) * 16.0f, simd_sum(a13) * 16.0f
+        };
+        if (k_par == 1u && lane == 0u) {
+            for (uint i = 0u; i < 8u; ++i) sk_part2[sub * 8u + i] = s[i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (k_par == 0u && lane == 0u && has0) {
+            for (uint m = 0u; m < 4u; ++m) {
+                vxt_store_tile4(y_batch + m * p.rows, p.rows, tile0, s[m] + sk_part2[sub * 8u + m]);
+                if (has1) vxt_store_tile4(y_batch + m * p.rows, p.rows, tile0 + 1u, s[4u + m] + sk_part2[sub * 8u + 4u + m]);
+            }
+        }
+        return;
+    }
+
     if (use_sk2) {
         threadgroup float4 sk_part[16];
         uint sub = sg_id >> 1u;

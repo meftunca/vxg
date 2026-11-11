@@ -190,7 +190,7 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
     }
     let t_load = Instant::now();
     let mut model = LlmModel::load_file(model_path, use_gpu, threads)?;
-    model.set_turbo_ngram(true);
+    model.set_turbo_ngram(std::env::var_os("VXT_NO_NGRAM").is_none());
     if cb4_greedy { model.enable_cb4_greedy()?; }
     let load_s = t_load.elapsed().as_secs_f64();
 

@@ -375,6 +375,7 @@ impl MetalTurboRunner {
             let mut ngram =
                 use_ngram.then(|| crate::turbo_ngram::TurboNgramTable::new(prompt_ids, first_tok));
             let mut spec_streak = 0u32;
+            let mut spec_stats = [0usize; 2];
             let head_mode = if use_sketch { 2u32 } else { 3u32 };
             self.inner.ring_set(0, first_tok);
             let outcome =
@@ -432,6 +433,8 @@ impl MetalTurboRunner {
                                         if acc < 4 {
                                             self.inner.rollback_deltanet(st_in, acc as u32, 4)?;
                                         }
+                                        spec_stats[0] += 1;
+                                        spec_stats[1] += acc;
                                         submitted = consumed;
                                         if acc == 1 {
                                             ng.invalidate(dkey);
@@ -497,6 +500,13 @@ impl MetalTurboRunner {
                         drain_error = Some(error);
                     }
                 }
+            }
+            if std::env::var_os("VXT_SPEC_STATS").is_some() {
+                eprintln!(
+                    "[VXT_SPEC] m4_steps={} m4_tokens={} total_tokens={} mean_accept={:.2}",
+                    spec_stats[0], spec_stats[1], gen_ids.len(),
+                    spec_stats[1] as f64 / spec_stats[0].max(1) as f64
+                );
             }
             let recovery = (|| -> Result<()> {
                 if consumed != submitted

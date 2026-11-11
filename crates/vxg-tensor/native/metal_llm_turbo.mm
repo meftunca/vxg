@@ -10,6 +10,7 @@ namespace {
 constexpr uint32_t MAX_BATCH_M = 4u;
 constexpr uint32_t RING_SLOTS = 256u;
 constexpr uint32_t STAGE2_TGS = 768u;
+static bool g_gemm4_dual = (std::getenv("VXT_GEMM4_SINGLE") == nullptr);
 
 struct TurboLlmMatParamsC {
     uint32_t rows;
@@ -409,7 +410,11 @@ uint32_t encode_turbo_mat(
         uint32_t total_tiles = (m.rows + 3u) / 4u;
         uint32_t groups = 1u;
         uint32_t tps_flags = ec_flag;
-        if (use_sk2) {
+        bool dual = use_sk2 && g_gemm4_dual && batch_m == 4u && (m.bits == 3u || m.bits == 4u);
+        if (dual) {
+            groups = (total_tiles + 7u) / 8u;
+            tps_flags |= 1u | 512u | 1024u;
+        } else if (use_sk2) {
             groups = (total_tiles + 3u) / 4u;
             tps_flags |= 1u | 512u;
         } else {
@@ -1367,7 +1372,7 @@ void* vxt_metal_turbo_create(
         uint32_t lm_steps = std::max<uint32_t>(lm_pcols >> 8u, 1u);
         r->tail_sync_base = cfg->n_layer * std::max<uint32_t>(cfg->ssm_dt_rank, 4u) + 8u;
         uint32_t total_sync_slots = std::max<uint32_t>(r->tail_sync_base + 3u * cfg->n_layer + 16u, 128u);
-        uint32_t max_blk_vals = std::max<uint32_t>(STAGE2_TGS, (cfg->n_vocab + 1023u) / 1024u);
+        uint32_t max_blk_vals = std::max<uint32_t>(4096u, (cfg->n_vocab + 1023u) / 1024u);
 
         r->lut_bank_buf = alloc_shared_bytes(dev, 16384);
         r->caps_buf = alloc_shared_bytes(dev, 64);
@@ -1768,6 +1773,92 @@ static void run_vxt_timing_probe(MetalTurboRunner* r) {
         [enc setBuffer:ts->seen_vocab_buf offset:0 atIndex:5];
         [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     });
+
+    for (uint32_t tgs : { 384u, 768u, 1536u, 3072u }) {
+        char lbl[96];
+        std::snprintf(lbl, sizeof(lbl), "E3. Full-scan exact head TGs=%u", tgs);
+        measure_gpu_us(lbl, [&](id<MTLComputeCommandEncoder> enc) {
+            TurboSketchStage2ParamsC s2p{
+                c.n_vocab, r->output_head_mat.padded_cols, r->output_head_mat.bits | 256u, 0.0f, tgs,
+                0xffffffffu, 0xffffffffu, 0xffffffffu
+            };
+            id<MTLComputePipelineState> s2_pso = (r->output_head_mat.bits == 2u)
+                ? r->pso_sketch_s2_t2
+                : ((r->output_head_mat.bits == 5u) ? r->pso_sketch_s2_t25 : r->pso_sketch_s2_t3);
+            [enc setComputePipelineState:s2_pso];
+            [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.scales_off atIndex:0];
+            [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.packed_off atIndex:1];
+            [enc setBuffer:r->x_rot_h_buf offset:0 atIndex:2];
+            [enc setBuffer:r->surv_blk_buf offset:0 atIndex:3];
+            [enc setBuffer:r->blk_vals_buf offset:0 atIndex:4];
+            [enc setBuffer:r->blk_idxs_buf offset:0 atIndex:5];
+            [enc setBytes:&s2p length:sizeof(s2p) atIndex:6];
+            [enc setBuffer:ts->seen_vocab_buf offset:0 atIndex:7];
+            [enc setBuffer:r->lut_bank_buf offset:0 atIndex:8];
+            [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        });
+    }
+    measure_gpu_us("E4. Final norm + plain head GEMV (old mode=3)", [&](id<MTLComputeCommandEncoder> enc) {
+        encode_turbo_mat(r, enc, r->output_head_mat, r->x_rot_buf, r->x_rot_h_buf, 0, r->logits_buf, 0, 1u);
+    });
+
+    measure_gpu_us("D1. M=4 DeltaNet only (raw16+conv+heads)", [&](id<MTLComputeCommandEncoder> enc) {
+        uint32_t n_kh = c.ssm_group_count, n_vh = c.ssm_dt_rank, dk = c.ssm_state_size;
+        if (n_vh == 0u) return;
+        uint32_t dv = c.ssm_inner_size / n_vh;
+        uint32_t conv_ch = 2u * n_kh * dk + c.ssm_inner_size;
+        uint32_t p_inner = ((c.ssm_inner_size + 255u) / 256u) * 256u;
+        for (uint32_t il = 0; il < c.n_layer; ++il) {
+            const auto& L = r->layers[il];
+            if (!L.is_recurrent) continue;
+            uint32_t z_stride = (L.has_split_gate != 0u) ? c.ssm_inner_size : L.w_qkv.rows;
+            id<MTLBuffer> z_buf = (L.has_split_gate != 0u) ? ts->z_sep_hist[il] : ts->qkv_hist[il];
+            size_t z_off = (L.has_split_gate != 0u) ? 0u : size_t(conv_ch) * sizeof(float);
+            uint32_t ab_rows = 2u * n_vh;
+            TurboRaw16ParamsC rp{ ab_rows, padded_embd, 4u, 0u };
+            [enc setComputePipelineState:r->pso_llm_raw16_rot];
+            [enc setBuffer:r->weight_arena_buf offset:L.ab_rot_f16_off atIndex:0];
+            [enc setBuffer:r->x_rot_buf offset:0 atIndex:1];
+            [enc setBuffer:ts->ab_hist[il] offset:0 atIndex:2];
+            [enc setBytes:&rp length:sizeof(rp) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((ab_rows + 1u) / 2u, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            TurboDeltaConvParamsC cp{ conv_ch, c.ssm_conv_kernel, L.w_qkv.rows, 4u, 1u };
+            [enc setComputePipelineState:r->pso_deltanet_conv_batch];
+            [enc setBuffer:ts->qkv_hist[il] offset:0 atIndex:0];
+            [enc setBuffer:r->weight_arena_buf offset:L.vec0_off atIndex:1];
+            [enc setBuffer:ts->conv_states[il] offset:0 atIndex:2];
+            [enc setBuffer:ts->conv_bak[il] offset:0 atIndex:3];
+            [enc setBuffer:r->conv_silu_buf offset:0 atIndex:4];
+            [enc setBytes:&cp length:sizeof(cp) atIndex:5];
+            [enc dispatchThreadgroups:MTLSizeMake((conv_ch + 255u) / 256u, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            TurboDeltaHeadsParamsC hp{
+                n_kh, n_vh, dk, dv, L.w_qkv.rows, z_stride, p_inner, padded_embd,
+                4u, 1u, c.rms_norm_eps, 0u, 0u
+            };
+            [enc setComputePipelineState:r->pso_deltanet_heads_fp16];
+            [enc setBuffer:r->conv_silu_buf offset:0 atIndex:0];
+            [enc setBuffer:z_buf offset:z_off atIndex:1];
+            [enc setBuffer:ts->ab_hist[il] offset:0 atIndex:2];
+            [enc setBuffer:r->weight_arena_buf offset:L.vec1_off atIndex:3];
+            [enc setBuffer:r->weight_arena_buf offset:L.vec2_off atIndex:4];
+            [enc setBuffer:r->weight_arena_buf offset:L.vec3_off atIndex:5];
+            [enc setBuffer:ts->ssm_states[il] offset:0 atIndex:6];
+            [enc setBuffer:ts->ssm_bak[il] offset:0 atIndex:7];
+            [enc setBuffer:r->x_rot_tmp_buf offset:0 atIndex:8];
+            [enc setBytes:&hp length:sizeof(hp) atIndex:9];
+            [enc setBuffer:r->x_rot_tmp_h_buf offset:0 atIndex:10];
+            [enc dispatchThreadgroups:MTLSizeMake(n_vh, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        }
+    });
+
+    for (int dual = 0; dual < 2; ++dual) {
+        bool saved = g_gemm4_dual;
+        g_gemm4_dual = (dual != 0);
+        measure_gpu_us(dual ? "G2. M=4 trunk DUAL-tile gemm4" : "G1. M=4 trunk single-tile gemm4", [&](id<MTLComputeCommandEncoder> enc) {
+            encode_turbo_forward(r, ts, enc, r->tok_in_buf, 0, 4u, 64u, 1u, 0u, r->out_ids_buf, 0, 0xffffffffu);
+        });
+        g_gemm4_dual = saved;
+    }
 
     measure_gpu_us("C3a. Trunk (dnet_fuse=1)", [&](id<MTLComputeCommandEncoder> enc) {
         encode_turbo_forward(r, ts, enc, r->tok_ring_buf, 0, 1u, 64u, 0u, 0u, r->out_ring_buf, 0, 1u, 0xffffffffu, 0xffffffffu, false, 1);
