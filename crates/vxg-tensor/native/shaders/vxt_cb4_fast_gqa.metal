@@ -14,6 +14,37 @@ struct Cb4FastGqaBatchParams {
     uint rope_pos_base, mrope_s1, mrope_s2;
 };
 
+struct KvQ8BlockMsl {
+    ushort d;
+    char qs[32];
+};
+
+inline void cb4_quantize_q8_sg32(
+    threadgroup float* src,
+    device KvQ8BlockMsl* dst_blocks,
+    uint hd,
+    uint lane,
+    bool write_global
+) {
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    uint n_blk = hd >> 5u;
+    for (uint b = 0u; b < n_blk; ++b) {
+        uint idx = (b << 5u) + lane;
+        float v = src[idx];
+        float amax = simd_max(fabs(v));
+        half dh = half(amax / 127.0f);
+        float df = float(dh);
+        float inv = (df > 0.0f) ? (1.0f / df) : 0.0f;
+        int q = clamp(int(rint(v * inv)), -127, 127);
+        src[idx] = df * float(q);
+        if (write_global) {
+            dst_blocks[b].qs[lane] = char(q);
+            if (lane == 0u) dst_blocks[b].d = as_type<ushort>(dh);
+        }
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+}
+
 // 1. Batched Causal Conv1D + SiLU across `batch_m` tokens in 1 single dispatch (keeps history in regs!)
 kernel void vxt_cb4_dnet_conv_batch(
     device const float* qkv_z           [[buffer(0)]],
@@ -271,6 +302,10 @@ kernel void vxt_cb4_gqa_fused_m1(
     bool has_qb = (p.flags & 16u) != 0u;
     bool has_kb = (p.flags & 32u) != 0u;
     bool has_vb = (p.flags & 64u) != 0u;
+    bool kv_q8 = (p.flags & 256u) != 0u;
+    ulong kv_blk_stride = ulong(p.nkv) * ulong(hd >> 5u);
+    device KvQ8BlockMsl* k_q8 = (device KvQ8BlockMsl*)k_cache;
+    device KvQ8BlockMsl* v_q8 = (device KvQ8BlockMsl*)v_cache;
 
     threadgroup float q_sh[512];
     threadgroup float qg_sh[512];
@@ -299,15 +334,21 @@ kernel void vxt_cb4_gqa_fused_m1(
         device const float* v_cur = k_cur + p.kv_dim;
         uint base = kv_h * hd;
         ulong cache_off = ulong(pos) * kv_stride + ulong(base);
+        ulong blk_off = ulong(pos) * kv_blk_stride + ulong(kv_h) * ulong(hd >> 5u);
         bool write_kv = ((h % gqa_mul) == 0u);
         for (uint d = lane; d < hd; d += 32u) {
             float vv = v_cur[base + d] + (has_vb ? v_bias[base + d] : 0.0f);
             k_last[d] = k_cur[base + d] + (has_kb ? k_bias[base + d] : 0.0f);
             v_last[d] = vv;
-            if (write_kv) v_cache[cache_off + d] = vv;
+            if (write_kv && !kv_q8) v_cache[cache_off + d] = vv;
+        }
+        if (kv_q8) {
+            cb4_quantize_q8_sg32(v_last, v_q8 + blk_off, hd, lane, write_kv);
         }
         cb4_gqa_norm_rope_sg(k_last, k_norm, has_kn, neox, hd, p.rope_dim, rpos, 0u, 0u, p.rope_freq_base, p.eps, lane);
-        if (write_kv) {
+        if (kv_q8) {
+            cb4_quantize_q8_sg32(k_last, k_q8 + blk_off, hd, lane, write_kv);
+        } else if (write_kv) {
             for (uint d = lane; d < hd; d += 32u) {
                 k_cache[cache_off + d] = k_last[d];
             }
@@ -329,6 +370,12 @@ kernel void vxt_cb4_gqa_fused_m1(
                 uint d = (c << 5u) + lane;
                 if (d < hd) dot = fma(q_sh[d], k_last[d], dot);
             }
+        } else if (kv_q8) {
+            device const KvQ8BlockMsl* kh_q = k_q8 + ulong(t) * kv_blk_stride + ulong(kv_h) * ulong(hd >> 5u);
+            for (uint c = 0u; c < hd_chunks; ++c) {
+                float kd = float(as_type<half>(kh_q[c].d));
+                dot = fma(q_sh[(c << 5u) + lane], kd * float(kh_q[c].qs[lane]), dot);
+            }
         } else {
             device const float* kh = k_cache + ulong(t) * kv_stride + ulong(kv_h * hd);
             for (uint c = 0u; c < hd_chunks; ++c) {
@@ -346,6 +393,12 @@ kernel void vxt_cb4_gqa_fused_m1(
             for (uint c = 0u; c < hd_chunks; ++c) {
                 uint d = (c << 5u) + lane;
                 if (d < hd) acc[c] = fma(w, v_last[d], acc[c] * alpha);
+            }
+        } else if (kv_q8) {
+            device const KvQ8BlockMsl* vh_q = v_q8 + ulong(t) * kv_blk_stride + ulong(kv_h) * ulong(hd >> 5u);
+            for (uint c = 0u; c < hd_chunks; ++c) {
+                float vd = float(as_type<half>(vh_q[c].d));
+                acc[c] = fma(w, vd * float(vh_q[c].qs[lane]), acc[c] * alpha);
             }
         } else {
             device const float* vh = v_cache + ulong(t) * kv_stride + ulong(kv_h * hd);
@@ -459,15 +512,31 @@ kernel void vxt_cb4_gqa_prep_batch(
         cb4_gqa_norm_rope_sg(h_buf, q_norm, has_qn, neox, hd, p.rope_dim, rpos, ms1, ms2, p.rope_freq_base, p.eps, lane);
         for (uint d = lane; d < hd; d += 32u) q_dst[d] = h_buf[d];
     } else if (idx < p.nh + p.nkv) {
+        bool kv_q8 = (p.flags & 256u) != 0u;
         uint kh = idx - p.nh;
         uint base = kh * hd;
-        ulong cache_off = ulong(pos) * ulong(p.nkv * hd) + ulong(base);
-        for (uint d = lane; d < hd; d += 32u) {
-            h_buf[d] = k_cur[base + d] + (has_kb ? k_bias[base + d] : 0.0f);
-            v_cache[cache_off + d] = v_cur[base + d] + (has_vb ? v_bias[base + d] : 0.0f);
+        if (kv_q8) {
+            ulong blk_off = ulong(pos) * ulong(p.nkv * (hd >> 5u)) + ulong(kh * (hd >> 5u));
+            device KvQ8BlockMsl* k_q8 = (device KvQ8BlockMsl*)k_cache;
+            device KvQ8BlockMsl* v_q8 = (device KvQ8BlockMsl*)v_cache;
+            for (uint d = lane; d < hd; d += 32u) {
+                h_buf[d] = v_cur[base + d] + (has_vb ? v_bias[base + d] : 0.0f);
+            }
+            cb4_quantize_q8_sg32(h_buf, v_q8 + blk_off, hd, lane, true);
+            for (uint d = lane; d < hd; d += 32u) {
+                h_buf[d] = k_cur[base + d] + (has_kb ? k_bias[base + d] : 0.0f);
+            }
+            cb4_gqa_norm_rope_sg(h_buf, k_norm, has_kn, neox, hd, p.rope_dim, rpos, ms1, ms2, p.rope_freq_base, p.eps, lane);
+            cb4_quantize_q8_sg32(h_buf, k_q8 + blk_off, hd, lane, true);
+        } else {
+            ulong cache_off = ulong(pos) * ulong(p.nkv * hd) + ulong(base);
+            for (uint d = lane; d < hd; d += 32u) {
+                h_buf[d] = k_cur[base + d] + (has_kb ? k_bias[base + d] : 0.0f);
+                v_cache[cache_off + d] = v_cur[base + d] + (has_vb ? v_bias[base + d] : 0.0f);
+            }
+            cb4_gqa_norm_rope_sg(h_buf, k_norm, has_kn, neox, hd, p.rope_dim, rpos, ms1, ms2, p.rope_freq_base, p.eps, lane);
+            for (uint d = lane; d < hd; d += 32u) k_cache[cache_off + d] = h_buf[d];
         }
-        cb4_gqa_norm_rope_sg(h_buf, k_norm, has_kn, neox, hd, p.rope_dim, rpos, ms1, ms2, p.rope_freq_base, p.eps, lane);
-        for (uint d = lane; d < hd; d += 32u) k_cache[cache_off + d] = h_buf[d];
     }
 }
 
@@ -493,8 +562,12 @@ kernel void vxt_cb4_gqa_attn_batch(
     uint kv_h = h / (p.nh / p.nkv);
     uint seq_len = p.pos_base + m + 1u;
     ulong kv_stride = ulong(p.nkv * hd);
+    ulong kv_blk_stride = ulong(p.nkv) * ulong(hd >> 5u);
     float scale = rsqrt(float(hd));
     bool gated_q = (p.flags & 1u) != 0u;
+    bool kv_q8 = (p.flags & 256u) != 0u;
+    device const KvQ8BlockMsl* k_q8 = (device const KvQ8BlockMsl*)k_cache;
+    device const KvQ8BlockMsl* v_q8 = (device const KvQ8BlockMsl*)v_cache;
 
     device const float* q_m = q_cur + ulong(m) * ulong(att_dim);
     device const float* qg_m = q_gate + ulong(m) * ulong(att_dim);
@@ -515,23 +588,43 @@ kernel void vxt_cb4_gqa_attn_batch(
     float l_i = 0.0f;
 
     for (uint t = sg_id; t < seq_len; t += 8u) {
-        ulong base = ulong(t) * kv_stride + ulong(kv_h * hd);
-        device const float* kh = k_cache + base;
-        device const float* vh = v_cache + base;
         float dot = 0.0f;
-        for (uint c = 0u; c < hd_chunks; ++c) {
-            uint d = (c << 5u) + lane;
-            if (d < hd) dot = fma(q_sh[d], kh[d], dot);
-        }
-        float s = simd_sum(dot) * scale;
-        float m_new = max(m_i, s);
-        float alpha = (l_i == 0.0f) ? 0.0f : exp(m_i - m_new);
-        float w = exp(s - m_new);
-        l_i = fma(l_i, alpha, w);
-        m_i = m_new;
-        for (uint c = 0u; c < hd_chunks; ++c) {
-            uint d = (c << 5u) + lane;
-            if (d < hd) acc[c] = fma(w, vh[d], acc[c] * alpha);
+        if (kv_q8) {
+            ulong b_off = ulong(t) * kv_blk_stride + ulong(kv_h) * ulong(hd >> 5u);
+            device const KvQ8BlockMsl* kh_q = k_q8 + b_off;
+            for (uint c = 0u; c < hd_chunks; ++c) {
+                float kd = float(as_type<half>(kh_q[c].d));
+                dot = fma(q_sh[(c << 5u) + lane], kd * float(kh_q[c].qs[lane]), dot);
+            }
+            float s = simd_sum(dot) * scale;
+            float m_new = max(m_i, s);
+            float alpha = (l_i == 0.0f) ? 0.0f : exp(m_i - m_new);
+            float w = exp(s - m_new);
+            l_i = fma(l_i, alpha, w);
+            m_i = m_new;
+            device const KvQ8BlockMsl* vh_q = v_q8 + b_off;
+            for (uint c = 0u; c < hd_chunks; ++c) {
+                float vd = float(as_type<half>(vh_q[c].d));
+                acc[c] = fma(w, vd * float(vh_q[c].qs[lane]), acc[c] * alpha);
+            }
+        } else {
+            ulong base = ulong(t) * kv_stride + ulong(kv_h * hd);
+            device const float* kh = k_cache + base;
+            device const float* vh = v_cache + base;
+            for (uint c = 0u; c < hd_chunks; ++c) {
+                uint d = (c << 5u) + lane;
+                if (d < hd) dot = fma(q_sh[d], kh[d], dot);
+            }
+            float s = simd_sum(dot) * scale;
+            float m_new = max(m_i, s);
+            float alpha = (l_i == 0.0f) ? 0.0f : exp(m_i - m_new);
+            float w = exp(s - m_new);
+            l_i = fma(l_i, alpha, w);
+            m_i = m_new;
+            for (uint c = 0u; c < hd_chunks; ++c) {
+                uint d = (c << 5u) + lane;
+                if (d < hd) acc[c] = fma(w, vh[d], acc[c] * alpha);
+            }
         }
     }
 

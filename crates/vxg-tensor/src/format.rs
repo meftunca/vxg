@@ -9,7 +9,7 @@
 //! - Per-tensor 64-byte-aligned payload sections with FNV-1a64 section + whole-archive tags.
 
 use crate::codebook::{CodebookMatrix, Q4_0Matrix};
-use crate::entropy_pack::{pack_turbo_ec, unpack_turbo_ec};
+use crate::entropy_pack::{decode_pending_ec_batch, pack_turbo_ec, scan_turbo_ec};
 use crate::format_io::{
     fnv1a64, pad64, push_f32_slice, push_hdr, push_u16_slice, push_u32_slice, push_u8_slice,
     verify_section_crcs, Cur, SectionCrcJob,
@@ -345,6 +345,7 @@ fn read_vxt_body(bytes: &[u8], body: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, V
 
     let mut entries = Vec::with_capacity(count.min(4096));
     let mut crc_jobs = Vec::with_capacity(count.min(4096));
+    let mut ec_jobs = Vec::new();
     for _ in 0..count {
         r.align64()?;
         let section_start = r.pos;
@@ -533,7 +534,13 @@ fn read_vxt_body(bytes: &[u8], body: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, V
                 })
             }
             KIND_TURBO_WHT_EC => {
-                PackedTensor::TurboWht(unpack_turbo_ec(sub, rows, cols, padded_cols, &mut r)?)
+                let entry_idx = entries.len();
+                ec_jobs.push(scan_turbo_ec(entry_idx, sub, rows, cols, padded_cols, &mut r)?);
+                PackedTensor::RawF32 {
+                    rows: 0,
+                    cols: 0,
+                    data: Vec::new(),
+                }
             }
             _ => return Err(Error::Format(format!("unknown VXT tensor kind {kind}"))),
         };
@@ -548,6 +555,9 @@ fn read_vxt_body(bytes: &[u8], body: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, V
         entries.push(VxtEntry { name, tensor });
     }
     verify_section_crcs(&crc_jobs)?;
+    for (idx, mat) in decode_pending_ec_batch(ec_jobs)? {
+        entries[idx].tensor = PackedTensor::TurboWht(mat);
+    }
     Ok((meta_kv, entries))
 }
 

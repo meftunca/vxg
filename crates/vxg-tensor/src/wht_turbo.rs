@@ -10,6 +10,7 @@
 use crate::fp16::f16_to_f32;
 use crate::wht2::fwht32_inplace;
 use crate::wht_turbo_enc::encode_turbo_planes;
+use crate::wht_turbo_gptq::encode_turbo_gptq_planes;
 use crate::wht_turbo_tables::{
     ec_orth2d_tables, orth2d_tables, orth4d64_tables, orth4d_tables, unpack_t25_lane,
 };
@@ -108,6 +109,21 @@ impl TurboWhtMatrix {
     where
         F: Fn(usize) -> f32 + Sync,
     {
+        Self::encode_with_ch_amp(bits, rows, cols, weights, h_rot, None, row_lambda)
+    }
+
+    pub fn encode_with_ch_amp<F>(
+        bits: u8,
+        rows: usize,
+        cols: usize,
+        weights: &[f32],
+        h_rot: Option<&[f32]>,
+        ch_amp: Option<&[f32]>,
+        row_lambda: F,
+    ) -> Result<Self>
+    where
+        F: Fn(usize) -> f32 + Sync,
+    {
         if !matches!(bits, 2 | 3 | 4 | 5) {
             return Err(Error::Format(
                 "TurboWhtMatrix bits must be 2, 3, 4 (EC-Turbo3), or 5 (Turbo2.5)".into(),
@@ -119,17 +135,32 @@ impl TurboWhtMatrix {
         let padded_rows = rows.div_ceil(4) * 4;
         let padded_cols = cols.div_ceil(256) * 256;
         let h_checked = h_rot.filter(|h| h.len() == padded_cols);
+        let amp_checked = ch_amp.filter(|a| a.len() == cols);
         let wps = Self::words_per_tile_step(bits);
-        let (scales_f16, packed_words) = encode_turbo_planes(
-            bits,
-            rows,
-            cols,
-            padded_cols,
-            wps,
-            weights,
-            h_checked,
-            row_lambda,
-        );
+        let (scales_f16, packed_words) = if let Some(amp) = amp_checked.filter(|_| matches!(bits, 3 | 4)) {
+            encode_turbo_gptq_planes(
+                bits,
+                rows,
+                cols,
+                padded_cols,
+                wps,
+                weights,
+                h_checked,
+                amp,
+                row_lambda,
+            )
+        } else {
+            encode_turbo_planes(
+                bits,
+                rows,
+                cols,
+                padded_cols,
+                wps,
+                weights,
+                h_checked,
+                row_lambda,
+            )
+        };
         Ok(Self {
             bits,
             rows,

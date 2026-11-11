@@ -5,8 +5,9 @@ use std::collections::HashMap;
 
 use crate::format::PackedTensor;
 use crate::gguf_meta::ModelConfig;
-use crate::llm::{LlmModel, LlmState};
+use crate::llm::{KvCacheMode, LlmModel, LlmState};
 use crate::llm_ops::{rms_norm, silu, step_deltanet_recurrent, step_full_gqa};
+use crate::llm_prefill::{gelu_tanh_f32, rms_norm_inplace, step_full_gqa_q8};
 use crate::metal::{GpuPackedTensor, MetalEngine};
 use crate::vision::{step_full_gqa_mrope, EncodedVisionImage};
 use crate::{Error, Result};
@@ -98,6 +99,8 @@ pub(crate) enum LayerAttn {
 pub(crate) struct DecoderLayer {
     pub(crate) attn_norm: Vec<f32>,
     pub(crate) post_attn_norm: Vec<f32>,
+    pub(crate) attn_post_norm: Option<Vec<f32>>,
+    pub(crate) ffn_post_norm: Option<Vec<f32>>,
     pub(crate) attn: LayerAttn,
     pub(crate) ffn_gate: MatWeight,
     pub(crate) ffn_up: MatWeight,
@@ -129,6 +132,12 @@ pub(crate) fn extract_decoder_layers(
             .or_else(|| map.remove(&format!("{pfx}.ffn_norm.weight")))
             .ok_or_else(|| Error::Format(format!("missing post-attn norm in layer {il}")))?
             .decode_f32();
+        let attn_post_norm = map
+            .remove(&format!("{pfx}.attn_post_norm.weight"))
+            .map(|t| t.decode_f32());
+        let ffn_post_norm = map
+            .remove(&format!("{pfx}.ffn_post_norm.weight"))
+            .map(|t| t.decode_f32());
         let attn = if cfg.is_recurrent_layer(il) {
             LayerAttn::LinearDeltaNet {
                 wqkv: take_mat(map, &format!("{pfx}.attn_qkv.weight"))?,
@@ -163,6 +172,8 @@ pub(crate) fn extract_decoder_layers(
         layers.push(DecoderLayer {
             attn_norm,
             post_attn_norm,
+            attn_post_norm,
+            ffn_post_norm,
             attn,
             ffn_gate: take_mat(map, &format!("{pfx}.ffn_gate.weight"))?,
             ffn_up: take_mat(map, &format!("{pfx}.ffn_up.weight"))?,
@@ -176,6 +187,7 @@ pub(crate) fn build_multimodal_embeds(
     token_embd: &PackedTensor,
     n_vocab: usize,
     n_embd: usize,
+    embed_scale: f32,
     tok_ids: &[u32],
     images: &[&EncodedVisionImage],
     image_token_id: u32,
@@ -209,7 +221,13 @@ pub(crate) fn build_multimodal_embeds(
             if (tid as usize) >= n_vocab {
                 return Err(Error::Format(format!("token id {tid} out of vocab {n_vocab}")));
             }
-            token_embd.decode_row(tid as usize, &mut out[i * n_embd..(i + 1) * n_embd]);
+            let row = &mut out[i * n_embd..(i + 1) * n_embd];
+            token_embd.decode_row(tid as usize, row);
+            if (embed_scale - 1.0).abs() > 1e-7 {
+                for v in row.iter_mut() {
+                    *v *= embed_scale;
+                }
+            }
             i += 1;
         }
     }
@@ -373,6 +391,27 @@ pub(crate) fn forward_embed_step(
                         &mut state.v_caches[il],
                         &mut att_cat,
                     );
+                } else if state.kv_mode == KvCacheMode::Q8_0 && hd % 32 == 0 {
+                    step_full_gqa_q8(
+                        &q_raw,
+                        &mut k_cur,
+                        &v_cur,
+                        q_norm.as_deref(),
+                        k_norm.as_deref(),
+                        *gated_q,
+                        nh,
+                        nkv,
+                        hd,
+                        state.pos,
+                        pos_thw[0] as usize,
+                        model.cfg.rope_dim,
+                        model.cfg.rope_freq_base,
+                        model.cfg.rope_neox,
+                        eps,
+                        &mut state.k_q8[il],
+                        &mut state.v_q8[il],
+                        &mut att_cat,
+                    );
                 } else {
                     step_full_gqa(
                         &q_raw,
@@ -398,6 +437,9 @@ pub(crate) fn forward_embed_step(
             }
         }
 
+        if let Some(apn) = layer.attn_post_norm.as_deref() {
+            rms_norm_inplace(&mut attn_out, apn, eps);
+        }
         for i in 0..dim {
             cur[i] += attn_out[i];
         }
@@ -412,12 +454,21 @@ pub(crate) fn forward_embed_step(
             model.metal.as_mut(),
             threads,
         )?;
-        for i in 0..model.cfg.n_ff {
-            ffn_gate_buf[i] = silu(ffn_gate_buf[i]) * ffn_up_buf[i];
+        if model.cfg.ffn_gelu {
+            for i in 0..model.cfg.n_ff {
+                ffn_gate_buf[i] = gelu_tanh_f32(ffn_gate_buf[i]) * ffn_up_buf[i];
+            }
+        } else {
+            for i in 0..model.cfg.n_ff {
+                ffn_gate_buf[i] = silu(ffn_gate_buf[i]) * ffn_up_buf[i];
+            }
         }
         layer
             .ffn_down
             .forward(&ffn_gate_buf, &mut ffn_out, model.metal.as_mut(), threads)?;
+        if let Some(fpn) = layer.ffn_post_norm.as_deref() {
+            rms_norm_inplace(&mut ffn_out, fpn, eps);
+        }
         for i in 0..dim {
             cur[i] += ffn_out[i];
         }

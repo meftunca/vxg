@@ -118,7 +118,8 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
     let mut use_gpu = true;
     let mut raw_prompt = false;
     let mut enable_thinking = false;
-    let mut exact_head = false;
+    let mut exact_head = true;
+    let mut exact_head_flag = false;
     let mut reference_decode = false;
     let mut cb4_greedy = false;
     let mut threads = std::thread::available_parallelism()
@@ -175,7 +176,8 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
             "--cpu" => use_gpu = false,
             "--raw" => raw_prompt = true,
             "--think" => enable_thinking = true,
-            "--exact-head" => exact_head = true,
+            "--exact-head" => { exact_head = true; exact_head_flag = true; }
+            "--sketch-head" => exact_head = false,
             "--reference-decode" => reference_decode = true,
             "--cb4-greedy" => cb4_greedy = true,
             other => return Err(Error::Format(format!("unexpected flag '{other}'"))),
@@ -183,11 +185,12 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
         i += 1;
     }
 
-    if cb4_greedy && (!use_gpu || temp != 0.0 || presence_penalty != Some(0.0) || reference_decode || exact_head) {
+    if cb4_greedy && (!use_gpu || temp != 0.0 || presence_penalty != Some(0.0) || reference_decode || exact_head_flag) {
         return Err(Error::Unsupported("--cb4-greedy requires GPU, --temp 0, explicit --presence-penalty 0, and no alternate decode flags".into()));
     }
     let t_load = Instant::now();
     let mut model = LlmModel::load_file(model_path, use_gpu, threads)?;
+    model.set_turbo_ngram(true);
     if cb4_greedy { model.enable_cb4_greedy()?; }
     let load_s = t_load.elapsed().as_secs_f64();
 

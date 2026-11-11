@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::format::PackedTensor;
+use crate::metal::MetalEngine;
+use crate::metal_vision::{MetalVisionRunner, VisionBlockBorrow};
 pub use crate::vision_img::{apply_mrope_neox, compute_mrope_positions, step_full_gqa_mrope};
 use crate::vision_img::{load_image_source, preprocess_image_bytes, PreprocessedImage, VisionConfig};
 use crate::{Error, Result};
@@ -45,6 +47,8 @@ pub struct VisionEncoder {
     merger_fc1_b: Vec<f32>,
     merger_fc2_w: PackedTensor,
     merger_fc2_b: Vec<f32>,
+    gpu_enabled: bool,
+    gpu: std::sync::OnceLock<Option<MetalVisionRunner>>,
 }
 
 #[inline]
@@ -274,8 +278,57 @@ impl VisionEncoder {
             merger_fc1_b: take_vec(map, "vis.merger.linear_fc1.bias")?,
             merger_fc2_w: take_mat(map, "vis.merger.linear_fc2.weight")?,
             merger_fc2_b: take_vec(map, "vis.merger.linear_fc2.bias")?,
+            gpu_enabled: false,
+            gpu: std::sync::OnceLock::new(),
             cfg,
         })
+    }
+
+    pub(crate) fn upload_gpu(&mut self, _eng: &MetalEngine, _threads: usize) -> Result<()> {
+        self.gpu_enabled = true;
+        Ok(())
+    }
+
+    fn init_gpu_runner(&self, threads: usize) -> Option<MetalVisionRunner> {
+        let eng = MetalEngine::new().ok()?;
+        let borrows: Vec<VisionBlockBorrow<'_>> = self
+            .blocks
+            .iter()
+            .map(|b| VisionBlockBorrow {
+                norm1_w: &b.norm1_w,
+                norm1_b: &b.norm1_b,
+                qkv_w: &b.qkv_w,
+                qkv_b: &b.qkv_b,
+                proj_w: &b.proj_w,
+                proj_b: &b.proj_b,
+                norm2_w: &b.norm2_w,
+                norm2_b: &b.norm2_b,
+                fc1_w: &b.fc1_w,
+                fc1_b: &b.fc1_b,
+                fc2_w: &b.fc2_w,
+                fc2_b: &b.fc2_b,
+            })
+            .collect();
+        MetalVisionRunner::try_create(
+            &eng,
+            &self.cfg,
+            &self.patch_w,
+            &self.patch_b,
+            &borrows,
+            &self.merger_norm_w,
+            &self.merger_norm_b,
+            &self.merger_fc1_w,
+            &self.merger_fc1_b,
+            &self.merger_fc2_w,
+            &self.merger_fc2_b,
+            threads,
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn has_gpu(&self) -> bool {
+        self.gpu.get().map_or(self.gpu_enabled, Option::is_some)
     }
 
     pub fn encode_source(&self, src: &str, threads: usize) -> Result<EncodedVisionImage> {
@@ -284,33 +337,9 @@ impl VisionEncoder {
         self.encode_preprocessed(&pre, threads)
     }
 
-    pub fn encode_preprocessed(
-        &self,
-        img: &PreprocessedImage,
-        threads: usize,
-    ) -> Result<EncodedVisionImage> {
+    fn build_pos_and_rope(&self, img: &PreprocessedImage, seq: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let c = &self.cfg;
-        let seq = img.num_patches();
-        let d = c.hidden_size;
-        let m = c.spatial_merge_size;
-        let m_unit = c.merge_unit();
-        if seq == 0 || seq % m_unit != 0 {
-            return Err(Error::InvalidShape("vision patch count not divisible by merge_unit"));
-        }
-
-        let mut hidden = vec![0.0f32; seq * d];
-        dense_linear_par(
-            &img.patches,
-            seq,
-            c.patch_dim(),
-            &self.patch_w,
-            &self.patch_b,
-            d,
-            threads,
-            &mut hidden,
-        );
-
-        // Add bilinear-interpolated `pos_embed` (`align_corners = true`) + build 2D axial RoPE
+        let (d, m, m_unit) = (c.hidden_size, c.spatial_merge_size, c.merge_unit());
         let side = (c.num_position_embeddings as f64).sqrt().round() as usize;
         let side_max = side.saturating_sub(1) as f32;
         let gh_denom = img.grid_h.saturating_sub(1).max(1) as f32;
@@ -321,7 +350,7 @@ impl VisionEncoder {
         let inv_freq: Vec<f32> = (0..quarter)
             .map(|k| c.rope_theta.powf(-(2.0 * (k as f32)) / (spatial_dim as f32)))
             .collect();
-
+        let mut pos_add = vec![0.0f32; seq * d];
         let mut rope_cos = vec![0.0f32; seq * spatial_dim];
         let mut rope_sin = vec![0.0f32; seq * spatial_dim];
         let spatial_patches = img.grid_h * img.grid_w;
@@ -349,29 +378,64 @@ impl VisionEncoder {
                 (dh * (1.0 - dw), h1 * side + w0),
                 (dh * dw, h1 * side + w1),
             ];
-            let hs = &mut hidden[idx * d..(idx + 1) * d];
+            let ps = &mut pos_add[idx * d..(idx + 1) * d];
             for &(wt, pidx) in &taps {
                 if wt > 0.0 {
                     let pe = &self.pos_embed[pidx * d..(pidx + 1) * d];
                     for j in 0..d {
-                        hs[j] = wt.mul_add(pe[j], hs[j]);
+                        ps[j] = wt.mul_add(pe[j], ps[j]);
                     }
                 }
             }
-
             let cs = &mut rope_cos[idx * spatial_dim..(idx + 1) * spatial_dim];
             let sn = &mut rope_sin[idx * spatial_dim..(idx + 1) * spatial_dim];
             for k in 0..quarter {
-                let th_r = (row as f32) * inv_freq[k];
-                let th_c = (col as f32) * inv_freq[k];
-                let (sr, cr) = th_r.sin_cos();
-                let (sc, cc) = th_c.sin_cos();
+                let (sr, cr) = ((row as f32) * inv_freq[k]).sin_cos();
+                let (sc, cc) = ((col as f32) * inv_freq[k]).sin_cos();
                 cs[k] = cr;
                 sn[k] = sr;
                 cs[quarter + k] = cc;
                 sn[quarter + k] = sc;
             }
         }
+        (pos_add, rope_cos, rope_sin)
+    }
+
+    pub fn encode_preprocessed(
+        &self,
+        img: &PreprocessedImage,
+        threads: usize,
+    ) -> Result<EncodedVisionImage> {
+        let c = &self.cfg;
+        let seq = img.num_patches();
+        let d = c.hidden_size;
+        let m_unit = c.merge_unit();
+        if seq == 0 || seq % m_unit != 0 {
+            return Err(Error::InvalidShape("vision patch count not divisible by merge_unit"));
+        }
+        let llm_tokens = seq / m_unit;
+        let (pos_add, rope_cos, rope_sin) = self.build_pos_and_rope(img, seq);
+
+        if self.gpu_enabled {
+            if let Some(gpu) = self.gpu.get_or_init(|| self.init_gpu_runner(threads)).as_ref() {
+                let mut embeds = vec![0.0f32; llm_tokens * c.out_hidden_size];
+                gpu.encode(seq, &img.patches, &pos_add, &rope_cos, &rope_sin, &mut embeds)?;
+                return Ok(EncodedVisionImage {
+                    embeds,
+                    grid_t: img.grid_t,
+                    grid_h: img.grid_h,
+                    grid_w: img.grid_w,
+                    llm_tokens,
+                });
+            }
+        }
+
+        let mut hidden = vec![0.0f32; seq * d];
+        dense_linear_par(&img.patches, seq, c.patch_dim(), &self.patch_w, &self.patch_b, d, threads, &mut hidden);
+        for (h, &p) in hidden.iter_mut().zip(&pos_add) {
+            *h += p;
+        }
+        let spatial_dim = c.head_dim / 2;
 
         let mut normed = vec![0.0f32; seq * d];
         let mut qkv = vec![0.0f32; seq * 3 * d];
@@ -503,50 +567,18 @@ impl VisionEncoder {
         }
 
         // `PatchMerger`: LayerNorm(hidden_size) per patch -> reshape [seq/4, 4*d] -> fc1 -> GELU -> fc2
-        layer_norm_rows(
-            &hidden,
-            &self.merger_norm_w,
-            &self.merger_norm_b,
-            d,
-            1e-6,
-            &mut normed,
-        );
-        let llm_tokens = seq / m_unit;
+        layer_norm_rows(&hidden, &self.merger_norm_w, &self.merger_norm_b, d, 1e-6, &mut normed);
         let merged_dim = d * m_unit;
         let mut m_fc1 = vec![0.0f32; llm_tokens * merged_dim];
         decode_packed_par(&self.merger_fc1_w, threads, &mut w_buf);
-        dense_linear_par(
-            &normed,
-            llm_tokens,
-            merged_dim,
-            &w_buf,
-            &self.merger_fc1_b,
-            merged_dim,
-            threads,
-            &mut m_fc1,
-        );
+        dense_linear_par(&normed, llm_tokens, merged_dim, &w_buf, &self.merger_fc1_b, merged_dim, threads, &mut m_fc1);
         for v in &mut m_fc1 {
             *v = gelu_exact(*v);
         }
         let mut embeds = vec![0.0f32; llm_tokens * c.out_hidden_size];
         decode_packed_par(&self.merger_fc2_w, threads, &mut w_buf);
-        dense_linear_par(
-            &m_fc1,
-            llm_tokens,
-            merged_dim,
-            &w_buf,
-            &self.merger_fc2_b,
-            c.out_hidden_size,
-            threads,
-            &mut embeds,
-        );
+        dense_linear_par(&m_fc1, llm_tokens, merged_dim, &w_buf, &self.merger_fc2_b, c.out_hidden_size, threads, &mut embeds);
 
-        Ok(EncodedVisionImage {
-            embeds,
-            grid_t: img.grid_t,
-            grid_h: img.grid_h,
-            grid_w: img.grid_w,
-            llm_tokens,
-        })
+        Ok(EncodedVisionImage { embeds, grid_t: img.grid_t, grid_h: img.grid_h, grid_w: img.grid_w, llm_tokens })
     }
 }

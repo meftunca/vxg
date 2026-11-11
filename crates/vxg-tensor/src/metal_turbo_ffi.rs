@@ -81,59 +81,36 @@ struct VxtTurboLayerDesc {
 
 extern "C" {
     fn vxt_metal_turbo_create(
-        gemv_ctx: *mut c_void,
-        cfg: *const VxtLlmConfig,
-        embed_mat: *const VxtTurboMat,
-        layers: *const VxtTurboLayerDesc,
-        output_norm_buf: *mut c_void,
-        output_head_mat: *const VxtTurboMat,
-        err_out: *mut c_char,
-        err_cap: usize,
+        gemv_ctx: *mut c_void, cfg: *const VxtLlmConfig, embed_mat: *const VxtTurboMat,
+        layers: *const VxtTurboLayerDesc, output_norm_buf: *mut c_void,
+        output_head_mat: *const VxtTurboMat, err_out: *mut c_char, err_cap: usize,
     ) -> *mut c_void;
     fn vxt_metal_turbo_destroy(runner: *mut c_void);
-    fn vxt_metal_turbo_state_create(
-        runner: *mut c_void,
-        err_out: *mut c_char,
-        err_cap: usize,
-    ) -> *mut c_void;
+    fn vxt_metal_turbo_state_create(runner: *mut c_void, err_out: *mut c_char, err_cap: usize) -> *mut c_void;
     fn vxt_metal_turbo_state_destroy(state: *mut c_void);
     fn vxt_metal_turbo_step_batch(
-        runner: *mut c_void,
-        state: *mut c_void,
-        tok_ids: *const u32,
-        batch_m: u32,
-        pos_base: u32,
-        save_backup: u32,
-        compute_mode: u32,
-        logits_out: *mut f32,
-        argmax_ids_out: *mut u32,
-        err_out: *mut c_char,
-        err_cap: usize,
+        runner: *mut c_void, state: *mut c_void, tok_ids: *const u32, batch_m: u32,
+        pos_base: u32, save_backup: u32, compute_mode: u32, logits_out: *mut f32,
+        argmax_ids_out: *mut u32, err_out: *mut c_char, err_cap: usize,
+    ) -> i32;
+    fn vxt_metal_turbo_rollback_deltanet(
+        runner: *mut c_void, state: *mut c_void, accepted_m: u32, batch_m: u32,
+        err_out: *mut c_char, err_cap: usize,
     ) -> i32;
     fn vxt_metal_turbo_generation_checkpoint(
-        runner: *mut c_void,
-        state: *mut c_void,
-        restore: u32,
-        err_out: *mut c_char,
-        err_cap: usize,
+        runner: *mut c_void, state: *mut c_void, restore: u32, err_out: *mut c_char, err_cap: usize,
+    ) -> i32;
+    fn vxt_metal_turbo_replay_trunk(
+        runner: *mut c_void, state: *mut c_void, tok_ids: *const u32, step_count: u32,
+        pos_base: u32, err_out: *mut c_char, err_cap: usize,
     ) -> i32;
     fn vxt_metal_turbo_ring_set_token(runner: *mut c_void, slot: u32, tok_id: u32);
     fn vxt_metal_turbo_ring_get_out(runner: *mut c_void, slot: u32) -> u32;
-    fn vxt_metal_turbo_init_seen(
-        state: *mut c_void,
-        seen_ids: *const u32,
-        n_seen: usize,
-        presence_pen: f32,
-    );
+    fn vxt_metal_turbo_init_seen(state: *mut c_void, seen_ids: *const u32, n_seen: usize, presence_pen: f32);
+    fn vxt_metal_turbo_mark_seen(state: *mut c_void, tok_id: u32);
     fn vxt_metal_turbo_step_async_enqueue(
-        runner: *mut c_void,
-        state: *mut c_void,
-        base_slot: u32,
-        step_count: u32,
-        pos_base: u32,
-        use_sketch: u32,
-        err_out: *mut c_char,
-        err_cap: usize,
+        runner: *mut c_void, state: *mut c_void, base_slot: u32, step_count: u32,
+        pos_base: u32, use_sketch: u32, err_out: *mut c_char, err_cap: usize,
     ) -> *mut c_void;
     fn vxt_metal_turbo_wait_cmd(raw_cmd: *mut c_void, err_out: *mut c_char, err_cap: usize) -> i32;
 }
@@ -579,15 +556,38 @@ impl TurboRunnerInner {
         unsafe { vxt_metal_turbo_ring_get_out(self.raw.as_ptr(), slot) }
     }
 
-    #[inline]
-    pub fn init_seen(&self, state: &mut TurboStateInner, seen_ids: &[u32], presence_pen: f32) {
-        unsafe {
-            vxt_metal_turbo_init_seen(
-                state.0.as_ptr(),
-                seen_ids.as_ptr(),
-                seen_ids.len(),
-                presence_pen,
+    pub fn rollback_deltanet(&self, state: &mut TurboStateInner, accepted_m: u32, batch_m: u32) -> Result<()> {
+        let mut err_buf = [0u8; 512];
+        let rc = unsafe {
+            vxt_metal_turbo_rollback_deltanet(
+                self.raw.as_ptr(), state.0.as_ptr(), accepted_m, batch_m,
+                err_buf.as_mut_ptr() as *mut c_char, err_buf.len(),
             )
         };
+        if rc != 0 { return Err(Error::Backend(cbuf_to_str(&err_buf))); }
+        Ok(())
+    }
+
+    pub fn replay_trunk(&self, state: &mut TurboStateInner, tok_ids: &[u32], pos_base: u32) -> Result<()> {
+        if tok_ids.is_empty() { return Ok(()); }
+        let mut err_buf = [0u8; 512];
+        let rc = unsafe {
+            vxt_metal_turbo_replay_trunk(
+                self.raw.as_ptr(), state.0.as_ptr(), tok_ids.as_ptr(),
+                tok_ids.len() as u32, pos_base, err_buf.as_mut_ptr() as *mut c_char, err_buf.len(),
+            )
+        };
+        if rc != 0 { return Err(Error::Backend(cbuf_to_str(&err_buf))); }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn mark_seen(&self, state: &mut TurboStateInner, tok_id: u32) {
+        unsafe { vxt_metal_turbo_mark_seen(state.0.as_ptr(), tok_id) };
+    }
+
+    #[inline]
+    pub fn init_seen(&self, state: &mut TurboStateInner, seen_ids: &[u32], presence_pen: f32) {
+        unsafe { vxt_metal_turbo_init_seen(state.0.as_ptr(), seen_ids.as_ptr(), seen_ids.len(), presence_pen) };
     }
 }

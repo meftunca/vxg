@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub use crate::chat_mm::cmd_chat_llm;
-use crate::chat_mm::{count_image_spans, format_chat_multimodal};
+use crate::chat_mm::{count_image_spans, format_chat_multimodal, format_gemma_or_mistral};
 use crate::llm::{sample_logits, LlmModel, LlmState};
 use crate::llm_ops::{
     has_severe_loop, sample_logits_top_k_p, strip_think_block, TokenPenaltyTracker,
@@ -162,6 +162,10 @@ pub(crate) fn format_chat_messages_cached(
         return out;
     }
 
+    if let Some(ids) = format_gemma_or_mistral(tokenizer, messages, asst_cache) {
+        return ids;
+    }
+
     let mut buf = String::new();
     for msg in messages {
         buf.push_str(&msg.role);
@@ -204,6 +208,7 @@ impl ChatSession {
     pub fn load(path: &str, use_gpu: bool, threads: usize) -> Result<Self> {
         let t0 = Instant::now();
         let mut model = LlmModel::load_file(path, use_gpu, threads)?;
+        model.set_turbo_ngram(true);
         let cb4_greedy_ready = model.enable_cb4_greedy().is_ok();
         let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let state = model.new_state();
@@ -328,8 +333,10 @@ impl ChatSession {
         let eot_id = self.model.tokenizer.token_id("<|eot_id|>").unwrap_or(
             self.model.tokenizer.token_id("<|endoftext|>").unwrap_or(eos_id),
         );
+        let gemma_eot = self.model.tokenizer.token_id("<end_of_turn>").unwrap_or(eos_id);
+        let mistral_eos = self.model.tokenizer.token_id("</s>").unwrap_or(eos_id);
         let think_end_id = self.model.tokenizer.token_id("</think>");
-        let stop_ids = [eos_id, im_end_id, eot_id];
+        let stop_ids = [eos_id, im_end_id, eot_id, gemma_eot, mistral_eos];
 
         let explicit_zero_pen = params.presence_penalty == Some(0.0);
         let use_cb4_greedy = self.cb4_greedy_ready
@@ -417,7 +424,7 @@ impl ChatSession {
                 delta_ids,
                 first_id,
                 max_tokens,
-                true,
+                false,
                 presence_pen,
                 &stop_ids,
                 |tok| {

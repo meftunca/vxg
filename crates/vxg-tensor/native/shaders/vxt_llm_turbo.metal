@@ -2811,32 +2811,50 @@ kernel void vxt_dnet_m1_prep16(
     uint h = tg_pos.x;
     if (h >= p.n_vh) return;
 
-    uint qk_dim = p.n_vh * 128u;
-    uint conv_ch = 3u * qk_dim;
+    uint gva = p.n_vh / p.n_kh;
+    uint kh = h / gva;
+    bool is_kh_lead = (h % gva) == 0u;
+    uint qk_dim = p.n_kh * 128u;
+    uint v_dim = p.n_vh * 128u;
+    uint conv_ch = 2u * qk_dim + v_dim;
     device float* q_all = dnet_tmp;
     device float* k_all = dnet_tmp + qk_dim;
     device float* v_all = dnet_tmp + 2u * qk_dim;
-    device float2* db_all = (device float2*)(dnet_tmp + 4u * qk_dim);
+    device float2* db_all = (device float2*)(dnet_tmp + 2u * qk_dim + 2u * v_dim);
 
     threadgroup float q_sh[128];
     threadgroup float k_sh[128];
     threadgroup float sg_ab[4];
 
-    for (uint sub = 0u; sub < 3u; ++sub) {
-        uint c = sub * qk_dim + h * 128u + tid;
-        device const float* w = ssm_conv1d + c * 4u;
-        float h0 = conv_state[c];
-        float h1 = conv_state[conv_ch + c];
-        float h2 = conv_state[2u * conv_ch + c];
-        float x_c = qkv_in[c];
-        float acc = fma(x_c, w[3], fma(h2, w[2], fma(h1, w[1], h0 * w[0])));
-        conv_state[c] = h1;
-        conv_state[conv_ch + c] = h2;
-        conv_state[2u * conv_ch + c] = x_c;
-        float sv = acc / (1.0f + exp(-acc));
-        if (sub == 0u) q_sh[tid] = sv;
-        else if (sub == 1u) k_sh[tid] = sv;
-        else v_all[h * 128u + tid] = sv;
+    if (is_kh_lead) {
+        for (uint sub = 0u; sub < 2u; ++sub) {
+            uint c = sub * qk_dim + kh * 128u + tid;
+            device const float* w = ssm_conv1d + c * 4u;
+            float h0 = conv_state[c];
+            float h1 = conv_state[conv_ch + c];
+            float h2 = conv_state[2u * conv_ch + c];
+            float x_c = qkv_in[c];
+            float acc = fma(x_c, w[3], fma(h2, w[2], fma(h1, w[1], h0 * w[0])));
+            conv_state[c] = h1;
+            conv_state[conv_ch + c] = h2;
+            conv_state[2u * conv_ch + c] = x_c;
+            float sv = acc / (1.0f + exp(-acc));
+            if (sub == 0u) q_sh[tid] = sv;
+            else k_sh[tid] = sv;
+        }
+    }
+    {
+        uint cv = 2u * qk_dim + h * 128u + tid;
+        device const float* wv = ssm_conv1d + cv * 4u;
+        float h0 = conv_state[cv];
+        float h1 = conv_state[conv_ch + cv];
+        float h2 = conv_state[2u * conv_ch + cv];
+        float x_c = qkv_in[cv];
+        float acc = fma(x_c, wv[3], fma(h2, wv[2], fma(h1, wv[1], h0 * wv[0])));
+        conv_state[cv] = h1;
+        conv_state[conv_ch + cv] = h2;
+        conv_state[2u * conv_ch + cv] = x_c;
+        v_all[h * 128u + tid] = acc / (1.0f + exp(-acc));
     }
 
     uint n4 = p.padded_embd >> 2u;
@@ -2852,14 +2870,14 @@ kernel void vxt_dnet_m1_prep16(
     if (lane == 0u) sg_ab[sg_id] = acc_ab;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    if (sg_id == 0u) {
+    if (is_kh_lead && sg_id == 0u) {
         float4 qv = ((threadgroup const float4*)q_sh)[lane];
         float sc = 0.08838834764831845f * rsqrt(simd_sum(dot(qv, qv)) + p.eps);
-        ((device float4*)(q_all + h * 128u))[lane] = qv * sc;
-    } else if (sg_id == 1u) {
+        ((device float4*)(q_all + kh * 128u))[lane] = qv * sc;
+    } else if (is_kh_lead && sg_id == 1u) {
         float4 kv = ((threadgroup const float4*)k_sh)[lane];
         float sc = rsqrt(simd_sum(dot(kv, kv)) + p.eps);
-        ((device float4*)(k_all + h * 128u))[lane] = kv * sc;
+        ((device float4*)(k_all + kh * 128u))[lane] = kv * sc;
     } else if (sg_id == 2u && lane == 0u) {
         float alpha_val = sg_ab[0] + sg_ab[1];
         float beta_val = sg_ab[2] + sg_ab[3];
@@ -2889,12 +2907,14 @@ kernel void vxt_dnet_m1_state64(
     uint sub = tg_id & 3u;
     if (h >= p.n_vh) return;
 
-    uint qk_dim = p.n_vh * 128u;
-    float4 q4 = ((VXT_COHERENT_DEV const float4*)(dnet_tmp + h * 128u))[lane];
-    float4 k4 = ((VXT_COHERENT_DEV const float4*)(dnet_tmp + qk_dim + h * 128u))[lane];
+    uint kh = h / (p.n_vh / p.n_kh);
+    uint qk_dim = p.n_kh * 128u;
+    uint v_dim = p.n_vh * 128u;
+    float4 q4 = ((VXT_COHERENT_DEV const float4*)(dnet_tmp + kh * 128u))[lane];
+    float4 k4 = ((VXT_COHERENT_DEV const float4*)(dnet_tmp + qk_dim + kh * 128u))[lane];
     VXT_COHERENT_DEV const float* v_h = dnet_tmp + 2u * qk_dim + h * 128u;
-    VXT_COHERENT_DEV float* o_h = dnet_tmp + 3u * qk_dim + h * 128u;
-    float2 db = ((VXT_COHERENT_DEV const float2*)(dnet_tmp + 4u * qk_dim))[h];
+    VXT_COHERENT_DEV float* o_h = dnet_tmp + 2u * qk_dim + v_dim + h * 128u;
+    float2 db = ((VXT_COHERENT_DEV const float2*)(dnet_tmp + 2u * qk_dim + 2u * v_dim))[h];
     float decay = db.x;
     float beta = db.y;
 
@@ -2989,9 +3009,10 @@ kernel void vxt_dnet_m1_out2(
     uint3 tg_pos                        [[threadgroup_position_in_grid]]
 ) {
     uint h = tg_pos.x * 8u + sg_id;
-    uint qk_dim = p.n_vh * 128u;
+    uint qk_dim = p.n_kh * 128u;
+    uint v_dim = p.n_vh * 128u;
     if (h < p.n_vh) {
-        device const float* o_h = dnet_tmp + 3u * qk_dim + h * 128u;
+        device const float* o_h = dnet_tmp + 2u * qk_dim + v_dim + h * 128u;
         float o0 = o_h[lane];
         float o1 = o_h[32u + lane];
         float o2 = o_h[64u + lane];
@@ -4624,7 +4645,7 @@ inline void vxt_select_top_coords_m1(
     }
 
     uint steps = padded_cols >> 8u;
-    uint k_ind = (steps <= 2u) ? 256u : ((steps <= 8u) ? 56u : min(64u, max(24u, 448u / steps)));
+    uint k_ind = (steps <= 2u) ? 256u : 64u;
     device uint2* active_ind = (device uint2*)active_grp4;
 
     for (uint step = sg_id; step < steps; step += 8u) {
@@ -4868,11 +4889,11 @@ kernel void vxt_lm_sketch_stage1(
     device float* blk_sketch_max = blk_sketch_max_out + ulong(m) * ulong(p.n_blocks);
     device const uint2* active_ind = (device const uint2*)active_grp4;
 
-    threadgroup uint sh_cnt[8];
-    threadgroup uint sh_col[512];
-    threadgroup uint sh_xh2[512];
+    threadgroup uint sh_cnt[16];
+    threadgroup uint sh_col[1024];
+    threadgroup uint sh_xh2[1024];
 
-    if (steps > 2u && steps <= 8u) {
+    if (steps > 2u && steps <= 16u) {
         if (tid < steps) {
             sh_cnt[tid] = min(x_qmeta[1u + tid], 64u);
         }
@@ -4988,7 +5009,7 @@ kernel void vxt_lm_sketch_threshold(
     uint n_blocks = tp.x;
     device const float* blk_sketch_max = blk_sketch_max_in + ulong(m) * ulong(n_blocks);
     device uint* surv_out = surv_out_all + ulong(m) * 512ul;
-    const uint MAX_SURV = 256u;
+    const uint MAX_SURV = 384u;
     if (n_blocks <= MAX_SURV) {
         if (tid == 0u) surv_out[0] = n_blocks;
         if (tid < n_blocks) surv_out[1u + tid] = tid;
@@ -5163,11 +5184,12 @@ kernel void vxt_lm_exact_stage2_turbo2(
     uint3 tg_pos                        [[threadgroup_position_in_grid]]
 ) {
     uint m = tg_pos.y;
-    device const uint* surv_buf = surv_buf_in + ulong(m) * 512ul;
+    bool full_scan = (p.bits & 256u) != 0u;
     device float* blk_vals = blk_vals_out + ulong(m) * ulong(p.stage2_tgs);
     device uint* blk_idxs = blk_idxs_out + ulong(m) * ulong(p.stage2_tgs);
     uint surv_slot = tg_pos.x >> 1u;
-    if (surv_slot >= surv_buf[0]) {
+    device const uint* surv_buf = surv_buf_in + ulong(m) * 512ul;
+    if (!full_scan && surv_slot >= surv_buf[0]) {
         if (tid == 0u) {
             blk_vals[tg_pos.x] = -INFINITY;
             blk_idxs[tg_pos.x] = 0u;
@@ -5180,15 +5202,16 @@ kernel void vxt_lm_exact_stage2_turbo2(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     device const half4* x_rot_h = x_rot_h_in + ulong(m) * ulong(p.padded_cols >> 2u);
-    uint block_id = surv_buf[1u + surv_slot];
-    uint tile = (block_id << 4u) + ((tg_pos.x & 1u) << 3u) + sg_id;
-    uint r0 = tile << 2u;
+    uint steps = p.padded_cols >> 8u;
+    uint gh = lane >> 4u;
+    uint total_tiles = (p.rows + 3u) >> 2u;
+    uint tile_beg = full_scan ? (tg_pos.x * 8u + sg_id) : ((surv_buf[1u + surv_slot] << 4u) + ((tg_pos.x & 1u) << 3u) + sg_id);
+    uint tile_step = full_scan ? (p.stage2_tgs * 8u) : max(total_tiles, 1u);
     float best_v = -INFINITY;
     uint best_i = 0u;
 
-    if (r0 < p.rows) {
-        uint steps = p.padded_cols >> 8u;
-        uint gh = lane >> 4u;
+    for (uint tile = tile_beg; tile < total_tiles; tile += tile_step) {
+        uint r0 = tile << 2u;
         device const ushort* sc0 = scales_f16 + ulong(tile) * ulong(steps) * 8ul;
         device const uint2* pw0 = (device const uint2*)(packed_words + ulong(tile) * ulong(steps) * 64ul);
         float4 acc0 = float4(0.0f);
@@ -5210,6 +5233,7 @@ kernel void vxt_lm_exact_stage2_turbo2(
                 }
             }
         }
+        if (!full_scan) break;
     }
 
     threadgroup float sg_v[8];
@@ -5234,11 +5258,12 @@ kernel void vxt_lm_exact_stage2_turbo25(
     uint3 tg_pos                        [[threadgroup_position_in_grid]]
 ) {
     uint m = tg_pos.y;
-    device const uint* surv_buf = surv_buf_in + ulong(m) * 512ul;
+    bool full_scan = (p.bits & 256u) != 0u;
     device float* blk_vals = blk_vals_out + ulong(m) * ulong(p.stage2_tgs);
     device uint* blk_idxs = blk_idxs_out + ulong(m) * ulong(p.stage2_tgs);
     uint surv_slot = tg_pos.x >> 1u;
-    if (surv_slot >= surv_buf[0]) {
+    device const uint* surv_buf = surv_buf_in + ulong(m) * 512ul;
+    if (!full_scan && surv_slot >= surv_buf[0]) {
         if (tid == 0u) {
             blk_vals[tg_pos.x] = -INFINITY;
             blk_idxs[tg_pos.x] = 0u;
@@ -5251,15 +5276,16 @@ kernel void vxt_lm_exact_stage2_turbo25(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     device const half4* x_rot_h = x_rot_h_in + ulong(m) * ulong(p.padded_cols >> 2u);
-    uint block_id = surv_buf[1u + surv_slot];
-    uint tile = (block_id << 4u) + ((tg_pos.x & 1u) << 3u) + sg_id;
-    uint r0 = tile << 2u;
+    uint steps = p.padded_cols >> 8u;
+    uint gh = lane >> 4u;
+    uint total_tiles = (p.rows + 3u) >> 2u;
+    uint tile_beg = full_scan ? (tg_pos.x * 8u + sg_id) : ((surv_buf[1u + surv_slot] << 4u) + ((tg_pos.x & 1u) << 3u) + sg_id);
+    uint tile_step = full_scan ? (p.stage2_tgs * 8u) : max(total_tiles, 1u);
     float best_v = -INFINITY;
     uint best_i = 0u;
 
-    if (r0 < p.rows) {
-        uint steps = p.padded_cols >> 8u;
-        uint gh = lane >> 4u;
+    for (uint tile = tile_beg; tile < total_tiles; tile += tile_step) {
+        uint r0 = tile << 2u;
         device const ushort* sc0 = scales_f16 + ulong(tile) * ulong(steps) * 8ul;
         device const uint* pw0 = packed_words + ulong(tile) * ulong(steps) * 80ul;
         float4 acc0 = float4(0.0f);
@@ -5282,6 +5308,7 @@ kernel void vxt_lm_exact_stage2_turbo25(
                 }
             }
         }
+        if (!full_scan) break;
     }
 
     threadgroup float sg_v[8];
@@ -5306,11 +5333,13 @@ kernel void vxt_lm_exact_stage2_turbo3(
     uint3 tg_pos                        [[threadgroup_position_in_grid]]
 ) {
     uint m = tg_pos.y;
-    device const uint* surv_buf = surv_buf_in + ulong(m) * 512ul;
+    bool full_scan = (p.bits & 256u) != 0u;
+    uint raw_bits = p.bits & 255u;
     device float* blk_vals = blk_vals_out + ulong(m) * ulong(p.stage2_tgs);
     device uint* blk_idxs = blk_idxs_out + ulong(m) * ulong(p.stage2_tgs);
     uint surv_slot = tg_pos.x >> 1u;
-    if (surv_slot >= surv_buf[0]) {
+    device const uint* surv_buf = surv_buf_in + ulong(m) * 512ul;
+    if (!full_scan && surv_slot >= surv_buf[0]) {
         if (tid == 0u) {
             blk_vals[tg_pos.x] = -INFINITY;
             blk_idxs[tg_pos.x] = 0u;
@@ -5318,21 +5347,22 @@ kernel void vxt_lm_exact_stage2_turbo3(
         return;
     }
 
-    bool is_ec = (p.bits == 4u);
+    bool is_ec = (raw_bits == 4u);
     threadgroup half2 lut64[64];
     if (tid < 64u) lut64[tid] = ((device const half2*)(lut_bank + (is_ec ? 1312u : 1280u)))[tid];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     device const half4* x_rot_h = x_rot_h_in + ulong(m) * ulong(p.padded_cols >> 2u);
-    uint block_id = surv_buf[1u + surv_slot];
-    uint tile = (block_id << 4u) + ((tg_pos.x & 1u) << 3u) + sg_id;
-    uint r0 = tile << 2u;
+    uint steps = p.padded_cols >> 8u;
+    uint gh = lane >> 4u;
+    uint total_tiles = (p.rows + 3u) >> 2u;
+    uint tile_beg = full_scan ? (tg_pos.x * 8u + sg_id) : ((surv_buf[1u + surv_slot] << 4u) + ((tg_pos.x & 1u) << 3u) + sg_id);
+    uint tile_step = full_scan ? (p.stage2_tgs * 8u) : max(total_tiles, 1u);
     float best_v = -INFINITY;
     uint best_i = 0u;
 
-    if (r0 < p.rows) {
-        uint steps = p.padded_cols >> 8u;
-        uint gh = lane >> 4u;
+    for (uint tile = tile_beg; tile < total_tiles; tile += tile_step) {
+        uint r0 = tile << 2u;
         device const ushort* sc0 = scales_f16 + ulong(tile) * ulong(steps) * 8ul;
         device const uint* pw0 = packed_words + ulong(tile) * ulong(steps) * 96ul;
         float4 acc0 = float4(0.0f);
@@ -5355,6 +5385,7 @@ kernel void vxt_lm_exact_stage2_turbo3(
                 }
             }
         }
+        if (!full_scan) break;
     }
 
     threadgroup float sg_v[8];

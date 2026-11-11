@@ -200,6 +200,8 @@ extern "C" {
 void* vxt_metal_cb4_fast_create(
     void* gemv_ctx_raw,
     const VxtLlmConfig* cfg_in,
+    float embed_scale,
+    uint32_t ffn_gelu,
     const VxtCb4FastConcatMat* embed_in,
     const float* embed_centroids,
     uint32_t has_untied_head,
@@ -223,6 +225,8 @@ void* vxt_metal_cb4_fast_create(
         r->device = dev;
         r->queue = gemv->queue;
         r->cfg = *cfg_in;
+        r->embed_scale = embed_scale;
+        r->ffn_gelu = ffn_gelu;
         if (const char* dm = std::getenv("VXG_CB4_FAST_MODE")) {
             r->dispatch_mode = uint32_t(std::atoi(dm));
         }
@@ -308,6 +312,16 @@ void* vxt_metal_cb4_fast_create(
             arena_bytes += cb4_align256(size_t(c.n_embd) * sizeof(float));
             dst.post_attn_norm_off = arena_bytes;
             arena_bytes += cb4_align256(size_t(c.n_embd) * sizeof(float));
+            if (src.attn_post_norm) {
+                dst.has_attn_post_norm = true;
+                dst.attn_post_norm_off = arena_bytes;
+                arena_bytes += cb4_align256(size_t(c.n_embd) * sizeof(float));
+            }
+            if (src.ffn_post_norm) {
+                dst.has_ffn_post_norm = true;
+                dst.ffn_post_norm_off = arena_bytes;
+                arena_bytes += cb4_align256(size_t(c.n_embd) * sizeof(float));
+            }
 
             plan_concat_mat(src.w_in, dst.w_in, false, arena_bytes);
             plan_concat_mat(src.w_out, dst.w_out, false, arena_bytes);
@@ -360,6 +374,12 @@ void* vxt_metal_cb4_fast_create(
             const auto& dst = dst_layers[idx];
             std::memcpy(arena + dst.attn_norm_off, src.attn_norm, size_t(c.n_embd) * sizeof(float));
             std::memcpy(arena + dst.post_attn_norm_off, src.post_attn_norm, size_t(c.n_embd) * sizeof(float));
+            if (dst.has_attn_post_norm && src.attn_post_norm) {
+                std::memcpy(arena + dst.attn_post_norm_off, src.attn_post_norm, size_t(c.n_embd) * sizeof(float));
+            }
+            if (dst.has_ffn_post_norm && src.ffn_post_norm) {
+                std::memcpy(arena + dst.ffn_post_norm_off, src.ffn_post_norm, size_t(c.n_embd) * sizeof(float));
+            }
             pack_concat_mat(src.w_in, dst.w_in, arena, false);
             pack_concat_mat(src.w_out, dst.w_out, arena, false);
             pack_concat_mat(src.w_ffn_gu, dst.w_ffn_gu, arena, false);
@@ -437,7 +457,9 @@ void vxt_metal_cb4_fast_destroy(void* raw_runner) {
     }
 }
 
-void* vxt_metal_cb4_fast_state_create(void* raw_runner, char* err_out, size_t err_cap) {
+void* vxt_metal_cb4_fast_state_create(
+    void* raw_runner, uint32_t kv_q8, char* err_out, size_t err_cap
+) {
     @autoreleasepool {
         auto* r = static_cast<MetalCb4FastRunner*>(raw_runner);
         if (!r) {
@@ -450,6 +472,7 @@ void* vxt_metal_cb4_fast_state_create(void* raw_runner, char* err_out, size_t er
         s->n_layer = c.n_layer;
         s->kv_stride = c.n_head_kv * c.head_dim;
         s->cap_seq = 1024u;
+        s->kv_q8 = (kv_q8 != 0u) && (s->kv_stride > 0u) && ((c.head_dim % 32u) == 0u);
         s->is_rec.resize(c.n_layer, 0);
         s->conv_bytes.resize(c.n_layer, 0);
         s->ssm_bytes.resize(c.n_layer, 0);
@@ -481,11 +504,11 @@ void* vxt_metal_cb4_fast_state_create(void* raw_runner, char* err_out, size_t er
                     return nullptr;
                 }
             } else {
-                size_t kvb = size_t(s->cap_seq) * size_t(s->kv_stride) * sizeof(float);
+                size_t kvb = s->kv_buf_bytes(s->cap_seq);
                 s->k_caches[il] = cb4_alloc_zeroed(s->device, kvb);
                 s->v_caches[il] = cb4_alloc_zeroed(s->device, kvb);
                 if (!s->k_caches[il] || !s->v_caches[il]) {
-                    vxt_write_err(err_out, err_cap, "failed to allocate CB4-Fast FP32 KV cache");
+                    vxt_write_err(err_out, err_cap, "failed to allocate CB4-Fast KV cache");
                     delete s;
                     return nullptr;
                 }
@@ -493,6 +516,11 @@ void* vxt_metal_cb4_fast_state_create(void* raw_runner, char* err_out, size_t er
         }
         return s;
     }
+}
+
+size_t vxt_metal_cb4_fast_state_kv_bytes(void* raw_state) {
+    auto* s = static_cast<MetalCb4FastState*>(raw_state);
+    return s ? s->total_kv_bytes() : 0u;
 }
 
 void vxt_metal_cb4_fast_state_destroy(void* raw_state) {

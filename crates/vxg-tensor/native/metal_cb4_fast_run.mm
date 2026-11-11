@@ -5,11 +5,11 @@ namespace {
 
 struct Cb4FastEmbedParamsC {
     uint32_t cols, padded_cols, batch_m, n_vocab;
-    float eps, _pad0, _pad1, _pad2;
+    float eps, embed_scale, _pad1, _pad2;
     float centroids[16];
 };
 struct Cb4FastNormParamsC { uint32_t dim, padded_dim, batch_m; float eps; };
-struct Cb4FastSwigluParamsC { uint32_t n_ff, gu_stride, padded_ff, batch_m; };
+struct Cb4FastSwigluParamsC { uint32_t n_ff, gu_stride, padded_ff, batch_m, is_gelu, _p0, _p1, _p2; };
 struct Cb4FastAbParamsC {
     uint32_t rows, padded_cols, x_stride, y_stride, ab_half_stride, n_vh, batch_m, is_strided32;
 };
@@ -31,7 +31,7 @@ struct Cb4FastGemvParamsC {
     float poly[3][4];
 };
 struct Cb4FastFfnGuParamsC {
-    uint32_t n_ff, padded_ff, padded_cols, _pad;
+    uint32_t n_ff, padded_ff, padded_cols, is_gelu;
     float poly_g[4], poly_u[4];
 };
 struct Cb4FastArgmaxParamsC { uint32_t n_vocab, slot, next_slot, num_tgs; };
@@ -107,6 +107,7 @@ static void encode_cb4_fast_forward(
         Cb4FastEmbedParamsC ep{};
         ep.cols = c.n_embd; ep.padded_cols = r->padded_embd;
         ep.batch_m = batch_m; ep.n_vocab = c.n_vocab; ep.eps = c.rms_norm_eps;
+        ep.embed_scale = r->embed_scale;
         std::memcpy(ep.centroids, r->embed_centroids, sizeof(ep.centroids));
 
         if (fuse_m1 && c.n_layer > 0u && r->padded_embd <= 4096u) {
@@ -137,7 +138,7 @@ static void encode_cb4_fast_forward(
     }
 
     Cb4FastNormParamsC np{c.n_embd, r->padded_embd, batch_m, c.rms_norm_eps};
-    Cb4FastSwigluParamsC sp{c.n_ff, r->gu_stride, r->padded_ff, batch_m};
+    Cb4FastSwigluParamsC sp{c.n_ff, r->gu_stride, r->padded_ff, batch_m, r->ffn_gelu, 0u, 0u, 0u};
 
     uint32_t conv_ch = c.ssm_inner_size + 2u * c.ssm_group_count * c.ssm_state_size;
     uint32_t dv = c.ssm_dt_rank > 0u ? (c.ssm_inner_size / c.ssm_dt_rank) : 0u;
@@ -260,7 +261,7 @@ static void encode_cb4_fast_forward(
             };
             Cb4FastGqaBatchParamsC gp{
                 c.n_head, c.n_head_kv, c.head_dim, pos_base, c.rope_dim,
-                L.gqa_flags | (has_mrope ? 128u : 0u),
+                L.gqa_flags | (has_mrope ? 128u : 0u) | (s->kv_q8 ? 256u : 0u),
                 batch_m, r->qkv_z_stride, L.w_in.split0, kv_dim, r->padded_att,
                 c.rope_freq_base, c.rms_norm_eps, rope_pos_base, mrope_s1, mrope_s2
             };
@@ -311,6 +312,14 @@ static void encode_cb4_fast_forward(
             );
         }
 
+        if (L.has_attn_post_norm) {
+            [enc setComputePipelineState:r->pso_rms_norm];
+            [enc setBuffer:r->delta_buf offset:0 atIndex:0];
+            [enc setBuffer:r->weight_arena_buf offset:L.attn_post_norm_off atIndex:1];
+            [enc setBuffer:r->delta_buf offset:0 atIndex:2];
+            [enc setBytes:&np length:sizeof(np) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake(1, batch_m, 1) threadsPerThreadgroup:tg256];
+        }
         encode_add_rms_norm(r, enc, L.post_attn_norm_off, batch_m);
 
         if (can_fuse_gu) {
@@ -318,6 +327,7 @@ static void encode_cb4_fast_forward(
             gp.n_ff = c.n_ff;
             gp.padded_ff = r->padded_ff;
             gp.padded_cols = L.w_ffn_gu.padded_cols;
+            gp.is_gelu = r->ffn_gelu;
             std::memcpy(gp.poly_g, L.w_ffn_gu.poly[0], sizeof(gp.poly_g));
             std::memcpy(gp.poly_u, L.w_ffn_gu.poly[1], sizeof(gp.poly_u));
 
@@ -348,8 +358,21 @@ static void encode_cb4_fast_forward(
         }
 
         bool has_next_norm = (il + 1u < c.n_layer) || (compute_mode != 0u);
-        if (has_next_norm) {
-            size_t next_norm_off = (il + 1u < c.n_layer) ? r->layers[il + 1u].attn_norm_off : r->output_norm_off;
+        size_t next_norm_off = (il + 1u < c.n_layer) ? r->layers[il + 1u].attn_norm_off : r->output_norm_off;
+        if (L.has_ffn_post_norm) {
+            encode_cb4_mat(
+                r, enc, L.w_ffn_dn, r->ffn_act_buf, 0, r->padded_ff,
+                r->delta_buf, 0, r->padded_embd, batch_m, 0u
+            );
+            [enc setComputePipelineState:r->pso_rms_norm];
+            [enc setBuffer:r->delta_buf offset:0 atIndex:0];
+            [enc setBuffer:r->weight_arena_buf offset:L.ffn_post_norm_off atIndex:1];
+            [enc setBuffer:r->delta_buf offset:0 atIndex:2];
+            [enc setBytes:&np length:sizeof(np) atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake(1, batch_m, 1) threadsPerThreadgroup:tg256];
+            encode_add_rms_norm(r, enc, next_norm_off, batch_m);
+            norm_ready = has_next_norm;
+        } else if (has_next_norm) {
             encode_cb4_mat(
                 r, enc, L.w_ffn_dn, r->ffn_act_buf, 0, r->padded_ff,
                 r->delta_buf, 0, r->padded_embd, batch_m, 0u

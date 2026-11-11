@@ -24,12 +24,14 @@ pub mod gguf;
 pub mod gguf_meta;
 mod hf_meta;
 pub mod hf_pack;
+mod hf_pack_enc;
 mod huff;
 pub mod llm;
 mod llm_calib;
 mod llm_cpu;
 pub mod llm_ops;
 pub mod llm_pack;
+pub mod llm_prefill;
 pub mod lossless;
 mod meta_lz;
 pub mod metal;
@@ -39,9 +41,14 @@ mod metal_cb4_fast_ffi;
 #[cfg(vxt_has_metal)]
 mod metal_ffi;
 mod metal_llm;
+#[cfg(all(test, vxt_has_metal))]
+mod metal_llm_tests;
 mod metal_llm_turbo;
 #[cfg(vxt_has_metal)]
 mod metal_turbo_ffi;
+#[cfg(vxt_has_metal)]
+mod turbo_ngram;
+mod metal_vision;
 pub mod mmap;
 pub mod native_qwen35;
 pub mod q4_0;
@@ -54,6 +61,7 @@ pub mod vision_img;
 pub mod wht2;
 pub mod wht_turbo;
 mod wht_turbo_enc;
+mod wht_turbo_gptq;
 mod wht_turbo_tables;
 
 use std::fmt;

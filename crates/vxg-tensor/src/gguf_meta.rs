@@ -58,6 +58,8 @@ pub struct ModelConfig {
     pub rope_freq_base: f32,
     pub rope_dim: usize,
     pub rope_neox: bool,
+    pub ffn_gelu: bool,
+    pub embed_scale: f32,
     /// `0` = all layers are standard full GQA; `4` (`qwen35`) = every 4th layer (`3,7,11,...`) is full Gated-GQA and others are Recurrent Gated-DeltaNet.
     pub full_attn_interval: usize,
     pub ssm_conv_kernel: usize,
@@ -109,7 +111,13 @@ impl ModelConfig {
         let rms_norm_eps = get_f("attention.layer_norm_rms_epsilon").unwrap_or(1e-6);
         let rope_freq_base = get_f("rope.freq_base").unwrap_or(10_000.0);
         let rope_dim = get_u("rope.dimension_count").unwrap_or(head_dim);
-        let rope_neox = matches!(arch.as_str(), "qwen2" | "qwen3" | "qwen35");
+        let is_gemma = matches!(arch.as_str(), "gemma" | "gemma2" | "gemma3");
+        let rope_neox = matches!(
+            arch.as_str(),
+            "qwen2" | "qwen3" | "qwen35" | "gemma" | "gemma2" | "gemma3"
+        );
+        let ffn_gelu = is_gemma;
+        let embed_scale = if is_gemma { (n_embd as f32).sqrt() } else { 1.0 };
 
         let full_attn_interval = get_u("full_attention_interval").unwrap_or(0);
         let ssm_conv_kernel = get_u("ssm.conv_kernel").unwrap_or(0);
@@ -145,6 +153,8 @@ impl ModelConfig {
             rope_freq_base,
             rope_dim,
             rope_neox,
+            ffn_gelu,
+            embed_scale,
             full_attn_interval,
             ssm_conv_kernel,
             ssm_state_size,
@@ -158,7 +168,7 @@ impl ModelConfig {
 
     pub fn to_kv_bytes(&self) -> Vec<u8> {
         let s = format!(
-            "arch={}\nname={}\nn_layer={}\nn_embd={}\nn_ff={}\nn_vocab={}\nn_head={}\nn_head_kv={}\nhead_dim={}\neps={:.12e}\nrope_base={:.6}\nrope_dim={}\nrope_neox={}\nfull_int={}\nssm_conv={}\nssm_state={}\nssm_grp={}\nssm_dt={}\nssm_in={}\neos={}\nbos={}\n",
+            "arch={}\nname={}\nn_layer={}\nn_embd={}\nn_ff={}\nn_vocab={}\nn_head={}\nn_head_kv={}\nhead_dim={}\neps={:.12e}\nrope_base={:.6}\nrope_dim={}\nrope_neox={}\nffn_gelu={}\nembed_scale={:.8}\nfull_int={}\nssm_conv={}\nssm_state={}\nssm_grp={}\nssm_dt={}\nssm_in={}\neos={}\nbos={}\n",
             self.arch,
             self.model_name.replace('\n', " "),
             self.n_layer,
@@ -172,6 +182,8 @@ impl ModelConfig {
             self.rope_freq_base,
             self.rope_dim,
             self.rope_neox as u8,
+            self.ffn_gelu as u8,
+            self.embed_scale,
             self.full_attn_interval,
             self.ssm_conv_kernel,
             self.ssm_state_size,
@@ -217,6 +229,15 @@ impl ModelConfig {
             rope_freq_base: p_f32("rope_base")?,
             rope_dim: p_usize("rope_dim")?,
             rope_neox: p_usize("rope_neox")? != 0,
+            ffn_gelu: m
+                .get("ffn_gelu")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0)
+                != 0,
+            embed_scale: m
+                .get("embed_scale")
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(1.0),
             full_attn_interval: p_usize("full_int")?,
             ssm_conv_kernel: p_usize("ssm_conv")?,
             ssm_state_size: p_usize("ssm_state")?,

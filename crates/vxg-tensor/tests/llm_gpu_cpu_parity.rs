@@ -42,6 +42,8 @@ fn build_synthetic_qwen35_vxt(mode: u8) -> Vec<u8> {
         rope_freq_base: 1_000_000.0,
         rope_dim: 32,
         rope_neox: true,
+        ffn_gelu: false,
+        embed_scale: 1.0,
         full_attn_interval: 2, // layer 0 = LinearDeltaNet (dk=128!), layer 1 = FullGqa (gated_q)!
         ssm_conv_kernel: 4,
         ssm_state_size: 128,

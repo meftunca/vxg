@@ -5,11 +5,11 @@
 
 struct Cb4FastEmbedParams {
     uint cols, padded_cols, batch_m, n_vocab;
-    float eps, _pad0, _pad1, _pad2;
+    float eps, embed_scale, _pad1, _pad2;
     float centroids[16];
 };
 struct Cb4FastNormParams { uint dim, padded_dim, batch_m; float eps; };
-struct Cb4FastSwigluParams { uint n_ff, gu_stride, padded_ff, batch_m; };
+struct Cb4FastSwigluParams { uint n_ff, gu_stride, padded_ff, batch_m, is_gelu, _p0, _p1, _p2; };
 struct Cb4FastAbParams {
     uint rows, padded_cols, x_stride, y_stride, ab_half_stride, n_vh, batch_m, is_strided32;
 };
@@ -106,9 +106,10 @@ kernel void vxt_cb4_embed_exact_batch(
         return;
     }
     uint tok = min(tok_buf[m], p.n_vocab - 1u);
-    dst[col] = cb4_decode_embed_elem(
+    float v = cb4_decode_embed_elem(
         tiled_scales, tiled_words, row_ptr, outliers, p.centroids, tok, col, p.padded_cols
     );
+    dst[col] = (p.embed_scale != 1.0f) ? (v * p.embed_scale) : v;
 }
 
 // Single-dispatch M=1 Embedding Decode + Layer-0 RMSNorm (1 TG x 256 threads, 0-ULP exact).
@@ -133,6 +134,7 @@ kernel void vxt_cb4_embed_norm0_m1(
             float v = cb4_decode_embed_elem(
                 tiled_scales, tiled_words, row_ptr, outliers, p.centroids, tok, col, p.padded_cols
             );
+            if (p.embed_scale != 1.0f) v *= p.embed_scale;
             cur_out[col] = v;
             sq = fma(v, v, sq);
         } else {
@@ -249,7 +251,14 @@ kernel void vxt_cb4_swiglu_batch(
     device const float* src = gu_in + ulong(m) * ulong(p.gu_stride);
     float g = src[col];
     float u = src[p.n_ff + col];
-    dst[col] = (g / (1.0f + exp(-g))) * u;
+    if (p.is_gelu != 0u) {
+        float z = 0.7978846f * (g + 0.044715f * g * g * g);
+        float e2 = exp(-2.0f * fabs(z));
+        float th = copysign((1.0f - e2) / (1.0f + e2), z);
+        dst[col] = (0.5f * g * (1.0f + th)) * u;
+    } else {
+        dst[col] = (g / (1.0f + exp(-g))) * u;
+    }
 }
 
 kernel void vxt_cb4_ab_gemv_batch(

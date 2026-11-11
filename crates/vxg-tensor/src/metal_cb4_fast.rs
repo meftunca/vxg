@@ -128,6 +128,19 @@ pub(crate) struct MetalCb4FastState {
     inner: crate::metal_cb4_fast_ffi::Cb4FastStateInner,
 }
 
+impl MetalCb4FastState {
+    pub fn kv_bytes(&self) -> usize {
+        #[cfg(vxt_has_metal)]
+        {
+            self.inner.kv_bytes()
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            0
+        }
+    }
+}
+
 impl MetalCb4FastRunner {
     pub fn try_from_layers(
         eng: &MetalEngine,
@@ -162,15 +175,16 @@ impl MetalCb4FastRunner {
         }
     }
 
-    pub fn new_state(&self) -> Result<MetalCb4FastState> {
+    pub fn new_state(&self, kv_q8: bool) -> Result<MetalCb4FastState> {
         #[cfg(vxt_has_metal)]
         {
             Ok(MetalCb4FastState {
-                inner: self.inner.new_state()?,
+                inner: self.inner.new_state(kv_q8)?,
             })
         }
         #[cfg(not(vxt_has_metal))]
         {
+            let _ = kv_q8;
             Err(Error::Unsupported("Metal unavailable".into()))
         }
     }

@@ -112,6 +112,8 @@ struct VxtCb4FastLayerUpload {
     _pad: u32,
     attn_norm: *const f32,
     post_attn_norm: *const f32,
+    attn_post_norm: *const f32,
+    ffn_post_norm: *const f32,
     w_in: VxtCb4FastConcatMat,
     w_out: VxtCb4FastConcatMat,
     w_ffn_gu: VxtCb4FastConcatMat,
@@ -133,6 +135,8 @@ extern "C" {
     fn vxt_metal_cb4_fast_create(
         gemv_ctx: *mut c_void,
         cfg: *const VxtLlmConfig,
+        embed_scale: f32,
+        ffn_gelu: u32,
         embed_in: *const VxtCb4FastConcatMat,
         embed_centroids: *const f32,
         has_untied_head: u32,
@@ -145,10 +149,12 @@ extern "C" {
     fn vxt_metal_cb4_fast_destroy(runner: *mut c_void);
     fn vxt_metal_cb4_fast_state_create(
         runner: *mut c_void,
+        kv_q8: u32,
         err_out: *mut c_char,
         err_cap: usize,
     ) -> *mut c_void;
     fn vxt_metal_cb4_fast_state_destroy(state: *mut c_void);
+    fn vxt_metal_cb4_fast_state_kv_bytes(state: *mut c_void) -> usize;
     fn vxt_metal_cb4_fast_step_batch(
         runner: *mut c_void,
         state: *mut c_void,
@@ -221,6 +227,12 @@ impl Drop for Cb4FastStateInner {
     }
 }
 
+impl Cb4FastStateInner {
+    pub(crate) fn kv_bytes(&self) -> usize {
+        unsafe { vxt_metal_cb4_fast_state_kv_bytes(self.0.as_ptr()) }
+    }
+}
+
 fn opt_slice_ptr(opt: Option<&[f32]>) -> (*const f32, u32) {
     match opt {
         Some(s) if !s.is_empty() => (s.as_ptr(), s.len() as u32),
@@ -278,88 +290,54 @@ impl Cb4FastRunnerInner {
         let mut layer_uploads = Vec::with_capacity(layers.len());
 
         for ly in layers {
-            let (
-                PackedTensor::Codebook(fg),
-                PackedTensor::Codebook(fu),
-                PackedTensor::Codebook(fd),
-            ) = (&ly.ffn_gate.cpu, &ly.ffn_up.cpu, &ly.ffn_down.cpu)
+            let (PackedTensor::Codebook(fg), PackedTensor::Codebook(fu), PackedTensor::Codebook(fd)) =
+                (&ly.ffn_gate.cpu, &ly.ffn_up.cpu, &ly.ffn_down.cpu)
             else {
                 return Ok(None);
             };
             let w_ffn_gu = VxtCb4FastConcatMat::from_subs(&[fg, fu]);
             let w_ffn_dn = VxtCb4FastConcatMat::from_subs(&[fd]);
+            let (apn_p, _) = opt_slice_ptr(ly.attn_post_norm.as_deref());
+            let (fpn_p, _) = opt_slice_ptr(ly.ffn_post_norm.as_deref());
 
             match &ly.attn {
                 LayerAttn::LinearDeltaNet {
-                    wqkv,
-                    wqkv_gate,
-                    ssm_alpha,
-                    ssm_beta,
-                    ssm_out,
-                    ssm_conv1d,
-                    ssm_a,
-                    ssm_dt_bias,
-                    ssm_norm,
+                    wqkv, wqkv_gate, ssm_alpha, ssm_beta, ssm_out,
+                    ssm_conv1d, ssm_a, ssm_dt_bias, ssm_norm,
                 } => {
-                    let (
-                        PackedTensor::Codebook(mq),
-                        PackedTensor::Codebook(mg),
-                        PackedTensor::Codebook(mo),
-                    ) = (&wqkv.cpu, &wqkv_gate.cpu, &ssm_out.cpu)
+                    let (PackedTensor::Codebook(mq), PackedTensor::Codebook(mg), PackedTensor::Codebook(mo)) =
+                        (&wqkv.cpu, &wqkv_gate.cpu, &ssm_out.cpu)
                     else {
                         return Ok(None);
                     };
                     let (ab_vec, ab_is_strided32) = build_ab_padded(
-                        &ssm_alpha.cpu,
-                        &ssm_beta.cpu,
-                        cfg.ssm_dt_rank,
-                        cfg.n_embd,
-                        padded_embd,
+                        &ssm_alpha.cpu, &ssm_beta.cpu, cfg.ssm_dt_rank, cfg.n_embd, padded_embd,
                     );
                     let ab_ptr = ab_vec.as_ptr();
                     ab_keep.push(ab_vec);
 
                     layer_uploads.push(VxtCb4FastLayerUpload {
-                        is_recurrent: 1,
-                        gated_q: 0,
-                        ab_is_strided32,
-                        _pad: 0,
+                        is_recurrent: 1, gated_q: 0, ab_is_strided32, _pad: 0,
                         attn_norm: ly.attn_norm.as_ptr(),
                         post_attn_norm: ly.post_attn_norm.as_ptr(),
+                        attn_post_norm: apn_p,
+                        ffn_post_norm: fpn_p,
                         w_in: VxtCb4FastConcatMat::from_subs(&[mq, mg]),
                         w_out: VxtCb4FastConcatMat::from_subs(&[mo]),
-                        w_ffn_gu,
-                        w_ffn_dn,
-                        ab_weights_pad: ab_ptr,
-                        vec0: ssm_conv1d.as_ptr(),
-                        vec0_len: ssm_conv1d.len() as u32,
-                        vec1: ssm_a.as_ptr(),
-                        vec1_len: ssm_a.len() as u32,
-                        vec2: ssm_dt_bias.as_ptr(),
-                        vec2_len: ssm_dt_bias.len() as u32,
-                        vec3: ssm_norm.as_ptr(),
-                        vec3_len: ssm_norm.len() as u32,
-                        vec4: null(),
-                        vec4_len: 0,
+                        w_ffn_gu, w_ffn_dn, ab_weights_pad: ab_ptr,
+                        vec0: ssm_conv1d.as_ptr(), vec0_len: ssm_conv1d.len() as u32,
+                        vec1: ssm_a.as_ptr(), vec1_len: ssm_a.len() as u32,
+                        vec2: ssm_dt_bias.as_ptr(), vec2_len: ssm_dt_bias.len() as u32,
+                        vec3: ssm_norm.as_ptr(), vec3_len: ssm_norm.len() as u32,
+                        vec4: null(), vec4_len: 0,
                     });
                 }
                 LayerAttn::FullGqa {
-                    wq,
-                    wk,
-                    wv,
-                    wo,
-                    q_norm,
-                    k_norm,
-                    q_bias,
-                    k_bias,
-                    v_bias,
-                    gated_q,
+                    wq, wk, wv, wo, q_norm, k_norm, q_bias, k_bias, v_bias, gated_q,
                 } => {
                     let (
-                        PackedTensor::Codebook(mq),
-                        PackedTensor::Codebook(mk),
-                        PackedTensor::Codebook(mv),
-                        PackedTensor::Codebook(mo),
+                        PackedTensor::Codebook(mq), PackedTensor::Codebook(mk),
+                        PackedTensor::Codebook(mv), PackedTensor::Codebook(mo),
                     ) = (&wq.cpu, &wk.cpu, &wv.cpu, &wo.cpu)
                     else {
                         return Ok(None);
@@ -371,49 +349,30 @@ impl Cb4FastRunnerInner {
                     let (v4, l4) = opt_slice_ptr(v_bias.as_deref());
 
                     layer_uploads.push(VxtCb4FastLayerUpload {
-                        is_recurrent: 0,
-                        gated_q: u32::from(*gated_q),
-                        ab_is_strided32: 0,
-                        _pad: 0,
+                        is_recurrent: 0, gated_q: u32::from(*gated_q), ab_is_strided32: 0, _pad: 0,
                         attn_norm: ly.attn_norm.as_ptr(),
                         post_attn_norm: ly.post_attn_norm.as_ptr(),
+                        attn_post_norm: apn_p,
+                        ffn_post_norm: fpn_p,
                         w_in: VxtCb4FastConcatMat::from_subs(&[mq, mk, mv]),
                         w_out: VxtCb4FastConcatMat::from_subs(&[mo]),
-                        w_ffn_gu,
-                        w_ffn_dn,
-                        ab_weights_pad: null(),
-                        vec0: v0,
-                        vec0_len: l0,
-                        vec1: v1,
-                        vec1_len: l1,
-                        vec2: v2,
-                        vec2_len: l2,
-                        vec3: v3,
-                        vec3_len: l3,
-                        vec4: v4,
-                        vec4_len: l4,
+                        w_ffn_gu, w_ffn_dn, ab_weights_pad: null(),
+                        vec0: v0, vec0_len: l0, vec1: v1, vec1_len: l1,
+                        vec2: v2, vec2_len: l2, vec3: v3, vec3_len: l3,
+                        vec4: v4, vec4_len: l4,
                     });
                 }
             }
         }
 
         let c_cfg = VxtLlmConfig {
-            n_layer: cfg.n_layer as u32,
-            n_embd: cfg.n_embd as u32,
-            n_ff: cfg.n_ff as u32,
-            n_vocab: cfg.n_vocab as u32,
-            n_head: cfg.n_head as u32,
-            n_head_kv: cfg.n_head_kv as u32,
-            head_dim: cfg.head_dim as u32,
-            rope_dim: cfg.rope_dim as u32,
-            rope_neox: u32::from(cfg.rope_neox),
-            rope_freq_base: cfg.rope_freq_base,
-            rms_norm_eps: cfg.rms_norm_eps,
-            ssm_conv_kernel: cfg.ssm_conv_kernel as u32,
-            ssm_state_size: cfg.ssm_state_size as u32,
-            ssm_group_count: cfg.ssm_group_count as u32,
-            ssm_inner_size: cfg.ssm_inner_size as u32,
-            ssm_dt_rank: cfg.ssm_dt_rank as u32,
+            n_layer: cfg.n_layer as u32, n_embd: cfg.n_embd as u32, n_ff: cfg.n_ff as u32,
+            n_vocab: cfg.n_vocab as u32, n_head: cfg.n_head as u32, n_head_kv: cfg.n_head_kv as u32,
+            head_dim: cfg.head_dim as u32, rope_dim: cfg.rope_dim as u32,
+            rope_neox: u32::from(cfg.rope_neox), rope_freq_base: cfg.rope_freq_base,
+            rms_norm_eps: cfg.rms_norm_eps, ssm_conv_kernel: cfg.ssm_conv_kernel as u32,
+            ssm_state_size: cfg.ssm_state_size as u32, ssm_group_count: cfg.ssm_group_count as u32,
+            ssm_inner_size: cfg.ssm_inner_size as u32, ssm_dt_rank: cfg.ssm_dt_rank as u32,
         };
 
         let mut err_buf = [0u8; 512];
@@ -421,6 +380,8 @@ impl Cb4FastRunnerInner {
             vxt_metal_cb4_fast_create(
                 eng.raw_ctx().as_ptr(),
                 &c_cfg,
+                cfg.embed_scale,
+                u32::from(cfg.ffn_gelu),
                 &embed_desc,
                 emb_cb.centroids.as_ptr(),
                 has_untied_head,
@@ -438,11 +399,12 @@ impl Cb4FastRunnerInner {
         Ok(Some(Self { raw: nn }))
     }
 
-    pub(crate) fn new_state(&self) -> Result<Cb4FastStateInner> {
+    pub(crate) fn new_state(&self, kv_q8: bool) -> Result<Cb4FastStateInner> {
         let mut err_buf = [0u8; 512];
         let ptr = unsafe {
             vxt_metal_cb4_fast_state_create(
                 self.raw.as_ptr(),
+                u32::from(kv_q8),
                 err_buf.as_mut_ptr() as *mut c_char,
                 err_buf.len(),
             )

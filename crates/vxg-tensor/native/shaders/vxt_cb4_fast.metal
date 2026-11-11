@@ -22,7 +22,7 @@ struct Cb4FastFfnGuParams {
     uint n_ff;
     uint padded_ff;
     uint padded_cols;
-    uint _pad;
+    uint is_gelu;
     float poly_g[4];
     float poly_u[4];
 };
@@ -269,7 +269,14 @@ kernel void vxt_cb4_ffn_gu_nr2_m1(
         if (lane == 0u) {
             float2 gv = float2(g0, g1);
             float2 uv = float2(u0, u1);
-            *(device float2*)(act_out + rg) = (gv / (1.0f + exp(-gv))) * uv;
+            if (p.is_gelu != 0u) {
+                float2 z = 0.7978846f * (gv + 0.044715f * gv * gv * gv);
+                float2 e2 = exp(-2.0f * fabs(z));
+                float2 th = copysign((1.0f - e2) / (1.0f + e2), z);
+                *(device float2*)(act_out + rg) = (0.5f * gv * (1.0f + th)) * uv;
+            } else {
+                *(device float2*)(act_out + rg) = (gv / (1.0f + exp(-gv))) * uv;
+            }
         }
     }
     if (tg_pos.x == 0u && p.n_ff < p.padded_ff) {

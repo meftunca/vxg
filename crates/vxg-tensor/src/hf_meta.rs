@@ -156,10 +156,12 @@ pub fn parse_hf_config(bytes: &[u8], fallback_name: &str) -> Result<(ModelConfig
         "qwen3_5" | "qwen3_5_text" => ("qwen35", true),
         "qwen3" => ("qwen3", false),
         "qwen2" => ("qwen2", false),
-        "llama" | "mistral" => ("llama", false),
+        "llama" => ("llama", false),
+        "mistral" => ("mistral", false),
+        "gemma" | "gemma2" | "gemma3" | "gemma3_text" => ("gemma3", true),
         other => {
             return Err(Error::Unsupported(format!(
-                "unsupported HF model_type '{other}' (expected qwen3_5, qwen3, qwen2, llama)"
+                "unsupported HF model_type '{other}' (expected qwen3_5, qwen3, qwen2, llama, mistral, gemma3)"
             )))
         }
     };
@@ -188,6 +190,15 @@ pub fn parse_hf_config(bytes: &[u8], fallback_name: &str) -> Result<(ModelConfig
         .unwrap_or(1.0);
     let rope_dim = ((head_dim as f32 * partial_rot).round() as usize).clamp(2, head_dim);
 
+    let is_gemma = arch == "gemma3";
+    let act_str = t
+        .get("hidden_act")
+        .or_else(|| t.get("hidden_activation"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let ffn_gelu = is_gemma || act_str.contains("gelu");
+    let embed_scale = if is_gemma { (n_embd as f32).sqrt() } else { 1.0 };
+
     let (full_attn_interval, ssm_conv_kernel, ssm_state_size, ssm_group_count, ssm_dt_rank, ssm_inner_size) =
         if arch == "qwen35" {
             let fi = json_usize(t, "full_attention_interval").unwrap_or(4);
@@ -210,7 +221,7 @@ pub fn parse_hf_config(bytes: &[u8], fallback_name: &str) -> Result<(ModelConfig
         .get("tie_word_embeddings")
         .or_else(|| root.get("tie_word_embeddings"))
         .and_then(Value::as_bool)
-        .unwrap_or(false);
+        .unwrap_or(is_gemma);
 
     Ok((
         ModelConfig {
@@ -227,6 +238,8 @@ pub fn parse_hf_config(bytes: &[u8], fallback_name: &str) -> Result<(ModelConfig
             rope_freq_base,
             rope_dim,
             rope_neox: true,
+            ffn_gelu,
+            embed_scale,
             full_attn_interval,
             ssm_conv_kernel,
             ssm_state_size,
@@ -432,6 +445,7 @@ pub(crate) fn map_hf_vision_tensor_name(src: &str, v_depth: usize) -> Option<(St
 
 pub(crate) fn map_hf_tensor_name(
     src: &str,
+    arch: &str,
     tie_word_embeddings: bool,
     n_layer: usize,
 ) -> Option<(String, HfTransform)> {
@@ -462,7 +476,17 @@ pub(crate) fn map_hf_tensor_name(
     }
     let (dst_suf, tf) = match suffix {
         "input_layernorm.weight" => ("attn_norm.weight", HfTransform::NormWeight),
-        "post_attention_layernorm.weight" => ("post_attention_norm.weight", HfTransform::NormWeight),
+        "post_attention_layernorm.weight" => {
+            if arch == "gemma3" {
+                ("attn_post_norm.weight", HfTransform::NormWeight)
+            } else {
+                ("post_attention_norm.weight", HfTransform::NormWeight)
+            }
+        }
+        "pre_feedforward_layernorm.weight" => {
+            ("post_attention_norm.weight", HfTransform::NormWeight)
+        }
+        "post_feedforward_layernorm.weight" => ("ffn_post_norm.weight", HfTransform::NormWeight),
         "mlp.gate_proj.weight" => ("ffn_gate.weight", HfTransform::Identity),
         "mlp.up_proj.weight" => ("ffn_up.weight", HfTransform::Identity),
         "mlp.down_proj.weight" => ("ffn_down.weight", HfTransform::Identity),

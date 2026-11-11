@@ -23,6 +23,103 @@ pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
+pub(crate) fn format_gemma_or_mistral(
+    tokenizer: &BpeTokenizer,
+    messages: &[ChatMessage],
+    asst_cache: &HashMap<String, (bool, Vec<u32>)>,
+) -> Option<Vec<u32>> {
+    if tokenizer.token_id("<start_of_turn>").is_some()
+        && tokenizer.token_id("<end_of_turn>").is_some()
+    {
+        let mut out = if tokenizer.token_id("<bos>").is_some() {
+            tokenizer.encode("<bos>")
+        } else {
+            Vec::new()
+        };
+        let eot_ids = tokenizer.encode("<end_of_turn>\n");
+        let model_hdr = tokenizer.encode("<start_of_turn>model\n");
+        let mut pending_sys = String::new();
+        for msg in messages {
+            if matches!(msg.role.as_str(), "system" | "developer") {
+                if !pending_sys.is_empty() {
+                    pending_sys.push_str("\n\n");
+                }
+                pending_sys.push_str(msg.content.trim());
+                continue;
+            }
+            if msg.role == "assistant" {
+                if let Some((_, exact_ids)) = asst_cache.get(&msg.content) {
+                    out.extend_from_slice(&model_hdr);
+                    out.extend_from_slice(exact_ids);
+                    out.extend_from_slice(&eot_ids);
+                    continue;
+                }
+                out.extend(tokenizer.encode(&format!(
+                    "<start_of_turn>model\n{}<end_of_turn>\n",
+                    msg.content.trim()
+                )));
+            } else {
+                let body = if pending_sys.is_empty() {
+                    msg.content.trim().to_owned()
+                } else {
+                    let s = format!("{pending_sys}\n\n{}", msg.content.trim());
+                    pending_sys.clear();
+                    s
+                };
+                out.extend(tokenizer.encode(&format!("<start_of_turn>user\n{body}<end_of_turn>\n")));
+            }
+        }
+        if !pending_sys.is_empty() {
+            out.extend(tokenizer.encode(&format!(
+                "<start_of_turn>user\n{pending_sys}<end_of_turn>\n"
+            )));
+        }
+        out.extend_from_slice(&model_hdr);
+        return Some(out);
+    }
+
+    if tokenizer.token_id("[INST]").is_some() && tokenizer.token_id("[/INST]").is_some() {
+        let mut out = if tokenizer.token_id("<s>").is_some() {
+            tokenizer.encode("<s>")
+        } else {
+            Vec::new()
+        };
+        let eos_s = tokenizer.encode("</s>");
+        let mut pending_sys = String::new();
+        for msg in messages {
+            if matches!(msg.role.as_str(), "system" | "developer") {
+                if !pending_sys.is_empty() {
+                    pending_sys.push_str("\n\n");
+                }
+                pending_sys.push_str(msg.content.trim());
+                continue;
+            }
+            if msg.role == "assistant" {
+                if let Some((_, exact_ids)) = asst_cache.get(&msg.content) {
+                    out.extend_from_slice(exact_ids);
+                } else {
+                    out.extend(tokenizer.encode(msg.content.trim()));
+                }
+                out.extend_from_slice(&eos_s);
+            } else {
+                let body = if pending_sys.is_empty() {
+                    msg.content.trim().to_owned()
+                } else {
+                    let s = format!("{pending_sys}\n\n{}", msg.content.trim());
+                    pending_sys.clear();
+                    s
+                };
+                out.extend(tokenizer.encode(&format!("[INST] {body} [/INST]")));
+            }
+        }
+        if !pending_sys.is_empty() {
+            out.extend(tokenizer.encode(&format!("[INST] {pending_sys} [/INST]")));
+        }
+        return Some(out);
+    }
+    None
+}
+
 pub(crate) fn count_image_spans(ids: &[u32], image_token_id: u32) -> usize {
     let mut spans = 0usize;
     let mut in_span = false;

@@ -11,7 +11,7 @@ use crate::codebook::{CodebookMatrix, Q4_0Matrix};
 use crate::format::{write_vxt_model, PackedTensor, VxtEntry};
 use crate::gguf::{GgufTensorMeta, GgufView};
 use crate::gguf_meta::{parse_gguf_kv, ModelConfig};
-use crate::llm_calib::{run_turbo_calibration, TurboCalibPlan};
+use crate::llm_calib::{run_turbo_calibration, turbo_ch_amp, TurboCalibPlan};
 use crate::lossless::LosslessMatrix;
 use crate::tokenizer::BpeTokenizer;
 use crate::wht2::Wht2Matrix;
@@ -257,15 +257,24 @@ fn encode_gguf_tensor_with_layers(
                 sorted.get(rows / 2).copied().unwrap_or(1e-6).max(1e-12)
             };
 
+            let ch_amp = turbo_ch_amp(plan, &meta.name, layer_idx, cols);
             if meta.name == "token_embd.weight" || meta.name == "output.weight" {
                 let h = if meta.name == "token_embd.weight" { &plan.h_embd } else { &plan.h_lm_head };
-                let lam = if meta.name == "token_embd.weight" { EMBD_LAM } else { 0.040 };
-                Ok(PackedTensor::TurboWht(TurboWhtMatrix::encode_with_hessian(
-                    4,
+                let head_bits = if plan.ch_plan.is_some() { 3 } else { 4 };
+                let lam = if head_bits == 3 {
+                    0.0
+                } else if meta.name == "token_embd.weight" {
+                    EMBD_LAM
+                } else {
+                    0.040
+                };
+                Ok(PackedTensor::TurboWht(TurboWhtMatrix::encode_with_ch_amp(
+                    head_bits,
                     rows,
                     cols,
                     &f32s,
                     non_empty_slice(h),
+                    ch_amp,
                     |r| turbo_entropy_scale * if row_ms[r] > 3.0 * mat_ms { 0.0 } else { lam },
                 )?))
             } else {
@@ -310,12 +319,13 @@ fn encode_gguf_tensor_with_layers(
                 } else {
                     0.040
                 };
-                Ok(PackedTensor::TurboWht(TurboWhtMatrix::encode_with_hessian(
+                Ok(PackedTensor::TurboWht(TurboWhtMatrix::encode_with_ch_amp(
                     4,
                     rows,
                     cols,
                     &f32s,
                     h_rot,
+                    ch_amp,
                     |r| {
                         if row_ms[r] > 3.2 * mat_ms {
                             0.0
@@ -346,7 +356,16 @@ pub fn pack_gguf_model_to_vxt(
 pub fn pack_gguf_model_to_vxt_with_entropy_scale(
     gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, turbo_entropy_scale: f32,
 ) -> Result<(ModelConfig, Vec<u8>)> {
-    pack_with_activation(gguf_bytes, mode, threads, turbo_entropy_scale, None)
+    pack_with_activation(gguf_bytes, mode, threads, turbo_entropy_scale, None, None)
+}
+
+pub fn pack_gguf_model_to_vxt_with_progress(
+    gguf_bytes: &[u8],
+    mode: LlmPackMode,
+    threads: usize,
+    progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>,
+) -> Result<(ModelConfig, Vec<u8>)> {
+    pack_with_activation(gguf_bytes, mode, threads, 1.0, None, progress)
 }
 
 pub fn turbo_activation_manifest(bytes: &[u8]) -> Result<serde_json::Value> {
@@ -358,9 +377,9 @@ pub fn turbo_activation_manifest(bytes: &[u8]) -> Result<serde_json::Value> {
 }
 
 pub fn pack_gguf_model_with_activation_profile(bytes: &[u8], threads: usize, profile: &serde_json::Value) -> Result<(ModelConfig,Vec<u8>)> {
-    pack_with_activation(bytes,LlmPackMode::Turbo,threads,1.,Some(profile))
+    pack_with_activation(bytes,LlmPackMode::Turbo,threads,1.,Some(profile),None)
 }
-fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, turbo_entropy_scale: f32, activation: Option<&serde_json::Value>) -> Result<(ModelConfig,Vec<u8>)> {
+fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, turbo_entropy_scale: f32, activation: Option<&serde_json::Value>, progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>) -> Result<(ModelConfig,Vec<u8>)> {
     if !turbo_entropy_scale.is_finite() || turbo_entropy_scale < 0.0 {
         return Err(Error::Format("turbo entropy scale must be finite and nonnegative".into()));
     }
@@ -416,6 +435,12 @@ fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, tu
     let slots: Vec<Mutex<Option<VxtEntry>>> = (0..n).map(|_| Mutex::new(None)).collect();
     let first_err: Mutex<Option<Error>> = Mutex::new(None);
     let next_idx = AtomicUsize::new(0);
+    let done_cnt = AtomicUsize::new(0);
+    if let Some(cb) = progress {
+        if !cb(0, n, "GGUF kalibrasyonu tamamlandı, sıkıştırılıyor...") {
+            return Err(Error::Io("işlem kullanıcı tarafından iptal edildi".into()));
+        }
+    }
 
     std::thread::scope(|s| {
         for _ in 0..workers {
@@ -424,6 +449,7 @@ fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, tu
             let slots_ref = &slots;
             let err_ref = &first_err;
             let idx_ref = &next_idx;
+            let done_ref = &done_cnt;
             let plan_ref = &smooth_plan;
             let cb4_ref = &cb4_plan;
             s.spawn(move || loop {
@@ -450,6 +476,16 @@ fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, tu
                             name: meta.name.clone(),
                             tensor,
                         });
+                        let done = done_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(cb) = progress {
+                            if !cb(done, n, &meta.name) {
+                                let mut g = err_ref.lock().unwrap();
+                                if g.is_none() {
+                                    *g = Some(Error::Io("işlem kullanıcı tarafından iptal edildi".into()));
+                                }
+                                break;
+                            }
+                        }
                     }
                     Err(e) => {
                         let mut g = err_ref.lock().unwrap();

@@ -331,21 +331,30 @@ pub(crate) fn pack_turbo_ec(m: &TurboWhtMatrix, out: &mut Vec<u8>) {
     }
 }
 
-pub(crate) fn unpack_turbo_ec(
+pub(crate) struct PendingEcTensor<'a> {
+    pub entry_idx: usize,
+    pub bits: u8,
+    pub rows: usize,
+    pub cols: usize,
+    pub padded_cols: usize,
+    pub disk_bytes: usize,
+    pub chunk_slices: Vec<&'a [u8]>,
+}
+
+pub(crate) fn scan_turbo_ec<'a>(
+    entry_idx: usize,
     bits: u8,
     rows: usize,
     cols: usize,
     padded_cols: usize,
-    r: &mut Cur<'_>,
-) -> Result<TurboWhtMatrix> {
+    r: &mut Cur<'a>,
+) -> Result<PendingEcTensor<'a>> {
     if !matches!(bits, 2 | 3 | 4 | 5) || padded_cols != cols.div_ceil(256) * 256 {
         return Err(Error::Format("invalid VXT EC-Turbo header".into()));
     }
     let payload_start = r.pos;
     let padded_rows = rows.div_ceil(4) * 4;
     let row_tiles = padded_rows / 4;
-    let steps = padded_cols / 256;
-    let wps = TurboWhtMatrix::words_per_tile_step(bits);
     let expected_chunks = row_tiles.div_ceil(CHUNK_TILES);
     let n_chunks = r.u32()? as usize;
     if n_chunks != expected_chunks {
@@ -356,14 +365,44 @@ pub(crate) fn unpack_turbo_ec(
         let clen = r.u32()? as usize;
         chunk_slices.push(r.take(clen)?);
     }
-    let disk_bytes = r.pos - payload_start;
+    Ok(PendingEcTensor {
+        entry_idx,
+        bits,
+        rows,
+        cols,
+        padded_cols,
+        disk_bytes: r.pos - payload_start,
+        chunk_slices,
+    })
+}
 
-    let mut scales_f16 = vec![0u16; row_tiles * steps * 8];
-    let mut packed_words = vec![0u32; row_tiles * steps * wps];
-    let mut errs: Vec<Option<Error>> = (0..n_chunks).map(|_| None).collect();
-
-    std::thread::scope(|s| {
-        for (((ci, &bytes), (sc_ch, pw_ch)), err_slot) in chunk_slices
+pub(crate) fn decode_pending_ec_batch(
+    jobs: Vec<PendingEcTensor<'_>>,
+) -> Result<Vec<(usize, TurboWhtMatrix)>> {
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    struct WorkTask<'a> {
+        bits: u8,
+        tile_start: usize,
+        steps: usize,
+        bytes: &'a [u8],
+        sc_ptr: usize,
+        sc_len: usize,
+        pw_ptr: usize,
+        pw_len: usize,
+    }
+    let mut mats: Vec<(usize, TurboWhtMatrix)> = Vec::with_capacity(jobs.len());
+    let mut tasks: Vec<WorkTask<'_>> = Vec::new();
+    for j in &jobs {
+        let padded_rows = j.rows.div_ceil(4) * 4;
+        let row_tiles = padded_rows / 4;
+        let steps = j.padded_cols / 256;
+        let wps = TurboWhtMatrix::words_per_tile_step(j.bits);
+        let mut scales_f16 = vec![0u16; row_tiles * steps * 8];
+        let mut packed_words = vec![0u32; row_tiles * steps * wps];
+        for ((ci, &bytes), (sc_ch, pw_ch)) in j
+            .chunk_slices
             .iter()
             .enumerate()
             .zip(
@@ -371,27 +410,81 @@ pub(crate) fn unpack_turbo_ec(
                     .chunks_mut(CHUNK_TILES * steps * 8)
                     .zip(packed_words.chunks_mut(CHUNK_TILES * steps * wps)),
             )
-            .zip(errs.iter_mut())
         {
-            s.spawn(move || {
-                if let Err(e) = unpack_ec_chunk(bits, ci * CHUNK_TILES, steps, bytes, sc_ch, pw_ch)
-                {
-                    *err_slot = Some(e);
+            tasks.push(WorkTask {
+                bits: j.bits,
+                tile_start: ci * CHUNK_TILES,
+                steps,
+                bytes,
+                sc_ptr: sc_ch.as_mut_ptr() as usize,
+                sc_len: sc_ch.len(),
+                pw_ptr: pw_ch.as_mut_ptr() as usize,
+                pw_len: pw_ch.len(),
+            });
+        }
+        mats.push((
+            j.entry_idx,
+            TurboWhtMatrix {
+                bits: j.bits,
+                rows: j.rows,
+                cols: j.cols,
+                padded_rows,
+                padded_cols: j.padded_cols,
+                disk_bytes: j.disk_bytes,
+                scales_f16,
+                packed_words,
+            },
+        ));
+    }
+    let n_tasks = tasks.len();
+    let n_workers = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 10))
+        .unwrap_or(8)
+        .min(n_tasks);
+    if n_workers <= 1 {
+        for t in &tasks {
+            let sc = unsafe { std::slice::from_raw_parts_mut(t.sc_ptr as *mut u16, t.sc_len) };
+            let pw = unsafe { std::slice::from_raw_parts_mut(t.pw_ptr as *mut u32, t.pw_len) };
+            unpack_ec_chunk(t.bits, t.tile_start, t.steps, t.bytes, sc, pw)?;
+        }
+        return Ok(mats);
+    }
+    let next_idx = std::sync::atomic::AtomicUsize::new(0);
+    let mut worker_errs: Vec<Option<Error>> = (0..n_workers).map(|_| None).collect();
+    std::thread::scope(|s| {
+        let tasks_ref = &tasks;
+        let next_ref = &next_idx;
+        for slot in &mut worker_errs {
+            s.spawn(move || loop {
+                let ti = next_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if ti >= tasks_ref.len() {
+                    break;
+                }
+                let t = &tasks_ref[ti];
+                let sc = unsafe { std::slice::from_raw_parts_mut(t.sc_ptr as *mut u16, t.sc_len) };
+                let pw = unsafe { std::slice::from_raw_parts_mut(t.pw_ptr as *mut u32, t.pw_len) };
+                if let Err(e) = unpack_ec_chunk(t.bits, t.tile_start, t.steps, t.bytes, sc, pw) {
+                    *slot = Some(e);
+                    next_ref.store(tasks_ref.len(), std::sync::atomic::Ordering::Relaxed);
+                    break;
                 }
             });
         }
     });
-    if let Some(e) = errs.into_iter().flatten().next() {
+    if let Some(e) = worker_errs.into_iter().flatten().next() {
         return Err(e);
     }
-    Ok(TurboWhtMatrix {
-        bits,
-        rows,
-        cols,
-        padded_rows,
-        padded_cols,
-        disk_bytes,
-        scales_f16,
-        packed_words,
-    })
+    Ok(mats)
+}
+
+#[allow(dead_code)]
+pub(crate) fn unpack_turbo_ec(
+    bits: u8,
+    rows: usize,
+    cols: usize,
+    padded_cols: usize,
+    r: &mut Cur<'_>,
+) -> Result<TurboWhtMatrix> {
+    let pending = scan_turbo_ec(0, bits, rows, cols, padded_cols, r)?;
+    Ok(decode_pending_ec_batch(vec![pending])?.pop().unwrap().1)
 }

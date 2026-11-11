@@ -32,6 +32,7 @@ fn main() {
     println!("cargo:rerun-if-changed=native/metal_llm_turbo.mm");
     println!("cargo:rerun-if-changed=native/metal_cb4_fast.mm");
     println!("cargo:rerun-if-changed=native/metal_cb4_fast_run.mm");
+    println!("cargo:rerun-if-changed=native/metal_vision.mm");
     println!("cargo:rerun-if-changed=native/shaders/vxt_gemv.metal");
     println!("cargo:rerun-if-changed=native/shaders/vxt_llm_ops.metal");
     println!("cargo:rerun-if-changed=native/shaders/vxt_turbo.metal");
@@ -39,6 +40,7 @@ fn main() {
     println!("cargo:rerun-if-changed=native/shaders/vxt_cb4_fast.metal");
     println!("cargo:rerun-if-changed=native/shaders/vxt_cb4_fast_ops.metal");
     println!("cargo:rerun-if-changed=native/shaders/vxt_cb4_fast_gqa.metal");
+    println!("cargo:rerun-if-changed=native/shaders/vxt_vision.metal");
     println!("cargo:rerun-if-env-changed=CXX");
     println!("cargo:rerun-if-env-changed=AR");
     println!("cargo:rerun-if-env-changed=VXG_NO_METAL");
@@ -60,10 +62,12 @@ fn main() {
             .expect("missing native/shaders/vxt_cb4_fast_ops.metal");
         let cb4_fast_gqa_src = fs::read_to_string("native/shaders/vxt_cb4_fast_gqa.metal")
             .expect("missing native/shaders/vxt_cb4_fast_gqa.metal");
+        let vision_src = fs::read_to_string("native/shaders/vxt_vision.metal")
+            .expect("missing native/shaders/vxt_vision.metal");
         fs::write(
             out.join("vxt_metal_source.h"),
             format!(
-                "#pragma once\nstatic const char* VXT_METAL_SOURCE = R\"VXT_MSL({gemv_src}\n{llm_src}\n{turbo_src}\n{llm_turbo_src}\n{cb4_fast_src}\n{cb4_fast_ops_src}\n{cb4_fast_gqa_src})VXT_MSL\";\n"
+                "#pragma once\nstatic const char* VXT_METAL_SOURCE = R\"VXT_MSL({gemv_src}\n{llm_src}\n{turbo_src}\n{llm_turbo_src}\n{cb4_fast_src}\n{cb4_fast_ops_src}\n{cb4_fast_gqa_src}\n{vision_src})VXT_MSL\";\n"
             ),
         )
         .unwrap();
@@ -76,6 +80,7 @@ fn main() {
             ("native/metal_llm_turbo.mm", "metal_llm_turbo.o"),
             ("native/metal_cb4_fast.mm", "metal_cb4_fast.o"),
             ("native/metal_cb4_fast_run.mm", "metal_cb4_fast_run.o"),
+            ("native/metal_vision.mm", "metal_vision.o"),
         ] {
             let obj = out.join(obj_name);
             run(

@@ -49,6 +49,10 @@ struct Cb4ArenaLayer {
     uint32_t gqa_flags = 0;
     size_t attn_norm_off = 0;
     size_t post_attn_norm_off = 0;
+    bool has_attn_post_norm = false;
+    size_t attn_post_norm_off = 0;
+    bool has_ffn_post_norm = false;
+    size_t ffn_post_norm_off = 0;
     Cb4ArenaMat w_in;
     Cb4ArenaMat w_out;
     Cb4ArenaMat w_ffn_gu;
@@ -62,6 +66,8 @@ struct MetalCb4FastRunner {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
     VxtLlmConfig cfg{};
+    float embed_scale = 1.0f;
+    uint32_t ffn_gelu = 0u;
     uint32_t dispatch_mode = 0;
     bool disable_fusions = false;
     bool profile_enabled = false;
@@ -136,6 +142,7 @@ struct MetalCb4FastState {
     uint32_t n_layer = 0;
     uint32_t kv_stride = 0;
     uint32_t cap_seq = 0;
+    bool kv_q8 = false;
     std::vector<uint8_t> is_rec;
     std::vector<size_t> conv_bytes;
     std::vector<size_t> ssm_bytes;
@@ -146,11 +153,29 @@ struct MetalCb4FastState {
     std::vector<id<MTLBuffer>> k_caches;
     std::vector<id<MTLBuffer>> v_caches;
 
+    size_t kv_buf_bytes(uint32_t seq) const {
+        if (kv_q8) {
+            return size_t(seq) * size_t(kv_stride / 32u) * 34u;
+        }
+        return size_t(seq) * size_t(kv_stride) * sizeof(float);
+    }
+
+    size_t total_kv_bytes() const {
+        size_t tot = 0u;
+        for (uint32_t il = 0; il < n_layer; ++il) {
+            if (!is_rec[il]) {
+                if (k_caches[il]) tot += [k_caches[il] length];
+                if (v_caches[il]) tot += [v_caches[il] length];
+            }
+        }
+        return tot;
+    }
+
     bool ensure_kv_cap(uint32_t needed_seq) {
         if (kv_stride == 0u || needed_seq <= cap_seq) return true;
         uint32_t new_cap = std::max<uint32_t>(cap_seq * 2u, needed_seq + 256u);
-        size_t old_bytes = size_t(cap_seq) * size_t(kv_stride) * sizeof(float);
-        size_t new_bytes = size_t(new_cap) * size_t(kv_stride) * sizeof(float);
+        size_t old_bytes = kv_buf_bytes(cap_seq);
+        size_t new_bytes = kv_buf_bytes(new_cap);
         for (uint32_t il = 0; il < n_layer; ++il) {
             if (is_rec[il]) continue;
             id<MTLBuffer> nk = cb4_alloc_zeroed(device, new_bytes);
@@ -192,6 +217,8 @@ struct VxtCb4FastLayerUpload {
     uint32_t _pad;
     const float* attn_norm;
     const float* post_attn_norm;
+    const float* attn_post_norm;
+    const float* ffn_post_norm;
     VxtCb4FastConcatMat w_in;
     VxtCb4FastConcatMat w_out;
     VxtCb4FastConcatMat w_ffn_gu;

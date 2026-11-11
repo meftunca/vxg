@@ -57,6 +57,9 @@ pub(crate) fn is_turbo_compatible(
     output_head: Option<&PackedTensor>,
     layers: &[TurboLayerCpuSpec<'_>],
 ) -> bool {
+    if cfg.ffn_gelu || (cfg.embed_scale - 1.0).abs() > 1e-6 {
+        return false;
+    }
     if !matches!(token_embd, PackedTensor::TurboWht(_)) {
         return false;
     }
@@ -128,11 +131,21 @@ pub struct MetalTurboState {
 pub struct MetalTurboRunner {
     #[cfg(vxt_has_metal)]
     inner: crate::metal_turbo_ffi::TurboRunnerInner,
+    #[cfg(vxt_has_metal)]
+    ngram_spec: std::sync::atomic::AtomicBool,
     #[cfg(not(vxt_has_metal))]
     _priv: (),
 }
 
 impl MetalTurboRunner {
+    pub fn set_ngram_spec(&self, enable: bool) {
+        #[cfg(vxt_has_metal)]
+        self.ngram_spec
+            .store(enable, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(vxt_has_metal))]
+        let _ = enable;
+    }
+
     pub(crate) fn try_from_layers(
         eng: &MetalEngine,
         cfg: &ModelConfig,
@@ -141,6 +154,14 @@ impl MetalTurboRunner {
         output_head: Option<&PackedTensor>,
         layers: &[DecoderLayer],
     ) -> Result<Option<Self>> {
+        if cfg.ffn_gelu
+            || (cfg.embed_scale - 1.0).abs() > 1e-6
+            || layers
+                .iter()
+                .any(|l| l.attn_post_norm.is_some() || l.ffn_post_norm.is_some())
+        {
+            return Ok(None);
+        }
         let mut specs = Vec::with_capacity(layers.len());
         for ly in layers {
             let attn = match &ly.attn {
@@ -208,7 +229,10 @@ impl MetalTurboRunner {
                 output_head,
                 &specs,
             )?
-            .map(|inner| Self { inner }))
+            .map(|inner| Self {
+                inner,
+                ngram_spec: std::sync::atomic::AtomicBool::new(false),
+            }))
         }
         #[cfg(not(vxt_has_metal))]
         {
@@ -327,29 +351,111 @@ impl MetalTurboRunner {
                 return Ok(gen_ids);
             }
 
-            let _ = prompt_ids;
             self.inner
                 .init_seen(&mut state.inner, &[first_tok], presence_pen);
             let guard = SeenGuard(&self.inner, &mut state.inner);
             let st_in = &mut *guard.1;
 
-            // The first token is emitted but remains unconsumed. Each GPU step
-            // consumes the preceding emitted token and predicts the next one.
-            // EOS is not emitted, but its preceding token has been consumed;
-            // cancellation includes the delivered token, which remains pending.
-            const BURST: usize = 8;
+            // `first_tok` is emitted but unconsumed. Rolling checkpoints every 8 steps bound
+            // EOS/cancellation replay to <= 7 trunk-only (`compute_mode = 0`) steps in 1 CmdBuf,
+            // while optional lossless 3-gram Prompt-Lookup / Output N-gram runs `M = 4` bursts.
+            const BURST: usize = 4;
+            const CKPT_WINDOW: usize = 8;
             let start_pos = *pos;
             self.inner.generation_checkpoint(st_in, false)?;
+            let mut ckpt_consumed = 0usize;
             let mut pending = std::collections::VecDeque::new();
             let mut submitted = 0usize;
             let mut consumed = 0usize;
             let total = max_new_tokens - 1;
+            let use_ngram = self
+                .ngram_spec
+                .load(std::sync::atomic::Ordering::Relaxed)
+                && total >= 4;
+            let mut ngram =
+                use_ngram.then(|| crate::turbo_ngram::TurboNgramTable::new(prompt_ids, first_tok));
+            let mut spec_streak = 0u32;
+            let head_mode = if use_sketch { 2u32 } else { 3u32 };
             self.inner.ring_set(0, first_tok);
             let outcome =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
                     loop {
-                        while pending.len() < 2 && submitted < total {
-                            let count = (total - submitted).min(BURST);
+                        if consumed >= total {
+                            return Ok(());
+                        }
+                        if pending.is_empty() && submitted == consumed {
+                            if consumed.saturating_sub(ckpt_consumed) >= CKPT_WINDOW {
+                                self.inner.generation_checkpoint(st_in, false)?;
+                                ckpt_consumed = consumed;
+                            }
+                            if let Some(ng) = ngram.as_mut() {
+                                if total - consumed >= 4 {
+                                    ng.sync_generated(&gen_ids);
+                                    if let Some((d, dkey)) = ng.draft3(spec_streak > 0, stop_ids) {
+                                        let prev = consumed;
+                                        let cur_tok = gen_ids[prev];
+                                        let mut out4 = [0u32; 4];
+                                        self.inner.step_batch(
+                                            st_in,
+                                            &[cur_tok, d[0], d[1], d[2]],
+                                            (start_pos + prev) as u32,
+                                            true,
+                                            head_mode,
+                                            None,
+                                            Some(&mut out4),
+                                        )?;
+                                        ckpt_consumed = prev + 1;
+                                        submitted = prev + 4;
+                                        let mut acc = 0usize;
+                                        for k in 0..4 {
+                                            let pred = out4[k];
+                                            acc += 1;
+                                            consumed = gen_ids.len();
+                                            if is_stop(pred) {
+                                                self.inner.rollback_deltanet(st_in, acc as u32, 4)?;
+                                                submitted = consumed;
+                                                return Ok(());
+                                            }
+                                            gen_ids.push(pred);
+                                            if presence_pen > 0.0 {
+                                                self.inner.mark_seen(st_in, pred);
+                                            }
+                                            if !on_token(pred) || consumed >= total {
+                                                self.inner.rollback_deltanet(st_in, acc as u32, 4)?;
+                                                submitted = consumed;
+                                                return Ok(());
+                                            }
+                                            if k < 3 && pred != d[k] {
+                                                break;
+                                            }
+                                        }
+                                        if acc < 4 {
+                                            self.inner.rollback_deltanet(st_in, acc as u32, 4)?;
+                                        }
+                                        submitted = consumed;
+                                        if acc == 1 {
+                                            ng.invalidate(dkey);
+                                            spec_streak = 0;
+                                        } else {
+                                            spec_streak = spec_streak.saturating_add(1);
+                                        }
+                                        self.inner
+                                            .ring_set((submitted & 255) as u32, *gen_ids.last().unwrap());
+                                        continue;
+                                    }
+                                    spec_streak = 0;
+                                }
+                            }
+                        }
+                        while pending.len() < 2
+                            && submitted < total
+                            && (pending.is_empty()
+                                || submitted.saturating_sub(ckpt_consumed) < CKPT_WINDOW)
+                        {
+                            let rem_win = CKPT_WINDOW
+                                .saturating_sub(submitted.saturating_sub(ckpt_consumed))
+                                .max(BURST);
+                            let count = (total - submitted).min(BURST).min(rem_win);
                             let slot = (submitted & 255) as u32;
                             let cmd = self.inner.enqueue_async(
                                 st_in,
@@ -399,22 +505,13 @@ impl MetalTurboRunner {
                     || panic.is_some()
                 {
                     self.inner.generation_checkpoint(st_in, true)?;
-                    *pos = start_pos;
-                    // Replay uses the same single-token full trunk as async generation.
-                    // GQA reads only positions <= pos; stale speculative KV suffix rows
-                    // are therefore invisible and get overwritten by replay/continuation.
-                    for &tok in gen_ids.iter().take(consumed) {
-                        self.inner.step_batch(
-                            st_in,
-                            &[tok],
-                            *pos as u32,
-                            false,
-                            if use_sketch { 2 } else { 3 },
-                            None,
-                            None,
-                        )?;
-                        *pos += 1;
-                    }
+                    let replay_beg = ckpt_consumed.min(consumed);
+                    self.inner.replay_trunk(
+                        st_in,
+                        &gen_ids[replay_beg..consumed],
+                        (start_pos + replay_beg) as u32,
+                    )?;
+                    *pos = start_pos + consumed;
                 } else {
                     *pos = start_pos + consumed;
                 }

@@ -1,6 +1,7 @@
 #include "metal_internal.h"
 
 #include <cstdlib>
+#include <dispatch/dispatch.h>
 #include <utility>
 #include <vector>
 
@@ -8,7 +9,7 @@ namespace {
 
 constexpr uint32_t MAX_BATCH_M = 4u;
 constexpr uint32_t RING_SLOTS = 256u;
-constexpr uint32_t STAGE2_TGS = 512u;
+constexpr uint32_t STAGE2_TGS = 768u;
 
 struct TurboLlmMatParamsC {
     uint32_t rows;
@@ -357,9 +358,9 @@ uint32_t encode_turbo_mat(
     if (batch_m == 1u) {
         uint32_t steps = m.padded_cols >> 8u;
         uint32_t total_tiles = (m.rows + 3u) / 4u;
-        bool use_t25_512 = (m.bits == 5u && r->can_t25_sk2_512 && steps >= 2u && m.rows >= 4096u && m.rows <= 16384u);
-        bool use_t3_512 = ((m.bits == 3u || m.bits == 4u) && r->can_t3_sk2_512 && steps >= 2u && m.rows >= 4096u && m.rows <= 16384u);
-        bool use_sk2 = (!use_t25_512 && !use_t3_512 && steps >= 2u && m.rows <= 16384u);
+        bool use_t25_512 = (m.bits == 5u && r->can_t25_sk2_512 && steps >= 2u && m.rows >= 4096u && m.rows <= 65536u);
+        bool use_t3_512 = ((m.bits == 3u || m.bits == 4u) && r->can_t3_sk2_512 && steps >= 2u && m.rows >= 4096u && m.rows <= 65536u);
+        bool use_sk2 = (!use_t25_512 && !use_t3_512 && steps >= 2u && m.rows <= 65536u);
         uint32_t tg_threads = 256u;
         uint32_t groups = 1u;
         id<MTLComputePipelineState> pso = nil;
@@ -404,7 +405,7 @@ uint32_t encode_turbo_mat(
         return groups;
     } else {
         uint32_t steps = m.padded_cols >> 8u;
-        bool use_sk2 = (steps >= 2u && m.rows <= 16384u);
+        bool use_sk2 = (steps >= 2u && m.rows <= 65536u);
         uint32_t total_tiles = (m.rows + 3u) / 4u;
         uint32_t groups = 1u;
         uint32_t tps_flags = ec_flag;
@@ -520,7 +521,7 @@ void encode_turbo_forward(
         uint32_t slot_gu   = r->tail_sync_base + 3u * il + 1u;
         uint32_t slot_next = r->tail_sync_base + 3u * il + 2u;
         bool can_epi_layer = (fuse_m1_res && r->has_coherent_dev && !use_bak_state);
-        bool can_fused_gu = false;
+        bool can_fused_gu = (fuse_m1_res && r->can_tg512_gu && (c.n_ff % 32u == 0u) && (L.w_ffn_gu.rows == 2u * c.n_ff) && (L.w_ffn_gu.padded_cols >= 512u));
         bool post_norm_ready = false;
 
         if (run_attn) {
@@ -557,10 +558,11 @@ void encode_turbo_forward(
                 id<MTLBuffer> z_buf = (L.has_split_gate != 0u) ? s->z_sep_hist[il] : s->qkv_hist[il];
                 size_t z_off = (L.has_split_gate != 0u) ? 0u : size_t(conv_ch) * sizeof(float);
                 uint32_t z_stride = (L.has_split_gate != 0u) ? c.ssm_inner_size : L.w_qkv.rows;
-                bool can_m1_dnet = (batch_m == 1u && save_backup == 0u && n_kh == n_vh && c.ssm_conv_kernel == 4u && dk == 128u && dv == 128u);
-                bool use_dnet_fused64 = can_m1_dnet && r->has_coherent_dev && (force_dnet_fuse == 3);
-                bool use_dnet_fused16 = !use_dnet_fused64 && can_m1_dnet && r->can_dnet_fused16 && (force_dnet_fuse < 0 || force_dnet_fuse == 2);
-                uint32_t fuse_dnet_out = (!use_dnet_fused64 && !use_dnet_fused16 && force_dnet_fuse == 1 && can_m1_dnet) ? 1u : 0u;
+                bool is_1to1_dnet = (n_kh == n_vh);
+                bool can_m1_dnet = (batch_m == 1u && save_backup == 0u && n_kh > 0u && n_vh >= n_kh && (n_vh % n_kh) == 0u && c.ssm_conv_kernel == 4u && dk == 128u && dv == 128u);
+                bool use_dnet_fused64 = can_m1_dnet && is_1to1_dnet && r->has_coherent_dev && (force_dnet_fuse == 3);
+                bool use_dnet_fused16 = !use_dnet_fused64 && can_m1_dnet && is_1to1_dnet && r->can_dnet_fused16 && (force_dnet_fuse == 2);
+                uint32_t fuse_dnet_out = (!use_dnet_fused64 && !use_dnet_fused16 && r->has_coherent_dev && (force_dnet_fuse < 0 || force_dnet_fuse == 1) && can_m1_dnet) ? 1u : 0u;
                 TurboDeltaHeadsParamsC hp{
                     n_kh, n_vh, dk, dv, L.w_qkv.rows, z_stride, padded_inner, padded_embd,
                     batch_m, save_backup, c.rms_norm_eps, fuse_dnet_out, dnet_sync_slot
@@ -771,7 +773,7 @@ void encode_turbo_forward(
             }
 
             if (fuse_m1_res) {
-                bool fuse_post = (can_epi_layer && run_ffn && L.w_out.padded_cols >= 512u && L.w_out.rows <= 16384u);
+                bool fuse_post = (can_epi_layer && run_ffn && L.w_out.padded_cols >= 512u && L.w_out.rows <= 65536u);
                 encode_turbo_mat(
                     r, enc, L.w_out, r->x_rot_tmp_buf, r->x_rot_tmp_h_buf, 0, r->cur_buf, 0, 1u,
                     true, fuse_post ? 1u : 0u, slot_post, L.post_attn_norm_off, padded_embd, false
@@ -831,7 +833,7 @@ void encode_turbo_forward(
                     threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
                 buf_bar();
             } else {
-                bool fuse_sw = (can_epi_layer && L.w_ffn_gu.padded_cols >= 512u && L.w_ffn_gu.rows <= 16384u);
+                bool fuse_sw = (can_epi_layer && L.w_ffn_gu.padded_cols >= 512u && L.w_ffn_gu.rows <= 65536u);
                 encode_turbo_mat(
                     r, enc, L.w_ffn_gu, r->x_rot_buf, r->x_rot_h_buf, 0, r->ffn_gu_buf, 0, batch_m,
                     false, fuse_sw ? 2u : 0u, slot_gu, 0u, padded_ff, false
@@ -852,8 +854,14 @@ void encode_turbo_forward(
 
             if (fuse_m1_res) {
                 bool has_nxt = (il + 1u < c.n_layer) && (((attn_mask >> (il + 1u)) & 1u) != 0u);
-                bool fuse_nxt = (can_epi_layer && has_nxt && L.w_ffn_down.padded_cols >= 512u && L.w_ffn_down.rows <= 16384u);
-                size_t nxt_norm_off = has_nxt ? r->layers[il + 1u].attn_norm_off : 0u;
+                bool has_final_norm = (il + 1u == c.n_layer)
+                    && (compute_mode == 1u || compute_mode == 3u)
+                    && (r->output_head_mat.padded_cols == padded_embd);
+                bool fuse_nxt = (can_epi_layer && (has_nxt || has_final_norm)
+                    && L.w_ffn_down.padded_cols >= 512u && L.w_ffn_down.rows <= 65536u);
+                size_t nxt_norm_off = has_nxt
+                    ? r->layers[il + 1u].attn_norm_off
+                    : (has_final_norm ? r->output_norm_off : 0u);
                 bool nxt_write_f = has_nxt && (r->layers[il + 1u].is_recurrent != 0u);
                 encode_turbo_mat(
                     r, enc, L.w_ffn_down, r->x_rot_tmp_buf, r->x_rot_tmp_h_buf, 0, r->cur_buf, 0, 1u,
@@ -1004,31 +1012,67 @@ void encode_turbo_forward(
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         if (write_next_slot != 0xffffffffu) buf_bar();
     } else if (compute_mode == 3u) {
-        encode_turbo_mat(r, enc, r->output_head_mat, r->x_rot_buf, r->x_rot_h_buf, 0, r->logits_buf, 0, batch_m);
-        buf_bar();
-        uint32_t n_blocks1024 = (c.n_vocab + 1023u) / 1024u;
-        TurboArgmaxParamsC ap{ c.n_vocab, n_blocks1024, batch_m, write_next_slot, s->presence_pen, d1, d2, d3 };
+        float eff_pen = use_bak_state ? 0.0f : s->presence_pen;
+        if (r->output_head_mat.bits >= 2u && r->output_head_mat.bits <= 5u) {
+            TurboSketchStage2ParamsC s2p{
+                c.n_vocab, r->output_head_mat.padded_cols, r->output_head_mat.bits | 256u,
+                eff_pen, STAGE2_TGS, d1, d2, d3
+            };
+            id<MTLComputePipelineState> s2_pso = (r->output_head_mat.bits == 2u)
+                ? r->pso_sketch_s2_t2
+                : ((r->output_head_mat.bits == 5u) ? r->pso_sketch_s2_t25 : r->pso_sketch_s2_t3);
+            [enc setComputePipelineState:s2_pso];
+            [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.scales_off atIndex:0];
+            [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.packed_off atIndex:1];
+            [enc setBuffer:r->x_rot_h_buf offset:0 atIndex:2];
+            [enc setBuffer:r->surv_blk_buf offset:0 atIndex:3];
+            [enc setBuffer:r->blk_vals_buf offset:0 atIndex:4];
+            [enc setBuffer:r->blk_idxs_buf offset:0 atIndex:5];
+            [enc setBytes:&s2p length:sizeof(s2p) atIndex:6];
+            [enc setBuffer:s->seen_vocab_buf offset:0 atIndex:7];
+            [enc setBuffer:r->lut_bank_buf offset:0 atIndex:8];
+            [enc dispatchThreadgroups:MTLSizeMake(STAGE2_TGS, batch_m, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            buf_bar();
 
-        [enc setComputePipelineState:r->pso_argmax_s1];
-        [enc setBuffer:r->logits_buf offset:0 atIndex:0];
-        [enc setBuffer:r->blk_vals_buf offset:0 atIndex:1];
-        [enc setBuffer:r->blk_idxs_buf offset:0 atIndex:2];
-        [enc setBytes:&ap length:sizeof(ap) atIndex:3];
-        [enc setBuffer:s->seen_vocab_buf offset:0 atIndex:4];
-        [enc dispatchThreadgroups:MTLSizeMake(n_blocks1024, batch_m, 1)
-            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        buf_bar();
+            TurboArgmaxParamsC ap{ c.n_vocab, STAGE2_TGS, batch_m, write_next_slot, eff_pen, d1, d2, d3 };
+            [enc setComputePipelineState:r->pso_argmax_s2];
+            [enc setBuffer:r->blk_vals_buf offset:0 atIndex:0];
+            [enc setBuffer:r->blk_idxs_buf offset:0 atIndex:1];
+            [enc setBuffer:out_ids_buf offset:out_ids_byte_off atIndex:2];
+            [enc setBuffer:r->tok_ring_buf offset:0 atIndex:3];
+            [enc setBytes:&ap length:sizeof(ap) atIndex:4];
+            [enc setBuffer:s->seen_vocab_buf offset:0 atIndex:5];
+            [enc dispatchThreadgroups:MTLSizeMake(1, batch_m, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            if (write_next_slot != 0xffffffffu) buf_bar();
+        } else {
+            encode_turbo_mat(r, enc, r->output_head_mat, r->x_rot_buf, r->x_rot_h_buf, 0, r->logits_buf, 0, batch_m);
+            buf_bar();
+            uint32_t n_blocks1024 = (c.n_vocab + 1023u) / 1024u;
+            TurboArgmaxParamsC ap{ c.n_vocab, n_blocks1024, batch_m, write_next_slot, eff_pen, d1, d2, d3 };
 
-        [enc setComputePipelineState:r->pso_argmax_s2];
-        [enc setBuffer:r->blk_vals_buf offset:0 atIndex:0];
-        [enc setBuffer:r->blk_idxs_buf offset:0 atIndex:1];
-        [enc setBuffer:out_ids_buf offset:out_ids_byte_off atIndex:2];
-        [enc setBuffer:r->tok_ring_buf offset:0 atIndex:3];
-        [enc setBytes:&ap length:sizeof(ap) atIndex:4];
-        [enc setBuffer:s->seen_vocab_buf offset:0 atIndex:5];
-        [enc dispatchThreadgroups:MTLSizeMake(1, batch_m, 1)
-            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        if (write_next_slot != 0xffffffffu) buf_bar();
+            [enc setComputePipelineState:r->pso_argmax_s1];
+            [enc setBuffer:r->logits_buf offset:0 atIndex:0];
+            [enc setBuffer:r->blk_vals_buf offset:0 atIndex:1];
+            [enc setBuffer:r->blk_idxs_buf offset:0 atIndex:2];
+            [enc setBytes:&ap length:sizeof(ap) atIndex:3];
+            [enc setBuffer:s->seen_vocab_buf offset:0 atIndex:4];
+            [enc dispatchThreadgroups:MTLSizeMake(n_blocks1024, batch_m, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            buf_bar();
+
+            [enc setComputePipelineState:r->pso_argmax_s2];
+            [enc setBuffer:r->blk_vals_buf offset:0 atIndex:0];
+            [enc setBuffer:r->blk_idxs_buf offset:0 atIndex:1];
+            [enc setBuffer:out_ids_buf offset:out_ids_byte_off atIndex:2];
+            [enc setBuffer:r->tok_ring_buf offset:0 atIndex:3];
+            [enc setBytes:&ap length:sizeof(ap) atIndex:4];
+            [enc setBuffer:s->seen_vocab_buf offset:0 atIndex:5];
+            [enc dispatchThreadgroups:MTLSizeMake(1, batch_m, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            if (write_next_slot != 0xffffffffu) buf_bar();
+        }
     }
 }
 
@@ -1152,44 +1196,58 @@ void* vxt_metal_turbo_create(
                 uint32_t steps = m.padded_cols >> 8u;
                 uint32_t* pw = static_cast<uint32_t*>([(__bridge id<MTLBuffer>)m.packed_buf contents]);
                 size_t total_ts = size_t(tiles) * size_t(steps);
-                if (m.bits == 5u) {
-                    for (size_t ts = 0; ts < total_ts; ++ts) {
-                        uint32_t* p80 = pw + ts * 80u;
-                        uint16_t* h64 = reinterpret_cast<uint16_t*>(p80 + 64u);
-                        for (uint32_t lane = 0; lane < 32u; ++lane) {
-                            uint32_t w0 = p80[2u * lane], w1 = p80[2u * lane + 1u];
-                            uint32_t h16 = h64[lane];
-                            uint32_t s00 = swz_t25(w0 & 1023u);
-                            uint32_t s01 = swz_t25((w0 >> 10u) & 1023u);
-                            uint32_t s10 = swz_t25((w0 >> 20u) & 1023u);
-                            uint32_t s11 = swz_t25(w1 & 1023u);
-                            uint32_t s20 = swz_t25((w1 >> 10u) & 1023u);
-                            uint32_t s21 = swz_t25((w1 >> 20u) & 1023u);
-                            uint32_t s30 = swz_t25((h16 & 0xffu) | ((w0 >> 30u) << 8u));
-                            uint32_t s31 = swz_t25((h16 >> 8u) | ((w1 >> 30u) << 8u));
-                            p80[2u * lane]     = s00 | (s01 << 10u) | (s10 << 20u) | ((s30 >> 8u) << 30u);
-                            p80[2u * lane + 1u] = s11 | (s20 << 10u) | (s21 << 20u) | ((s31 >> 8u) << 30u);
-                            h64[lane]          = uint16_t((s30 & 0xffu) | ((s31 & 0xffu) << 8u));
-                        }
-                    }
-                } else {
-                    for (size_t ts = 0; ts < total_ts; ++ts) {
-                        uint32_t* p96 = pw + ts * 96u;
-                        for (uint32_t lane = 0; lane < 32u; ++lane) {
-                            uint32_t iw0 = p96[2u * lane], iw1 = p96[2u * lane + 1u], sw = p96[64u + lane];
-                            uint32_t idx16[4] = { iw0 & 0xffffu, iw0 >> 16u, iw1 & 0xffffu, iw1 >> 16u };
-                            uint32_t c6[4][4];
-                            for (uint32_t sr = 0; sr < 4u; ++sr) {
-                                uint32_t sgn8 = (sw >> (sr * 8u)) & 0xffu;
-                                for (uint32_t pr = 0; pr < 4u; ++pr) {
-                                    c6[sr][pr] = ((idx16[sr] >> (pr * 4u)) & 0x0fu) | (((sgn8 >> (pr * 2u)) & 0x03u) << 4u);
-                                }
+                constexpr size_t CHUNK_TS = 256u;
+                size_t n_chunks = (total_ts + CHUNK_TS - 1u) / CHUNK_TS;
+                uint32_t bits = m.bits;
+                auto repack_range = [&](size_t ci) {
+                    size_t beg = ci * CHUNK_TS;
+                    size_t end = std::min(beg + CHUNK_TS, total_ts);
+                    if (bits == 5u) {
+                        for (size_t ts = beg; ts < end; ++ts) {
+                            uint32_t* p80 = pw + ts * 80u;
+                            uint16_t* h64 = reinterpret_cast<uint16_t*>(p80 + 64u);
+                            for (uint32_t lane = 0; lane < 32u; ++lane) {
+                                uint32_t w0 = p80[2u * lane], w1 = p80[2u * lane + 1u];
+                                uint32_t h16 = h64[lane];
+                                uint32_t s00 = swz_t25(w0 & 1023u);
+                                uint32_t s01 = swz_t25((w0 >> 10u) & 1023u);
+                                uint32_t s10 = swz_t25((w0 >> 20u) & 1023u);
+                                uint32_t s11 = swz_t25(w1 & 1023u);
+                                uint32_t s20 = swz_t25((w1 >> 10u) & 1023u);
+                                uint32_t s21 = swz_t25((w1 >> 20u) & 1023u);
+                                uint32_t s30 = swz_t25((h16 & 0xffu) | ((w0 >> 30u) << 8u));
+                                uint32_t s31 = swz_t25((h16 >> 8u) | ((w1 >> 30u) << 8u));
+                                p80[2u * lane]     = s00 | (s01 << 10u) | (s10 << 20u) | ((s30 >> 8u) << 30u);
+                                p80[2u * lane + 1u] = s11 | (s20 << 10u) | (s21 << 20u) | ((s31 >> 8u) << 30u);
+                                h64[lane]          = uint16_t((s30 & 0xffu) | ((s31 & 0xffu) << 8u));
                             }
-                            p96[2u * lane]      = c6[0][0] | (c6[0][1] << 6u) | (c6[0][2] << 12u) | (c6[0][3] << 18u) | (c6[3][0] << 24u) | ((c6[3][3] & 0x03u) << 30u);
-                            p96[2u * lane + 1u] = c6[1][0] | (c6[1][1] << 6u) | (c6[1][2] << 12u) | (c6[1][3] << 18u) | (c6[3][1] << 24u) | (((c6[3][3] >> 2u) & 0x03u) << 30u);
-                            p96[64u + lane]     = c6[2][0] | (c6[2][1] << 6u) | (c6[2][2] << 12u) | (c6[2][3] << 18u) | (c6[3][2] << 24u) | (((c6[3][3] >> 4u) & 0x03u) << 30u);
+                        }
+                    } else {
+                        for (size_t ts = beg; ts < end; ++ts) {
+                            uint32_t* p96 = pw + ts * 96u;
+                            for (uint32_t lane = 0; lane < 32u; ++lane) {
+                                uint32_t iw0 = p96[2u * lane], iw1 = p96[2u * lane + 1u], sw = p96[64u + lane];
+                                uint32_t idx16[4] = { iw0 & 0xffffu, iw0 >> 16u, iw1 & 0xffffu, iw1 >> 16u };
+                                uint32_t c6[4][4];
+                                for (uint32_t sr = 0; sr < 4u; ++sr) {
+                                    uint32_t sgn8 = (sw >> (sr * 8u)) & 0xffu;
+                                    for (uint32_t pr = 0; pr < 4u; ++pr) {
+                                        c6[sr][pr] = ((idx16[sr] >> (pr * 4u)) & 0x0fu) | (((sgn8 >> (pr * 2u)) & 0x03u) << 4u);
+                                    }
+                                }
+                                p96[2u * lane]      = c6[0][0] | (c6[0][1] << 6u) | (c6[0][2] << 12u) | (c6[0][3] << 18u) | (c6[3][0] << 24u) | ((c6[3][3] & 0x03u) << 30u);
+                                p96[2u * lane + 1u] = c6[1][0] | (c6[1][1] << 6u) | (c6[1][2] << 12u) | (c6[1][3] << 18u) | (c6[3][1] << 24u) | (((c6[3][3] >> 2u) & 0x03u) << 30u);
+                                p96[64u + lane]     = c6[2][0] | (c6[2][1] << 6u) | (c6[2][2] << 12u) | (c6[2][3] << 18u) | (c6[3][2] << 24u) | (((c6[3][3] >> 4u) & 0x03u) << 30u);
+                            }
                         }
                     }
+                };
+                if (n_chunks >= 4u) {
+                    dispatch_apply(n_chunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t ci) {
+                        repack_range(ci);
+                    });
+                } else {
+                    for (size_t ci = 0; ci < n_chunks; ++ci) repack_range(ci);
                 }
             };
             repack_mat(*embed_mat);
@@ -1282,10 +1340,18 @@ void* vxt_metal_turbo_create(
         {
             uint8_t* dst_base = static_cast<uint8_t*>([r->weight_arena_buf contents]);
             std::memset(dst_base, 0, 256u);
-            for (const auto& kv : arena_map) {
-                id<MTLBuffer> sb = (__bridge id<MTLBuffer>)kv.first;
-                size_t len = [sb length];
-                std::memcpy(dst_base + kv.second, [sb contents], len);
+            const auto* amap = arena_map.data();
+            size_t amap_len = arena_map.size();
+            if (amap_len >= 16u) {
+                dispatch_apply(amap_len, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
+                    id<MTLBuffer> sb = (__bridge id<MTLBuffer>)amap[i].first;
+                    std::memcpy(dst_base + amap[i].second, [sb contents], [sb length]);
+                });
+            } else {
+                for (size_t i = 0; i < amap_len; ++i) {
+                    id<MTLBuffer> sb = (__bridge id<MTLBuffer>)amap[i].first;
+                    std::memcpy(dst_base + amap[i].second, [sb contents], [sb length]);
+                }
             }
         }
 
@@ -1377,20 +1443,18 @@ void* vxt_metal_turbo_create(
 
         // Ramp GPU DVFS clock on full-size models so token-1 decode runs at boost frequency
         if (cfg->n_layer >= 16u && !std::getenv("VXT_TIMING")) {
-            for (int w = 0; w < 4; ++w) {
-                id<MTLCommandBuffer> wcb = [r->gemv.queue commandBuffer];
-                id<MTLComputeCommandEncoder> wenc = [wcb computeCommandEncoder];
-                for (int rep = 0; rep < 6; ++rep) {
-                    for (uint32_t il = 0; il < cfg->n_layer; ++il) {
-                        const auto& L = r->layers[il];
-                        encode_turbo_mat(r, wenc, L.w_ffn_gu, r->x_rot_buf, r->x_rot_h_buf, 0, r->ffn_gu_buf, 0, 1u);
-                        encode_turbo_mat(r, wenc, L.w_ffn_down, r->x_rot_tmp_buf, r->x_rot_tmp_h_buf, 0, r->ffn_out_buf, 0, 1u);
-                    }
+            id<MTLCommandBuffer> wcb = [r->gemv.queue commandBuffer];
+            id<MTLComputeCommandEncoder> wenc = [wcb computeCommandEncoder];
+            for (int rep = 0; rep < 3; ++rep) {
+                for (uint32_t il = 0; il < cfg->n_layer; ++il) {
+                    const auto& L = r->layers[il];
+                    encode_turbo_mat(r, wenc, L.w_ffn_gu, r->x_rot_buf, r->x_rot_h_buf, 0, r->ffn_gu_buf, 0, 1u);
+                    encode_turbo_mat(r, wenc, L.w_ffn_down, r->x_rot_tmp_buf, r->x_rot_tmp_h_buf, 0, r->ffn_out_buf, 0, 1u);
                 }
-                [wenc endEncoding];
-                [wcb commit];
-                [wcb waitUntilCompleted];
             }
+            [wenc endEncoding];
+            [wcb commit];
+            [wcb waitUntilCompleted];
         }
 
         if (std::getenv("VXT_TIMING")) run_vxt_timing_probe(r);
@@ -1726,11 +1790,21 @@ static void run_vxt_timing_probe(MetalTurboRunner* r) {
     measure_gpu_us("C4d. Full step mode=2 (dnet_fused64=3)", [&](id<MTLComputeCommandEncoder> enc) {
         encode_turbo_forward(r, ts, enc, r->tok_ring_buf, 0, 1u, 64u, 0u, 2u, r->out_ring_buf, 0, 1u, 0xffffffffu, 0xffffffffu, false, 3);
     });
+    measure_gpu_us("C4e. Full step mode=3 (exact-head)", [&](id<MTLComputeCommandEncoder> enc) {
+        encode_turbo_forward(r, ts, enc, r->tok_ring_buf, 0, 1u, 64u, 0u, 3u, r->out_ring_buf, 0, 1u, 0xffffffffu, 0xffffffffu, false, 1);
+    });
     measure_gpu_us("C5. Burst-8 mode=2 (8 tok total)", [&](id<MTLComputeCommandEncoder> enc) {
         for (uint32_t k = 0; k < 8u; ++k) {
             uint32_t sl = k & (RING_SLOTS - 1u);
             uint32_t nx = (k + 1u) & (RING_SLOTS - 1u);
             encode_turbo_forward(r, ts, enc, r->tok_ring_buf, sl * 4u, 1u, 64u + k, 0u, 2u, r->out_ring_buf, sl * 4u, nx);
+        }
+    });
+    measure_gpu_us("C5b. Burst-8 mode=3 (8 tok exact)", [&](id<MTLComputeCommandEncoder> enc) {
+        for (uint32_t k = 0; k < 8u; ++k) {
+            uint32_t sl = k & (RING_SLOTS - 1u);
+            uint32_t nx = (k + 1u) & (RING_SLOTS - 1u);
+            encode_turbo_forward(r, ts, enc, r->tok_ring_buf, sl * 4u, 1u, 64u + k, 0u, 3u, r->out_ring_buf, sl * 4u, nx);
         }
     });
     measure_gpu_us("C6. Burst-16 mode=2 (16 tok total)", [&](id<MTLComputeCommandEncoder> enc) {
@@ -2102,6 +2176,61 @@ uint32_t vxt_metal_turbo_ring_get_out(void* raw_runner, uint32_t slot) {
     auto* r = static_cast<MetalTurboRunner*>(raw_runner);
     if (!r) return 0u;
     return static_cast<const uint32_t*>([r->out_ring_buf contents])[slot & (RING_SLOTS - 1u)];
+}
+
+int vxt_metal_turbo_replay_trunk(
+    void* raw_runner,
+    void* raw_state,
+    const uint32_t* tok_ids,
+    uint32_t step_count,
+    uint32_t pos_base,
+    char* err_out,
+    size_t err_cap
+) {
+    @autoreleasepool {
+        auto* r = static_cast<MetalTurboRunner*>(raw_runner);
+        auto* s = static_cast<MetalTurboState*>(raw_state);
+        if (!r || !s) {
+            vxt_write_err(err_out, err_cap, "null runner/state in replay_trunk");
+            return -1;
+        }
+        if (step_count == 0u) return 0;
+        if (!tok_ids) {
+            vxt_write_err(err_out, err_cap, "null tok_ids in replay_trunk");
+            return -1;
+        }
+        if (!s->ensure_kv_cap(pos_base + step_count + 16u)) {
+            vxt_write_err(err_out, err_cap, "failed to grow Turbo KV cache in replay_trunk");
+            return -2;
+        }
+        uint32_t done = 0u;
+        while (done < step_count) {
+            uint32_t chunk = std::min<uint32_t>(step_count - done, RING_SLOTS);
+            auto* ring = static_cast<uint32_t*>([r->tok_ring_buf contents]);
+            std::memcpy(ring, tok_ids + done, size_t(chunk) * sizeof(uint32_t));
+            id<MTLCommandBuffer> cmd = [r->gemv.queue commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+            if (!cmd || !enc) {
+                vxt_write_err(err_out, err_cap, "failed to create replay_trunk command buffer");
+                return -3;
+            }
+            for (uint32_t k = 0u; k < chunk; ++k) {
+                encode_turbo_forward(
+                    r, s, enc, r->tok_ring_buf, size_t(k) * sizeof(uint32_t),
+                    1u, pos_base + done + k, 0u, 0u, r->out_ring_buf, 0, 0xffffffffu
+                );
+            }
+            [enc endEncoding];
+            [cmd commit];
+            [cmd waitUntilCompleted];
+            if ([cmd status] != MTLCommandBufferStatusCompleted) {
+                vxt_write_err(err_out, err_cap, "Turbo replay_trunk GPU execution failed");
+                return -4;
+            }
+            done += chunk;
+        }
+        return 0;
+    }
 }
 
 void* vxt_metal_turbo_step_async_enqueue(

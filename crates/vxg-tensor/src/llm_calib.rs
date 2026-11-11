@@ -7,7 +7,9 @@
 //!   from `RMSNorm` gains (`attn_norm`, `post_attention_norm`, `ssm_norm`, `output_norm`), preserving
 //!   exact intra-block Rademacher isotropy with zero calibration-prompt overfitting.
 
-use crate::cb4_calib::Cb4TensorSource;
+use crate::cb4_calib::{
+    build_cb4_calib_plan_from_source, cb4_col_amp, normalize_amp, Cb4CalibPlan, Cb4TensorSource,
+};
 use crate::gguf::GgufView;
 use crate::gguf_meta::ModelConfig;
 
@@ -20,6 +22,18 @@ pub(crate) struct TurboCalibPlan {
     pub h_ffn_gu: Vec<Vec<f32>>,
     pub h_embd: Vec<f32>,
     pub h_lm_head: Vec<f32>,
+    pub ch_plan: Option<Cb4CalibPlan>,
+}
+
+pub(crate) fn turbo_ch_amp<'a>(
+    plan: &'a TurboCalibPlan,
+    name: &str,
+    layer_idx: Option<usize>,
+    cols: usize,
+) -> Option<&'a [f32]> {
+    plan.ch_plan
+        .as_ref()
+        .and_then(|cp| cb4_col_amp(cp, name, layer_idx, cols))
 }
 
 fn block_isotropic_hessian(ch_amp: &[f32]) -> Vec<f32> {
@@ -81,6 +95,7 @@ pub(crate) fn run_turbo_calibration_from_source(
         h_ffn_gu: vec![Vec::new(); n_layer],
         h_embd: Vec::new(),
         h_lm_head: Vec::new(),
+        ch_plan: None,
     };
 
     let mut ch_e = vec![0.0f64; n_embd];
@@ -201,6 +216,31 @@ pub(crate) fn run_turbo_calibration_from_source(
             plan.h_embd = h_out.iter().map(|&hv| 0.35 + 0.65 * hv).collect();
         }
     }
+
+    let mut ch_plan = build_cb4_calib_plan_from_source(src, cfg);
+    for il in 0..n_layer {
+        if let Some(amp) = ch_plan.amp_attn.get_mut(il) {
+            if !plan.attn_smooth[il].is_empty() {
+                for &(c, g) in &plan.attn_smooth[il] {
+                    if c < amp.len() {
+                        amp[c] /= g;
+                    }
+                }
+                normalize_amp(amp);
+            }
+        }
+        if let Some(amp) = ch_plan.amp_post.get_mut(il) {
+            if !plan.post_smooth[il].is_empty() {
+                for &(c, g) in &plan.post_smooth[il] {
+                    if c < amp.len() {
+                        amp[c] /= g;
+                    }
+                }
+                normalize_amp(amp);
+            }
+        }
+    }
+    plan.ch_plan = Some(ch_plan);
     plan
 }
 

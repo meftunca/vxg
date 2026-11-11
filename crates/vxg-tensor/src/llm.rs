@@ -13,6 +13,8 @@ use crate::llm_cpu::{
 pub(crate) use crate::llm_cpu::{DecoderLayer, LayerAttn, MatWeight};
 use crate::llm_ops::alloc_cpu_state_vecs;
 pub use crate::llm_ops::{compare_logits, sample_logits, LogitEvalMetrics};
+use crate::llm_prefill::{cpu_kv_cache_bytes, prefill_cpu_tiled};
+pub use crate::llm_prefill::{KvCacheMode, KvQ8Block};
 use crate::metal::MetalEngine;
 use crate::metal_cb4_fast::{MetalCb4FastRunner, MetalCb4FastState};
 use crate::metal_llm::{MetalLlmRunner, MetalLlmState};
@@ -26,12 +28,15 @@ use crate::{Error, Result};
 pub struct LlmState {
     pub pos: usize,
     pub rope_delta: isize,
+    pub kv_mode: KvCacheMode,
     cb4_failed: bool,
     turbo_gpu: Option<MetalTurboState>,
     cb4_fast_gpu: Option<MetalCb4FastState>,
     gpu: Option<MetalLlmState>,
     pub(crate) k_caches: Vec<Vec<f32>>,
     pub(crate) v_caches: Vec<Vec<f32>>,
+    pub(crate) k_q8: Vec<Vec<KvQ8Block>>,
+    pub(crate) v_q8: Vec<Vec<KvQ8Block>>,
     pub(crate) conv_states: Vec<Vec<f32>>,
     pub(crate) ssm_states: Vec<Vec<f32>>,
 }
@@ -172,17 +177,17 @@ impl LlmModel {
         use_gpu: bool,
         cpu_threads: usize,
     ) -> Result<Self> {
-        let vision = match vision_cfg {
+        let mut vision = match vision_cfg {
             Some(vc) if map.contains_key("vis.patch_embed.proj.weight") => {
                 Some(VisionEncoder::from_tensors(vc, &mut map)?)
             }
             _ => None,
         };
-        let metal = if use_gpu {
-            MetalEngine::new().ok()
-        } else {
-            None
-        };
+        let metal = if use_gpu { MetalEngine::new().ok() } else { None };
+        let threads = cpu_threads.max(1);
+        if let (Some(eng), Some(vis)) = (metal.as_ref(), vision.as_mut()) {
+            let _ = vis.upload_gpu(eng, threads);
+        }
         let mut token_embd = MatWeight::cpu_only(
             map.remove("token_embd.weight")
                 .ok_or_else(|| Error::Format("missing model tensor 'token_embd.weight'".into()))?,
@@ -194,36 +199,20 @@ impl LlmModel {
         let mut output_head = map.remove("output.weight").map(MatWeight::cpu_only);
         let mut layers = extract_decoder_layers(&cfg, &mut map)?;
 
-        let mut metal_turbo = None;
-        let mut metal_cb4_fast = None;
-        let mut metal_llm = None;
+        let (mut metal_turbo, mut metal_cb4_fast, mut metal_llm) = (None, None, None);
         if let Some(eng) = metal.as_ref() {
+            let head_cpu = output_head.as_ref().map(|h| &h.cpu);
             metal_turbo = MetalTurboRunner::try_from_layers(
-                eng,
-                &cfg,
-                &token_embd.cpu,
-                &output_norm,
-                output_head.as_ref().map(|h| &h.cpu),
-                &layers,
+                eng, &cfg, &token_embd.cpu, &output_norm, head_cpu, &layers,
             )?;
             if metal_turbo.is_none() {
                 metal_cb4_fast = MetalCb4FastRunner::try_from_layers(
-                    eng,
-                    &cfg,
-                    &token_embd.cpu,
-                    &output_norm,
-                    output_head.as_ref().map(|h| &h.cpu),
-                    &layers,
+                    eng, &cfg, &token_embd.cpu, &output_norm, head_cpu, &layers,
                 )?;
             }
             if metal_turbo.is_none() && metal_cb4_fast.is_none() {
                 metal_llm = MetalLlmRunner::upload_and_build(
-                    eng,
-                    &cfg,
-                    &mut token_embd,
-                    &mut output_head,
-                    &mut layers,
-                    &output_norm,
+                    eng, &cfg, &mut token_embd, &mut output_head, &mut layers, &output_norm,
                 )?;
             }
         }
@@ -236,7 +225,7 @@ impl LlmModel {
             metal_turbo,
             metal_cb4_fast,
             metal_llm,
-            cpu_threads: cpu_threads.max(1),
+            cpu_threads: threads,
             cb4_greedy_enabled: false,
             token_embd,
             output_norm,
@@ -247,20 +236,12 @@ impl LlmModel {
     }
 
     pub fn backend_label(&self) -> String {
-        let base = match (
-            &self.metal,
-            &self.metal_turbo,
-            &self.metal_cb4_fast,
-            &self.metal_llm,
-        ) {
+        let base = match (&self.metal, &self.metal_turbo, &self.metal_cb4_fast, &self.metal_llm) {
             (Some(m), Some(_), _, _) => {
                 format!("Apple Metal GPU ({}, VXT-Turbo Pipelined)", m.device_name())
             }
             (Some(m), None, Some(_), _) => {
-                format!(
-                    "Apple Metal GPU ({}, 1-CmdBuf Fused, CB4-Fast Pipelined)",
-                    m.device_name()
-                )
+                format!("Apple Metal GPU ({}, 1-CmdBuf Fused, CB4-Fast Pipelined)", m.device_name())
             }
             (Some(m), None, None, Some(_)) => {
                 format!("Apple Metal GPU ({}, 1-CmdBuf Fused)", m.device_name())
@@ -268,8 +249,12 @@ impl LlmModel {
             (Some(m), None, None, None) => format!("Apple Metal GPU ({})", m.device_name()),
             (None, _, _, _) => format!("CPU ({} threads)", self.cpu_threads),
         };
-        if self.vision.is_some() {
-            format!("{base} + Vision")
+        if let Some(vis) = self.vision.as_ref() {
+            if vis.has_gpu() {
+                format!("{base} + Vision (Metal GPU)")
+            } else {
+                format!("{base} + Vision")
+            }
         } else {
             base
         }
@@ -299,34 +284,64 @@ impl LlmModel {
     }
 
     pub fn new_state(&self) -> LlmState {
+        self.new_state_with_kv(KvCacheMode::Fp32)
+    }
+
+    pub fn new_state_with_kv(&self, kv_mode: KvCacheMode) -> LlmState {
+        let want_q8 = kv_mode == KvCacheMode::Q8_0 && self.cfg.head_dim % 32 == 0;
         let turbo_gpu = self.metal_turbo.as_ref().and_then(|tr| tr.new_state().ok());
         let cb4_fast_gpu = if turbo_gpu.is_none() {
-            self.metal_cb4_fast.as_ref().and_then(|cf| cf.new_state().ok())
+            self.metal_cb4_fast.as_ref().and_then(|cf| cf.new_state(want_q8).ok())
         } else {
             None
         };
-        let gpu = if turbo_gpu.is_none() && cb4_fast_gpu.is_none() {
+        let gpu = if turbo_gpu.is_none() && cb4_fast_gpu.is_none() && !want_q8 {
             self.metal_llm.as_ref().and_then(|r| r.new_state().ok())
         } else {
             None
         };
-        let (k_caches, v_caches, conv_states, ssm_states) =
-            if turbo_gpu.is_none() && cb4_fast_gpu.is_none() && gpu.is_none() {
-                alloc_cpu_state_vecs(&self.cfg)
-            } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-            };
+        let is_cpu = turbo_gpu.is_none() && cb4_fast_gpu.is_none() && gpu.is_none();
+        let (mut k_caches, mut v_caches, conv_states, ssm_states) = if is_cpu {
+            alloc_cpu_state_vecs(&self.cfg)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        };
+        let (mut k_q8, mut v_q8) = (Vec::new(), Vec::new());
+        if is_cpu && want_q8 {
+            let nl = self.cfg.n_layer;
+            let blks = self.cfg.n_head_kv * (self.cfg.head_dim / 32) * 256;
+            k_q8.reserve_exact(nl);
+            v_q8.reserve_exact(nl);
+            for il in 0..nl {
+                let cap = if self.cfg.is_recurrent_layer(il) { 0 } else { blks };
+                k_q8.push(Vec::with_capacity(cap));
+                v_q8.push(Vec::with_capacity(cap));
+                k_caches[il] = Vec::new();
+                v_caches[il] = Vec::new();
+            }
+        }
         LlmState {
             pos: 0,
             rope_delta: 0,
+            kv_mode: if want_q8 { KvCacheMode::Q8_0 } else { KvCacheMode::Fp32 },
             cb4_failed: false,
             turbo_gpu,
             cb4_fast_gpu,
             gpu,
             k_caches,
             v_caches,
+            k_q8,
+            v_q8,
             conv_states,
             ssm_states,
+        }
+    }
+
+    pub fn kv_cache_bytes(&self, state: &LlmState) -> usize {
+        if let Some(cst) = state.cb4_fast_gpu.as_ref() {
+            cst.kv_bytes()
+        } else {
+            cpu_kv_cache_bytes(state)
         }
     }
 
@@ -349,11 +364,7 @@ impl LlmModel {
         if let (Some(cf), Some(cst)) = (self.metal_cb4_fast.as_ref(), state.cb4_fast_gpu.as_mut()) {
             return cf.prefill_tokens(cst, &mut state.pos, state.rope_delta, prompt_ids, logits_out);
         }
-        for (idx, &tid) in prompt_ids.iter().enumerate() {
-            let last = idx + 1 == prompt_ids.len();
-            self.forward_step(state, tid, last.then_some(&mut *logits_out))?;
-        }
-        Ok(())
+        prefill_cpu_tiled(self, state, prompt_ids, logits_out)
     }
 
     pub fn prefill_multimodal(
@@ -382,23 +393,13 @@ impl LlmModel {
             compute_mrope_positions(tok_ids, images, &vcfg, state.pos, start_rope)?;
         let dim = self.cfg.n_embd;
         let embeds = build_multimodal_embeds(
-            &self.token_embd.cpu,
-            self.cfg.n_vocab,
-            dim,
-            tok_ids,
-            images,
-            vcfg.image_token_id,
+            &self.token_embd.cpu, self.cfg.n_vocab, dim, self.cfg.embed_scale,
+            tok_ids, images, vcfg.image_token_id,
         )?;
 
         if let (Some(cf), Some(cst)) = (self.metal_cb4_fast.as_ref(), state.cb4_fast_gpu.as_mut()) {
             cf.prefill_embeds_mrope(
-                cst,
-                &mut state.pos,
-                &embeds,
-                dim,
-                &mrope_pos,
-                vcfg.mrope_section,
-                logits_out,
+                cst, &mut state.pos, &embeds, dim, &mrope_pos, vcfg.mrope_section, logits_out,
             )?;
             state.rope_delta = new_delta;
             return Ok(());
@@ -434,37 +435,24 @@ impl LlmModel {
         Ok(())
     }
 
+    pub fn set_turbo_ngram(&self, enable: bool) {
+        if let Some(tr) = self.metal_turbo.as_ref() {
+            tr.set_ngram_spec(enable);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn generate_greedy_turbo<F: FnMut(u32) -> bool>(
-        &self,
-        state: &mut LlmState,
-        prompt_ids: &[u32],
-        first_tok: u32,
-        max_new_tokens: usize,
-        use_sketch: bool,
-        presence_pen: f32,
-        stop_ids: &[u32],
-        on_token: F,
+        &self, state: &mut LlmState, prompt_ids: &[u32], first_tok: u32,
+        max_new_tokens: usize, use_sketch: bool, presence_pen: f32, stop_ids: &[u32], on_token: F,
     ) -> Result<Vec<u32>> {
         if state.cb4_failed {
-            return Err(Error::Unsupported(
-                "CB4 device failure invalidated this state; create a new state".into(),
-            ));
+            return Err(Error::Unsupported("CB4 device failure invalidated this state; create a new state".into()));
         }
         let (Some(tr), Some(tst)) = (self.metal_turbo.as_ref(), state.turbo_gpu.as_mut()) else {
             return Err(Error::Unsupported("Turbo fast decode unavailable".into()));
         };
-        tr.generate_greedy_fast(
-            tst,
-            &mut state.pos,
-            prompt_ids,
-            first_tok,
-            max_new_tokens,
-            use_sketch,
-            presence_pen,
-            stop_ids,
-            on_token,
-        )
+        tr.generate_greedy_fast(tst, &mut state.pos, prompt_ids, first_tok, max_new_tokens, use_sketch, presence_pen, stop_ids, on_token)
     }
 
     /// Opt in to exact CB4 embedding decode and full-head GPU greedy selection.
@@ -575,6 +563,11 @@ impl LlmModel {
         let dim = self.cfg.n_embd;
         let mut cur = vec![0.0f32; dim];
         self.token_embd.cpu.decode_row(token_id as usize, &mut cur);
+        if (self.cfg.embed_scale - 1.0).abs() > 1e-7 {
+            for v in cur.iter_mut() {
+                *v *= self.cfg.embed_scale;
+            }
+        }
 
         if state.rope_delta == 0 {
             if let (Some(runner), Some(gpu_st)) = (self.metal_llm.as_mut(), state.gpu.as_mut()) {

@@ -35,7 +35,21 @@ impl BpeTokenizer {
             let known_added = (tok.starts_with("<|") && tok.ends_with("|>"))
                 || matches!(
                     tok.as_str(),
-                    "<think>" | "</think>" | "<tool_call>" | "</tool_call>" | "<tool_response>" | "</tool_response>"
+                    "<think>"
+                        | "</think>"
+                        | "<tool_call>"
+                        | "</tool_call>"
+                        | "<tool_response>"
+                        | "</tool_response>"
+                        | "<start_of_turn>"
+                        | "</start_of_turn>"
+                        | "<end_of_turn>"
+                        | "<bos>"
+                        | "<eos>"
+                        | "[INST]"
+                        | "[/INST]"
+                        | "<s>"
+                        | "</s>"
                 );
             let is_special = known_added
                 || token_types
@@ -156,9 +170,13 @@ impl BpeTokenizer {
         self.token_to_id.get(tok).copied()
     }
 
-    /// Formats a user prompt using Qwen ChatML (`enable_thinking=false` by default for crisp output).
+    /// Formats a user prompt using Qwen ChatML, Llama-3, Gemma-3, or Mistral chat templates.
     pub fn encode_chat(&self, user_prompt: &str, arch: &str, enable_thinking: bool) -> Vec<u32> {
-        if user_prompt.contains("<|im_start|>") {
+        if user_prompt.contains("<|im_start|>")
+            || user_prompt.contains("<|start_header_id|>")
+            || user_prompt.contains("<start_of_turn>")
+            || user_prompt.contains("[INST]")
+        {
             return self.encode(user_prompt);
         }
         if self.token_id("<|im_start|>").is_some() && self.token_id("<|im_end|>").is_some() {
@@ -173,6 +191,24 @@ impl BpeTokenizer {
             };
             let formatted = format!("<|im_start|>user\n{user_prompt}<|im_end|>\n{suffix}");
             self.encode(&formatted)
+        } else if self.token_id("<|start_header_id|>").is_some()
+            && self.token_id("<|eot_id|>").is_some()
+        {
+            self.encode(&format!(
+                "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+                user_prompt.trim()
+            ))
+        } else if self.token_id("<start_of_turn>").is_some()
+            && self.token_id("<end_of_turn>").is_some()
+        {
+            let bos = if self.token_id("<bos>").is_some() { "<bos>" } else { "" };
+            self.encode(&format!(
+                "{bos}<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n",
+                user_prompt.trim()
+            ))
+        } else if self.token_id("[INST]").is_some() && self.token_id("[/INST]").is_some() {
+            let bos = if self.token_id("<s>").is_some() { "<s>" } else { "" };
+            self.encode(&format!("{bos}[INST] {} [/INST]", user_prompt.trim()))
         } else {
             self.encode(user_prompt)
         }
@@ -191,7 +227,7 @@ impl BpeTokenizer {
             // Check if any special token starts at or after cursor
             let rem = &text[cursor..];
             let mut earliest: Option<(usize, usize, u32)> = None;
-            if rem.contains('<') {
+            if rem.contains('<') || rem.contains('[') {
                 for &(ref sp, id) in &self.special_tokens {
                     if let Some(pos) = rem.find(sp.as_str()) {
                         if earliest.is_none_or(|(best_pos, _, _)| pos < best_pos) {
