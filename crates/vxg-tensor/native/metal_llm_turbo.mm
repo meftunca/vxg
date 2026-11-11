@@ -11,6 +11,7 @@ constexpr uint32_t MAX_BATCH_M = 4u;
 constexpr uint32_t RING_SLOTS = 256u;
 constexpr uint32_t STAGE2_TGS = 768u;
 static bool g_gemm4_dual = (std::getenv("VXT_GEMM4_SINGLE") == nullptr);
+static bool g_skip_gemm = false;
 
 struct TurboLlmMatParamsC {
     uint32_t rows;
@@ -356,6 +357,7 @@ uint32_t encode_turbo_mat(
 ) {
     uint32_t ec_flag = (m.bits == 4u) ? 256u : 0u;
     uint32_t res_flag = add_residual ? 512u : 0u;
+    if (g_skip_gemm) return 1u;
     if (batch_m == 1u) {
         uint32_t steps = m.padded_cols >> 8u;
         uint32_t total_tiles = (m.rows + 3u) / 4u;
@@ -1859,6 +1861,14 @@ static void run_vxt_timing_probe(MetalTurboRunner* r) {
         });
         g_gemm4_dual = saved;
     }
+    g_skip_gemm = true;
+    measure_gpu_us("G3. M=4 trunk WITHOUT gemms", [&](id<MTLComputeCommandEncoder> enc) {
+        encode_turbo_forward(r, ts, enc, r->tok_in_buf, 0, 4u, 64u, 1u, 0u, r->out_ids_buf, 0, 0xffffffffu);
+    });
+    measure_gpu_us("G4. M=1 trunk WITHOUT gemms (no epi)", [&](id<MTLComputeCommandEncoder> enc) {
+        encode_turbo_forward(r, ts, enc, r->tok_ring_buf, 0, 1u, 64u, 0u, 0u, r->out_ring_buf, 0, 1u, 0xffffffffu, 0xffffffffu, true, 1);
+    });
+    g_skip_gemm = false;
 
     measure_gpu_us("C3a. Trunk (dnet_fuse=1)", [&](id<MTLComputeCommandEncoder> enc) {
         encode_turbo_forward(r, ts, enc, r->tok_ring_buf, 0, 1u, 64u, 0u, 0u, r->out_ring_buf, 0, 1u, 0xffffffffu, 0xffffffffu, false, 1);
@@ -2248,6 +2258,9 @@ int vxt_metal_turbo_generation_checkpoint(void* raw_runner, void* raw_state,
         }
         [enc endEncoding];
         [cmd commit];
+        // Saving is ordered on the queue ahead of every later step/restore (tracked hazards),
+        // so the CPU never needs to block on it; only restores are awaited.
+        if (!restore) return 0;
         [cmd waitUntilCompleted];
         if ([cmd status] != MTLCommandBufferStatusCompleted) {
             vxt_write_err(err_out, err_cap, "Turbo generation checkpoint failed");
