@@ -2552,6 +2552,28 @@ inline half vxt_dot_u4_h2(half2 u0, half2 u1, half2 u2, half2 u3, half4 xa, half
     return p.x + p.y;
 }
 
+// Decode one lane's 4-row x 8-col Turbo3 slice to 16 `half2` LUT values once (shared by M tokens).
+inline void vxt_t3_decode16(threadgroup const half2* lut64, uint2 rw01, uint rw2, thread half2* u) {
+    u[0] = lut64[rw01.x & 63u];  u[1] = lut64[(rw01.x >> 6u) & 63u];
+    u[2] = lut64[(rw01.x >> 12u) & 63u]; u[3] = lut64[(rw01.x >> 18u) & 63u];
+    u[4] = lut64[rw01.y & 63u];  u[5] = lut64[(rw01.y >> 6u) & 63u];
+    u[6] = lut64[(rw01.y >> 12u) & 63u]; u[7] = lut64[(rw01.y >> 18u) & 63u];
+    u[8] = lut64[rw2 & 63u];     u[9] = lut64[(rw2 >> 6u) & 63u];
+    u[10] = lut64[(rw2 >> 12u) & 63u]; u[11] = lut64[(rw2 >> 18u) & 63u];
+    uint c33 = (rw01.x >> 30u) | ((rw01.y >> 28u) & 0x0Cu) | ((rw2 >> 26u) & 0x30u);
+    u[12] = lut64[(rw01.x >> 24u) & 63u]; u[13] = lut64[(rw01.y >> 24u) & 63u];
+    u[14] = lut64[(rw2 >> 24u) & 63u];    u[15] = lut64[c33];
+}
+
+inline float4 vxt_t3_apply16(thread const half2* u, float4 sf, half4 xa, half4 xb, float4 acc) {
+    half4 d = half4(
+        vxt_dot_u4_h2(u[0], u[1], u[2], u[3], xa, xb),
+        vxt_dot_u4_h2(u[4], u[5], u[6], u[7], xa, xb),
+        vxt_dot_u4_h2(u[8], u[9], u[10], u[11], xa, xb),
+        vxt_dot_u4_h2(u[12], u[13], u[14], u[15], xa, xb));
+    return fma(sf, float4(d), acc);
+}
+
 [[max_total_threads_per_threadgroup(256)]]
 kernel void vxt_llm_turbo3_gemm4(
     device const ushort* scales_f16    [[buffer(0)]],
@@ -2610,14 +2632,18 @@ kernel void vxt_llm_turbo3_gemm4(
                 uint s0w = q0[64u + lane], s1w = q1[64u + lane];
                 half4 h0 = *(device const half4*)(sc0 + soff);
                 half4 h1 = *(device const half4*)(sc1 + soff);
-                a00 = vxt_eval_t3_lut(lut64, r0, s0w, h0, x0a, x0b, a00);
-                a01 = vxt_eval_t3_lut(lut64, r0, s0w, h0, x1a, x1b, a01);
-                a02 = vxt_eval_t3_lut(lut64, r0, s0w, h0, x2a, x2b, a02);
-                a03 = vxt_eval_t3_lut(lut64, r0, s0w, h0, x3a, x3b, a03);
-                a10 = vxt_eval_t3_lut(lut64, r1, s1w, h1, x0a, x0b, a10);
-                a11 = vxt_eval_t3_lut(lut64, r1, s1w, h1, x1a, x1b, a11);
-                a12 = vxt_eval_t3_lut(lut64, r1, s1w, h1, x2a, x2b, a12);
-                a13 = vxt_eval_t3_lut(lut64, r1, s1w, h1, x3a, x3b, a13);
+                float4 f0 = float4(h0), f1 = float4(h1);
+                half2 u0[16], u1[16];
+                vxt_t3_decode16(lut64, r0, s0w, u0);
+                vxt_t3_decode16(lut64, r1, s1w, u1);
+                a00 = vxt_t3_apply16(u0, f0, x0a, x0b, a00);
+                a01 = vxt_t3_apply16(u0, f0, x1a, x1b, a01);
+                a02 = vxt_t3_apply16(u0, f0, x2a, x2b, a02);
+                a03 = vxt_t3_apply16(u0, f0, x3a, x3b, a03);
+                a10 = vxt_t3_apply16(u1, f1, x0a, x0b, a10);
+                a11 = vxt_t3_apply16(u1, f1, x1a, x1b, a11);
+                a12 = vxt_t3_apply16(u1, f1, x2a, x2b, a12);
+                a13 = vxt_t3_apply16(u1, f1, x3a, x3b, a13);
             }
         }
         float4 s[8] = {

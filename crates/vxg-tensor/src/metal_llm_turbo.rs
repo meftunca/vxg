@@ -450,8 +450,16 @@ impl MetalTurboRunner {
                                 }
                             }
                         }
+                        // Copy-heavy output: if the current suffix already has an N-gram hit, let the
+                        // pipeline drain after the in-flight burst so the next step can be an M=4 draft.
+                        let ngram_hint = pending.len() == 1
+                            && ngram.as_mut().is_some_and(|ng| {
+                                ng.sync_generated(&gen_ids);
+                                ng.draft3(spec_streak > 0, stop_ids).is_some()
+                            });
                         while pending.len() < 2
                             && submitted < total
+                            && !(ngram_hint && !pending.is_empty())
                             && (pending.is_empty()
                                 || submitted.saturating_sub(ckpt_consumed) < CKPT_WINDOW)
                         {
