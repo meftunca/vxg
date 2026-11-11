@@ -9,8 +9,8 @@
 use std::io::{self, Read, Write};
 
 use crate::{
-    compress_into, decompress_into, frame, max_compressed_size, DecodeOptions, Error, Options,
-    Result,
+    compress_into_stream, decompress_into, dict_lz, frame, max_compressed_size, DecodeOptions,
+    Error, Options, Result,
 };
 
 fn to_io_err(err: Error) -> io::Error {
@@ -59,7 +59,7 @@ pub struct StreamEncoder<W: Write> {
     chunk_size: usize,
     raw_buf: Vec<u8>,
     enc_buf: Vec<u8>,
-    v6_builder: Option<frame::v6::V6StreamBuilder>,
+    stream_cache: Option<(Options, Option<dict_lz::PreparedDict>)>,
     frames_emitted: u64,
     total_in: u64,
     total_out: u64,
@@ -67,17 +67,8 @@ pub struct StreamEncoder<W: Write> {
 
 impl<W: Write> StreamEncoder<W> {
     /// Creates a new streaming encoder with a bounded default chunk size
-    /// (`4..16 MiB` scaled by `options.threads` for `v4`/`v5`; a small `1..4`-block micro-batch
-    /// when `options.col_group` is enabled so blocks are encoded immediately into per-column buffers).
+    /// (`4..16 MiB` scaled by `options.threads`).
     pub fn new(writer: W, options: Options) -> Result<Self> {
-        if options.col_group && !options.legacy_v2 {
-            let micro_blocks = options.threads.clamp(1, 8);
-            let chunk_size = options
-                .block_size
-                .saturating_mul(micro_blocks)
-                .clamp(options.block_size, 4 << 20);
-            return Self::with_chunk_size(writer, options, chunk_size);
-        }
         let blocks = (options.threads.clamp(1, 32) * 16).clamp(64, 256);
         let chunk_size = options
             .block_size
@@ -89,12 +80,7 @@ impl<W: Write> StreamEncoder<W> {
     /// Creates a new streaming encoder flushing a self-contained VXG frame every `chunk_size` bytes.
     pub fn with_chunk_size(writer: W, options: Options, chunk_size: usize) -> Result<Self> {
         options.validate()?;
-        let eff_chunk = if options.col_group && !options.legacy_v2 {
-            chunk_size.min(4 << 20)
-        } else {
-            chunk_size
-        };
-        let blocks = eff_chunk
+        let blocks = chunk_size
             .max(options.block_size)
             .div_ceil(options.block_size);
         let aligned_chunk = blocks
@@ -104,15 +90,13 @@ impl<W: Write> StreamEncoder<W> {
             return Err(Error::InvalidOption("stream chunk_size must be <= 64 MiB"));
         }
         let _max_enc = max_compressed_size(aligned_chunk, options.block_size)?;
-        let v6_builder =
-            (options.col_group && !options.legacy_v2).then(frame::v6::V6StreamBuilder::new);
         Ok(Self {
             writer: Some(writer),
             options,
             chunk_size: aligned_chunk,
             raw_buf: Vec::new(),
             enc_buf: Vec::new(),
-            v6_builder,
+            stream_cache: None,
             frames_emitted: 0,
             total_in: 0,
             total_out: 0,
@@ -129,116 +113,89 @@ impl<W: Write> StreamEncoder<W> {
         self.total_out
     }
 
-    /// Current total buffer footprint (`raw_buf + enc_buf + active v6 group streams`).
+    /// Current total buffer footprint (`raw_buf + enc_buf`).
     pub fn buffered_bytes(&self) -> usize {
-        self.raw_buf.capacity()
-            + self.enc_buf.capacity()
-            + self
-                .v6_builder
-                .as_ref()
-                .map_or(0, frame::v6::V6StreamBuilder::buffered_compressed_bytes)
+        self.raw_buf.capacity() + self.enc_buf.capacity()
     }
 
-    fn flush_slice(&mut self, len: usize) -> io::Result<()> {
+    #[inline]
+    fn snap_chunk_len(&self, slice: &[u8]) -> usize {
+        let len = slice.len();
+        if self.options.record_aligned && !self.options.legacy_v2 && len > self.options.block_size / 2 {
+            let back = (self.options.block_size / 2).min(65_536).min(len);
+            if let Some(rel) = slice[len - back..len].iter().rposition(|&c| c == b'\n') {
+                return len - back + rel + 1;
+            }
+        }
+        len
+    }
+
+    fn encode_and_emit(&mut self, slice: &[u8]) -> io::Result<()> {
         let writer = self
             .writer
             .as_mut()
             .ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
-        let bound = max_compressed_size(len, self.options.block_size).map_err(to_io_err)?;
+        let bound = max_compressed_size(slice.len(), self.options.block_size).map_err(to_io_err)?;
         if self.enc_buf.len() < bound {
             self.enc_buf.resize(bound, 0);
         }
-        let written = compress_into(&self.raw_buf[..len], &mut self.enc_buf[..bound], &self.options)
-            .map_err(to_io_err)?;
+        let written = compress_into_stream(
+            slice,
+            &mut self.enc_buf[..bound],
+            &self.options,
+            &mut self.stream_cache,
+            true,
+        )
+        .map_err(to_io_err)?;
         writer.write_all(&self.enc_buf[..written])?;
-        self.total_in += len as u64;
+        self.total_in += slice.len() as u64;
         self.total_out += written as u64;
         self.frames_emitted += 1;
         Ok(())
     }
 
-    fn flush_v6_step(&mut self, is_final: bool) -> io::Result<()> {
-        while !self.raw_buf.is_empty() {
-            let len = self.raw_buf.len();
-            let eff_bs = self.v6_builder.as_mut().unwrap().resolve_eff_bs(
-                &self.raw_buf,
-                &self.options,
-                is_final,
-            );
-            let target_micro = (eff_bs * self.options.threads.clamp(1, 8)).clamp(eff_bs, 4 << 20);
-            self.chunk_size = target_micro;
-            if !is_final && len < target_micro {
-                return Ok(());
-            }
-            let take_raw = len.min(target_micro);
-            let encode_len = if !is_final && self.options.record_aligned && take_raw > eff_bs / 2 {
-                let back = (eff_bs / 4).min(32_768).min(take_raw);
-                self.raw_buf[take_raw - back..take_raw]
-                    .iter()
-                    .rposition(|&c| c == b'\n')
-                    .map_or(take_raw, |rel| take_raw - back + rel + 1)
-            } else {
-                take_raw
-            };
-            let skip_dict = self.v6_builder.as_ref().is_some_and(|b| b.saw_columnar_no_dict);
-            let mut micro_opts = self
-                .v6_builder
-                .as_ref()
-                .and_then(|b| b.eff_opts.clone())
-                .unwrap_or_else(|| self.options.clone());
-            micro_opts.col_group = false;
-            let bound = max_compressed_size(encode_len, self.options.block_size).map_err(to_io_err)?;
-            if self.enc_buf.len() < bound {
-                self.enc_buf.resize(bound, 0);
-            }
-            let written = crate::compress_into_micro(&self.raw_buf[..encode_len], &mut self.enc_buf[..bound], &micro_opts, skip_dict)
-                .map_err(to_io_err)?;
-            let writer = self.writer.as_mut().ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
-            let v6_out = self
-                .v6_builder
-                .as_mut()
-                .unwrap()
-                .ingest_v5_micro_frame(&self.enc_buf[..written], writer, &self.options)
-                .map_err(to_io_err)?;
-            self.total_in += encode_len as u64;
-            self.total_out += v6_out;
-            self.frames_emitted += u64::from(v6_out > 0);
-            self.raw_buf.drain(..encode_len);
+    fn flush_buffered(&mut self, is_final: bool) -> io::Result<()> {
+        if self.raw_buf.is_empty() && !(is_final && self.frames_emitted == 0) {
+            return Ok(());
         }
-        if is_final {
-            let writer = self.writer.as_mut().ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
-            let v6_out = self
-                .v6_builder
-                .as_mut()
-                .unwrap()
-                .flush_group(writer, &self.options)
-                .map_err(to_io_err)?;
-            self.total_out += v6_out;
-            self.frames_emitted += u64::from(v6_out > 0);
-            if self.frames_emitted == 0 {
-                self.flush_slice(0)?;
-            }
+        let take = if is_final {
+            self.raw_buf.len()
+        } else {
+            self.snap_chunk_len(&self.raw_buf)
+        };
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| io::Error::other("StreamEncoder already finished"))?;
+        let bound = max_compressed_size(take, self.options.block_size).map_err(to_io_err)?;
+        if self.enc_buf.len() < bound {
+            self.enc_buf.resize(bound, 0);
         }
-        Ok(())
-    }
-
-    fn flush_chunk(&mut self) -> io::Result<()> {
-        if self.v6_builder.is_some() {
-            return self.flush_v6_step(false);
+        let written = compress_into_stream(
+            &self.raw_buf[..take],
+            &mut self.enc_buf[..bound],
+            &self.options,
+            &mut self.stream_cache,
+            true,
+        )
+        .map_err(to_io_err)?;
+        writer.write_all(&self.enc_buf[..written])?;
+        self.total_in += take as u64;
+        self.total_out += written as u64;
+        self.frames_emitted += 1;
+        if take == self.raw_buf.len() {
+            self.raw_buf.clear();
+        } else {
+            self.raw_buf.drain(..take);
         }
-        let len = self.raw_buf.len();
-        self.flush_slice(len)?;
-        self.raw_buf.clear();
         Ok(())
     }
 
     /// Flushes any remaining buffered bytes (or emits an empty VXG frame if 0 bytes were written)
     /// and returns the underlying writer.
     pub fn finish(mut self) -> io::Result<W> {
-        if self.v6_builder.is_some() {
-            self.flush_v6_step(true)?;
-        } else if !self.raw_buf.is_empty() || self.frames_emitted == 0 {
-            self.flush_chunk()?;
+        if !self.raw_buf.is_empty() || self.frames_emitted == 0 {
+            self.flush_buffered(true)?;
         }
         let mut writer = self.writer.take().unwrap();
         writer.flush()?;
@@ -250,22 +207,26 @@ impl<W: Write> Write for StreamEncoder<W> {
     fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
         let total = buf.len();
         while !buf.is_empty() {
+            if self.raw_buf.is_empty() && buf.len() >= self.chunk_size {
+                let take = self.snap_chunk_len(&buf[..self.chunk_size]);
+                self.encode_and_emit(&buf[..take])?;
+                buf = &buf[take..];
+                continue;
+            }
             let space = self.chunk_size.saturating_sub(self.raw_buf.len()).max(1);
             let take = buf.len().min(space);
             self.raw_buf.extend_from_slice(&buf[..take]);
             buf = &buf[take..];
             if self.raw_buf.len() >= self.chunk_size {
-                self.flush_chunk()?;
+                self.flush_buffered(false)?;
             }
         }
         Ok(total)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if self.v6_builder.is_some() {
-            self.flush_v6_step(true)?;
-        } else if !self.raw_buf.is_empty() {
-            self.flush_chunk()?;
+        if !self.raw_buf.is_empty() {
+            self.flush_buffered(true)?;
         }
         if let Some(ref mut w) = self.writer {
             w.flush()?;
@@ -276,12 +237,8 @@ impl<W: Write> Write for StreamEncoder<W> {
 
 impl<W: Write> Drop for StreamEncoder<W> {
     fn drop(&mut self) {
-        if self.writer.is_some() {
-            if self.v6_builder.is_some() {
-                let _ = self.flush_v6_step(true);
-            } else if !self.raw_buf.is_empty() || self.frames_emitted == 0 {
-                let _ = self.flush_chunk();
-            }
+        if self.writer.is_some() && (!self.raw_buf.is_empty() || self.frames_emitted == 0) {
+            let _ = self.flush_buffered(true);
         }
     }
 }
@@ -412,33 +369,20 @@ pub fn compress_stream<R: Read, W: Write>(
     options: &Options,
 ) -> Result<(u64, u64)> {
     let mut enc = StreamEncoder::new(writer, options.clone())?;
-    if enc.v6_builder.is_some() {
-        let mut io_buf = vec![0u8; 65_536];
-        loop {
-            match reader.read(&mut io_buf) {
-                Ok(0) => break,
-                Ok(n) => enc.write_all(&io_buf[..n]).map_err(from_io_err)?,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(from_io_err(e)),
-            }
-        }
-        let total_in = enc.total_in + enc.raw_buf.len() as u64;
-        let _ = total_in;
-        enc.flush_v6_step(true).map_err(from_io_err)?;
-        let stats = (enc.total_in, enc.total_out);
-        enc.finish().map_err(from_io_err)?;
-        return Ok(stats);
-    }
-    enc.raw_buf.resize(enc.chunk_size, 0);
+    let mut raw_buf = vec![0u8; enc.chunk_size];
     let mut filled = 0usize;
     loop {
-        match reader.read(&mut enc.raw_buf[filled..]) {
+        match reader.read(&mut raw_buf[filled..]) {
             Ok(0) => break,
             Ok(n) => {
                 filled += n;
                 if filled == enc.chunk_size {
-                    enc.flush_slice(filled).map_err(from_io_err)?;
-                    filled = 0;
+                    let take = enc.snap_chunk_len(&raw_buf[..filled]);
+                    enc.encode_and_emit(&raw_buf[..take]).map_err(from_io_err)?;
+                    if take < filled {
+                        raw_buf.copy_within(take..filled, 0);
+                    }
+                    filled -= take;
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -446,9 +390,8 @@ pub fn compress_stream<R: Read, W: Write>(
         }
     }
     if filled > 0 || enc.frames_emitted == 0 {
-        enc.flush_slice(filled).map_err(from_io_err)?;
+        enc.encode_and_emit(&raw_buf[..filled]).map_err(from_io_err)?;
     }
-    enc.raw_buf.clear();
     let stats = (enc.total_in, enc.total_out);
     enc.finish().map_err(from_io_err)?;
     Ok(stats)

@@ -18,7 +18,6 @@ pub const GROUP_MAGIC: &[u8; 4] = b"VXG6";
 pub const GROUP_TRAILER_MAGIC: &[u8; 4] = b"6GXV";
 pub const GROUP_CUM_FLAG: u16 = 0x4000;
 pub const GROUP_V2_FLAG: u16 = 0x2000;
-pub const TARGET_COL_STREAM_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GroupDirEntry {
@@ -43,15 +42,6 @@ pub(crate) fn uleb_len_usize(mut v: usize) -> usize {
         n += 1;
     }
     n
-}
-
-#[inline]
-pub(crate) fn put_uleb_usize(out: &mut Vec<u8>, mut v: usize) {
-    while v >= 0x80 {
-        out.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
 }
 
 #[inline]
@@ -594,7 +584,3 @@ pub(crate) use v6_point::{extract_row_range_v6_indexed, try_extract_block_v6_int
 #[path = "v6_query.rs"]
 mod v6_query;
 pub(crate) use v6_query::{decode_v6_direct_into, parse_v6_for_query, parse_v6_frame};
-
-#[path = "v6_stream.rs"]
-mod v6_stream;
-pub(crate) use v6_stream::{repack_v4_v5_to_v6, V6StreamBuilder};

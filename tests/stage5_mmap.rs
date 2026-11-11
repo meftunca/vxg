@@ -342,22 +342,10 @@ fn partial_cache_30_70_and_scattered_residency_and_single_mincore_per_query() {
         },
     )
     .unwrap();
-    let v6_bytes = compress(
-        &raw,
-        &Options {
-            block_size: 65_536,
-            threads: 4,
-            record_aligned: true,
-            col_group: true,
-            ..Options::default()
-        },
-    )
-    .unwrap();
     assert!(
-        v5_bytes.len() >= 3 * CHUNK_BYTES && v6_bytes.len() >= 3 * CHUNK_BYTES,
-        "test archive must span multiple 1 MiB chunks (v5={}, v6={})",
+        v5_bytes.len() >= 3 * CHUNK_BYTES,
+        "test archive must span multiple 1 MiB chunks (v5={})",
         v5_bytes.len(),
-        v6_bytes.len()
     );
 
     let dec = DecodeOptions {
@@ -368,7 +356,7 @@ fn partial_cache_30_70_and_scattered_residency_and_single_mincore_per_query() {
     let q = SqlQuery::parse("SELECT grp, COUNT(*), SUM(amt) FROM frame WHERE amt > 50 GROUP BY grp ORDER BY grp ASC").unwrap();
     let expected_sql = execute_sql(&v5_bytes, &q, SqlFormat::Csv, false, &dec).unwrap();
 
-    for (label, frame_bytes) in [("v5", &v5_bytes), ("v6", &v6_bytes)] {
+    for (label, frame_bytes) in [("v5", &v5_bytes)] {
         let path = dir.join(format!("test_{label}.vxg"));
         let num_chunks = frame_bytes.len().div_ceil(CHUNK_BYTES);
 

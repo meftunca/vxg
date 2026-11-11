@@ -89,24 +89,24 @@ Measured standalone with zero background CPU contention (`libvxg.dylib` via `cty
 <!-- BEGIN GENERATED TABLE: duckdb-in-cache -->
 | Corpus & Query (`1T / 8T` latency in `ms`, lower is faster) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* | DuckDB Raw |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`nyc-taxi-2024-01.ndjson`** *(52.3 MB, 200k rows)* | 3.10 MB (`6.8 ms` `-l 3`, YES) | **2.86 MB** (`29.4 ms` `-l 3`, YES) | 3.94 MB (`83.6 ms` ETL, NO) | 4.17 MB (`75.7 ms`, NO) | 2.96 MB (`92.0 ms` ETL, NO) | `52.33 MB` (YES) |
-| ↳ `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 2.46 / 0.61 | **0.53** / **0.15** | 1.69 / 1.13 | 2.38 / 1.57 | 2.30 / 1.37 | 81.27 / 57.39 |
-| ↳ `SUM/MIN/MAX(total_cents) [all 200k rows]` | 1.35 / 0.47 | **0.15** / **0.10** | 2.11 / 0.91 | 1.49 / 0.93 | 1.77 / 1.15 | 81.30 / 56.10 |
-| ↳ `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 1.73 / 0.44 | **0.28** / **0.09** | 1.18 / 0.98 | 1.47 / 0.91 | 1.46 / 1.22 | 81.51 / 57.32 |
-| ↳ `GROUP BY payment_type: COUNT(*), SUM(total)` | 2.08 / 0.49 | **0.52** / **0.10** | 1.22 / 0.98 | 1.56 / 0.86 | 1.57 / 1.14 | 84.65 / 55.83 |
-| ↳ `ORDER BY total_cents DESC LIMIT 10` | 1.61 / 0.87 | **0.46** / **0.18** | 2.56 / 2.16 | 2.47 / 2.33 | 4.59 / 3.41 | 92.09 / 58.27 |
-| ↳ `SELECT 4 cols WHERE tip_cents >= 2500` | 2.08 / 0.92 | **1.07** / **0.23** | 3.22 / 3.11 | 3.61 / 3.57 | 5.55 / 5.28 | 94.70 / 59.56 |
-| **`nyc-taxi-2024-01.csv`** *(23.0 MB, 300k rows)* | 4.21 MB (`9.1 ms` `-l 3`, YES) | **4.19 MB** (`27.0 ms` `-l 3`, YES) | 5.86 MB (`105.3 ms` ETL, NO) | 6.19 MB (`88.9 ms`, NO) | 4.39 MB (`97.7 ms` ETL, NO) | `23.00 MB` (YES) |
-| ↳ `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 0.90 / 0.19 | **0.80** / **0.13** | 1.92 / 1.21 | 2.64 / 1.27 | 2.80 / 1.57 | 77.86 / 51.57 |
-| ↳ `SUM/MIN/MAX(total_cents) [all 300k rows]` | 0.40 / 0.18 | **0.35** / **0.16** | 1.45 / 0.97 | 1.81 / 0.92 | 1.91 / 1.10 | 79.03 / 50.90 |
-| ↳ `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 0.60 / 0.17 | **0.52** / **0.09** | 1.53 / 1.15 | 1.94 / 1.09 | 1.95 / 1.33 | 79.73 / 50.40 |
-| ↳ `GROUP BY payment_type: COUNT(*), SUM(total)` | 1.06 / 0.25 | **0.91** / **0.21** | 1.62 / 1.04 | 2.13 / 1.17 | 2.09 / 1.22 | 77.72 / 50.85 |
-| **`ndjson_varied.ndjson`** *(56.5 MB, 300k rows)* | 5.17 MB (`8.8 ms` `-l 3`, YES) | **4.70 MB** (`41.6 ms` `-l 3`, YES) | 9.70 MB (`116.4 ms` ETL, NO) | 9.72 MB (`102.7 ms`, NO) | 5.56 MB (`121.0 ms` ETL, NO) | `56.50 MB` (YES) |
-| ↳ `COUNT(*) WHERE fraud & status=500 & lat>=150` | 2.79 / 0.61 | **0.89** / **0.21** | 1.23 / 0.92 | 1.74 / 1.06 | 1.43 / 1.01 | 99.73 / 62.44 |
-| ↳ `SUM/MIN/MAX(bytes) [all 300k rows]` | 1.17 / 0.32 | **0.12** / **0.03** | 2.35 / 1.24 | 2.57 / 0.94 | 3.61 / 1.80 | 88.87 / 58.29 |
-| ↳ `GROUP BY service: COUNT(*), SUM(bytes)` | 2.60 / 0.54 | **0.83** / **0.16** | 2.97 / 1.73 | 3.31 / 1.57 | 4.25 / 2.25 | 100.75 / 62.54 |
-| ↳ `ORDER BY latency_ms DESC LIMIT 10` | 1.65 / 0.81 | **0.44** / **0.17** | 3.15 / 2.06 | 2.55 / 1.59 | 3.88 / 2.38 | 101.63 / 62.16 |
-| ↳ `SELECT 3 cols WHERE fraud & 500 & lat>=150` | 2.71 / 0.86 | **0.95** / **0.20** | 7.43 / 6.89 | 5.04 / 4.78 | 9.42 / 8.95 | 104.52 / 63.29 |
+| **`nyc-taxi-2024-01.ndjson`** *(52.3 MB, 200k rows)* | 3.10 MB (`5.8 ms` `-l 3`, YES) | **2.86 MB** (`24.5 ms` `-l 3`, YES) | 3.94 MB (`81.8 ms` ETL, NO) | 4.17 MB (`76.0 ms`, NO) | 2.96 MB (`89.2 ms` ETL, NO) | `52.33 MB` (YES) |
+| ↳ `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 2.54 / 0.52 | **0.54** / **0.12** | 1.42 / 1.21 | 2.04 / 1.05 | 2.01 / 1.37 | 84.80 / 55.27 |
+| ↳ `SUM/MIN/MAX(total_cents) [all 200k rows]` | 1.33 / 0.35 | **0.16** / **0.04** | 1.07 / 0.84 | 1.33 / 0.81 | 1.36 / 1.03 | 78.42 / 54.16 |
+| ↳ `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 1.75 / 0.46 | **0.29** / **0.11** | 1.25 / 0.89 | 1.47 / 0.83 | 1.51 / 1.08 | 83.97 / 55.55 |
+| ↳ `GROUP BY payment_type: COUNT(*), SUM(total)` | 2.20 / 0.50 | **0.54** / **0.10** | 1.31 / 0.93 | 1.58 / 0.87 | 1.59 / 1.17 | 81.00 / 55.74 |
+| ↳ `ORDER BY total_cents DESC LIMIT 10` | 1.63 / 0.81 | **0.45** / **0.19** | 2.77 / 2.10 | 2.53 / 1.68 | 4.85 / 3.32 | 89.02 / 58.79 |
+| ↳ `SELECT 4 cols WHERE tip_cents >= 2500` | 2.17 / 0.87 | **1.12** / **0.25** | 3.06 / 3.16 | 3.48 / 3.66 | 5.19 / 5.29 | 94.40 / 59.62 |
+| **`nyc-taxi-2024-01.csv`** *(23.0 MB, 300k rows)* | 4.21 MB (`8.1 ms` `-l 3`, YES) | **4.19 MB** (`19.9 ms` `-l 3`, YES) | 5.86 MB (`88.8 ms` ETL, NO) | 6.19 MB (`84.8 ms`, NO) | 4.39 MB (`96.1 ms` ETL, NO) | `23.00 MB` (YES) |
+| ↳ `COUNT(*) WHERE pay=1 & tip>=1000 & dist>=500` | 0.94 / 0.19 | **0.83** / **0.14** | 1.83 / 1.22 | 2.84 / 1.24 | 2.86 / 1.52 | 78.66 / 51.13 |
+| ↳ `SUM/MIN/MAX(total_cents) [all 300k rows]` | 0.40 / 0.13 | **0.33** / **0.06** | 1.35 / 0.90 | 1.77 / 0.92 | 1.79 / 1.11 | 76.68 / 49.13 |
+| ↳ `SUM/MIN/MAX(fare_cents) WHERE payment_type=2` | 0.58 / 0.20 | **0.50** / **0.16** | 1.63 / 1.04 | 1.99 / 1.11 | 2.05 / 1.23 | 77.52 / 50.86 |
+| ↳ `GROUP BY payment_type: COUNT(*), SUM(total)` | 1.07 / 0.33 | **0.91** / **0.26** | 1.62 / 1.00 | 2.11 / 1.02 | 2.07 / 1.20 | 80.92 / 51.94 |
+| **`ndjson_varied.ndjson`** *(56.5 MB, 300k rows)* | 5.17 MB (`9.8 ms` `-l 3`, YES) | **4.70 MB** (`32.8 ms` `-l 3`, YES) | 9.70 MB (`107.4 ms` ETL, NO) | 9.72 MB (`101.0 ms`, NO) | 5.56 MB (`119.3 ms` ETL, NO) | `56.50 MB` (YES) |
+| ↳ `COUNT(*) WHERE fraud & status=500 & lat>=150` | 2.73 / 0.51 | **0.90** / **0.15** | 1.09 / 0.83 | 1.64 / 1.06 | 1.42 / 0.99 | 99.18 / 61.06 |
+| ↳ `SUM/MIN/MAX(bytes) [all 300k rows]` | 1.16 / 0.39 | **0.13** / **0.03** | 2.29 / 1.23 | 2.49 / 1.11 | 3.58 / 1.73 | 91.37 / 58.16 |
+| ↳ `GROUP BY service: COUNT(*), SUM(bytes)` | 2.72 / 0.58 | **0.86** / **0.18** | 2.77 / 1.61 | 3.12 / 1.27 | 4.00 / 2.17 | 103.08 / 62.57 |
+| ↳ `ORDER BY latency_ms DESC LIMIT 10` | 1.53 / 0.63 | **0.42** / **0.14** | 3.44 / 2.10 | 2.87 / 1.75 | 4.36 / 2.46 | 98.83 / 62.00 |
+| ↳ `SELECT 3 cols WHERE fraud & 500 & lat>=150` | 2.80 / 0.82 | **0.96** / **0.20** | 6.82 / 6.86 | 4.64 / 4.67 | 8.87 / 9.00 | 108.23 / 64.17 |
 <!-- END GENERATED TABLE: duckdb-in-cache -->
 
 - **In-Cache Summary (`1T` & `8T`):** With thread-local `GRAMMAR_TPL_WIRE_CACHE` + `JSON_TPL_SLOT_CACHE` memoization, zero-alloc `GroupAccumSoa` fused group buckets (`DenseRange` `<= 4096` + `DictKeys` SoA), dynamic `Top-K` zone-map/delta pruning, and short-circuit `RowBitset` predicates:

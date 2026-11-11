@@ -111,10 +111,6 @@ pub struct Options {
     /// neither `record_aligned` nor `BLOCK_DICT_LZ` is active, enabling $O(1)$ `frame_row_count` and
     /// $O(\log B)$ random row seek without touching non-overlapping block payloads.
     pub row_index: bool,
-    /// Developer-only experimental flag (`--col-group`): emit `VERSION_V6` (`FLAG_COL_GROUP = 0x10`)
-    /// column-grouped macro-blocks (`~1 MiB`/column stream per group).
-    #[doc(hidden)]
-    pub col_group: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -129,7 +125,6 @@ impl Default for Options {
             target_block_rows: 0,
             level: 3,
             row_index: false,
-            col_group: false,
         }
     }
 }
@@ -186,19 +181,47 @@ pub fn compress_with_stats(input: &[u8], options: &Options) -> Result<(Vec<u8>, 
 /// Compresses `input` directly into caller-supplied `out[..written]`, avoiding per-call output
 /// buffer allocation on both single-threaded and multi-threaded paths by reusing thread-local scratch arenas.
 pub fn compress_into(input: &[u8], out: &mut [u8], options: &Options) -> Result<usize> {
-    compress_into_micro(input, out, options, false)
+    let mut no_cache = None;
+    compress_into_stream(input, out, options, &mut no_cache, false)
 }
 
-pub(crate) fn compress_into_micro(
+pub(crate) fn compress_into_stream(
     input: &[u8],
     out: &mut [u8],
     options: &Options,
-    skip_dict: bool,
+    stream_cache: &mut Option<(Options, Option<dict_lz::PreparedDict>)>,
+    use_stream_cache: bool,
 ) -> Result<usize> {
     options.validate()?;
     max_compressed_size(input.len(), options.block_size)?;
-    let eff = frame::v5::resolve_effective_options(input, options);
-    let options = &eff;
+    let can_cache = use_stream_cache && !options.legacy_v2 && input.len() >= options.block_size;
+    if can_cache && stream_cache.is_none() {
+        let eff = frame::v5::resolve_effective_options(input, options);
+        let probe_workers = eff.threads.min(input.len().div_ceil(eff.block_size).max(1));
+        let pd = dict_lz::prepare_frame_dict(input, eff.block_size, eff.level, probe_workers);
+        *stream_cache = Some((eff, pd));
+    }
+    let fresh_eff;
+    let fresh_dict;
+    let (options, dict_opt) = if let Some((ref cached_eff, ref cached_dict)) = *stream_cache {
+        if can_cache {
+            (cached_eff, cached_dict.as_ref())
+        } else {
+            fresh_eff = frame::v5::resolve_effective_options(input, options);
+            fresh_dict = (!fresh_eff.legacy_v2).then(|| {
+                let w = fresh_eff.threads.min(input.len().div_ceil(fresh_eff.block_size).max(1));
+                dict_lz::prepare_frame_dict(input, fresh_eff.block_size, fresh_eff.level, w)
+            }).flatten();
+            (&fresh_eff, fresh_dict.as_ref())
+        }
+    } else {
+        fresh_eff = frame::v5::resolve_effective_options(input, options);
+        fresh_dict = (!fresh_eff.legacy_v2).then(|| {
+            let w = fresh_eff.threads.min(input.len().div_ceil(fresh_eff.block_size).max(1));
+            dict_lz::prepare_frame_dict(input, fresh_eff.block_size, fresh_eff.level, w)
+        }).flatten();
+        (&fresh_eff, fresh_dict.as_ref())
+    };
     let engine = simd::Engine::new(options.simd)?;
     let ranges = frame::v5::compute_block_ranges(
         input,
@@ -213,11 +236,6 @@ pub(crate) fn compress_into_micro(
         frame::VERSION
     } else {
         frame::VERSION_RELEASE
-    };
-    let prep_dict = if !options.legacy_v2 && !skip_dict {
-        dict_lz::prepare_frame_dict(input, options.block_size, options.level, workers)
-    } else {
-        None
     };
 
     let run = |out_buf: &mut [u8], dict_ref: Option<&dict_lz::PreparedDict>| -> Result<usize> {
@@ -263,17 +281,10 @@ pub(crate) fn compress_into_micro(
         Ok(written)
     };
 
-    let written = match run(out, prep_dict.as_ref()) {
-        Err(Error::InvalidFrame("dict_expansion")) => run(out, None)?,
-        res => res?,
-    };
-    if options.col_group && !options.legacy_v2 {
-        let repacked = frame::v6::repack_v4_v5_to_v6(&out[..written], out.len())?;
-        let rlen = repacked.len();
-        out[..rlen].copy_from_slice(&repacked);
-        return Ok(rlen);
+    match run(out, dict_opt) {
+        Err(Error::InvalidFrame("dict_expansion")) => run(out, None),
+        res => res,
     }
-    Ok(written)
 }
 
 fn compress_inner<const STATS: bool>(
@@ -348,15 +359,10 @@ fn compress_inner<const STATS: bool>(
         Ok((out, stats))
     };
 
-    let (out, stats) = match run(prep_dict.as_ref()) {
-        Err(Error::InvalidFrame("dict_expansion")) => run(None)?,
-        res => res?,
-    };
-    if options.col_group && !options.legacy_v2 {
-        let repacked = frame::v6::repack_v4_v5_to_v6(&out, usize::MAX)?;
-        return Ok((repacked, stats));
+    match run(prep_dict.as_ref()) {
+        Err(Error::InvalidFrame("dict_expansion")) => run(None),
+        res => res,
     }
-    Ok((out, stats))
 }
 
 pub fn decompress(src: &[u8], options: &DecodeOptions) -> Result<Vec<u8>> {

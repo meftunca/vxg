@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0-rc.1 — Hybrid `mincore + pread` Cold/Partial-Cache Engine, Hardware `CRC32C`, Lock-Free `LIMIT` Projection, `StreamEncoder` Reuse & Wire Format Freeze (`Format v4/v5`)
+
+- **Automatic Hybrid `mincore(2)` + `1 MiB` Coalesced `pread(2)` Query Engine (`src/mmap/`, `src/frame.rs`):**
+  - Added single-syscall whole-archive `ChunkResidency::probe` (`mincore(2)`, `<= 1` call per query) with per-`1 MiB` chunk routing: resident chunks execute zero-copy from `mmap`, while non-resident chunks load via parallel `1 MiB` coalesced `pread(2)` (`HybridArena`), cutting cold NVMe `10M`-row NYC Taxi query latency by **`2.6–3.7×`** with zero warm-cache regression and zero user-facing flags.
+- **Hardware `CRC32C` (`ARMv8` / `SSE4.2`) & Lock-Free `LIMIT` Projection (`src/checksum.rs`, `src/ops/project.rs`):**
+  - Replaced software `Slice-by-8` `CRC32C` with native `ARMv8 __crc32cd` (`aarch64`) and `SSE4.2 _mm_crc32_u64` (`x86_64`) intrinsics, and added lock-free contiguous-prefix `LIMIT` cutoff (`advance_prefix`) in `select_columns_parallel` (`10M` warm `SELECT 4 cols` `12.98 -> 6.76 ms`, `SELECT *` 13 cols `20.35 -> 13.39 ms`).
+- **`StreamEncoder` Zero-Copy Slice Path, `record_aligned` Frame Snapping & First-Chunk Dictionary Reuse (`src/stream.rs`, `src/lib.rs`):**
+  - Eliminated intermediate `raw_buf` copies on full-chunk streaming writes, snapped `record_aligned` multi-frame boundaries backward to `\n` to prevent cross-frame split lines, and reused the first chunk's `PreparedDict` / columnar classification across subsequent stream frames.
+- **Production Wire Format Freeze (`Format v4/v5`, `src/frame/v6*.rs`, `tests/vectors/v6-col-group.vxg`):**
+  - Froze production wire emission at `Format v4/v5` and removed experimental `v6` archive emission (`--col-group`), retaining full `VERSION_V6` read/query/recovery compatibility, per-slice `CRC32C` verification, and the frozen `v6-col-group.vxg` golden compatibility vector + `1,250`-trial corruption fuzzer.
+
 ## 0.5.3 — Zero-Alloc `GROUP BY` SoA Fusion, Dynamic `Top-K` Pruning, Filtered Arrow Pushdown (`DuckDB` & `Polars`), Parallel `FastCover` + `FSE (tANS)`, Multi-Level (`depth <= 4`) Nested JSON & `FLAG_ROW_INDEX` ($O(1)$ Row Index)
 
 - **Zero-Alloc `GROUP BY` SoA Bucket Fusion, Dynamic `Top-K` Pruning & Work-Stealing Chunk Reducer (`src/columns/ops_group_soa.rs`, `src/columns/ops_group.rs`, `src/columns/ops_topk.rs`, `src/ops/par_chunks.rs`):**

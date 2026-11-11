@@ -1,8 +1,8 @@
 use std::process::Command;
 use vxg::{
-    compress, decompress, execute_sql, extract_block_into, extract_row, frame_row_count,
-    recover_frame, verify_frame, DecodeOptions, Frame, Options, Simd, SqlFormat, SqlQuery,
-    BLOCK_COLUMN, BLOCK_DICT_LZ, BLOCK_LZ, BLOCK_RAW, VERSION_V6,
+    decompress, execute_sql, extract_block_into, extract_row, frame_row_count, recover_frame,
+    verify_frame, DecodeOptions, Frame, Simd, SqlFormat, SqlQuery, BLOCK_COLUMN, BLOCK_DICT_LZ,
+    BLOCK_LZ, BLOCK_RAW, VERSION_V6,
 };
 
 struct FrozenVector {
@@ -390,61 +390,33 @@ fn partial_recovery_salvages_intact_blocks_from_corrupt_and_truncated_frames() {
 }
 
 #[test]
-fn v6_corrupt_group_header_recovery_salvages_remaining_groups() {
-    let mut raw = Vec::new();
-    // Group 0: 2 blocks (8192 bytes) of 4-column NDJSON records
-    while raw.len() < 8192 {
-        let i = raw.len() / 64;
-        let line = format!(
-            "{{\"id\":{},\"region\":\"eu-west-1\",\"status\":\"ok\",\"cents\":{}}}\n",
-            1000 + i,
-            (i * 37) % 10000
-        );
-        let take = line.len().min(8192 - raw.len());
-        raw.extend_from_slice(&line.as_bytes()[..take]);
-    }
-    raw[8191] = b'\n';
-    // Group 1: 2 blocks (8192 bytes) of 6-column NDJSON records (distinct slot count -> separate VXG6 group!)
-    while raw.len() < 16384 {
-        let i = raw.len() / 64;
-        let line = format!(
-            "{{\"id\":{},\"region\":\"us-east-1\",\"status\":\"ok\",\"cents\":{},\"tax\":{},\"zone\":\"A\"}}\n",
-            5000 + i,
-            (i * 53) % 10000,
-            i % 99
-        );
-        let take = line.len().min(16384 - raw.len());
-        raw.extend_from_slice(&line.as_bytes()[..take]);
-    }
-    raw[16383] = b'\n';
+fn v6_corrupt_group_header_recovery_via_backup_trailer() {
+    let v6_frame = include_bytes!("vectors/v6-col-group.vxg");
+    let raw = include_bytes!("vectors/v5-record-aligned.raw");
+    let v5_frame = include_bytes!("vectors/v5-record-aligned.vxg");
 
-    let opt = Options {
-        block_size: 4096,
-        threads: 2,
-        row_index: true,
-        col_group: true,
-        ..Options::default()
-    };
-    let v6_frame = compress(&raw, &opt).unwrap();
-    let parsed = Frame::parse(&v6_frame, 1 << 20).unwrap();
+    let parsed = Frame::parse(v6_frame, 1 << 20).unwrap();
     assert_eq!(parsed.version(), VERSION_V6);
-    assert_eq!(parsed.block_count(), 4);
+    assert!(parsed.block_count() >= 2);
 
-    // Verify random single-block and single-row access on intact v6 frame
-    let mut blk2 = vec![0u8; 4096];
-    let n2 = extract_block_into(&v6_frame, 2, &mut blk2, &DecodeOptions::default()).unwrap();
-    assert_eq!(&blk2[..n2], &raw[8192..12288]);
-    let row0 = extract_row(&v6_frame, 0, &DecodeOptions::default()).unwrap();
-    assert!(row0.starts_with(b"{\"id\":1000,"));
+    // Verify random single-block and single-row access on intact v6 golden vector
+    let b0_rn = parsed.blocks().next().unwrap().raw_size;
+    let mut blk0 = vec![0u8; b0_rn];
+    let n0 = extract_block_into(v6_frame, 0, &mut blk0, &DecodeOptions::default()).unwrap();
+    assert_eq!(&blk0[..n0], &raw[..b0_rn]);
+    assert_eq!(
+        extract_row(v6_frame, 0, &DecodeOptions::default()).unwrap(),
+        extract_row(v5_frame, 0, &DecodeOptions::default()).unwrap()
+    );
 
-    // 1. Corrupt Group 0's primary "VXG6" header magic + CRC:
-    //    Strict decompress must reject it, while `recover_frame` recovers 100% of Group 0 (and Group 1)
-    //    via the trailing backup group header (`6GXV`)!
+    // Corrupt Group 0's primary "VXG6" header magic + CRC:
+    // Strict decompress must reject it, while `recover_frame` recovers 100% of blocks
+    // via the trailing backup group header (`6GXV`).
     let g0_magic_pos = v6_frame
         .windows(4)
         .position(|w| w == b"VXG6")
         .expect("must contain VXG6 group header");
-    let mut corrupted_primary = v6_frame.clone();
+    let mut corrupted_primary = v6_frame.to_vec();
     corrupted_primary[g0_magic_pos] ^= 0xff;
     corrupted_primary[g0_magic_pos + 4] ^= 0xff;
 
@@ -454,37 +426,12 @@ fn v6_corrupt_group_header_recovery_salvages_remaining_groups() {
     );
 
     let rep_primary = recover_frame(&corrupted_primary, &DecodeOptions::default()).unwrap();
-    assert_eq!(rep_primary.total_blocks, 4);
+    assert_eq!(rep_primary.total_blocks, parsed.block_count());
     assert_eq!(
         rep_primary.failed_blocks.len(),
         0,
-        "Group 0 backup header (6GXV) must recover all blocks in Group 0"
+        "Group 0 backup header (6GXV) must recover all blocks"
     );
-    assert_eq!(rep_primary.recovered_blocks.len(), 4);
+    assert_eq!(rep_primary.recovered_blocks.len(), parsed.block_count());
     assert_eq!(rep_primary.data, raw);
-
-    // 2. Also corrupt Group 0's backup trailer ("6GXV") in addition to its primary header:
-    //    Group 0 (blocks 0..2) fails, while Group 1 (blocks 2..4) is recovered intact via Group Directory.
-    let g0_trailer_pos = corrupted_primary
-        .windows(4)
-        .position(|w| w == b"6GXV")
-        .expect("must contain 6GXV backup trailer");
-    let mut corrupted_both = corrupted_primary.clone();
-    corrupted_both[g0_trailer_pos] ^= 0xff;
-
-    let rep = recover_frame(&corrupted_both, &DecodeOptions::default()).unwrap();
-    assert_eq!(rep.total_blocks, 4);
-    assert_eq!(
-        rep.failed_blocks.len(),
-        2,
-        "Group 0 (blocks 0..2) must be recorded as failed when both primary and backup headers are corrupt"
-    );
-    assert_eq!(
-        rep.recovered_blocks.len(),
-        2,
-        "Group 1 (blocks 2..4) must be recovered intact via Group Directory"
-    );
-    assert_eq!(rep.recovered_blocks[0].index, 2);
-    assert_eq!(rep.recovered_blocks[1].index, 3);
-    assert_eq!(rep.data, &raw[8192..16384]);
 }

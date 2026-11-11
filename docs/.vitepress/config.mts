@@ -24,7 +24,7 @@ export default defineConfig({
     ['meta', { name: 'og:description', content: 'Store raw NDJSON/CSV verbatim, 0.1172 6-dataset real public geomean (beating Zstd-9 & Zstd+Dict-9 [32..256K] 0.1181), PFOR-Delta time-series (Covid-19 0.0963 vs Zstd-9 0.1415), SQL & Arrow/DuckDB scan up to 40M+ rows, 100% byte-exact reversible.' }]
   ],
   themeConfig: {
-    siteTitle: 'VXG v0.5.3',
+    siteTitle: 'VXG v0.6.0-rc.1',
     nav: [
       { text: 'Playground (WASM)', link: '/playground' },
       { text: 'AI Tensor (.vxt)', link: '/TENSOR' },
