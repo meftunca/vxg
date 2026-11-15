@@ -295,7 +295,19 @@ pub(crate) fn build_cb4_calib_plan_from_source(
     let lm_amp = eval_norm_amp("output_norm.weight", true);
     if has_output_weight {
         plan.amp_lm_head = lm_amp;
-        plan.amp_embd = vec![1.0; n_embd];
+        if let (Some(a0), Some(p0)) = (plan.amp_attn.first(), plan.amp_post.first()) {
+            if a0.len() == n_embd && p0.len() == n_embd {
+                let mut e: Vec<f32> = (0..n_embd)
+                    .map(|c| 0.70 * a0[c] + 0.30 * p0[c])
+                    .collect();
+                normalize_amp(&mut e);
+                plan.amp_embd = e;
+            } else {
+                plan.amp_embd = vec![1.0; n_embd];
+            }
+        } else {
+            plan.amp_embd = vec![1.0; n_embd];
+        }
     } else {
         let mut tied: Vec<f32> = lm_amp.iter().map(|&a| 0.30 + 0.70 * a).collect();
         normalize_amp(&mut tied);

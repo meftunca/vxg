@@ -128,6 +128,26 @@ fn pack_ec_chunk(bits: u8, _t0: usize, _steps: usize, sc: &[u16], pw: &[u32]) ->
         flush_bits(sbuf, sbits, &mut sgn_bytes);
         huff_encode(&mag_syms, &mut out);
         push_u8_slice(&mut out, &sgn_bytes);
+    } else if bits == 6 {
+        let mut idx_syms = Vec::with_capacity(total_ts * 512);
+        let mut sgn_bytes = Vec::with_capacity(total_ts * 128);
+        for ts in 0..total_ts {
+            let p128 = &pw[ts * 128..(ts + 1) * 128];
+            for lane in 0..32 {
+                for sr in 0..4 {
+                    let w = p128[lane * 4 + sr];
+                    let mut sb = 0u8;
+                    for pr in 0..4 {
+                        let c8 = ((w >> (pr * 8)) & 0xff) as u8;
+                        idx_syms.push(c8 & 0x3f);
+                        sb |= ((c8 >> 6) & 3) << (pr * 2);
+                    }
+                    sgn_bytes.push(sb);
+                }
+            }
+        }
+        huff_encode(&idx_syms, &mut out);
+        push_u8_slice(&mut out, &sgn_bytes);
     } else {
         let zero_elide = bits == 4;
         let mut idx_bytes = Vec::with_capacity(total_ts * 256);
@@ -257,6 +277,28 @@ fn unpack_ec_chunk(
                 p80[64 + (lane >> 1)] |= h16 << ((lane & 1) * 16);
             }
         }
+    } else if bits == 6 {
+        let idx_syms = huff_decode(&mut r, total_ts * 512)?;
+        let sgn_bytes = r.u8_vec()?;
+        if sgn_bytes.len() != total_ts * 128 {
+            return Err(Error::Format("corrupt Turbo4 sign plane".into()));
+        }
+        for ts_local in 0..total_ts {
+            let p128 = &mut pw_out[ts_local * 128..(ts_local + 1) * 128];
+            for lane in 0..32 {
+                for sr in 0..4 {
+                    let k = (ts_local * 32 + lane) * 4 + sr;
+                    let sb = sgn_bytes[k] as u32;
+                    let mut w = 0u32;
+                    for pr in 0..4 {
+                        let idx6 = (idx_syms[k * 4 + pr] as u32) & 0x3f;
+                        let s2 = (sb >> (pr * 2)) & 3;
+                        w |= (idx6 | (s2 << 6)) << (pr * 8);
+                    }
+                    p128[lane * 4 + sr] = w;
+                }
+            }
+        }
     } else {
         let zero_elide = bits == 4;
         let idx_bytes = huff_decode(&mut r, total_ts * 256)?;
@@ -349,7 +391,7 @@ pub(crate) fn scan_turbo_ec<'a>(
     padded_cols: usize,
     r: &mut Cur<'a>,
 ) -> Result<PendingEcTensor<'a>> {
-    if !matches!(bits, 2 | 3 | 4 | 5) || padded_cols != cols.div_ceil(256) * 256 {
+    if !matches!(bits, 2 | 3 | 4 | 5 | 6) || padded_cols != cols.div_ceil(256) * 256 {
         return Err(Error::Format("invalid VXT EC-Turbo header".into()));
     }
     let payload_start = r.pos;

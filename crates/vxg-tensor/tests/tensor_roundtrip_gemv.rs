@@ -260,6 +260,7 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
             PackedTensor::TurboWht(TurboWhtMatrix::encode(3, rows, cols, &bf_f32).unwrap()),
             PackedTensor::TurboWht(TurboWhtMatrix::encode(4, rows, cols, &bf_f32).unwrap()),
             PackedTensor::TurboWht(TurboWhtMatrix::encode(5, rows, cols, &bf_f32).unwrap()),
+            PackedTensor::TurboWht(TurboWhtMatrix::encode(6, rows, cols, &bf_f32).unwrap()),
             PackedTensor::TurboWht(TurboWhtMatrix::encode(2, rows, cols, &bf_f32).unwrap()),
         ];
         let mut gpu_cases = Vec::new();
@@ -309,7 +310,7 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
         let (_, wf_b) = generate_realistic_llm_weights(DType::BF16, r_b, cols, 302);
         let mut wf_ab = wf_a.clone();
         wf_ab.extend_from_slice(&wf_b);
-        for bits in [2u8, 3u8, 4u8, 5u8] {
+        for bits in [2u8, 3u8, 4u8, 5u8, 6u8] {
             let ta = TurboWhtMatrix::encode(bits, r_a, cols, &wf_a).unwrap();
             let tb = TurboWhtMatrix::encode(bits, r_b, cols, &wf_b).unwrap();
             let tab = TurboWhtMatrix::concat_vertical(&[&ta, &tb]).unwrap();
@@ -343,6 +344,7 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
     let t2 = TurboWhtMatrix::encode(2, rows, cols, &bf_f32).unwrap();
     let t25 = TurboWhtMatrix::encode(5, rows, cols, &bf_f32).unwrap();
     let t3 = TurboWhtMatrix::encode(3, rows, cols, &bf_f32).unwrap();
+    let t4 = TurboWhtMatrix::encode(6, rows, cols, &bf_f32).unwrap();
     let tec = TurboWhtMatrix::encode_with_lambda(4, rows, cols, &bf_f32, |r| {
         if r < 64 {
             0.055
@@ -380,6 +382,10 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
                 tensor: PackedTensor::TurboWht(tec.clone()),
             },
             VxtEntry {
+                name: "t4_proj".into(),
+                tensor: PackedTensor::TurboWht(t4.clone()),
+            },
+            VxtEntry {
                 name: "norm".into(),
                 tensor: PackedTensor::RawF32 {
                     rows: 1,
@@ -404,5 +410,12 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
         }
         _ => panic!("expected EC-Turbo3"),
     }
-    assert_eq!(parsed_entries[5].tensor.decode_f32(), vec![1.25f32; 16]);
+    match &parsed_entries[5].tensor {
+        PackedTensor::TurboWht(m) => {
+            assert_eq!(m.scales_f16, t4.scales_f16);
+            assert_eq!(m.packed_words, t4.packed_words);
+        }
+        _ => panic!("expected Turbo4"),
+    }
+    assert_eq!(parsed_entries[6].tensor.decode_f32(), vec![1.25f32; 16]);
 }

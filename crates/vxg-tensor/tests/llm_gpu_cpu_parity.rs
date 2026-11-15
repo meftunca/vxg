@@ -63,7 +63,7 @@ fn build_synthetic_qwen35_vxt(mode: u8) -> Vec<u8> {
 
     let mk_mat = |name: &str, rows: usize, cols: usize, seed: u64| -> VxtEntry {
         let data = pseudo_vec(seed, rows * cols, 0.08);
-        let tensor = if mode >= 4 {
+        let tensor = if (4..=7).contains(&mode) {
             let dtype = if mode % 2 == 0 { vxg_tensor::DType::BF16 } else { vxg_tensor::DType::F16 };
             let words: Vec<u16> = data.iter().map(|&v| if dtype == vxg_tensor::DType::BF16 { (v.to_bits() >> 16) as u16 } else { vxg_tensor::fp16::f32_to_f16(v) }).collect();
             if mode < 6 {
@@ -85,6 +85,23 @@ fn build_synthetic_qwen35_vxt(mode: u8) -> Vec<u8> {
                 })
                 .unwrap(),
             )
+        } else if mode == 8 {
+            let bits = if name.contains("token_embd")
+                || name.contains("attn_gate")
+                || name.contains("blk.0.ffn_gate")
+                || name.contains("blk.0.ffn_up")
+                || name.contains("attn_k")
+                || name.contains("attn_v")
+                || name.contains("attn_output")
+                || name.contains("blk.1.ffn_down")
+            {
+                6
+            } else if name.contains("blk.1.ffn_gate") || name.contains("blk.1.ffn_up") {
+                4
+            } else {
+                3
+            };
+            PackedTensor::TurboWht(TurboWhtMatrix::encode(bits, rows, cols, &data).unwrap())
         } else if mode == 2 {
             let bits = if name.contains("token_embd") {
                 2
@@ -231,7 +248,7 @@ fn hybrid_qwen35_1cmdbuf_metal_gpu_matches_cpu_across_cb4_and_wht2() {
 
 #[test]
 fn hybrid_qwen35_turbo_pipelined_gpu_matches_cpu_and_batched_decode() {
-    for mode in [2u8, 3u8] {
+    for mode in [2u8, 3u8, 8u8] {
         let vxt = build_synthetic_qwen35_vxt(mode);
         let mut cpu_model = LlmModel::from_vxt_bytes(&vxt, false, 2).unwrap();
         let mut st_cpu = cpu_model.new_state();
@@ -247,7 +264,11 @@ fn hybrid_qwen35_turbo_pipelined_gpu_matches_cpu_and_batched_decode() {
         }
 
         let mut gpu_model = LlmModel::from_vxt_bytes(&vxt, true, 2).unwrap();
-        assert!(gpu_model.has_turbo_fast_decode());
+        assert!(
+            gpu_model.has_turbo_fast_decode(),
+            "mode={mode} backend={}",
+            gpu_model.backend_label()
+        );
         assert!(gpu_model.backend_label().contains("VXT-Turbo Pipelined"));
 
         // 1. Step-by-step CPU vs FP16-State / Scaled-FP16-Dot Turbo GPU parity

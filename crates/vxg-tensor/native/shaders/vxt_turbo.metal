@@ -61,6 +61,25 @@ constant ushort2 EC_ORTH2D_16_U16[16] = {
     ushort2(0x409eu, 0x409eu),
 };
 
+constant ushort2 ORTH2D_64_U16[64] = {
+    ushort2(0x2f40u, 0x2f40u), ushort2(0x3555u, 0x2fafu), ushort2(0x2fafu, 0x3555u), ushort2(0x3741u, 0x34ecu),
+    ushort2(0x34ecu, 0x3741u), ushort2(0x3884u, 0x2e9au), ushort2(0x2e9au, 0x3884u), ushort2(0x3990u, 0x3493u),
+    ushort2(0x3493u, 0x3990u), ushort2(0x38e7u, 0x37d1u), ushort2(0x37d1u, 0x38e7u), ushort2(0x3a5au, 0x2e50u),
+    ushort2(0x2e50u, 0x3a5au), ushort2(0x3a94u, 0x37b7u), ushort2(0x37b7u, 0x3a94u), ushort2(0x3b82u, 0x34beu),
+    ushort2(0x34beu, 0x3b82u), ushort2(0x3c1cu, 0x2ee2u), ushort2(0x2ee2u, 0x3c1cu), ushort2(0x3ac2u, 0x398du),
+    ushort2(0x398du, 0x3ac2u), ushort2(0x3c4au, 0x3833u), ushort2(0x3833u, 0x3c4au), ushort2(0x3ce8u, 0x3534u),
+    ushort2(0x3534u, 0x3ce8u), ushort2(0x3d16u, 0x2eb1u), ushort2(0x2eb1u, 0x3d16u), ushort2(0x3bb9u, 0x3bb9u),
+    ushort2(0x3c99u, 0x3a28u), ushort2(0x3a28u, 0x3c99u), ushort2(0x3d9cu, 0x382cu), ushort2(0x382cu, 0x3d9cu),
+    ushort2(0x3e2fu, 0x3133u), ushort2(0x3133u, 0x3e2fu), ushort2(0x3dcfu, 0x3a81u), ushort2(0x3a81u, 0x3dcfu),
+    ushort2(0x3d1fu, 0x3c48u), ushort2(0x3c48u, 0x3d1fu), ushort2(0x3ed3u, 0x36f3u), ushort2(0x36f3u, 0x3ed3u),
+    ushort2(0x3f13u, 0x3a18u), ushort2(0x3a18u, 0x3f13u), ushort2(0x3fb7u, 0x3113u), ushort2(0x3113u, 0x3fb7u),
+    ushort2(0x3e9eu, 0x3c82u), ushort2(0x3c82u, 0x3e9eu), ushort2(0x3db1u, 0x3db1u), ushort2(0x4032u, 0x3859u),
+    ushort2(0x3859u, 0x4032u), ushort2(0x4027u, 0x3c20u), ushort2(0x3c20u, 0x4027u), ushort2(0x3f7eu, 0x3e27u),
+    ushort2(0x3e27u, 0x3f7eu), ushort2(0x40dbu, 0x3338u), ushort2(0x3338u, 0x40dbu), ushort2(0x411au, 0x3a6fu),
+    ushort2(0x3a6fu, 0x411au), ushort2(0x40c7u, 0x3de7u), ushort2(0x3de7u, 0x40c7u), ushort2(0x4237u, 0x3638u),
+    ushort2(0x3638u, 0x4237u), ushort2(0x4076u, 0x4076u), ushort2(0x4230u, 0x3d9fu), ushort2(0x3d9fu, 0x4230u),
+};
+
 constant ushort4 ORTH4D_64_U16[64] = {
     ushort4(0x0000u, 0x0000u, 0x0000u, 0x0000u), ushort4(0x3b24u, 0x0000u, 0x0000u, 0x0000u), ushort4(0x0000u, 0x3b24u, 0x0000u, 0x0000u), ushort4(0x0000u, 0x0000u, 0x3b24u, 0x0000u),
     ushort4(0x0000u, 0x0000u, 0x0000u, 0x3b24u), ushort4(0x0000u, 0x3c6au, 0x3c6au, 0x3c6au), ushort4(0x3c6au, 0x0000u, 0x3c6au, 0x3c6au), ushort4(0x3c6au, 0x3c6au, 0x0000u, 0x3c6au),
@@ -167,6 +186,18 @@ inline void vxt_init_lut64_sel(threadgroup half2* lut64, uint tid, bool is_ec) {
 
 inline void vxt_init_lut64(threadgroup half2* lut64, uint tid) {
     vxt_init_lut64_sel(lut64, tid, false);
+}
+
+inline void vxt_init_lut256_2d(threadgroup half2* lut256_2d, uint tid) {
+    for (uint idx = tid; idx < 256u; idx += 128u) {
+        ushort2 b = ORTH2D_64_U16[idx & 63u];
+        ushort s0 = ushort((idx & 0x40u) << 9u);
+        ushort s1 = ushort((idx & 0x80u) << 8u);
+        lut256_2d[idx] = as_type<half2>(ushort2(
+            b.x == 0u ? 0u : (b.x | s0),
+            b.y == 0u ? 0u : (b.y | s1)
+        ));
+    }
 }
 
 inline void vxt_init_lut64_4d(threadgroup ushort4* lut64_u16, uint tid) {
@@ -318,6 +349,16 @@ inline half2 vxt_orth2d_const_sel(uint idx6, bool is_ec) {
     ushort2 b = is_ec ? EC_ORTH2D_16_U16[idx4] : ORTH2D_16_U16[idx4];
     ushort s0 = ushort((idx6 << 11u) & 0x8000u);
     ushort s1 = ushort((idx6 << 10u) & 0x8000u);
+    return as_type<half2>(ushort2(
+        b.x == 0u ? 0u : (b.x | s0),
+        b.y == 0u ? 0u : (b.y | s1)
+    ));
+}
+
+inline half2 vxt_orth2d64_const(uint c8) {
+    ushort2 b = ORTH2D_64_U16[c8 & 63u];
+    ushort s0 = ushort((c8 & 0x40u) << 9u);
+    ushort s1 = ushort((c8 & 0x80u) << 8u);
     return as_type<half2>(ushort2(
         b.x == 0u ? 0u : (b.x | s0),
         b.y == 0u ? 0u : (b.y | s1)
@@ -765,6 +806,156 @@ kernel void vxt_gemv_turbo25_nr8(
                 acc0 = vxt_eval_turbo25_tile(
                     ((device const uint2*)p0)[lane], uint(((device const ushort*)(p0 + 64u))[lane]),
                     *(device const half4*)(sc0 + (step << 3u) + (gh << 2u)), xp4[0], xp4[1], lut64_u16, acc0
+                );
+            }
+        }
+
+        float4 sum0 = simd_sum(acc0);
+        float4 sum1 = simd_sum(acc1);
+        if (lane == 0u) {
+            vxt_store_tile4(y, p.rows, tile0, sum0);
+            if (has_t1) vxt_store_tile4(y, p.rows, tile0 + 1u, sum1);
+        }
+    }
+}
+
+inline float vxt_dot_t4_row32_tile(uint rw, float4 x0, float4 x1, threadgroup const half2* lut256_2d) {
+    uchar4 b = as_type<uchar4>(rw);
+    return dot(float4(half4(lut256_2d[b.x], lut256_2d[b.y])), x0)
+         + dot(float4(half4(lut256_2d[b.z], lut256_2d[b.w])), x1);
+}
+
+inline float4 vxt_eval_turbo4_tile(
+    uint4 w4,
+    half4 sh,
+    float4 x0,
+    float4 x1,
+    threadgroup const half2* lut256_2d,
+    float4 acc
+) {
+    float d0 = vxt_dot_t4_row32_tile(w4.x, x0, x1, lut256_2d);
+    float d1 = vxt_dot_t4_row32_tile(w4.y, x0, x1, lut256_2d);
+    float d2 = vxt_dot_t4_row32_tile(w4.z, x0, x1, lut256_2d);
+    float d3 = vxt_dot_t4_row32_tile(w4.w, x0, x1, lut256_2d);
+    return fma(float4(sh), float4(d0, d1, d2, d3), acc);
+}
+
+inline float vxt_dot_t4_row32_const(uint rw, float4 x0, float4 x1) {
+    uchar4 b = as_type<uchar4>(rw);
+    return dot(float4(half4(vxt_orth2d64_const(b.x), vxt_orth2d64_const(b.y))), x0)
+         + dot(float4(half4(vxt_orth2d64_const(b.z), vxt_orth2d64_const(b.w))), x1);
+}
+
+inline float4 vxt_eval_turbo4_const(
+    uint4 w4,
+    half4 sh,
+    float4 x0,
+    float4 x1,
+    float4 acc
+) {
+    float d0 = vxt_dot_t4_row32_const(w4.x, x0, x1);
+    float d1 = vxt_dot_t4_row32_const(w4.y, x0, x1);
+    float d2 = vxt_dot_t4_row32_const(w4.z, x0, x1);
+    float d3 = vxt_dot_t4_row32_const(w4.w, x0, x1);
+    return fma(float4(sh), float4(d0, d1, d2, d3), acc);
+}
+
+kernel void vxt_gemv_turbo4_nr4(
+    device const ushort* scales_f16 [[buffer(0)]],
+    device const uint* packed_words [[buffer(1)]],
+    device const float* x_rot_pad   [[buffer(2)]],
+    device float* y                 [[buffer(3)]],
+    constant TurboParams& p         [[buffer(4)]],
+    uint tid                        [[thread_index_in_threadgroup]],
+    uint sg_id                      [[simdgroup_index_in_threadgroup]],
+    uint lane                       [[thread_index_in_simdgroup]],
+    uint3 tg_pos                    [[threadgroup_position_in_grid]]
+) {
+    threadgroup half2 lut256_2d[256];
+    vxt_init_lut256_2d(lut256_2d, tid);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint tps = p.tiles_per_sg & 255u;
+    uint steps = p.padded_cols >> 8u;
+    uint gh = lane >> 4u;
+    uint sg_base = (tg_pos.x * 4u + sg_id) * tps;
+
+    for (uint kt = 0u; kt < tps; ++kt) {
+        uint tile = sg_base + kt;
+        if ((tile << 2u) >= p.rows) break;
+        device const ushort* sc_tile = scales_f16 + ulong(tile) * ulong(steps) * 8ul;
+        device const uint* pw_tile = packed_words + ulong(tile) * ulong(steps) * 128ul;
+
+        float4 acc = float4(0.0f);
+        for (uint step = 0u; step < steps; ++step) {
+            device const float4* xp4 = (device const float4*)(x_rot_pad + (step << 8u) + (lane << 3u));
+            device const uint* p128 = pw_tile + step * 128u;
+            uint4 w4 = ((device const uint4*)p128)[lane];
+            half4 sh = *(device const half4*)(sc_tile + (step << 3u) + (gh << 2u));
+            acc = vxt_eval_turbo4_tile(w4, sh, xp4[0], xp4[1], lut256_2d, acc);
+        }
+
+        float4 sum4 = simd_sum(acc);
+        if (lane == 0u) {
+            vxt_store_tile4(y, p.rows, tile, sum4);
+        }
+    }
+}
+
+kernel void vxt_gemv_turbo4_nr8(
+    device const ushort* scales_f16 [[buffer(0)]],
+    device const uint* packed_words [[buffer(1)]],
+    device const float* x_rot_pad   [[buffer(2)]],
+    device float* y                 [[buffer(3)]],
+    constant TurboParams& p         [[buffer(4)]],
+    uint tid                        [[thread_index_in_threadgroup]],
+    uint sg_id                      [[simdgroup_index_in_threadgroup]],
+    uint lane                       [[thread_index_in_simdgroup]],
+    uint3 tg_pos                    [[threadgroup_position_in_grid]]
+) {
+    threadgroup half2 lut256_2d[256];
+    vxt_init_lut256_2d(lut256_2d, tid);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint tps = p.tiles_per_sg & 255u;
+    uint steps = p.padded_cols >> 8u;
+    uint gh = lane >> 4u;
+    uint sg_pair_base = (tg_pos.x * 4u + sg_id) * tps;
+
+    for (uint kp = 0u; kp < tps; ++kp) {
+        uint tile0 = (sg_pair_base + kp) * 2u;
+        if ((tile0 << 2u) >= p.rows) break;
+        bool has_t1 = ((tile0 + 1u) << 2u) < p.rows;
+
+        device const ushort* sc0 = scales_f16 + ulong(tile0) * ulong(steps) * 8ul;
+        device const uint* pw0 = packed_words + ulong(tile0) * ulong(steps) * 128ul;
+        float4 acc0 = float4(0.0f);
+        float4 acc1 = float4(0.0f);
+
+        if (has_t1) {
+            device const ushort* sc1 = sc0 + ulong(steps) * 8ul;
+            device const uint* pw1 = pw0 + ulong(steps) * 128ul;
+            for (uint step = 0u; step < steps; ++step) {
+                device const float4* xp4 = (device const float4*)(x_rot_pad + (step << 8u) + (lane << 3u));
+                float4 x0 = xp4[0];
+                float4 x1 = xp4[1];
+                device const uint* p0 = pw0 + step * 128u;
+                device const uint* p1 = pw1 + step * 128u;
+                uint soff = (step << 3u) + (gh << 2u);
+                acc0 = vxt_eval_turbo4_tile(
+                    ((device const uint4*)p0)[lane], *(device const half4*)(sc0 + soff), x0, x1, lut256_2d, acc0
+                );
+                acc1 = vxt_eval_turbo4_const(
+                    ((device const uint4*)p1)[lane], *(device const half4*)(sc1 + soff), x0, x1, acc1
+                );
+            }
+        } else {
+            for (uint step = 0u; step < steps; ++step) {
+                device const float4* xp4 = (device const float4*)(x_rot_pad + (step << 8u) + (lane << 3u));
+                device const uint* p0 = pw0 + step * 128u;
+                acc0 = vxt_eval_turbo4_tile(
+                    ((device const uint4*)p0)[lane], *(device const half4*)(sc0 + (step << 3u) + (gh << 2u)),
+                    xp4[0], xp4[1], lut256_2d, acc0
                 );
             }
         }

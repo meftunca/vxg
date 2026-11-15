@@ -1,5 +1,5 @@
 //! Intra-block `32x32` Hadamard-Cholesky (`GPTQ` / `OBQ`) vector quantizer for `VXT-Turbo`
-//! (`Turbo3` `bits = 3` and `EC-Turbo3` `bits = 4`).
+//! (`Turbo3` `bits = 3`, `EC-Turbo3` `bits = 4`, and `Turbo4` `bits = 6`).
 //!
 //! Because `TurboWhtMatrix` rotates every 32-column block by `Q_b = H_32 * S_b`, an anisotropic
 //! input channel second-moment diagonal `D_b = diag(a_{32b}^2 .. a_{32b+31}^2)` becomes a dense
@@ -13,7 +13,7 @@ use crate::wht2::fwht32_inplace;
 use crate::wht_turbo::apply_col_sign;
 use crate::wht_turbo_enc::rademacher_sgn2;
 use crate::wht_turbo_tables::{
-    ec_orth2d_nz_mask, ec_orth2d_tables, orth2d_tables, EC_BITS_2D_16,
+    ec_orth2d_nz_mask, ec_orth2d_tables, orth2d64_tables, orth2d_tables, EC_BITS_2D_16,
 };
 
 const SQRT32: f64 = 5.656_854_249_492_381;
@@ -45,7 +45,7 @@ impl HadamardBlockChol {
         let mut d_f32 = [0.0f32; 32];
         let mut reg_sum = 0.0f64;
         for j in 0..32 {
-            let c = raw_d[j].clamp(0.25 * mean, 9.0 * mean);
+            let c = raw_d[j].clamp(0.15 * mean, 25.0 * mean);
             let r = 0.90 * c + 0.10 * mean;
             d_reg[j] = r;
             reg_sum += r;
@@ -115,60 +115,66 @@ fn quantize_group128_gptq(
     blks: &[HadamardBlockChol; 4],
     sc: f32,
     eff_hl: f32,
-    cb2: &[[f32; 2]; 16],
-    ec_cost16: &[f32; 16],
+    cb2: &[[f32; 2]],
+    ec_cost: &[f32],
     pair_idx: &mut [u8; 64],
     pair_sgn: &mut [u8; 64],
 ) -> (f32, f32, f32) {
-    let pen_scale = 2.0 * sc * sc * eff_hl;
+    let n_cb = cb2.len();
+    let inv_sc = 1.0 / sc;
+    let mut pen_u = [0.0f32; 64];
+    for c in 0..n_cb {
+        pen_u[c] = 2.0 * eff_hl * ec_cost[c];
+    }
     let (mut dwc, mut dcc, mut bit_sum) = (0.0f32, 0.0f32, 0.0f32);
 
     for b in 0..4 {
         let chol = &blks[b];
-        let w = &g_rot[b * 32..(b + 1) * 32];
-        let mut work = [0.0f32; 32];
-        work.copy_from_slice(w);
+        let w_raw = &g_rot[b * 32..(b + 1) * 32];
+        let mut w_u = [0.0f32; 32];
+        for j in 0..32 {
+            w_u[j] = w_raw[j] * inv_sc;
+        }
+        let mut work = w_u;
         let mut u_blk = [0.0f32; 32];
 
         for p in 0..16 {
             let i0 = p * 2;
             let i1 = i0 + 1;
             let (a0, a1, m10) = (chol.alpha[i0], chol.alpha[i1], chol.m[i1][i0]);
-            let (wk0, wk1, w0) = (work[i0], work[i1], w[i0]);
+            let (wk0, wk1, w0) = (work[i0], work[i1], w_u[i0]);
 
             let mut best_c = 0usize;
             let mut best_s2 = 0u8;
-            let mut best_z = (0.0f32, 0.0f32);
             let mut best_u = (0.0f32, 0.0f32);
             let mut best_cost = f32::INFINITY;
 
-            for c in 0..16 {
+            for c in 0..n_cb {
                 let (cu0, cu1) = (cb2[c][0], cb2[c][1]);
-                let (m0, m1) = (sc * cu0, sc * cu1);
-                let base_pen = pen_scale * ec_cost16[c];
+                let base_pen = pen_u[c];
+                let s0_pref = cu0 > 0.0 && wk0.is_sign_negative();
 
-                let s0_cands: &[bool] = if cu0 == 0.0 { &[false] } else { &[false, true] };
-                for &neg0 in s0_cands {
-                    let z0 = if neg0 { -m0 } else { m0 };
-                    let d0 = wk0 - z0;
+                for pass in 0..2 {
+                    if pass == 1 && cu0 == 0.0 {
+                        break;
+                    }
+                    let neg0 = if pass == 0 { s0_pref } else { !s0_pref };
+                    let u0 = if neg0 { -cu0 } else { cu0 };
+                    let d0 = wk0 - u0;
                     let c0 = a0 * d0 * d0 + base_pen;
                     if c0 >= best_cost {
                         continue;
                     }
-                    let t1 = wk1 + m10 * (w0 - z0);
+                    let t1 = wk1 + m10 * (w0 - u0);
                     let neg1 = cu1 > 0.0 && t1.is_sign_negative();
-                    let z1 = if neg1 { -m1 } else { m1 };
-                    let d1 = t1 - z1;
+                    let u1 = if neg1 { -cu1 } else { cu1 };
+                    let d1 = t1 - u1;
                     let cost = c0 + a1 * d1 * d1;
                     if cost < best_cost {
                         best_cost = cost;
                         best_c = c;
                         best_s2 = (neg0 as u8) | ((neg1 as u8) << 1);
-                        best_z = (z0, z1);
-                        best_u = (
-                            if neg0 { -cu0 } else { cu0 },
-                            if neg1 { -cu1 } else { cu1 },
-                        );
+                        best_u = (u0, u1);
                     }
                 }
             }
@@ -177,10 +183,10 @@ fn quantize_group128_gptq(
             pair_sgn[b * 16 + p] = best_s2;
             u_blk[i0] = best_u.0;
             u_blk[i1] = best_u.1;
-            bit_sum += ec_cost16[best_c];
+            bit_sum += ec_cost[best_c];
 
-            let e0 = w[i0] - best_z.0;
-            let e1 = w[i1] - best_z.1;
+            let e0 = w_u[i0] - best_u.0;
+            let e1 = w_u[i1] - best_u.1;
             for r in (i1 + 1)..32 {
                 work[r] = chol.m[r][i0].mul_add(e0, chol.m[r][i1].mul_add(e1, work[r]));
             }
@@ -216,8 +222,9 @@ pub(crate) fn encode_turbo_gptq_planes<F>(
 where
     F: Fn(usize) -> f32 + Sync,
 {
-    debug_assert!(matches!(bits, 3 | 4));
+    debug_assert!(matches!(bits, 3 | 4 | 6));
     let is_ec = bits == 4;
+    let is_t4 = bits == 6;
     let padded_rows = rows.div_ceil(4) * 4;
     let row_tiles = padded_rows / 4;
     let steps = padded_cols / 256;
@@ -244,8 +251,15 @@ where
         blk_chols.push(chol);
     }
 
-    let (cb2, _, _) = if is_ec { ec_orth2d_tables() } else { orth2d_tables() };
-    let ec_cost16 = if is_ec { EC_BITS_2D_16 } else { [0.0; 16] };
+    let (cb2_16, _, _) = if is_ec { ec_orth2d_tables() } else { orth2d_tables() };
+    let (cb2_64, _, _) = orth2d64_tables();
+    let cb2: &[[f32; 2]] = if is_t4 { &cb2_64 } else { &cb2_16 };
+    let ec_cost_vec: Vec<f32> = if is_ec {
+        EC_BITS_2D_16.to_vec()
+    } else {
+        vec![0.0; cb2.len()]
+    };
+    let ec_cost: &[f32] = &ec_cost_vec;
 
     let mut scales_f16 = vec![0u16; row_tiles * steps * 8];
     let mut packed_words = vec![0u32; row_tiles * steps * wps];
@@ -349,7 +363,9 @@ where
                         if sc > 0.0 {
                             for _it in 0..2 {
                                 let eff_hl = if is_ec {
-                                    0.5 * lam * (rms / (sc * sc).max(rms * 0.015)).min(16.0 * h_mean)
+                                    0.5 * lam
+                                        * h_mean
+                                        * (rms / (sc * sc).max(rms * 0.40)).min(2.0)
                                 } else {
                                     0.5 * lam * h_mean
                                 };
@@ -359,8 +375,8 @@ where
                                     blks,
                                     sc,
                                     eff_hl,
-                                    &cb2,
-                                    &ec_cost16,
+                                    cb2,
+                                    ec_cost,
                                     &mut pair_idx,
                                     &mut pair_sgn,
                                 );
@@ -382,11 +398,11 @@ where
 
                             if is_ec && sf16 > 0 && lam > 0.0 {
                                 let abs_lam = lam * rms;
-                                let mut best_j = e0 + abs_lam * (64.0 * ec_cost16[0] + 2.0);
-                                let mut best_u16 = 0u16;
-                                let mut best_pidx = [0u8; 64];
-                                let mut best_psgn = [0u8; 64];
-                                for delta in [-128i32, -64, 0, 64, 128] {
+                                let mut best_j = f32::INFINITY;
+                                let mut best_u16 = sf16;
+                                let mut best_pidx = pair_idx;
+                                let mut best_psgn = pair_sgn;
+                                for delta in [-64i32, 0, 64] {
                                     let cand_u16 =
                                         ((sf16 as i32 + delta).clamp(64, 0x7bc0) as u16) & 0xffc0;
                                     let c_sc = f16_to_f32(cand_u16);
@@ -395,17 +411,18 @@ where
                                     }
                                     let eff_hl = 0.5
                                         * lam
-                                        * (rms / (c_sc * c_sc).max(rms * 0.015)).min(16.0 * h_mean);
+                                        * h_mean
+                                        * (rms / (c_sc * c_sc).max(rms * 0.40)).min(2.0);
                                     let mut c_idx = [0u8; 64];
                                     let mut c_sgn = [0u8; 64];
                                     let (dwc, dcc, bit_sum) = quantize_group128_gptq(
-                                        g_rot, g_ds, blks, c_sc, eff_hl, &cb2, &ec_cost16,
+                                        g_rot, g_ds, blks, c_sc, eff_hl, cb2, ec_cost,
                                         &mut c_idx, &mut c_sgn,
                                     );
                                     let opt_u16 = if dcc > 0.0 && dwc > 0.0 {
                                         round_f16_12bit(f32_to_f16(dwc / dcc))
                                     } else {
-                                        0
+                                        cand_u16
                                     };
                                     let opt_sc = f16_to_f32(opt_u16);
                                     let err_sum =
@@ -425,26 +442,40 @@ where
                             }
 
                             if sc > 0.0 {
-                                for sub in 0..16 {
-                                    let lane = gh * 16 + sub;
-                                    let p = sub * 4;
-                                    idx_r[sr][lane] = (pair_idx[p] as u16)
-                                        | ((pair_idx[p + 1] as u16) << 4)
-                                        | ((pair_idx[p + 2] as u16) << 8)
-                                        | ((pair_idx[p + 3] as u16) << 12);
-                                    let mut sb = 0u8;
-                                    for pr in 0..4 {
-                                        let raw_s2 = pair_sgn[p + pr];
-                                        let s2 = if is_ec {
-                                            let nz2 = ec_orth2d_nz_mask(pair_idx[p + pr] as usize);
-                                            let rs2 = rademacher_sgn2(ts, lane, sr, pr);
-                                            (raw_s2 & nz2) | (rs2 & !nz2)
-                                        } else {
-                                            raw_s2
-                                        };
-                                        sb |= s2 << (pr * 2);
+                                if is_t4 {
+                                    for sub in 0..16 {
+                                        let lane = gh * 16 + sub;
+                                        let mut word = 0u32;
+                                        for pr in 0..4 {
+                                            let p = sub * 4 + pr;
+                                            let c8 = ((pair_idx[p] as u32) & 0x3f)
+                                                | (((pair_sgn[p] as u32) & 3) << 6);
+                                            word |= c8 << (pr * 8);
+                                        }
+                                        pw_step[lane * 4 + sr] = word;
                                     }
-                                    sgn_r[sr][lane] = sb;
+                                } else {
+                                    for sub in 0..16 {
+                                        let lane = gh * 16 + sub;
+                                        let p = sub * 4;
+                                        idx_r[sr][lane] = (pair_idx[p] as u16)
+                                            | ((pair_idx[p + 1] as u16) << 4)
+                                            | ((pair_idx[p + 2] as u16) << 8)
+                                            | ((pair_idx[p + 3] as u16) << 12);
+                                        let mut sb = 0u8;
+                                        for pr in 0..4 {
+                                            let raw_s2 = pair_sgn[p + pr];
+                                            let s2 = if is_ec {
+                                                let nz2 = ec_orth2d_nz_mask(pair_idx[p + pr] as usize);
+                                                let rs2 = rademacher_sgn2(ts, lane, sr, pr);
+                                                (raw_s2 & nz2) | (rs2 & !nz2)
+                                            } else {
+                                                raw_s2
+                                            };
+                                            sb |= s2 << (pr * 2);
+                                        }
+                                        sgn_r[sr][lane] = sb;
+                                    }
                                 }
                             }
                         }
@@ -452,14 +483,17 @@ where
                     }
                 }
 
-                for lane in 0..32 {
-                    pw_step[lane * 2] = (idx_r[0][lane] as u32) | ((idx_r[1][lane] as u32) << 16);
-                    pw_step[lane * 2 + 1] =
-                        (idx_r[2][lane] as u32) | ((idx_r[3][lane] as u32) << 16);
-                    pw_step[64 + lane] = (sgn_r[0][lane] as u32)
-                        | ((sgn_r[1][lane] as u32) << 8)
-                        | ((sgn_r[2][lane] as u32) << 16)
-                        | ((sgn_r[3][lane] as u32) << 24);
+                if !is_t4 {
+                    for lane in 0..32 {
+                        pw_step[lane * 2] =
+                            (idx_r[0][lane] as u32) | ((idx_r[1][lane] as u32) << 16);
+                        pw_step[lane * 2 + 1] =
+                            (idx_r[2][lane] as u32) | ((idx_r[3][lane] as u32) << 16);
+                        pw_step[64 + lane] = (sgn_r[0][lane] as u32)
+                            | ((sgn_r[1][lane] as u32) << 8)
+                            | ((sgn_r[2][lane] as u32) << 16)
+                            | ((sgn_r[3][lane] as u32) << 24);
+                    }
                 }
             }
         }
@@ -554,6 +588,69 @@ mod tests {
         assert!(
             sqnr_gptq > sqnr_base + 1.0,
             "expected GPTQ Cholesky SQNR ({sqnr_gptq:.2} dB) > baseline ({sqnr_base:.2} dB) + 1.0 dB"
+        );
+    }
+
+    #[test]
+    fn turbo4_sqnr_and_gptq_improvement() {
+        let (rows, cols) = (64usize, 256usize);
+        let mut weights = vec![0.0f32; rows * cols];
+        let mut rng = 0x4444_cafe_2026_1115u64;
+        let mut next_norm = || -> f32 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let u1 = (((rng >> 11) as f64) / ((1u64 << 53) as f64)).max(1e-12);
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let u2 = ((rng >> 11) as f64) / ((1u64 << 53) as f64);
+            ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
+        };
+        for w in &mut weights {
+            *w = 0.05 * next_norm();
+        }
+
+        // Isotropic weight SQNR of Turbo4 (bits = 6) must exceed 20.4 dB
+        let t4_iso = TurboWhtMatrix::encode(6, rows, cols, &weights).unwrap();
+        let dec_iso = crate::format::PackedTensor::TurboWht(t4_iso).decode_f32();
+        let sig_w: f64 = weights.iter().map(|&v| (v as f64) * (v as f64)).sum();
+        let err_w: f64 = weights
+            .iter()
+            .zip(&dec_iso)
+            .map(|(&a, &b)| ((a - b) as f64).powi(2))
+            .sum();
+        let sqnr_w = 10.0 * (sig_w / err_w).log10();
+        assert!(
+            sqnr_w > 20.4,
+            "expected Turbo4 weight SQNR ({sqnr_w:.2} dB) > 20.4 dB"
+        );
+
+        // Anisotropic GPTQ activation-weighted SQNR must improve over naive Turbo4
+        let mut ch_amp = vec![1.0f32; cols];
+        for c in 0..cols {
+            ch_amp[c] = if c % 32 == 5 { 5.0 } else if c % 16 == 2 { 2.2 } else { 0.65 };
+        }
+        let gptq = TurboWhtMatrix::encode_with_ch_amp(6, rows, cols, &weights, None, Some(&ch_amp), |_| 0.0)
+            .unwrap();
+        let t4_naive = TurboWhtMatrix::encode(6, rows, cols, &weights).unwrap();
+        let (mut err_naive, mut err_gptq, mut sig_e) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut y_ref, mut y_n, mut y_g) = (vec![0.0f32; rows], vec![0.0f32; rows], vec![0.0f32; rows]);
+        for _ in 0..32 {
+            let x: Vec<f32> = (0..cols).map(|c| ch_amp[c] * next_norm()).collect();
+            for r in 0..rows {
+                y_ref[r] = weights[r * cols..(r + 1) * cols].iter().zip(&x).map(|(w, xv)| w * xv).sum();
+            }
+            t4_naive.gemv_cpu(&x, &mut y_n, 1);
+            gptq.gemv_cpu(&x, &mut y_g, 1);
+            for r in 0..rows {
+                let rv = y_ref[r] as f64;
+                sig_e += rv * rv;
+                err_naive += (rv - y_n[r] as f64).powi(2);
+                err_gptq += (rv - y_g[r] as f64).powi(2);
+            }
+        }
+        let sqnr_naive = 10.0 * (sig_e / err_naive).log10();
+        let sqnr_gptq = 10.0 * (sig_e / err_gptq).log10();
+        assert!(
+            sqnr_gptq > sqnr_naive + 0.5,
+            "expected Turbo4 GPTQ SQNR ({sqnr_gptq:.2} dB) > naive ({sqnr_naive:.2} dB) + 0.5 dB"
         );
     }
 }

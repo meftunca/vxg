@@ -87,8 +87,138 @@ pub fn encode_gguf_tensor(
     )
 }
 
-fn non_empty_slice(v: &[f32]) -> Option<&[f32]> {
+pub(crate) fn non_empty_slice(v: &[f32]) -> Option<&[f32]> {
     (!v.is_empty()).then_some(v)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_turbo_calibrated_tensor(
+    name: &str,
+    layer_idx: Option<usize>,
+    rows: usize,
+    cols: usize,
+    f32s: &[f32],
+    n_layer: usize,
+    plan: &TurboCalibPlan,
+    turbo_entropy_scale: f32,
+) -> Result<TurboWhtMatrix> {
+    let n_lay = if n_layer > 0 { n_layer } else { 24 };
+    let inv_cols = 1.0 / (cols.max(1) as f64);
+    let row_ms: Vec<f32> = (0..rows)
+        .map(|r| {
+            let row = &f32s[r * cols..(r + 1) * cols];
+            let s2: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
+            ((s2 * inv_cols) as f32).max(1e-12)
+        })
+        .collect();
+    let mat_ms = {
+        let mut sorted = row_ms.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        sorted.get(rows / 2).copied().unwrap_or(1e-6).max(1e-12)
+    };
+    let ch_amp = turbo_ch_amp(plan, name, layer_idx, cols);
+    let is_calibrated = plan.ch_plan.is_some();
+
+    if name == "token_embd.weight" || name == "output.weight" {
+        let h = if name == "token_embd.weight" {
+            &plan.h_embd
+        } else {
+            &plan.h_lm_head
+        };
+        let head_bits = if is_calibrated { 6 } else { 4 };
+        let lam = if head_bits == 6 {
+            0.0
+        } else if name == "token_embd.weight" {
+            EMBD_LAM
+        } else {
+            0.040
+        };
+        return TurboWhtMatrix::encode_with_ch_amp(
+            head_bits,
+            rows,
+            cols,
+            f32s,
+            non_empty_slice(h),
+            ch_amp,
+            |r| turbo_entropy_scale * if row_ms[r] > 3.0 * mat_ms { 0.0 } else { lam },
+        );
+    }
+
+    let h_rot = layer_idx.and_then(|il| {
+        if name.ends_with(".attn_qkv.weight")
+            || name.ends_with(".attn_gate.weight")
+            || name.ends_with(".attn_q.weight")
+            || name.ends_with(".attn_k.weight")
+            || name.ends_with(".attn_v.weight")
+        {
+            plan.h_attn.get(il).and_then(|v| non_empty_slice(v))
+        } else if name.ends_with(".ssm_out.weight") {
+            plan.h_ssm_out.get(il).and_then(|v| non_empty_slice(v))
+        } else if name.ends_with(".attn_output.weight") {
+            plan.h_attn_out.get(il).and_then(|v| non_empty_slice(v))
+        } else if name.ends_with(".ffn_gate.weight") || name.ends_with(".ffn_up.weight") {
+            plan.h_ffn_gu.get(il).and_then(|v| non_empty_slice(v))
+        } else if name.ends_with(".ffn_down.weight") {
+            plan.h_ffn_down.get(il).and_then(|v| non_empty_slice(v))
+        } else {
+            None
+        }
+    });
+
+    let is_kv_or_out = name.ends_with(".attn_k.weight")
+        || name.ends_with(".attn_v.weight")
+        || name.ends_with(".attn_output.weight")
+        || name.ends_with(".ssm_out.weight");
+    let is_q = name.ends_with(".attn_q.weight");
+    let is_qkv_gate =
+        name.ends_with(".attn_qkv.weight") || name.ends_with(".attn_gate.weight");
+    let is_fg_fu = name.ends_with(".ffn_gate.weight") || name.ends_with(".ffn_up.weight");
+    let is_ffn_down = name.ends_with(".ffn_down.weight");
+    let is_edge = layer_idx.is_some_and(|il| il <= 1 || il + 2 >= n_lay);
+    let is_boundary = layer_idx.is_some_and(|il| il == 0 || il + 2 >= n_lay);
+    let is_anchor = is_edge || layer_idx.is_some_and(|il| il % 4 == 3);
+
+    if is_calibrated {
+        let (bits, base_lam): (u8, f32) = if is_kv_or_out {
+            (6, 0.0)
+        } else if is_q {
+            if is_edge { (6, 0.0) } else { (3, 0.0) }
+        } else if is_qkv_gate {
+            if is_boundary { (6, 0.0) } else { (3, 0.0) }
+        } else if is_ffn_down {
+            if is_anchor { (3, 0.0) } else { (4, 0.014) }
+        } else if is_fg_fu {
+            (4, if is_anchor { 0.014 } else { 0.020 })
+        } else {
+            (3, 0.0)
+        };
+        TurboWhtMatrix::encode_with_ch_amp(bits, rows, cols, f32s, h_rot, ch_amp, |r| {
+            if bits != 4 || row_ms[r] > 3.0 * mat_ms {
+                0.0
+            } else {
+                turbo_entropy_scale * base_lam * (mat_ms / row_ms[r]).clamp(0.50, 1.00)
+            }
+        })
+    } else {
+        let base_lam: f32 = if is_kv_or_out || is_q {
+            0.026
+        } else if is_qkv_gate {
+            if is_edge { 0.036 } else { 0.044 }
+        } else if is_ffn_down {
+            if is_anchor { 0.038 } else { DOWN_LAM }
+        } else if is_fg_fu {
+            if is_anchor { 0.045 } else { GU_LAM }
+        } else {
+            0.040
+        };
+        TurboWhtMatrix::encode_with_ch_amp(4, rows, cols, f32s, h_rot, ch_amp, |r| {
+            if row_ms[r] > 3.2 * mat_ms {
+                0.0
+            } else {
+                turbo_entropy_scale * (base_lam * (mat_ms / row_ms[r]).clamp(0.45, 1.50))
+            }
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -242,99 +372,16 @@ fn encode_gguf_tensor_with_layers(
                     }
                 }
             }
-            let n_lay = if n_layer > 0 { n_layer } else { 24 };
-            let inv_cols = 1.0 / (cols.max(1) as f64);
-            let row_ms: Vec<f32> = (0..rows)
-                .map(|r| {
-                    let row = &f32s[r * cols..(r + 1) * cols];
-                    let s2: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
-                    ((s2 * inv_cols) as f32).max(1e-12)
-                })
-                .collect();
-            let mat_ms = {
-                let mut sorted = row_ms.clone();
-                sorted.sort_by(|a, b| a.total_cmp(b));
-                sorted.get(rows / 2).copied().unwrap_or(1e-6).max(1e-12)
-            };
-
-            let ch_amp = turbo_ch_amp(plan, &meta.name, layer_idx, cols);
-            if meta.name == "token_embd.weight" || meta.name == "output.weight" {
-                let h = if meta.name == "token_embd.weight" { &plan.h_embd } else { &plan.h_lm_head };
-                let head_bits = if plan.ch_plan.is_some() { 3 } else { 4 };
-                let lam = if head_bits == 3 {
-                    0.0
-                } else if meta.name == "token_embd.weight" {
-                    EMBD_LAM
-                } else {
-                    0.040
-                };
-                Ok(PackedTensor::TurboWht(TurboWhtMatrix::encode_with_ch_amp(
-                    head_bits,
-                    rows,
-                    cols,
-                    &f32s,
-                    non_empty_slice(h),
-                    ch_amp,
-                    |r| turbo_entropy_scale * if row_ms[r] > 3.0 * mat_ms { 0.0 } else { lam },
-                )?))
-            } else {
-                let h_rot = layer_idx.and_then(|il| {
-                    if meta.name.ends_with(".attn_qkv.weight")
-                        || meta.name.ends_with(".attn_gate.weight")
-                        || meta.name.ends_with(".attn_q.weight")
-                        || meta.name.ends_with(".attn_k.weight")
-                        || meta.name.ends_with(".attn_v.weight")
-                    {
-                        plan.h_attn.get(il).and_then(|v| non_empty_slice(v))
-                    } else if meta.name.ends_with(".ssm_out.weight") {
-                        plan.h_ssm_out.get(il).and_then(|v| non_empty_slice(v))
-                    } else if meta.name.ends_with(".ffn_gate.weight")
-                        || meta.name.ends_with(".ffn_up.weight")
-                    {
-                        plan.h_ffn_gu.get(il).and_then(|v| non_empty_slice(v))
-                    } else {
-                        None
-                    }
-                });
-                let is_gqa_attn = meta.name.ends_with(".attn_q.weight")
-                    || meta.name.ends_with(".attn_k.weight")
-                    || meta.name.ends_with(".attn_v.weight")
-                    || meta.name.ends_with(".attn_output.weight");
-                let is_ssm_out = meta.name.ends_with(".ssm_out.weight");
-                let is_qkv_gate = meta.name.ends_with(".attn_qkv.weight")
-                    || meta.name.ends_with(".attn_gate.weight");
-                let is_fg_fu = meta.name.ends_with(".ffn_gate.weight")
-                    || meta.name.ends_with(".ffn_up.weight");
-                let is_ffn_down = meta.name.ends_with(".ffn_down.weight");
-                let is_edge = layer_idx.is_some_and(|il| il <= 1 || il + 2 >= n_lay);
-                let is_anchor = is_edge || layer_idx.is_some_and(|il| il % 4 == 3);
-                let base_lam: f32 = if is_gqa_attn || is_ssm_out {
-                    0.026
-                } else if is_qkv_gate {
-                    if is_edge { 0.036 } else { 0.044 }
-                } else if is_ffn_down {
-                    if is_anchor { 0.038 } else { DOWN_LAM }
-                } else if is_fg_fu {
-                    if is_anchor { 0.045 } else { GU_LAM }
-                } else {
-                    0.040
-                };
-                Ok(PackedTensor::TurboWht(TurboWhtMatrix::encode_with_ch_amp(
-                    4,
-                    rows,
-                    cols,
-                    &f32s,
-                    h_rot,
-                    ch_amp,
-                    |r| {
-                        if row_ms[r] > 3.2 * mat_ms {
-                            0.0
-                        } else {
-                            turbo_entropy_scale * (base_lam * (mat_ms / row_ms[r]).clamp(0.45, 1.50))
-                        }
-                    },
-                )?))
-            }
+            Ok(PackedTensor::TurboWht(encode_turbo_calibrated_tensor(
+                &meta.name,
+                layer_idx,
+                rows,
+                cols,
+                &f32s,
+                n_layer,
+                plan,
+                turbo_entropy_scale,
+            )?))
         }
         LlmPackMode::Q4_0 => {
             let f32s = gg.extract_f32(meta)?;

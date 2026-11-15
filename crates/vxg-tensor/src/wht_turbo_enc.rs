@@ -5,8 +5,8 @@ use crate::fp16::{f16_to_f32, f32_to_f16};
 use crate::wht2::fwht32_inplace;
 use crate::wht_turbo::apply_col_sign;
 use crate::wht_turbo_tables::{
-    ec_orth2d_nz_mask, ec_orth2d_tables, orth2d_tables, orth4d64_nz_mask, orth4d64_tables,
-    orth4d_tables, EC_BITS_2D_16, EC_BITS_4D_64,
+    ec_orth2d_nz_mask, ec_orth2d_tables, orth2d64_tables, orth2d_tables, orth4d64_nz_mask,
+    orth4d64_tables, orth4d_tables, EC_BITS_2D_16, EC_BITS_4D_64,
 };
 
 #[inline(always)]
@@ -55,6 +55,7 @@ where
 
     let (cb4, n2_4, _) = orth4d_tables();
     let (cb64, n2_64, _) = orth4d64_tables();
+    let (cb2_64, _, _) = orth2d64_tables();
     let (cb2, _, _) = if bits == 4 {
         ec_orth2d_tables()
     } else {
@@ -350,6 +351,80 @@ where
                         pw_step[lane * 2 + 1] = c11 | (c20 << 10) | (c21 << 20) | ((c31 >> 8) << 30);
                         let h16 = (c30 & 0xff) | ((c31 & 0xff) << 8);
                         pw_step[64 + (lane >> 1)] |= h16 << ((lane & 1) * 16);
+                    }
+                } else if bits == 6 {
+                    for sr in 0..4 {
+                        let r = tile * 4 + sr;
+                        if r >= rows {
+                            continue;
+                        }
+                        for gh in 0..2 {
+                            let g_off = step * 256 + gh * 128;
+                            let g_in = &rbufs[sr][g_off..g_off + 128];
+                            let g_h: &[f32] = match h_rot {
+                                Some(hr) => &hr[g_off..g_off + 128],
+                                None => &ones128,
+                            };
+                            let (mut e0, mut h_sum) = (0.0f32, 0.0f32);
+                            for u in 0..128 {
+                                let hv = g_h[u];
+                                e0 += hv * g_in[u] * g_in[u];
+                                h_sum += hv;
+                            }
+                            let mut sf16 = f32_to_f16((e0 / h_sum.max(1.0)).sqrt());
+                            let mut sc = f16_to_f32(sf16);
+                            let mut pair_idx = [0u8; 64];
+                            if sc > 0.0 {
+                                for _it in 0..2 {
+                                    let inv = 1.0 / sc;
+                                    let (mut dwc, mut dcc) = (0.0f32, 0.0f32);
+                                    for (pi, c2) in g_in.chunks_exact(2).enumerate() {
+                                        let (h0, h1) = (g_h[pi * 2], g_h[pi * 2 + 1]);
+                                        let (a0, a1) = (h0 * c2[0].abs() * inv, h1 * c2[1].abs() * inv);
+                                        let (mut best, mut bs) = (0usize, f32::NEG_INFINITY);
+                                        for i in 0..64 {
+                                            let s = a0 * cb2_64[i][0]
+                                                + a1 * cb2_64[i][1]
+                                                - (h0 * cb2_64[i][0] * cb2_64[i][0]
+                                                    + h1 * cb2_64[i][1] * cb2_64[i][1])
+                                                    * 0.5;
+                                            if s > bs {
+                                                bs = s;
+                                                best = i;
+                                            }
+                                        }
+                                        pair_idx[pi] = best as u8;
+                                        let (u0, u1) = (cb2_64[best][0], cb2_64[best][1]);
+                                        dwc += h0 * c2[0].abs() * u0 + h1 * c2[1].abs() * u1;
+                                        dcc += h0 * u0 * u0 + h1 * u1 * u1;
+                                    }
+                                    if dcc > 0.0 {
+                                        sf16 = f32_to_f16(dwc / dcc);
+                                        sc = f16_to_f32(sf16);
+                                        if sc == 0.0 {
+                                            pair_idx.fill(0);
+                                            break;
+                                        }
+                                    }
+                                }
+                                if sc > 0.0 {
+                                    for sub in 0..16 {
+                                        let lane = gh * 16 + sub;
+                                        let mut word = 0u32;
+                                        for pr in 0..4 {
+                                            let p = sub * 4 + pr;
+                                            let base = p * 2;
+                                            let s2 = (g_in[base].is_sign_negative() as u32)
+                                                | ((g_in[base + 1].is_sign_negative() as u32) << 1);
+                                            let c8 = ((pair_idx[p] as u32) & 0x3f) | (s2 << 6);
+                                            word |= c8 << (pr * 8);
+                                        }
+                                        pw_step[lane * 4 + sr] = word;
+                                    }
+                                }
+                            }
+                            sc8[gh * 4 + sr] = sf16;
+                        }
                     }
                 } else {
                     let is_ec = bits == 4;

@@ -3,18 +3,22 @@
 //!   so heavy-tailed neural channels become i.i.d. isotropic Gaussian vectors (`0` sparse outliers!).
 //! - `Turbo2` (`bits = 2`, `2.125 bpw`, `~7.53x` vs 16-bit): `Orth4D-16` (`~10.03 dB` SQNR).
 //! - `Turbo2.5` (`bits = 5`, `2.625 bpw`, `~6.10x` vs 16-bit): `Orth4D-64` (`~12.98 dB` SQNR).
-//! - `Turbo3` (`bits = 3`, `3.125 bpw`, `~5.12x` vs 16-bit): `Orth2D-16` (`~15.36 dB` SQNR).
+//! - `Turbo3` (`bits = 3`, `3.125 bpw` GPU / `~3.01 bpw` EC): `Orth2D-16` (`~15.36 dB` SQNR).
 //! - `EC-Turbo3` (`bits = 4`, `~2.82 bpw` on disk, `3.125 bpw` on GPU): Entropy-Constrained
 //!   `EC-Orth2D-16` with `(0, 0)` origin deadzone (`~14.97 dB` SQNR) + Canonical Huffman container.
+//! - `Turbo4` (`bits = 6`, `4.125 bpw` GPU / `~3.99 bpw` EC): `Orth2D-64` (`~20.96 dB` SQNR).
 
 use crate::fp16::f16_to_f32;
 use crate::wht2::fwht32_inplace;
 use crate::wht_turbo_enc::encode_turbo_planes;
 use crate::wht_turbo_gptq::encode_turbo_gptq_planes;
 use crate::wht_turbo_tables::{
-    ec_orth2d_tables, orth2d_tables, orth4d64_tables, orth4d_tables, unpack_t25_lane,
+    ec_orth2d_tables, orth2d64_tables, orth2d_tables, orth4d64_tables, orth4d_tables,
+    unpack_t25_lane,
 };
-pub use crate::wht_turbo_tables::{EC_ORTH2D_16_F16, ORTH2D_16_F16, ORTH4D_16_F16, ORTH4D_64_F16};
+pub use crate::wht_turbo_tables::{
+    EC_ORTH2D_16_F16, ORTH2D_16_F16, ORTH2D_64_F16, ORTH4D_16_F16, ORTH4D_64_F16,
+};
 use crate::{Error, Result};
 
 /// Deterministic 32-bit sign bit mask (`0x0000_0000` = `+1.0`, `0x8000_0000` = `-1.0`) matching MSL!
@@ -72,6 +76,7 @@ impl TurboWhtMatrix {
         match bits {
             2 => 64,
             5 => 80,
+            6 => 128,
             _ => 96,
         }
     }
@@ -124,9 +129,9 @@ impl TurboWhtMatrix {
     where
         F: Fn(usize) -> f32 + Sync,
     {
-        if !matches!(bits, 2 | 3 | 4 | 5) {
+        if !matches!(bits, 2 | 3 | 4 | 5 | 6) {
             return Err(Error::Format(
-                "TurboWhtMatrix bits must be 2, 3, 4 (EC-Turbo3), or 5 (Turbo2.5)".into(),
+                "TurboWhtMatrix bits must be 2, 3, 4 (EC-Turbo3), 5 (Turbo2.5), or 6 (Turbo4)".into(),
             ));
         }
         if rows == 0 || cols == 0 || weights.len() != rows.saturating_mul(cols) {
@@ -137,7 +142,8 @@ impl TurboWhtMatrix {
         let h_checked = h_rot.filter(|h| h.len() == padded_cols);
         let amp_checked = ch_amp.filter(|a| a.len() == cols);
         let wps = Self::words_per_tile_step(bits);
-        let (scales_f16, packed_words) = if let Some(amp) = amp_checked.filter(|_| matches!(bits, 3 | 4)) {
+        let (scales_f16, packed_words) =
+            if let Some(amp) = amp_checked.filter(|_| matches!(bits, 3 | 4 | 6)) {
             encode_turbo_gptq_planes(
                 bits,
                 rows,
@@ -276,6 +282,24 @@ impl TurboWhtMatrix {
                     }
                 }
             }
+        } else if self.bits == 6 {
+            let (_, _, lut256_2d) = orth2d64_tables();
+            for step in 0..steps {
+                let sc0 = f16_to_f32(sc_tile[step * 8 + sr]);
+                let sc1 = f16_to_f32(sc_tile[step * 8 + 4 + sr]);
+                let p128 = &pw_tile[step * 128..(step + 1) * 128];
+                for lane in 0..32 {
+                    let sc = if lane < 16 { sc0 } else { sc1 };
+                    let w = p128[lane * 4 + sr];
+                    let base = step * 256 + lane * 8;
+                    for p in 0..4 {
+                        let c8 = ((w >> (p * 8)) & 0xff) as usize;
+                        let v2 = lut256_2d[c8];
+                        rbuf[base + p * 2] = sc * v2[0];
+                        rbuf[base + p * 2 + 1] = sc * v2[1];
+                    }
+                }
+            }
         } else {
             let (_, _, lut64) = if self.bits == 4 {
                 ec_orth2d_tables()
@@ -320,6 +344,7 @@ impl TurboWhtMatrix {
 
         let (_, _, lut256) = orth4d_tables();
         let (_, _, lut1024) = orth4d64_tables();
+        let (_, _, lut256_2d) = orth2d64_tables();
         let (_, _, lut64) = if self.bits == 4 {
             ec_orth2d_tables()
         } else {
@@ -382,6 +407,32 @@ impl TurboWhtMatrix {
                                     let (v0, v1) = (lut1024[cc[sr][0]], lut1024[cc[sr][1]]);
                                     let d = v0[0].mul_add(xv[0], v0[1].mul_add(xv[1], v0[2].mul_add(xv[2], v0[3] * xv[3])))
                                         + v1[0].mul_add(xv[4], v1[1].mul_add(xv[5], v1[2].mul_add(xv[6], v1[3] * xv[7])));
+                                    acc[sr] = sc[sr].mul_add(d, acc[sr]);
+                                }
+                            }
+                        }
+                    }
+                } else if self.bits == 6 {
+                    for step in 0..steps {
+                        let p128 = &pw_tile[step * 128..(step + 1) * 128];
+                        for gh in 0..2 {
+                            let sc = [
+                                f16_to_f32(sc_tile[step * 8 + gh * 4]),
+                                f16_to_f32(sc_tile[step * 8 + gh * 4 + 1]),
+                                f16_to_f32(sc_tile[step * 8 + gh * 4 + 2]),
+                                f16_to_f32(sc_tile[step * 8 + gh * 4 + 3]),
+                            ];
+                            for sub in 0..16 {
+                                let lane = gh * 16 + sub;
+                                let xv = &x_rot[step * 256 + lane * 8..step * 256 + lane * 8 + 8];
+                                for sr in 0..4 {
+                                    let w = p128[lane * 4 + sr];
+                                    let mut d = 0.0f32;
+                                    for p in 0..4 {
+                                        let c8 = ((w >> (p * 8)) & 0xff) as usize;
+                                        let v2 = lut256_2d[c8];
+                                        d = v2[0].mul_add(xv[p * 2], v2[1].mul_add(xv[p * 2 + 1], d));
+                                    }
                                     acc[sr] = sc[sr].mul_add(d, acc[sr]);
                                 }
                             }

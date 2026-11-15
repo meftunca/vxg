@@ -116,6 +116,8 @@ struct MetalGemvCtx {
     id<MTLComputePipelineState> pso_turbo25_nr8 = nil;
     id<MTLComputePipelineState> pso_turbo3_nr4 = nil;
     id<MTLComputePipelineState> pso_turbo3_nr8 = nil;
+    id<MTLComputePipelineState> pso_turbo4_nr4 = nil;
+    id<MTLComputePipelineState> pso_turbo4_nr8 = nil;
 
     id<MTLBuffer> x_buf = nil;
     size_t x_cap = 0;

@@ -8,7 +8,7 @@
 //!   exact intra-block Rademacher isotropy with zero calibration-prompt overfitting.
 
 use crate::cb4_calib::{
-    build_cb4_calib_plan_from_source, cb4_col_amp, normalize_amp, Cb4CalibPlan, Cb4TensorSource,
+    build_cb4_calib_plan_from_source, cb4_col_amp, Cb4CalibPlan, Cb4TensorSource,
 };
 use crate::gguf::GgufView;
 use crate::gguf_meta::ModelConfig;
@@ -19,7 +19,9 @@ pub(crate) struct TurboCalibPlan {
     pub post_smooth: Vec<Vec<(usize, f32)>>,
     pub h_attn: Vec<Vec<f32>>,
     pub h_ssm_out: Vec<Vec<f32>>,
+    pub h_attn_out: Vec<Vec<f32>>,
     pub h_ffn_gu: Vec<Vec<f32>>,
+    pub h_ffn_down: Vec<Vec<f32>>,
     pub h_embd: Vec<f32>,
     pub h_lm_head: Vec<f32>,
     pub ch_plan: Option<Cb4CalibPlan>,
@@ -92,7 +94,9 @@ pub(crate) fn run_turbo_calibration_from_source(
         post_smooth: vec![Vec::new(); n_layer],
         h_attn: vec![Vec::new(); n_layer],
         h_ssm_out: vec![Vec::new(); n_layer],
+        h_attn_out: vec![Vec::new(); n_layer],
         h_ffn_gu: vec![Vec::new(); n_layer],
+        h_ffn_down: vec![Vec::new(); n_layer],
         h_embd: Vec::new(),
         h_lm_head: Vec::new(),
         ch_plan: None,
@@ -133,14 +137,9 @@ pub(crate) fn run_turbo_calibration_from_source(
     sorted.sort_by(|a, b| a.total_cmp(b));
     let med = sorted[n_embd / 2].max(1e-12);
     let w_rel: Vec<f32> = rms.iter().map(|&v| (v / med).clamp(0.5, 8.0)).collect();
-    let sinks: Vec<(usize, f32)> = rms
-        .iter()
-        .enumerate()
-        .filter_map(|(c, &v)| (v / med > 1.8).then_some((c, v / med)))
-        .collect();
 
     let eval_norm =
-        |norm_name: &str, hi_scale: f32, has_res: bool| -> (Vec<(usize, f32)>, Vec<f32>) {
+        |norm_name: &str, _hi_scale: f32, has_res: bool| -> (Vec<(usize, f32)>, Vec<f32>) {
             let Some(nw) = src.extract_f32(norm_name) else {
                 return (Vec::new(), Vec::new());
             };
@@ -151,32 +150,15 @@ pub(crate) fn run_turbo_calibration_from_source(
             ns.sort_by(|a, b| a.total_cmp(b));
             let n_med = ns[n_embd / 2].max(1e-12);
 
-            let mut smooth = Vec::new();
-            if has_res {
-                for &(c, w_rat) in &sinks {
-                    let eff = (nw[c].abs() / n_med) * w_rat;
-                    let g = if eff > 2.2 {
-                        hi_scale
-                    } else if eff > 1.5 {
-                        2.0
-                    } else {
-                        1.0
-                    };
-                    if g > 1.0 {
-                        smooth.push((c, g));
-                    }
-                }
-            }
-
+            // For weight-only Hadamard+GPTQ quantization, scaling reader weight columns (`W[:, c] *= g`)
+            // violates AM-GM optimality by smearing `g^2` variance across the entire 32-col block; leave
+            // column scales unmutated and let intra-block Cholesky GPTQ cancel spikes directly.
             let mut amp = vec![0.0f32; n_embd];
             for c in 0..n_embd {
                 let r_mul = if has_res { w_rel[c] } else { 1.0 };
                 amp[c] = (nw[c].abs() / n_med) * r_mul;
             }
-            for &(c, g) in &smooth {
-                amp[c] /= g;
-            }
-            (smooth, block_isotropic_hessian(&amp))
+            (Vec::new(), block_isotropic_hessian(&amp))
         };
 
     for il in 0..n_layer {
@@ -217,27 +199,16 @@ pub(crate) fn run_turbo_calibration_from_source(
         }
     }
 
-    let mut ch_plan = build_cb4_calib_plan_from_source(src, cfg);
+    let ch_plan = build_cb4_calib_plan_from_source(src, cfg);
+    if !ch_plan.amp_embd.is_empty() && plan.h_embd.is_empty() {
+        plan.h_embd = block_isotropic_hessian(&ch_plan.amp_embd);
+    }
     for il in 0..n_layer {
-        if let Some(amp) = ch_plan.amp_attn.get_mut(il) {
-            if !plan.attn_smooth[il].is_empty() {
-                for &(c, g) in &plan.attn_smooth[il] {
-                    if c < amp.len() {
-                        amp[c] /= g;
-                    }
-                }
-                normalize_amp(amp);
-            }
+        if let Some(a) = ch_plan.amp_attn_out.get(il).filter(|v| !v.is_empty()) {
+            plan.h_attn_out[il] = block_isotropic_hessian(a);
         }
-        if let Some(amp) = ch_plan.amp_post.get_mut(il) {
-            if !plan.post_smooth[il].is_empty() {
-                for &(c, g) in &plan.post_smooth[il] {
-                    if c < amp.len() {
-                        amp[c] /= g;
-                    }
-                }
-                normalize_amp(amp);
-            }
+        if let Some(d) = ch_plan.amp_ffn_down.get(il).filter(|v| !v.is_empty()) {
+            plan.h_ffn_down[il] = block_isotropic_hessian(d);
         }
     }
     plan.ch_plan = Some(ch_plan);
