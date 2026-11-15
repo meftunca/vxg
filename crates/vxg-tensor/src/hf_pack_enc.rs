@@ -81,6 +81,19 @@ impl Cb4TensorSource for HfCalibAdapter<'_> {
         let &idx = self.by_name.get(name)?;
         self.extract_transformed(idx).ok()
     }
+
+    fn extract_rows_f32(&self, name: &str, r0: usize, r1: usize) -> Option<Vec<f32>> {
+        let &idx = self.by_name.get(name)?;
+        let it = &self.items[idx];
+        let st = &self.views[it.shard_idx];
+        let meta = &st.tensors[it.meta_idx];
+        if matches!(it.tf, HfTransform::Identity) {
+            return st.extract_rows_f32(meta, r0, r1).ok();
+        }
+        let (_, cols) = item_matrix_dims(meta, it.tf)?;
+        let full = self.extract_transformed(idx).ok()?;
+        full.get(r0 * cols..r1 * cols).map(|s| s.to_vec())
+    }
 }
 
 pub(crate) fn item_matrix_dims(meta: &SafeTensorMeta, tf: HfTransform) -> Option<(usize, usize)> {

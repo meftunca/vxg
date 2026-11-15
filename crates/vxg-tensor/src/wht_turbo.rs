@@ -129,6 +129,26 @@ impl TurboWhtMatrix {
     where
         F: Fn(usize) -> f32 + Sync,
     {
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        Self::encode_with_ch_amp_threads(bits, rows, cols, weights, h_rot, ch_amp, row_lambda, threads)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_with_ch_amp_threads<F>(
+        bits: u8,
+        rows: usize,
+        cols: usize,
+        weights: &[f32],
+        h_rot: Option<&[f32]>,
+        ch_amp: Option<&[f32]>,
+        row_lambda: F,
+        threads: usize,
+    ) -> Result<Self>
+    where
+        F: Fn(usize) -> f32 + Sync,
+    {
         if !matches!(bits, 2 | 3 | 4 | 5 | 6) {
             return Err(Error::Format(
                 "TurboWhtMatrix bits must be 2, 3, 4 (EC-Turbo3), 5 (Turbo2.5), or 6 (Turbo4)".into(),
@@ -143,30 +163,31 @@ impl TurboWhtMatrix {
         let amp_checked = ch_amp.filter(|a| a.len() == cols);
         let wps = Self::words_per_tile_step(bits);
         let (scales_f16, packed_words) =
-            if let Some(amp) = amp_checked.filter(|_| matches!(bits, 3 | 4 | 6)) {
-            encode_turbo_gptq_planes(
-                bits,
-                rows,
-                cols,
-                padded_cols,
-                wps,
-                weights,
-                h_checked,
-                amp,
-                row_lambda,
-            )
-        } else {
-            encode_turbo_planes(
-                bits,
-                rows,
-                cols,
-                padded_cols,
-                wps,
-                weights,
-                h_checked,
-                row_lambda,
-            )
-        };
+            if let Some(amp) = amp_checked.filter(|_| matches!(bits, 3 | 4 | 5 | 6)) {
+                encode_turbo_gptq_planes(
+                    bits,
+                    rows,
+                    cols,
+                    padded_cols,
+                    wps,
+                    weights,
+                    h_checked,
+                    amp,
+                    row_lambda,
+                    threads.max(1),
+                )
+            } else {
+                encode_turbo_planes(
+                    bits,
+                    rows,
+                    cols,
+                    padded_cols,
+                    wps,
+                    weights,
+                    h_checked,
+                    row_lambda,
+                )
+            };
         Ok(Self {
             bits,
             rows,

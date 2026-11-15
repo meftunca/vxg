@@ -9,7 +9,8 @@ use std::time::Instant;
 use crate::chat_mm::build_single_turn_vlm_prompt;
 use crate::llm::{compare_logits, sample_logits, LlmModel};
 use crate::llm_ops::{has_severe_loop, sample_logits_top_k_p, TokenPenaltyTracker};
-use crate::llm_pack::{pack_gguf_model_to_vxt_with_entropy_scale, LlmPackMode};
+use crate::llm_pack::LlmPackMode;
+use crate::turbo_linalg::effective_cpu_threads;
 use crate::mmap::TensorBytes;
 use crate::vision::EncodedVisionImage;
 use crate::{Error, Result};
@@ -17,16 +18,16 @@ use crate::{Error, Result};
 pub fn cmd_pack_model(args: &[String]) -> Result<()> {
     if args.len() < 2 {
         return Err(Error::Format(
-            "usage: vxg-tensor pack-model <in.gguf | hf_model_dir | model.safetensors> <out.vxt> [--mode lossless|cb4|cb3|wht2|turbo|q4_0] [--threads T] [--turbo-entropy-scale S]".into(),
+            "usage: vxg-tensor pack-model <in.gguf | hf_model_dir | model.safetensors> <out.vxt> [--mode lossless|cb4|cb3|wht2|turbo|q4_0] [--threads T] [--turbo-entropy-scale S] [--calib <file.txt> | --no-calib]".into(),
         ));
     }
     let in_path = &args[0];
     let out_path = &args[1];
     let mut mode = LlmPackMode::Lossless;
     let mut entropy_scale = None;
-    let mut threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let mut calib_path: Option<String> = None;
+    let mut no_calib = false;
+    let mut threads = effective_cpu_threads(0);
 
     let mut i = 2;
     while i < args.len() {
@@ -43,12 +44,23 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
                 entropy_scale = Some(args.get(i).and_then(|s| s.parse::<f32>().ok())
                     .ok_or_else(|| Error::Format("invalid --turbo-entropy-scale".into()))?);
             }
+            "--calib" => {
+                i += 1;
+                let p = args
+                    .get(i)
+                    .ok_or_else(|| Error::Format("missing value for --calib".into()))?;
+                calib_path = Some(p.clone());
+            }
+            "--no-calib" => {
+                no_calib = true;
+            }
             "--threads" => {
                 i += 1;
-                threads = args
+                let req: usize = args
                     .get(i)
                     .and_then(|s| s.parse().ok())
                     .ok_or_else(|| Error::Format("invalid --threads".into()))?;
+                threads = effective_cpu_threads(req);
             }
             other => return Err(Error::Format(format!("unexpected flag '{other}'"))),
         }
@@ -58,27 +70,53 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
     if entropy_scale.is_some() && mode != LlmPackMode::Turbo {
         return Err(Error::Format("--turbo-entropy-scale requires --mode turbo".into()));
     }
+    if calib_path.is_some() && no_calib {
+        return Err(Error::Format("--calib and --no-calib are mutually exclusive".into()));
+    }
+    if (calib_path.is_some() || no_calib) && mode != LlmPackMode::Turbo {
+        return Err(Error::Format("--calib and --no-calib require --mode turbo".into()));
+    }
     let scale = entropy_scale.unwrap_or(1.0);
     if !scale.is_finite() || scale < 0.0 {
         return Err(Error::Format("--turbo-entropy-scale must be finite and nonnegative".into()));
     }
+    let calib_text = match calib_path {
+        Some(ref p) => Some(fs::read_to_string(p).map_err(|e| Error::Io(e.to_string()))?),
+        None => None,
+    };
     let t0 = Instant::now();
     let in_p = Path::new(in_path);
     let is_hf = !in_path.to_ascii_lowercase().ends_with(".gguf")
         && (in_p.is_dir() || crate::hf_pack::resolve_hf_model_dir(in_p).is_some());
-    let (cfg, in_len, archive) = if is_hf {
-        if entropy_scale.is_some() {
-            return Err(Error::Format(
-                "--turbo-entropy-scale is only supported for GGUF inputs".into(),
-            ));
+    let prog = |cur: usize, tot: usize, msg: &str| -> bool {
+        if msg.starts_with("Turbo v3") {
+            eprintln!("[pack-model {cur}/{tot}] {msg}");
         }
-        let (cfg, raw_bytes, archive) = crate::hf_pack::pack_hf_model_to_vxt(in_p, mode, threads)?;
+        true
+    };
+    let (cfg, in_len, archive) = if is_hf {
+        let (cfg, raw_bytes, archive) = crate::hf_pack::pack_hf_model_to_vxt_with_calib(
+            in_p,
+            mode,
+            threads,
+            scale,
+            calib_text.as_deref(),
+            no_calib,
+            Some(&prog),
+        )?;
         (cfg, raw_bytes as usize, archive)
     } else {
         let mapped = TensorBytes::open(in_path)?;
         let in_bytes = mapped.as_slice();
-        let (cfg, archive) =
-            pack_gguf_model_to_vxt_with_entropy_scale(in_bytes, mode, threads, scale)?;
+        let (cfg, archive) = crate::llm_pack::pack_gguf_model_to_vxt_with_calib(
+            in_bytes,
+            mode,
+            threads,
+            scale,
+            calib_text.as_deref(),
+            no_calib,
+            Some(&prog),
+        )?;
         (cfg, in_bytes.len(), archive)
     };
     fs::write(Path::new(out_path), &archive).map_err(|e| Error::Io(e.to_string()))?;

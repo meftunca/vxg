@@ -8,6 +8,7 @@ use crate::vision_img::VisionConfig;
 use crate::Error;
 use crate::Result;
 
+#[cfg_attr(not(vxt_has_metal), allow(dead_code))]
 pub(crate) struct VisionBlockBorrow<'a> {
     pub norm1_w: &'a [f32],
     pub norm1_b: &'a [f32],

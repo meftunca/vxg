@@ -151,6 +151,57 @@ impl<'a> SafeTensorsView<'a> {
             )),
         }
     }
+
+    /// Materializes rows `[r0, r1)` of a 2D tensor as `Vec<f32>` (`BF16`, `F16`, or `F32`).
+    pub fn extract_rows_f32(&self, meta: &SafeTensorMeta, r0: usize, r1: usize) -> Result<Vec<f32>> {
+        let (rows, cols) = meta
+            .matrix_dims()
+            .ok_or_else(|| Error::InvalidShape("expected 2D matrix for extract_rows_f32"))?;
+        if r0 > r1 || r1 > rows {
+            return Err(Error::InvalidShape("row range out of bounds"));
+        }
+        if r0 == r1 {
+            return Ok(Vec::new());
+        }
+        if r0 == 0 && r1 == rows {
+            return self.extract_f32(meta);
+        }
+        let raw = self.tensor_bytes(meta);
+        let elem0 = r0 * cols;
+        let elem1 = r1 * cols;
+        match meta.dtype {
+            SafeDType::BF16 => {
+                if raw.len() != meta.numel() * 2 {
+                    return Err(Error::Format("BF16 byte length mismatch".into()));
+                }
+                Ok(raw[elem0 * 2..elem1 * 2]
+                    .chunks_exact(2)
+                    .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+                    .collect())
+            }
+            SafeDType::F16 => {
+                if raw.len() != meta.numel() * 2 {
+                    return Err(Error::Format("F16 byte length mismatch".into()));
+                }
+                Ok(raw[elem0 * 2..elem1 * 2]
+                    .chunks_exact(2)
+                    .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+                    .collect())
+            }
+            SafeDType::F32 => {
+                if raw.len() != meta.numel() * 4 {
+                    return Err(Error::Format("F32 byte length mismatch".into()));
+                }
+                Ok(raw[elem0 * 4..elem1 * 4]
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect())
+            }
+            SafeDType::Other => Err(Error::Unsupported(
+                "unsupported safetensors dtype (expected BF16/F16/F32)".into(),
+            )),
+        }
+    }
 }
 
 /// Encodes a minimal valid `.safetensors` buffer for one or more 16-bit (`BF16`/`F16`) matrices.

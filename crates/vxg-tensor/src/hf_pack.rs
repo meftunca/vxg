@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::cb4_calib::{build_cb4_calib_plan_from_source, Cb4CalibPlan};
-use crate::format::{write_vxt_model, VxtEntry};
+use crate::format::{write_vxt_model, PackedTensor, VxtEntry};
 use crate::gguf_meta::ModelConfig;
 use crate::hf_meta::{
     map_hf_tensor_name, map_hf_vision_tensor_name, parse_hf_tokenizer_meta,
@@ -22,6 +22,9 @@ use crate::llm_calib::{run_turbo_calibration_from_source, TurboCalibPlan};
 use crate::llm_pack::LlmPackMode;
 use crate::mmap::TensorBytes;
 use crate::safetensors::SafeTensorsView;
+use crate::tokenizer::BpeTokenizer;
+use crate::turbo_linalg::effective_cpu_threads;
+use crate::turbo_seq_calib::run_sequential_turbo_pack;
 use crate::{Error, Result};
 
 pub type PackProgressFn<'a> = &'a (dyn Fn(usize, usize, &str) -> bool + Sync);
@@ -31,7 +34,7 @@ pub fn pack_hf_model_to_vxt(
     mode: LlmPackMode,
     threads: usize,
 ) -> Result<(ModelConfig, u64, Vec<u8>)> {
-    pack_hf_model_to_vxt_with_progress(path, mode, threads, None)
+    pack_hf_model_to_vxt_with_calib(path, mode, threads, 1.0, None, false, None)
 }
 
 pub fn pack_hf_model_to_vxt_with_progress(
@@ -40,6 +43,25 @@ pub fn pack_hf_model_to_vxt_with_progress(
     threads: usize,
     progress: Option<PackProgressFn<'_>>,
 ) -> Result<(ModelConfig, u64, Vec<u8>)> {
+    pack_hf_model_to_vxt_with_calib(path, mode, threads, 1.0, None, false, progress)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn pack_hf_model_to_vxt_with_calib(
+    path: &Path,
+    mode: LlmPackMode,
+    threads: usize,
+    turbo_entropy_scale: f32,
+    calib_text: Option<&str>,
+    no_calib: bool,
+    progress: Option<PackProgressFn<'_>>,
+) -> Result<(ModelConfig, u64, Vec<u8>)> {
+    if !turbo_entropy_scale.is_finite() || turbo_entropy_scale < 0.0 {
+        return Err(Error::Format("turbo entropy scale must be finite and nonnegative".into()));
+    }
+    if mode != LlmPackMode::Turbo && turbo_entropy_scale != 1.0 {
+        return Err(Error::Format("turbo entropy scale requires turbo mode".into()));
+    }
     let hf = resolve_hf_model_dir(path).ok_or_else(|| {
         Error::Format(format!(
             "'{}' is not a valid HuggingFace model directory (expected config.json + tokenizer.json + .safetensors)",
@@ -112,7 +134,13 @@ pub fn pack_hf_model_to_vxt_with_progress(
             meta_kv.push(("vision.config".to_owned(), vcfg.to_json_bytes()));
         }
     }
-    meta_kv.extend(tok_meta);
+    if mode == LlmPackMode::Turbo && turbo_entropy_scale != 1.0 {
+        meta_kv.push((
+            "model.turbo_entropy_scale".to_owned(),
+            turbo_entropy_scale.to_string().into_bytes(),
+        ));
+    }
+    meta_kv.extend(tok_meta.iter().cloned());
 
     let by_name: HashMap<&str, usize> = items
         .iter()
@@ -125,16 +153,36 @@ pub fn pack_hf_model_to_vxt_with_progress(
         by_name,
         norm_plus_one,
     };
+    let eff_t = effective_cpu_threads(threads);
     let cb4_plan = if mode == LlmPackMode::Cb4 {
         build_cb4_calib_plan_from_source(&adapter, &cfg)
     } else {
         Cb4CalibPlan::default()
     };
-    let turbo_plan = if mode == LlmPackMode::Turbo {
-        run_turbo_calibration_from_source(&adapter, &cfg)
-    } else {
-        TurboCalibPlan::default()
-    };
+    let use_seq = !no_calib
+        && mode == LlmPackMode::Turbo
+        && cfg.n_layer >= 4
+        && cfg.n_embd >= 256
+        && cfg.n_vocab >= 1024;
+    let (turbo_plan, prepacked): (TurboCalibPlan, Option<Mutex<HashMap<String, PackedTensor>>>) =
+        if use_seq {
+            let tok = BpeTokenizer::from_vxt_meta(&tok_meta)?;
+            let map = run_sequential_turbo_pack(
+                &adapter,
+                &cfg,
+                &tok,
+                calib_text,
+                turbo_entropy_scale,
+                eff_t,
+                progress,
+            )?;
+            meta_kv.push(("model.turbo_version".to_owned(), b"v3-seq-gptq".to_vec()));
+            (TurboCalibPlan::default(), Some(Mutex::new(map)))
+        } else if mode == LlmPackMode::Turbo {
+            (run_turbo_calibration_from_source(&adapter, &cfg), None)
+        } else {
+            (TurboCalibPlan::default(), None)
+        };
 
     let n = items.len();
     let done_cnt = AtomicUsize::new(0);
@@ -153,7 +201,16 @@ pub fn pack_hf_model_to_vxt_with_progress(
                     return Err(Error::Io("işlem kullanıcı tarafından iptal edildi".into()));
                 }
             }
-            let entry = encode_hf_item(&adapter, idx, mode, &cfg, &cb4_plan, &turbo_plan)?;
+            let entry = match prepacked
+                .as_ref()
+                .and_then(|pp| pp.lock().unwrap().remove(&it.dst_name))
+            {
+                Some(tensor) => VxtEntry {
+                    name: it.dst_name.clone(),
+                    tensor,
+                },
+                None => encode_hf_item(&adapter, idx, mode, &cfg, &cb4_plan, &turbo_plan)?,
+            };
             *slots[idx].get_mut().unwrap() = Some(entry);
             let done = done_cnt.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(cb) = progress {
@@ -167,7 +224,7 @@ pub fn pack_hf_model_to_vxt_with_progress(
     }
 
     let reg_len = regular_indices.len();
-    let workers = threads.clamp(1, 6).min(reg_len.max(1));
+    let workers = eff_t.min(6).min(reg_len.max(1));
     let first_err: Mutex<Option<Error>> = Mutex::new(None);
     let next_idx = AtomicUsize::new(0);
     let done_ref = &done_cnt;
@@ -178,6 +235,8 @@ pub fn pack_hf_model_to_vxt_with_progress(
             let cfg_ref = &cfg;
             let cb4_ref = &cb4_plan;
             let turbo_ref = &turbo_plan;
+            let pre_ref = prepacked.as_ref();
+            let items_ref = &items;
             let slots_ref = &slots;
             let err_ref = &first_err;
             let idx_ref = &next_idx;
@@ -191,7 +250,20 @@ pub fn pack_hf_model_to_vxt_with_progress(
                     break;
                 }
                 let idx = reg_ref[k];
-                match encode_hf_item(ad_ref, idx, mode, cfg_ref, cb4_ref, turbo_ref) {
+                let pre_hit = pre_ref.and_then(|pp| {
+                    pp.lock()
+                        .unwrap()
+                        .remove(&items_ref[idx].dst_name)
+                        .map(|tensor| VxtEntry {
+                            name: items_ref[idx].dst_name.clone(),
+                            tensor,
+                        })
+                });
+                let res = match pre_hit {
+                    Some(entry) => Ok(entry),
+                    None => encode_hf_item(ad_ref, idx, mode, cfg_ref, cb4_ref, turbo_ref),
+                };
+                match res {
                     Ok(entry) => {
                         let tname = entry.name.clone();
                         *slots_ref[idx].lock().unwrap() = Some(entry);

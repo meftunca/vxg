@@ -56,12 +56,18 @@ pub mod safetensors;
 pub mod server;
 mod server_http;
 pub mod tokenizer;
+mod turbo_calib_corpus;
+mod turbo_full_gptq;
+mod turbo_head_kld;
+mod turbo_linalg;
+mod turbo_seq_calib;
 pub mod vision;
 pub mod vision_img;
 pub mod wht2;
 pub mod wht_turbo;
 mod wht_turbo_enc;
 mod wht_turbo_gptq;
+mod wht_turbo_gptq_4d;
 mod wht_turbo_tables;
 
 use std::fmt;

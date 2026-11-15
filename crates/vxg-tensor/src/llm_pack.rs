@@ -11,11 +11,13 @@ use crate::codebook::{CodebookMatrix, Q4_0Matrix};
 use crate::format::{write_vxt_model, PackedTensor, VxtEntry};
 use crate::gguf::{GgufTensorMeta, GgufView};
 use crate::gguf_meta::{parse_gguf_kv, ModelConfig};
-use crate::llm_calib::{run_turbo_calibration, turbo_ch_amp, TurboCalibPlan};
+use crate::llm_calib::{run_turbo_calibration, TurboCalibPlan};
+pub(crate) use crate::llm_calib::encode_turbo_calibrated_tensor;
 use crate::lossless::LosslessMatrix;
 use crate::tokenizer::BpeTokenizer;
+use crate::turbo_linalg::effective_cpu_threads;
+use crate::turbo_seq_calib::run_sequential_turbo_pack;
 use crate::wht2::Wht2Matrix;
-use crate::wht_turbo::TurboWhtMatrix;
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,10 +57,6 @@ impl LlmPackMode {
     }
 }
 
-const EMBD_LAM: f32 = 0.052;
-const GU_LAM: f32 = 0.074;
-const DOWN_LAM: f32 = 0.052;
-
 fn should_skip_layer(name: &str, n_layer: usize) -> bool {
     if let Some(rest) = name.strip_prefix("blk.") {
         if let Some((idx_s, _)) = rest.split_once('.') {
@@ -85,140 +83,6 @@ pub fn encode_gguf_tensor(
         &Cb4CalibPlan::default(),
         1.0,
     )
-}
-
-pub(crate) fn non_empty_slice(v: &[f32]) -> Option<&[f32]> {
-    (!v.is_empty()).then_some(v)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_turbo_calibrated_tensor(
-    name: &str,
-    layer_idx: Option<usize>,
-    rows: usize,
-    cols: usize,
-    f32s: &[f32],
-    n_layer: usize,
-    plan: &TurboCalibPlan,
-    turbo_entropy_scale: f32,
-) -> Result<TurboWhtMatrix> {
-    let n_lay = if n_layer > 0 { n_layer } else { 24 };
-    let inv_cols = 1.0 / (cols.max(1) as f64);
-    let row_ms: Vec<f32> = (0..rows)
-        .map(|r| {
-            let row = &f32s[r * cols..(r + 1) * cols];
-            let s2: f64 = row.iter().map(|&v| (v as f64) * (v as f64)).sum();
-            ((s2 * inv_cols) as f32).max(1e-12)
-        })
-        .collect();
-    let mat_ms = {
-        let mut sorted = row_ms.clone();
-        sorted.sort_by(|a, b| a.total_cmp(b));
-        sorted.get(rows / 2).copied().unwrap_or(1e-6).max(1e-12)
-    };
-    let ch_amp = turbo_ch_amp(plan, name, layer_idx, cols);
-    let is_calibrated = plan.ch_plan.is_some();
-
-    if name == "token_embd.weight" || name == "output.weight" {
-        let h = if name == "token_embd.weight" {
-            &plan.h_embd
-        } else {
-            &plan.h_lm_head
-        };
-        let head_bits = if is_calibrated { 6 } else { 4 };
-        let lam = if head_bits == 6 {
-            0.0
-        } else if name == "token_embd.weight" {
-            EMBD_LAM
-        } else {
-            0.040
-        };
-        return TurboWhtMatrix::encode_with_ch_amp(
-            head_bits,
-            rows,
-            cols,
-            f32s,
-            non_empty_slice(h),
-            ch_amp,
-            |r| turbo_entropy_scale * if row_ms[r] > 3.0 * mat_ms { 0.0 } else { lam },
-        );
-    }
-
-    let h_rot = layer_idx.and_then(|il| {
-        if name.ends_with(".attn_qkv.weight")
-            || name.ends_with(".attn_gate.weight")
-            || name.ends_with(".attn_q.weight")
-            || name.ends_with(".attn_k.weight")
-            || name.ends_with(".attn_v.weight")
-        {
-            plan.h_attn.get(il).and_then(|v| non_empty_slice(v))
-        } else if name.ends_with(".ssm_out.weight") {
-            plan.h_ssm_out.get(il).and_then(|v| non_empty_slice(v))
-        } else if name.ends_with(".attn_output.weight") {
-            plan.h_attn_out.get(il).and_then(|v| non_empty_slice(v))
-        } else if name.ends_with(".ffn_gate.weight") || name.ends_with(".ffn_up.weight") {
-            plan.h_ffn_gu.get(il).and_then(|v| non_empty_slice(v))
-        } else if name.ends_with(".ffn_down.weight") {
-            plan.h_ffn_down.get(il).and_then(|v| non_empty_slice(v))
-        } else {
-            None
-        }
-    });
-
-    let is_kv_or_out = name.ends_with(".attn_k.weight")
-        || name.ends_with(".attn_v.weight")
-        || name.ends_with(".attn_output.weight")
-        || name.ends_with(".ssm_out.weight");
-    let is_q = name.ends_with(".attn_q.weight");
-    let is_qkv_gate =
-        name.ends_with(".attn_qkv.weight") || name.ends_with(".attn_gate.weight");
-    let is_fg_fu = name.ends_with(".ffn_gate.weight") || name.ends_with(".ffn_up.weight");
-    let is_ffn_down = name.ends_with(".ffn_down.weight");
-    let is_edge = layer_idx.is_some_and(|il| il <= 1 || il + 2 >= n_lay);
-    let is_boundary = layer_idx.is_some_and(|il| il == 0 || il + 2 >= n_lay);
-    let is_anchor = is_edge || layer_idx.is_some_and(|il| il % 4 == 3);
-
-    if is_calibrated {
-        let (bits, base_lam): (u8, f32) = if is_kv_or_out {
-            (6, 0.0)
-        } else if is_q {
-            if is_edge { (6, 0.0) } else { (3, 0.0) }
-        } else if is_qkv_gate {
-            if is_boundary { (6, 0.0) } else { (3, 0.0) }
-        } else if is_ffn_down {
-            if is_anchor { (3, 0.0) } else { (4, 0.014) }
-        } else if is_fg_fu {
-            (4, if is_anchor { 0.014 } else { 0.020 })
-        } else {
-            (3, 0.0)
-        };
-        TurboWhtMatrix::encode_with_ch_amp(bits, rows, cols, f32s, h_rot, ch_amp, |r| {
-            if bits != 4 || row_ms[r] > 3.0 * mat_ms {
-                0.0
-            } else {
-                turbo_entropy_scale * base_lam * (mat_ms / row_ms[r]).clamp(0.50, 1.00)
-            }
-        })
-    } else {
-        let base_lam: f32 = if is_kv_or_out || is_q {
-            0.026
-        } else if is_qkv_gate {
-            if is_edge { 0.036 } else { 0.044 }
-        } else if is_ffn_down {
-            if is_anchor { 0.038 } else { DOWN_LAM }
-        } else if is_fg_fu {
-            if is_anchor { 0.045 } else { GU_LAM }
-        } else {
-            0.040
-        };
-        TurboWhtMatrix::encode_with_ch_amp(4, rows, cols, f32s, h_rot, ch_amp, |r| {
-            if row_ms[r] > 3.2 * mat_ms {
-                0.0
-            } else {
-                turbo_entropy_scale * (base_lam * (mat_ms / row_ms[r]).clamp(0.45, 1.50))
-            }
-        })
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -412,7 +276,29 @@ pub fn pack_gguf_model_to_vxt_with_progress(
     threads: usize,
     progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>,
 ) -> Result<(ModelConfig, Vec<u8>)> {
-    pack_with_activation(gguf_bytes, mode, threads, 1.0, None, progress)
+    pack_with_activation_calib(gguf_bytes, mode, threads, 1.0, None, None, true, progress)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn pack_gguf_model_to_vxt_with_calib(
+    gguf_bytes: &[u8],
+    mode: LlmPackMode,
+    threads: usize,
+    turbo_entropy_scale: f32,
+    calib_text: Option<&str>,
+    no_calib: bool,
+    progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>,
+) -> Result<(ModelConfig, Vec<u8>)> {
+    pack_with_activation_calib(
+        gguf_bytes,
+        mode,
+        threads,
+        turbo_entropy_scale,
+        None,
+        calib_text,
+        !no_calib,
+        progress,
+    )
 }
 
 pub fn turbo_activation_manifest(bytes: &[u8]) -> Result<serde_json::Value> {
@@ -427,6 +313,20 @@ pub fn pack_gguf_model_with_activation_profile(bytes: &[u8], threads: usize, pro
     pack_with_activation(bytes,LlmPackMode::Turbo,threads,1.,Some(profile),None)
 }
 fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, turbo_entropy_scale: f32, activation: Option<&serde_json::Value>, progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>) -> Result<(ModelConfig,Vec<u8>)> {
+    pack_with_activation_calib(gguf_bytes, mode, threads, turbo_entropy_scale, activation, None, true, progress)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_with_activation_calib(
+    gguf_bytes: &[u8],
+    mode: LlmPackMode,
+    threads: usize,
+    turbo_entropy_scale: f32,
+    activation: Option<&serde_json::Value>,
+    calib_text: Option<&str>,
+    allow_seq_calib: bool,
+    progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>,
+) -> Result<(ModelConfig, Vec<u8>)> {
     if !turbo_entropy_scale.is_finite() || turbo_entropy_scale < 0.0 {
         return Err(Error::Format("turbo entropy scale must be finite and nonnegative".into()));
     }
@@ -453,7 +353,8 @@ fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, tu
     if mode == LlmPackMode::Turbo && turbo_entropy_scale != 1.0 {
         meta_kv.push(("model.turbo_entropy_scale".to_owned(), turbo_entropy_scale.to_string().into_bytes()));
     }
-    meta_kv.extend(BpeTokenizer::to_vxt_meta_entries(&kv)?);
+    let tok_entries = BpeTokenizer::to_vxt_meta_entries(&kv)?;
+    meta_kv.extend(tok_entries.iter().cloned());
 
     let active_metas: Vec<&GgufTensorMeta> = gg
         .tensors
@@ -462,11 +363,23 @@ fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, tu
         .collect();
 
     let n = active_metas.len();
-    let workers = threads.clamp(1, 32).min(n.max(1));
-    let mut smooth_plan = if mode == LlmPackMode::Turbo {
-        run_turbo_calibration(&gg, &cfg)
+    let eff_t = effective_cpu_threads(threads);
+    let workers = eff_t.min(n.max(1));
+    let use_seq = allow_seq_calib
+        && mode == LlmPackMode::Turbo
+        && activation.is_none()
+        && cfg.n_layer >= 4
+        && cfg.n_embd >= 256
+        && cfg.n_vocab >= 1024;
+    let (mut smooth_plan, prepacked) = if use_seq {
+        let tok = BpeTokenizer::from_vxt_meta(&tok_entries)?;
+        let map = run_sequential_turbo_pack(&gg, &cfg, &tok, calib_text, turbo_entropy_scale, eff_t, progress)?;
+        meta_kv.push(("model.turbo_version".to_owned(), b"v3-seq-gptq".to_vec()));
+        (TurboCalibPlan::default(), Some(Mutex::new(map)))
+    } else if mode == LlmPackMode::Turbo {
+        (run_turbo_calibration(&gg, &cfg), None)
     } else {
-        TurboCalibPlan::default()
+        (TurboCalibPlan::default(), None)
     };
     let cb4_plan = if mode == LlmPackMode::Cb4 {
         build_cb4_calib_plan(&gg, &cfg)
@@ -499,6 +412,7 @@ fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, tu
             let done_ref = &done_cnt;
             let plan_ref = &smooth_plan;
             let cb4_ref = &cb4_plan;
+            let pre_ref = prepacked.as_ref();
             s.spawn(move || loop {
                 if err_ref.lock().unwrap().is_some() {
                     break;
@@ -508,16 +422,21 @@ fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, tu
                     break;
                 }
                 let meta = metas_ref[idx];
-                match encode_gguf_tensor_with_layers(
-                    gg_ref,
-                    meta,
-                    mode,
-                    cfg.n_layer,
-                    cfg.full_attn_interval,
-                    plan_ref,
-                    cb4_ref,
-                    turbo_entropy_scale,
-                ) {
+                let pre_hit = pre_ref.and_then(|pp| pp.lock().unwrap().remove(&meta.name));
+                let res = match pre_hit {
+                    Some(t) => Ok(t),
+                    None => encode_gguf_tensor_with_layers(
+                        gg_ref,
+                        meta,
+                        mode,
+                        cfg.n_layer,
+                        cfg.full_attn_interval,
+                        plan_ref,
+                        cb4_ref,
+                        turbo_entropy_scale,
+                    ),
+                };
+                match res {
                     Ok(tensor) => {
                         *slots_ref[idx].lock().unwrap() = Some(VxtEntry {
                             name: meta.name.clone(),
@@ -564,6 +483,7 @@ fn pack_with_activation(gguf_bytes: &[u8], mode: LlmPackMode, threads: usize, tu
 #[cfg(test)]
 mod entropy_ablation_tests {
     use super::*;
+    use crate::wht_turbo::TurboWhtMatrix;
     fn matrix(name: &str) -> Vec<u8> {
         let mut b = b"GGUF".to_vec();
         b.extend(3u32.to_le_bytes()); b.extend(1u64.to_le_bytes()); b.extend(0u64.to_le_bytes());

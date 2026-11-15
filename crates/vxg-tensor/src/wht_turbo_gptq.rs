@@ -11,27 +11,31 @@
 use crate::fp16::{f16_to_f32, f32_to_f16};
 use crate::wht2::fwht32_inplace;
 use crate::wht_turbo::apply_col_sign;
-use crate::wht_turbo_enc::rademacher_sgn2;
+use crate::wht_turbo_enc::{rademacher_sgn2, rademacher_sgn4};
+use crate::wht_turbo_gptq_4d::{
+    encode_group128_gptq_t25, flush_2d_step_words, pack_2d_half_step, pack_t25_step_words,
+    round_f16_12bit, search_2d_gptq_pair,
+};
 use crate::wht_turbo_tables::{
-    ec_orth2d_nz_mask, ec_orth2d_tables, orth2d64_tables, orth2d_tables, EC_BITS_2D_16,
+    ec_orth2d_tables, orth2d64_tables, orth2d_tables, EC_BITS_2D_16,
 };
 
 const SQRT32: f64 = 5.656_854_249_492_381;
 
 #[derive(Clone)]
-struct HadamardBlockChol {
+pub(crate) struct HadamardBlockChol {
     /// Regularized unrotated channel weights `d_j` (`mean = block_mean`).
-    d_unrot: [f32; 32],
+    pub(crate) d_unrot: [f32; 32],
     /// Diagonal entries `alpha_0 .. alpha_31` of `A_b = M^T diag(alpha) M`.
-    alpha: [f32; 32],
+    pub(crate) alpha: [f32; 32],
     /// Unit lower-triangular `M` (`m[i][j]` active for `j < i`).
-    m: [[f32; 32]; 32],
+    pub(crate) m: [[f32; 32]; 32],
     /// Mean of `d_unrot` (`trace(A_b) / 32`).
-    mean_d: f32,
+    pub(crate) mean_d: f32,
 }
 
 impl HadamardBlockChol {
-    fn from_amps(amps: &[f32]) -> Self {
+    pub(crate) fn from_amps(amps: &[f32]) -> Self {
         let mut raw_d = [1.0f64; 32];
         let mut sum = 0.0f64;
         for j in 0..32 {
@@ -99,15 +103,6 @@ impl HadamardBlockChol {
     }
 }
 
-#[inline(always)]
-fn round_f16_12bit(raw_f16: u16) -> u16 {
-    if raw_f16 == 0 {
-        0
-    } else {
-        (raw_f16.min(0x7bdf) + 32) & 0xffc0
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn quantize_group128_gptq(
     g_rot: &[f32],
@@ -141,52 +136,25 @@ fn quantize_group128_gptq(
         for p in 0..16 {
             let i0 = p * 2;
             let i1 = i0 + 1;
-            let (a0, a1, m10) = (chol.alpha[i0], chol.alpha[i1], chol.m[i1][i0]);
-            let (wk0, wk1, w0) = (work[i0], work[i1], w_u[i0]);
+            let (best_c, best_s2, u0, u1) = search_2d_gptq_pair(
+                cb2,
+                &pen_u,
+                work[i0],
+                work[i1],
+                w_u[i0],
+                chol.alpha[i0],
+                chol.alpha[i1],
+                chol.m[i1][i0],
+            );
 
-            let mut best_c = 0usize;
-            let mut best_s2 = 0u8;
-            let mut best_u = (0.0f32, 0.0f32);
-            let mut best_cost = f32::INFINITY;
-
-            for c in 0..n_cb {
-                let (cu0, cu1) = (cb2[c][0], cb2[c][1]);
-                let base_pen = pen_u[c];
-                let s0_pref = cu0 > 0.0 && wk0.is_sign_negative();
-
-                for pass in 0..2 {
-                    if pass == 1 && cu0 == 0.0 {
-                        break;
-                    }
-                    let neg0 = if pass == 0 { s0_pref } else { !s0_pref };
-                    let u0 = if neg0 { -cu0 } else { cu0 };
-                    let d0 = wk0 - u0;
-                    let c0 = a0 * d0 * d0 + base_pen;
-                    if c0 >= best_cost {
-                        continue;
-                    }
-                    let t1 = wk1 + m10 * (w0 - u0);
-                    let neg1 = cu1 > 0.0 && t1.is_sign_negative();
-                    let u1 = if neg1 { -cu1 } else { cu1 };
-                    let d1 = t1 - u1;
-                    let cost = c0 + a1 * d1 * d1;
-                    if cost < best_cost {
-                        best_cost = cost;
-                        best_c = c;
-                        best_s2 = (neg0 as u8) | ((neg1 as u8) << 1);
-                        best_u = (u0, u1);
-                    }
-                }
-            }
-
-            pair_idx[b * 16 + p] = best_c as u8;
+            pair_idx[b * 16 + p] = best_c;
             pair_sgn[b * 16 + p] = best_s2;
-            u_blk[i0] = best_u.0;
-            u_blk[i1] = best_u.1;
-            bit_sum += ec_cost[best_c];
+            u_blk[i0] = u0;
+            u_blk[i1] = u1;
+            bit_sum += ec_cost[best_c as usize];
 
-            let e0 = w_u[i0] - best_u.0;
-            let e1 = w_u[i1] - best_u.1;
+            let e0 = w_u[i0] - u0;
+            let e1 = w_u[i1] - u1;
             for r in (i1 + 1)..32 {
                 work[r] = chol.m[r][i0].mul_add(e0, chol.m[r][i1].mul_add(e1, work[r]));
             }
@@ -218,12 +186,14 @@ pub(crate) fn encode_turbo_gptq_planes<F>(
     h_rot: Option<&[f32]>,
     ch_amp: &[f32],
     row_lambda: F,
+    threads: usize,
 ) -> (Vec<u16>, Vec<u32>)
 where
     F: Fn(usize) -> f32 + Sync,
 {
-    debug_assert!(matches!(bits, 3 | 4 | 6));
+    debug_assert!(matches!(bits, 3 | 4 | 5 | 6));
     let is_ec = bits == 4;
+    let is_t25 = bits == 5;
     let is_t4 = bits == 6;
     let padded_rows = rows.div_ceil(4) * 4;
     let row_tiles = padded_rows / 4;
@@ -263,10 +233,7 @@ where
 
     let mut scales_f16 = vec![0u16; row_tiles * steps * 8];
     let mut packed_words = vec![0u32; row_tiles * steps * wps];
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(row_tiles.max(1));
+    let workers = threads.max(1).min(row_tiles.max(1));
 
     let encode_tiles = |t0: usize, sc_slice: &mut [u16], pw_slice: &mut [u32]| {
         let mut r_rot = [
@@ -315,6 +282,40 @@ where
                 let ts = tile * steps + step;
                 let sc8 = &mut sc_tile[step * 8..(step + 1) * 8];
                 let pw_step = &mut pw_tile[step * wps..(step + 1) * wps];
+                let mut codes10_r = [[0u16; 64]; 4];
+                if is_t25 {
+                    for sr in 0..4 {
+                        for k in 0..64 {
+                            codes10_r[sr][k] = (rademacher_sgn4(ts, k >> 1, sr, k & 1) as u16) << 6;
+                        }
+                        let r = tile * 4 + sr;
+                        if r >= rows {
+                            continue;
+                        }
+                        let lam = row_lambda(r);
+                        let rms = row_ms[sr];
+                        for gh in 0..2 {
+                            let g_off = step * 256 + gh * 128;
+                            let b0 = g_off / 32;
+                            let blks: &[HadamardBlockChol; 4] =
+                                (&blk_chols[b0..b0 + 4]).try_into().unwrap();
+                            sc8[gh * 4 + sr] = encode_group128_gptq_t25(
+                                ts,
+                                sr,
+                                gh,
+                                lam,
+                                rms,
+                                &r_rot[sr][g_off..g_off + 128],
+                                &r_ds[sr][g_off..g_off + 128],
+                                blks,
+                                &mut codes10_r[sr],
+                            );
+                        }
+                    }
+                    pack_t25_step_words(&codes10_r, pw_step);
+                    continue;
+                }
+
                 let mut idx_r = [[0u16; 32]; 4];
                 let mut sgn_r = [[0u8; 32]; 4];
                 if is_ec {
@@ -442,41 +443,10 @@ where
                             }
 
                             if sc > 0.0 {
-                                if is_t4 {
-                                    for sub in 0..16 {
-                                        let lane = gh * 16 + sub;
-                                        let mut word = 0u32;
-                                        for pr in 0..4 {
-                                            let p = sub * 4 + pr;
-                                            let c8 = ((pair_idx[p] as u32) & 0x3f)
-                                                | (((pair_sgn[p] as u32) & 3) << 6);
-                                            word |= c8 << (pr * 8);
-                                        }
-                                        pw_step[lane * 4 + sr] = word;
-                                    }
-                                } else {
-                                    for sub in 0..16 {
-                                        let lane = gh * 16 + sub;
-                                        let p = sub * 4;
-                                        idx_r[sr][lane] = (pair_idx[p] as u16)
-                                            | ((pair_idx[p + 1] as u16) << 4)
-                                            | ((pair_idx[p + 2] as u16) << 8)
-                                            | ((pair_idx[p + 3] as u16) << 12);
-                                        let mut sb = 0u8;
-                                        for pr in 0..4 {
-                                            let raw_s2 = pair_sgn[p + pr];
-                                            let s2 = if is_ec {
-                                                let nz2 = ec_orth2d_nz_mask(pair_idx[p + pr] as usize);
-                                                let rs2 = rademacher_sgn2(ts, lane, sr, pr);
-                                                (raw_s2 & nz2) | (rs2 & !nz2)
-                                            } else {
-                                                raw_s2
-                                            };
-                                            sb |= s2 << (pr * 2);
-                                        }
-                                        sgn_r[sr][lane] = sb;
-                                    }
-                                }
+                                pack_2d_half_step(
+                                    bits, ts, sr, gh, &pair_idx, &pair_sgn, &mut idx_r, &mut sgn_r,
+                                    pw_step,
+                                );
                             }
                         }
                         sc8[gh * 4 + sr] = sf16;
@@ -484,16 +454,7 @@ where
                 }
 
                 if !is_t4 {
-                    for lane in 0..32 {
-                        pw_step[lane * 2] =
-                            (idx_r[0][lane] as u32) | ((idx_r[1][lane] as u32) << 16);
-                        pw_step[lane * 2 + 1] =
-                            (idx_r[2][lane] as u32) | ((idx_r[3][lane] as u32) << 16);
-                        pw_step[64 + lane] = (sgn_r[0][lane] as u32)
-                            | ((sgn_r[1][lane] as u32) << 8)
-                            | ((sgn_r[2][lane] as u32) << 16)
-                            | ((sgn_r[3][lane] as u32) << 24);
-                    }
+                    flush_2d_step_words(&idx_r, &sgn_r, pw_step);
                 }
             }
         }
@@ -521,136 +482,82 @@ where
 mod tests {
     use crate::wht_turbo::TurboWhtMatrix;
 
-    #[test]
-    fn gptq_cholesky_improves_anisotropic_activation_sqnr() {
-        let (rows, cols) = (64usize, 256usize);
-        let mut weights = vec![0.0f32; rows * cols];
-        let mut rng = 0x5eed_cafe_2026_1111u64;
-        let mut next_norm = || -> f32 {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let u1 = (((rng >> 11) as f64) / ((1u64 << 53) as f64)).max(1e-12);
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let u2 = ((rng >> 11) as f64) / ((1u64 << 53) as f64);
+    fn make_aniso_case(rows: usize, cols: usize, seed: u64, w_sd: f32) -> (Vec<f32>, Vec<f32>, u64) {
+        let mut rng = seed;
+        let next_norm = |s: &mut u64| -> f32 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let u1 = (((*s >> 11) as f64) / ((1u64 << 53) as f64)).max(1e-12);
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let u2 = ((*s >> 11) as f64) / ((1u64 << 53) as f64);
             ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
         };
-        for w in &mut weights {
-            *w = 0.04 * next_norm();
-        }
-        // Realistic intra-block spiky RMSNorm + attention-sink channel amplitudes
-        let mut ch_amp = vec![1.0f32; cols];
-        for c in 0..cols {
-            ch_amp[c] = if c % 32 == 3 {
-                4.5
-            } else if c % 16 == 7 {
-                2.4
-            } else {
-                0.7
-            };
-        }
+        let weights = (0..rows * cols).map(|_| w_sd * next_norm(&mut rng)).collect();
+        let ch_amp = (0..cols)
+            .map(|c| if c % 32 == 5 { 5.0 } else if c % 16 == 2 { 2.2 } else { 0.65 })
+            .collect();
+        (weights, ch_amp, rng)
+    }
 
-        let base = TurboWhtMatrix::encode_with_hessian(4, rows, cols, &weights, None, |_| 0.045)
-            .unwrap();
-        let gptq = TurboWhtMatrix::encode_with_ch_amp(
-            4,
-            rows,
-            cols,
-            &weights,
-            None,
-            Some(&ch_amp),
-            |_| 0.045,
-        )
-        .unwrap();
-
-        let (mut err_base, mut err_gptq, mut sig_e) = (0.0f64, 0.0f64, 0.0f64);
-        let mut y_ref = vec![0.0f32; rows];
-        let mut y_b = vec![0.0f32; rows];
-        let mut y_g = vec![0.0f32; rows];
+    fn eval_pair_sqnr(
+        rows: usize,
+        cols: usize,
+        weights: &[f32],
+        ch_amp: &[f32],
+        a: &TurboWhtMatrix,
+        b: &TurboWhtMatrix,
+        mut rng: u64,
+    ) -> (f64, f64) {
+        let (mut err_a, mut err_b, mut sig_e) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut y_ref, mut ya, mut yb) = (vec![0.0f32; rows], vec![0.0f32; rows], vec![0.0f32; rows]);
         for _ in 0..32 {
-            let x: Vec<f32> = (0..cols).map(|c| ch_amp[c] * next_norm()).collect();
+            let x: Vec<f32> = (0..cols)
+                .map(|c| {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let u1 = (((rng >> 11) as f64) / ((1u64 << 53) as f64)).max(1e-12);
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let u2 = ((rng >> 11) as f64) / ((1u64 << 53) as f64);
+                    ch_amp[c] * ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
+                })
+                .collect();
             for r in 0..rows {
-                y_ref[r] = weights[r * cols..(r + 1) * cols]
-                    .iter()
-                    .zip(&x)
-                    .map(|(w, xv)| w * xv)
-                    .sum();
+                y_ref[r] = weights[r * cols..(r + 1) * cols].iter().zip(&x).map(|(w, xv)| w * xv).sum();
             }
-            base.gemv_cpu(&x, &mut y_b, 1);
-            gptq.gemv_cpu(&x, &mut y_g, 1);
+            a.gemv_cpu(&x, &mut ya, 1);
+            b.gemv_cpu(&x, &mut yb, 1);
             for r in 0..rows {
-                let ref_v = y_ref[r] as f64;
-                sig_e += ref_v * ref_v;
-                err_base += (ref_v - y_b[r] as f64).powi(2);
-                err_gptq += (ref_v - y_g[r] as f64).powi(2);
+                let rv = y_ref[r] as f64;
+                sig_e += rv * rv;
+                err_a += (rv - ya[r] as f64).powi(2);
+                err_b += (rv - yb[r] as f64).powi(2);
             }
         }
-        let sqnr_base = 10.0 * (sig_e / err_base).log10();
-        let sqnr_gptq = 10.0 * (sig_e / err_gptq).log10();
-        assert!(
-            sqnr_gptq > sqnr_base + 1.0,
-            "expected GPTQ Cholesky SQNR ({sqnr_gptq:.2} dB) > baseline ({sqnr_base:.2} dB) + 1.0 dB"
-        );
+        (10.0 * (sig_e / err_a).log10(), 10.0 * (sig_e / err_b).log10())
+    }
+
+    #[test]
+    fn gptq_cholesky_improves_anisotropic_activation_sqnr() {
+        let (rows, cols) = (64, 256);
+        let (w, ch_amp, rng) = make_aniso_case(rows, cols, 0x5eed_cafe_2026_1111, 0.04);
+        let base = TurboWhtMatrix::encode_with_hessian(4, rows, cols, &w, None, |_| 0.045).unwrap();
+        let gptq = TurboWhtMatrix::encode_with_ch_amp(4, rows, cols, &w, None, Some(&ch_amp), |_| 0.045).unwrap();
+        let (sqnr_base, sqnr_gptq) = eval_pair_sqnr(rows, cols, &w, &ch_amp, &base, &gptq, rng);
+        assert!(sqnr_gptq > sqnr_base + 1.0, "GPTQ {sqnr_gptq:.2} dB <= base {sqnr_base:.2} dB + 1.0");
     }
 
     #[test]
     fn turbo4_sqnr_and_gptq_improvement() {
-        let (rows, cols) = (64usize, 256usize);
-        let mut weights = vec![0.0f32; rows * cols];
-        let mut rng = 0x4444_cafe_2026_1115u64;
-        let mut next_norm = || -> f32 {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let u1 = (((rng >> 11) as f64) / ((1u64 << 53) as f64)).max(1e-12);
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let u2 = ((rng >> 11) as f64) / ((1u64 << 53) as f64);
-            ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
-        };
-        for w in &mut weights {
-            *w = 0.05 * next_norm();
-        }
-
-        // Isotropic weight SQNR of Turbo4 (bits = 6) must exceed 20.4 dB
-        let t4_iso = TurboWhtMatrix::encode(6, rows, cols, &weights).unwrap();
+        let (rows, cols) = (64, 256);
+        let (w, ch_amp, rng) = make_aniso_case(rows, cols, 0x4444_cafe_2026_1115, 0.05);
+        let t4_iso = TurboWhtMatrix::encode(6, rows, cols, &w).unwrap();
         let dec_iso = crate::format::PackedTensor::TurboWht(t4_iso).decode_f32();
-        let sig_w: f64 = weights.iter().map(|&v| (v as f64) * (v as f64)).sum();
-        let err_w: f64 = weights
-            .iter()
-            .zip(&dec_iso)
-            .map(|(&a, &b)| ((a - b) as f64).powi(2))
-            .sum();
+        let sig_w: f64 = w.iter().map(|&v| (v as f64) * (v as f64)).sum();
+        let err_w: f64 = w.iter().zip(&dec_iso).map(|(&a, &b)| ((a - b) as f64).powi(2)).sum();
         let sqnr_w = 10.0 * (sig_w / err_w).log10();
-        assert!(
-            sqnr_w > 20.4,
-            "expected Turbo4 weight SQNR ({sqnr_w:.2} dB) > 20.4 dB"
-        );
+        assert!(sqnr_w > 20.4, "Turbo4 weight SQNR ({sqnr_w:.2} dB) <= 20.4 dB");
 
-        // Anisotropic GPTQ activation-weighted SQNR must improve over naive Turbo4
-        let mut ch_amp = vec![1.0f32; cols];
-        for c in 0..cols {
-            ch_amp[c] = if c % 32 == 5 { 5.0 } else if c % 16 == 2 { 2.2 } else { 0.65 };
-        }
-        let gptq = TurboWhtMatrix::encode_with_ch_amp(6, rows, cols, &weights, None, Some(&ch_amp), |_| 0.0)
-            .unwrap();
-        let t4_naive = TurboWhtMatrix::encode(6, rows, cols, &weights).unwrap();
-        let (mut err_naive, mut err_gptq, mut sig_e) = (0.0f64, 0.0f64, 0.0f64);
-        let (mut y_ref, mut y_n, mut y_g) = (vec![0.0f32; rows], vec![0.0f32; rows], vec![0.0f32; rows]);
-        for _ in 0..32 {
-            let x: Vec<f32> = (0..cols).map(|c| ch_amp[c] * next_norm()).collect();
-            for r in 0..rows {
-                y_ref[r] = weights[r * cols..(r + 1) * cols].iter().zip(&x).map(|(w, xv)| w * xv).sum();
-            }
-            t4_naive.gemv_cpu(&x, &mut y_n, 1);
-            gptq.gemv_cpu(&x, &mut y_g, 1);
-            for r in 0..rows {
-                let rv = y_ref[r] as f64;
-                sig_e += rv * rv;
-                err_naive += (rv - y_n[r] as f64).powi(2);
-                err_gptq += (rv - y_g[r] as f64).powi(2);
-            }
-        }
-        let sqnr_naive = 10.0 * (sig_e / err_naive).log10();
-        let sqnr_gptq = 10.0 * (sig_e / err_gptq).log10();
-        assert!(
-            sqnr_gptq > sqnr_naive + 0.5,
-            "expected Turbo4 GPTQ SQNR ({sqnr_gptq:.2} dB) > naive ({sqnr_naive:.2} dB) + 0.5 dB"
-        );
+        let gptq = TurboWhtMatrix::encode_with_ch_amp(6, rows, cols, &w, None, Some(&ch_amp), |_| 0.0).unwrap();
+        let t4_naive = TurboWhtMatrix::encode(6, rows, cols, &w).unwrap();
+        let (sqnr_naive, sqnr_gptq) = eval_pair_sqnr(rows, cols, &w, &ch_amp, &t4_naive, &gptq, rng);
+        assert!(sqnr_gptq > sqnr_naive + 0.5, "Turbo4 GPTQ {sqnr_gptq:.2} dB <= naive {sqnr_naive:.2} dB + 0.5");
     }
 }

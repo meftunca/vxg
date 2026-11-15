@@ -241,6 +241,80 @@ impl<'a> GgufView<'a> {
         }
         Ok(out)
     }
+
+    /// Materializes rows `[r0, r1)` of a 2D GGUF matrix into `Vec<f32>` without decoding the full tensor.
+    pub fn extract_rows_f32(&self, meta: &GgufTensorMeta, r0: usize, r1: usize) -> Result<Vec<f32>> {
+        let (rows, cols) = meta
+            .matrix_dims()
+            .ok_or_else(|| Error::InvalidShape("expected 2D matrix for extract_rows_f32"))?;
+        if r0 > r1 || r1 > rows {
+            return Err(Error::InvalidShape("row range out of bounds"));
+        }
+        if r0 == r1 {
+            return Ok(Vec::new());
+        }
+        if r0 == 0 && r1 == rows {
+            return self.extract_f32(meta);
+        }
+        let raw = self.tensor_bytes(meta)?;
+        let count = (r1 - r0) * cols;
+        let mut out = Vec::with_capacity(count);
+        match meta.ggml_type {
+            GgmlType::F32 => {
+                let s = &raw[r0 * cols * 4..r1 * cols * 4];
+                for c in s.chunks_exact(4) {
+                    out.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+                }
+            }
+            GgmlType::F16 => {
+                let s = &raw[r0 * cols * 2..r1 * cols * 2];
+                for c in s.chunks_exact(2) {
+                    out.push(f16_to_f32(u16::from_le_bytes([c[0], c[1]])));
+                }
+            }
+            GgmlType::BF16 => {
+                let s = &raw[r0 * cols * 2..r1 * cols * 2];
+                for c in s.chunks_exact(2) {
+                    out.push(bf16_to_f32(u16::from_le_bytes([c[0], c[1]])));
+                }
+            }
+            GgmlType::Q4_0 if cols % 32 == 0 => {
+                let b0 = (r0 * cols) / 32;
+                let b1 = (r1 * cols) / 32;
+                for blk in raw[b0 * 18..b1 * 18].chunks_exact(18) {
+                    let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+                    for &b in &blk[2..18] {
+                        out.push(((b & 0x0f) as i32 - 8) as f32 * d);
+                    }
+                    for &b in &blk[2..18] {
+                        out.push(((b >> 4) as i32 - 8) as f32 * d);
+                    }
+                }
+            }
+            GgmlType::Q8_0 if cols % 32 == 0 => {
+                let b0 = (r0 * cols) / 32;
+                let b1 = (r1 * cols) / 32;
+                for blk in raw[b0 * 34..b1 * 34].chunks_exact(34) {
+                    let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+                    for &q in &blk[2..34] {
+                        out.push((q as i8 as f32) * d);
+                    }
+                }
+            }
+            GgmlType::Q4_K if cols % 256 == 0 => {
+                let b0 = (r0 * cols) / 256;
+                let b1 = (r1 * cols) / 256;
+                for blk in raw[b0 * 144..b1 * 144].chunks_exact(144) {
+                    dequant_q4_k_block(blk, &mut out);
+                }
+            }
+            _ => {
+                let full = self.extract_f32(meta)?;
+                return Ok(full[r0 * cols..r1 * cols].to_vec());
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn dequant_q4_k_block(blk: &[u8], out: &mut Vec<f32>) {

@@ -86,6 +86,11 @@ pub(crate) trait Cb4TensorSource: Sync {
     fn writer_tensors(&self, n_layer: usize) -> Vec<String>;
     fn matrix_dims(&self, name: &str) -> Option<(usize, usize)>;
     fn extract_f32(&self, name: &str) -> Option<Vec<f32>>;
+    fn extract_rows_f32(&self, name: &str, r0: usize, r1: usize) -> Option<Vec<f32>> {
+        let (_, cols) = self.matrix_dims(name)?;
+        let full = self.extract_f32(name)?;
+        full.get(r0 * cols..r1 * cols).map(|s| s.to_vec())
+    }
 }
 
 impl Cb4TensorSource for GgufView<'_> {
@@ -112,6 +117,10 @@ impl Cb4TensorSource for GgufView<'_> {
 
     fn extract_f32(&self, name: &str) -> Option<Vec<f32>> {
         find_tensor(self, name).and_then(|m| GgufView::extract_f32(self, m).ok())
+    }
+
+    fn extract_rows_f32(&self, name: &str, r0: usize, r1: usize) -> Option<Vec<f32>> {
+        find_tensor(self, name).and_then(|m| GgufView::extract_rows_f32(self, m, r0, r1).ok())
     }
 }
 
