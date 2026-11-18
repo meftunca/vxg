@@ -205,6 +205,7 @@ struct MetalTurboRunner {
     bool can_t25_sk2_512 = false;
     bool can_t3_sk2_512 = false;
     bool can_t4_sk2_512 = false;
+    bool can_e8_sk2_512 = false;
     bool can_tg512_gu = false;
     uint32_t n_tg_s1 = 0;
     uint32_t stride_tiles8 = 0;
@@ -236,10 +237,14 @@ struct MetalTurboRunner {
     id<MTLComputePipelineState> pso_m1_t4_1sg = nil;
     id<MTLComputePipelineState> pso_m1_t4_sk2 = nil;
     id<MTLComputePipelineState> pso_m1_t4_sk4 = nil;
+    id<MTLComputePipelineState> pso_m1_e8_1sg = nil;
+    id<MTLComputePipelineState> pso_m1_e8_sk2 = nil;
+    id<MTLComputePipelineState> pso_m1_e8_sk4 = nil;
     id<MTLComputePipelineState> pso_m1_ffn_gu_t2 = nil;
     id<MTLComputePipelineState> pso_m1_ffn_gu_t25 = nil;
     id<MTLComputePipelineState> pso_m1_ffn_gu_t3 = nil;
     id<MTLComputePipelineState> pso_m1_ffn_gu_t4 = nil;
+    id<MTLComputePipelineState> pso_m1_ffn_gu_e8 = nil;
     id<MTLComputePipelineState> pso_dnet_m1_prep16 = nil;
     id<MTLComputePipelineState> pso_dnet_m1_state64 = nil;
     id<MTLComputePipelineState> pso_dnet_m1_out2 = nil;
@@ -249,6 +254,7 @@ struct MetalTurboRunner {
     id<MTLComputePipelineState> pso_llm_turbo25_gemm4 = nil;
     id<MTLComputePipelineState> pso_llm_turbo3_gemm4 = nil;
     id<MTLComputePipelineState> pso_llm_turbo4_gemm4 = nil;
+    id<MTLComputePipelineState> pso_llm_turbo_e8_gemm4 = nil;
     id<MTLComputePipelineState> pso_deltanet_conv_batch = nil;
     id<MTLComputePipelineState> pso_deltanet_fused_1to1 = nil;
     id<MTLComputePipelineState> pso_deltanet_heads_fp16 = nil;
@@ -265,6 +271,7 @@ struct MetalTurboRunner {
     id<MTLComputePipelineState> pso_sketch_s2_t25 = nil;
     id<MTLComputePipelineState> pso_sketch_s2_t3 = nil;
     id<MTLComputePipelineState> pso_sketch_s2_t4 = nil;
+    id<MTLComputePipelineState> pso_sketch_s2_e8 = nil;
     id<MTLComputePipelineState> pso_final_norm_quant = nil;
     id<MTLComputePipelineState> pso_final_norm_quant_wait_m1 = nil;
 
@@ -371,7 +378,8 @@ uint32_t encode_turbo_mat(
         bool use_t25_512 = (m.bits == 5u && r->can_t25_sk2_512 && steps >= 2u && m.rows >= 4096u && m.rows <= 65536u);
         bool use_t3_512 = ((m.bits == 3u || m.bits == 4u) && r->can_t3_sk2_512 && steps >= 2u && m.rows >= 4096u && m.rows <= 65536u);
         bool use_t4_512 = (m.bits == 6u && r->can_t4_sk2_512 && steps >= 2u && m.rows >= 4096u && m.rows <= 65536u);
-        bool use_sk2 = (!use_t25_512 && !use_t3_512 && !use_t4_512 && steps >= 2u && m.rows <= 65536u);
+        bool use_e8_512 = (m.bits == 7u && r->can_e8_sk2_512 && steps >= 2u && m.rows >= 4096u && m.rows <= 65536u);
+        bool use_sk2 = (!use_t25_512 && !use_t3_512 && !use_t4_512 && !use_e8_512 && steps >= 2u && m.rows <= 65536u);
         uint32_t tg_threads = 256u;
         uint32_t groups = 1u;
         id<MTLComputePipelineState> pso = nil;
@@ -386,12 +394,16 @@ uint32_t encode_turbo_mat(
             if (use_t4_512) { tg_threads = 512u; groups = (total_tiles + 7u) / 8u; pso = r->pso_m1_t4_sk4; }
             else if (use_sk2) { tg_threads = 256u; groups = (total_tiles + 3u) / 4u; pso = r->pso_m1_t4_sk2; }
             else { tg_threads = 256u; groups = (total_tiles + 7u) / 8u; pso = r->pso_m1_t4_1sg; }
+        } else if (m.bits == 7u) {
+            if (use_e8_512) { tg_threads = 512u; groups = (total_tiles + 7u) / 8u; pso = r->pso_m1_e8_sk4; }
+            else if (use_sk2) { tg_threads = 256u; groups = (total_tiles + 3u) / 4u; pso = r->pso_m1_e8_sk2; }
+            else { tg_threads = 256u; groups = (total_tiles + 7u) / 8u; pso = r->pso_m1_e8_1sg; }
         } else {
             if (use_t3_512) { tg_threads = 512u; groups = (total_tiles + 7u) / 8u; pso = r->pso_m1_t3_sk4; }
             else if (use_sk2) { tg_threads = 256u; groups = (total_tiles + 3u) / 4u; pso = r->pso_m1_t3_sk2; }
             else { tg_threads = 256u; groups = (total_tiles + 7u) / 8u; pso = r->pso_m1_t3_1sg; }
         }
-        bool has_epi_bufs = (use_sk2 || use_t25_512 || use_t3_512 || use_t4_512);
+        bool has_epi_bufs = (use_sk2 || use_t25_512 || use_t3_512 || use_t4_512 || use_e8_512);
         uint32_t act_epi = has_epi_bufs ? epi_mode : 0u;
         uint32_t epi_flags = (act_epi == 1u)
             ? (1024u | (epinorm_write_f ? 2048u : 0u))
@@ -424,7 +436,7 @@ uint32_t encode_turbo_mat(
         uint32_t total_tiles = (m.rows + 3u) / 4u;
         uint32_t groups = 1u;
         uint32_t tps_flags = ec_flag;
-        bool dual = use_sk2 && g_gemm4_dual && batch_m == 4u && (m.bits == 3u || m.bits == 4u || m.bits == 6u);
+        bool dual = use_sk2 && g_gemm4_dual && batch_m == 4u && (m.bits == 3u || m.bits == 4u || m.bits == 6u || m.bits == 7u);
         if (dual) {
             groups = (total_tiles + 7u) / 8u;
             tps_flags |= 1u | 512u | 1024u;
@@ -441,7 +453,8 @@ uint32_t encode_turbo_mat(
         id<MTLComputePipelineState> pso = (m.bits == 2u)
             ? r->pso_llm_turbo2_gemm4
             : ((m.bits == 5u) ? r->pso_llm_turbo25_gemm4
-                : ((m.bits == 6u) ? r->pso_llm_turbo4_gemm4 : r->pso_llm_turbo3_gemm4));
+                : ((m.bits == 6u) ? r->pso_llm_turbo4_gemm4
+                    : ((m.bits == 7u) ? r->pso_llm_turbo_e8_gemm4 : r->pso_llm_turbo3_gemm4)));
         [enc setComputePipelineState:pso];
         [enc setBuffer:r->weight_arena_buf offset:m.scales_off atIndex:0];
         [enc setBuffer:r->weight_arena_buf offset:m.packed_off atIndex:1];
@@ -842,7 +855,8 @@ void encode_turbo_forward(
                 id<MTLComputePipelineState> gu_pso = (L.w_ffn_gu.bits == 2u)
                     ? r->pso_m1_ffn_gu_t2
                     : ((L.w_ffn_gu.bits == 5u) ? r->pso_m1_ffn_gu_t25
-                        : ((L.w_ffn_gu.bits == 6u) ? r->pso_m1_ffn_gu_t4 : r->pso_m1_ffn_gu_t3));
+                        : ((L.w_ffn_gu.bits == 6u) ? r->pso_m1_ffn_gu_t4
+                            : ((L.w_ffn_gu.bits == 7u) ? r->pso_m1_ffn_gu_e8 : r->pso_m1_ffn_gu_t3)));
                 [enc setComputePipelineState:gu_pso];
                 [enc setBuffer:r->weight_arena_buf offset:L.w_ffn_gu.scales_off atIndex:0];
                 [enc setBuffer:r->weight_arena_buf offset:L.w_ffn_gu.packed_off atIndex:1];
@@ -1007,7 +1021,8 @@ void encode_turbo_forward(
         id<MTLComputePipelineState> s2_pso = (r->output_head_mat.bits == 2u)
             ? r->pso_sketch_s2_t2
             : ((r->output_head_mat.bits == 5u) ? r->pso_sketch_s2_t25
-                : ((r->output_head_mat.bits == 6u) ? r->pso_sketch_s2_t4 : r->pso_sketch_s2_t3));
+                : ((r->output_head_mat.bits == 6u) ? r->pso_sketch_s2_t4
+                    : ((r->output_head_mat.bits == 7u) ? r->pso_sketch_s2_e8 : r->pso_sketch_s2_t3)));
         [enc setComputePipelineState:s2_pso];
         [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.scales_off atIndex:0];
         [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.packed_off atIndex:1];
@@ -1035,7 +1050,7 @@ void encode_turbo_forward(
         if (write_next_slot != 0xffffffffu) buf_bar();
     } else if (compute_mode == 3u) {
         float eff_pen = use_bak_state ? 0.0f : s->presence_pen;
-        if (r->output_head_mat.bits >= 2u && r->output_head_mat.bits <= 6u) {
+        if (r->output_head_mat.bits >= 2u && r->output_head_mat.bits <= 7u) {
             TurboSketchStage2ParamsC s2p{
                 c.n_vocab, r->output_head_mat.padded_cols, r->output_head_mat.bits | 256u,
                 eff_pen, STAGE2_TGS, d1, d2, d3
@@ -1043,7 +1058,8 @@ void encode_turbo_forward(
             id<MTLComputePipelineState> s2_pso = (r->output_head_mat.bits == 2u)
                 ? r->pso_sketch_s2_t2
                 : ((r->output_head_mat.bits == 5u) ? r->pso_sketch_s2_t25
-                    : ((r->output_head_mat.bits == 6u) ? r->pso_sketch_s2_t4 : r->pso_sketch_s2_t3));
+                    : ((r->output_head_mat.bits == 6u) ? r->pso_sketch_s2_t4
+                        : ((r->output_head_mat.bits == 7u) ? r->pso_sketch_s2_e8 : r->pso_sketch_s2_t3)));
             [enc setComputePipelineState:s2_pso];
             [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.scales_off atIndex:0];
             [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.packed_off atIndex:1];
@@ -1153,10 +1169,14 @@ void* vxt_metal_turbo_create(
         r->pso_m1_t4_1sg = need_pso(@"vxt_m1_t4_1sg");
         r->pso_m1_t4_sk2 = need_pso(@"vxt_m1_t4_sk2");
         r->pso_m1_t4_sk4 = need_pso(@"vxt_m1_t4_sk4");
+        r->pso_m1_e8_1sg = need_pso(@"vxt_m1_e8_1sg");
+        r->pso_m1_e8_sk2 = need_pso(@"vxt_m1_e8_sk2");
+        r->pso_m1_e8_sk4 = need_pso(@"vxt_m1_e8_sk4");
         r->pso_m1_ffn_gu_t2 = need_pso(@"vxt_m1_ffn_gu_t2");
         r->pso_m1_ffn_gu_t25 = need_pso(@"vxt_m1_ffn_gu_t25");
         r->pso_m1_ffn_gu_t3 = need_pso(@"vxt_m1_ffn_gu_t3");
         r->pso_m1_ffn_gu_t4 = need_pso(@"vxt_m1_ffn_gu_t4");
+        r->pso_m1_ffn_gu_e8 = need_pso(@"vxt_m1_ffn_gu_e8");
         r->pso_dnet_m1_prep16 = need_pso(@"vxt_dnet_m1_prep16");
         r->pso_dnet_m1_state64 = need_pso(@"vxt_dnet_m1_state64");
         r->pso_dnet_m1_out2 = need_pso(@"vxt_dnet_m1_out2");
@@ -1166,6 +1186,7 @@ void* vxt_metal_turbo_create(
         r->pso_llm_turbo25_gemm4 = need_pso(@"vxt_llm_turbo25_gemm4");
         r->pso_llm_turbo3_gemm4 = need_pso(@"vxt_llm_turbo3_gemm4");
         r->pso_llm_turbo4_gemm4 = need_pso(@"vxt_llm_turbo4_gemm4");
+        r->pso_llm_turbo_e8_gemm4 = need_pso(@"vxt_llm_turbo_e8_gemm4");
         r->pso_deltanet_conv_batch = need_pso(@"vxt_deltanet_conv_batch");
         r->pso_deltanet_fused_1to1 = need_pso(@"vxt_deltanet_fused_1to1_fp16");
         r->pso_deltanet_heads_fp16 = need_pso(@"vxt_deltanet_heads_fp16_turbo");
@@ -1182,6 +1203,7 @@ void* vxt_metal_turbo_create(
         r->pso_sketch_s2_t25 = need_pso(@"vxt_lm_exact_stage2_turbo25");
         r->pso_sketch_s2_t3 = need_pso(@"vxt_lm_exact_stage2_turbo3");
         r->pso_sketch_s2_t4 = need_pso(@"vxt_lm_exact_stage2_turbo4");
+        r->pso_sketch_s2_e8 = need_pso(@"vxt_lm_exact_stage2_turbo_e8");
         r->pso_final_norm_quant = need_pso(@"vxt_final_norm_quant_sketch");
         r->pso_final_norm_quant_wait_m1 = need_pso(@"vxt_final_norm_quant_wait_m1");
 
@@ -1192,16 +1214,17 @@ void* vxt_metal_turbo_create(
             !r->pso_m1_t25_1sg || !r->pso_m1_t25_sk2 || !r->pso_m1_t25_sk4 ||
             !r->pso_m1_t3_1sg || !r->pso_m1_t3_sk2 || !r->pso_m1_t3_sk4 ||
             !r->pso_m1_t4_1sg || !r->pso_m1_t4_sk2 || !r->pso_m1_t4_sk4 ||
-            !r->pso_m1_ffn_gu_t2 || !r->pso_m1_ffn_gu_t25 || !r->pso_m1_ffn_gu_t3 || !r->pso_m1_ffn_gu_t4 ||
+            !r->pso_m1_e8_1sg || !r->pso_m1_e8_sk2 || !r->pso_m1_e8_sk4 ||
+            !r->pso_m1_ffn_gu_t2 || !r->pso_m1_ffn_gu_t25 || !r->pso_m1_ffn_gu_t3 || !r->pso_m1_ffn_gu_t4 || !r->pso_m1_ffn_gu_e8 ||
             !r->pso_dnet_m1_prep16 || !r->pso_dnet_m1_state64 || !r->pso_dnet_m1_out2 ||
             !r->pso_dnet_m1_fused16 || !r->pso_dnet_m1_fused64 ||
-            !r->pso_llm_turbo2_gemm4 || !r->pso_llm_turbo25_gemm4 || !r->pso_llm_turbo3_gemm4 || !r->pso_llm_turbo4_gemm4 ||
+            !r->pso_llm_turbo2_gemm4 || !r->pso_llm_turbo25_gemm4 || !r->pso_llm_turbo3_gemm4 || !r->pso_llm_turbo4_gemm4 || !r->pso_llm_turbo_e8_gemm4 ||
             !r->pso_deltanet_conv_batch || !r->pso_deltanet_fused_1to1 || !r->pso_deltanet_heads_fp16 ||
             !r->pso_gqa_prep_fp16 || !r->pso_gqa_attn_fp16 || !r->pso_gqa_fused_m1 ||
             !r->pso_argmax_s1 || !r->pso_argmax_s2 ||
             !r->pso_build_sketch || !r->pso_quant_x_sketch || !r->pso_sketch_s1 ||
             !r->pso_sketch_thresh || !r->pso_sketch_s2_t2 || !r->pso_sketch_s2_t25 ||
-            !r->pso_sketch_s2_t3 || !r->pso_sketch_s2_t4 ||
+            !r->pso_sketch_s2_t3 || !r->pso_sketch_s2_t4 || !r->pso_sketch_s2_e8 ||
             !r->pso_final_norm_quant || !r->pso_final_norm_quant_wait_m1) {
             delete r;
             return nullptr;
@@ -1210,10 +1233,12 @@ void* vxt_metal_turbo_create(
         r->can_t25_sk2_512 = ([r->pso_m1_t25_sk4 maxTotalThreadsPerThreadgroup] >= 512u);
         r->can_t3_sk2_512 = ([r->pso_m1_t3_sk4 maxTotalThreadsPerThreadgroup] >= 512u);
         r->can_t4_sk2_512 = ([r->pso_m1_t4_sk4 maxTotalThreadsPerThreadgroup] >= 512u);
+        r->can_e8_sk2_512 = ([r->pso_m1_e8_sk4 maxTotalThreadsPerThreadgroup] >= 512u);
         r->can_tg512_gu = ([r->pso_m1_ffn_gu_t2 maxTotalThreadsPerThreadgroup] >= 512u) &&
                           ([r->pso_m1_ffn_gu_t25 maxTotalThreadsPerThreadgroup] >= 512u) &&
                           ([r->pso_m1_ffn_gu_t3 maxTotalThreadsPerThreadgroup] >= 512u) &&
-                          ([r->pso_m1_ffn_gu_t4 maxTotalThreadsPerThreadgroup] >= 512u);
+                          ([r->pso_m1_ffn_gu_t4 maxTotalThreadsPerThreadgroup] >= 512u) &&
+                          ([r->pso_m1_ffn_gu_e8 maxTotalThreadsPerThreadgroup] >= 512u);
 
         // 1. Repack `Turbo3`/`EC-Turbo3` (6-bit row words) & `Turbo2.5` swizzle once in-place
         {
@@ -1738,7 +1763,8 @@ static void run_vxt_timing_probe(MetalTurboRunner* r) {
             id<MTLComputePipelineState> gu_pso = (L.w_ffn_gu.bits == 2u)
                 ? r->pso_m1_ffn_gu_t2
                 : ((L.w_ffn_gu.bits == 5u) ? r->pso_m1_ffn_gu_t25
-                    : ((L.w_ffn_gu.bits == 6u) ? r->pso_m1_ffn_gu_t4 : r->pso_m1_ffn_gu_t3));
+                    : ((L.w_ffn_gu.bits == 6u) ? r->pso_m1_ffn_gu_t4
+                        : ((L.w_ffn_gu.bits == 7u) ? r->pso_m1_ffn_gu_e8 : r->pso_m1_ffn_gu_t3)));
             [enc setComputePipelineState:gu_pso];
             [enc setBuffer:r->weight_arena_buf offset:L.w_ffn_gu.scales_off atIndex:0];
             [enc setBuffer:r->weight_arena_buf offset:L.w_ffn_gu.packed_off atIndex:1];
@@ -1781,7 +1807,8 @@ static void run_vxt_timing_probe(MetalTurboRunner* r) {
         id<MTLComputePipelineState> s2_pso = (r->output_head_mat.bits == 2u)
             ? r->pso_sketch_s2_t2
             : ((r->output_head_mat.bits == 5u) ? r->pso_sketch_s2_t25
-                : ((r->output_head_mat.bits == 6u) ? r->pso_sketch_s2_t4 : r->pso_sketch_s2_t3));
+                : ((r->output_head_mat.bits == 6u) ? r->pso_sketch_s2_t4
+                    : ((r->output_head_mat.bits == 7u) ? r->pso_sketch_s2_e8 : r->pso_sketch_s2_t3)));
         [enc setComputePipelineState:s2_pso];
         [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.scales_off atIndex:0];
         [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.packed_off atIndex:1];
@@ -1816,7 +1843,8 @@ static void run_vxt_timing_probe(MetalTurboRunner* r) {
             id<MTLComputePipelineState> s2_pso = (r->output_head_mat.bits == 2u)
                 ? r->pso_sketch_s2_t2
                 : ((r->output_head_mat.bits == 5u) ? r->pso_sketch_s2_t25
-                    : ((r->output_head_mat.bits == 6u) ? r->pso_sketch_s2_t4 : r->pso_sketch_s2_t3));
+                    : ((r->output_head_mat.bits == 6u) ? r->pso_sketch_s2_t4
+                        : ((r->output_head_mat.bits == 7u) ? r->pso_sketch_s2_e8 : r->pso_sketch_s2_t3)));
             [enc setComputePipelineState:s2_pso];
             [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.scales_off atIndex:0];
             [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.packed_off atIndex:1];

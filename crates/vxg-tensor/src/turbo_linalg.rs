@@ -224,12 +224,15 @@ pub(crate) struct SuperBlockBlock {
     /// Row-major `[bw, bw]` unit lower-triangular `M` (`A = M^T diag(alpha) M`).
     pub(crate) m: Vec<f32>,
     /// Optional `[bw, bw]` drift operator `B = alpha_eff * H_drift^{-1} C_b^T` (`W^* += W_b B^T`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) b_drift: Option<Vec<f32>>,
 }
 
 pub(crate) struct SuperBlockHessian {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) x_stu_rot: Vec<f32>,
     pub(crate) ch_amp: Vec<f32>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) tok_w: Vec<f32>,
     pub(crate) blocks: Vec<SuperBlockBlock>,
 }
@@ -380,6 +383,7 @@ fn build_superblock(
         }
     }
 
+    let lw = (eff_n / (eff_n + 6.0 * (bw as f64))).clamp(0.05, 0.78);
     let mut s = vec![0.0f64; bw * bw];
     for u in 0..bw {
         let valid_u = c0 + u < cols;
@@ -395,9 +399,9 @@ fn build_superblock(
                 if sb32 == v / 32 {
                     0.70 * hn + 0.20 * prior32[sb32 * 1024 + u32 * 32 + (v % 32)] + if u == v { 0.10 } else { 0.0 }
                 } else if g128 == v / 128 {
-                    0.35 * hn
+                    0.50 * lw * hn
                 } else {
-                    0.20 * hn
+                    0.35 * lw * hn
                 }
             };
         }

@@ -1,0 +1,580 @@
+//! 8D Gosset Lattice (`E8`) Vector Quantizer with `32`-column `f16` sub-scales, Super-Block
+//! `LDL-GPTQ` error feedback, and zero-LUT SIMD bitfield packing (`VXT-Turbo-E8`, `bits = 7`).
+
+use crate::fp16::{f16_to_f32, f32_to_f16};
+use crate::turbo_linalg::{rotate_rows_fwht32, sgemm_nt, SuperBlockHessian};
+use crate::wht2::fwht32_inplace;
+use crate::wht_turbo::{apply_col_sign, TurboWhtMatrix};
+use crate::wht_turbo_gptq::HadamardBlockChol;
+use crate::wht_turbo_gptq_4d::round_f16_12bit;
+use crate::{Error, Result};
+
+/// Packs an `8D` Gosset lattice vector (`u_j in 0..=15`, `sum(u_j) & 1 == 0`, `c in 0..=1`) into `u32`.
+#[inline(always)]
+pub(crate) fn pack_e8_word(u: &[u8; 8], c: u8) -> u32 {
+    debug_assert_eq!((u[0] ^ u[1] ^ u[2] ^ u[3] ^ u[4] ^ u[5] ^ u[6] ^ u[7]) & 1, 0);
+    (u[0] as u32)
+        | ((u[1] as u32) << 4)
+        | ((u[2] as u32) << 8)
+        | ((u[3] as u32) << 12)
+        | ((u[4] as u32) << 16)
+        | ((u[5] as u32) << 20)
+        | ((u[6] as u32) << 24)
+        | (((u[7] as u32) >> 1) << 28)
+        | (((c & 1) as u32) << 31)
+}
+
+/// Decodes a packed `E8` `u32` word into `8` `f32` coordinates in `[-8.0, 7.5]`.
+#[inline(always)]
+pub(crate) fn decode_e8_word(w: u32) -> [f32; 8] {
+    let m7 = w & 0x0fff_ffff;
+    let mut p = m7 ^ (m7 >> 4);
+    p ^= p >> 8;
+    let u7 = ((w >> 27) & 14) | ((p ^ (p >> 16)) & 1);
+    let bias = if (w >> 31) != 0 { -7.5f32 } else { -8.0f32 };
+    [
+        ((w & 15) as f32) + bias,
+        (((w >> 4) & 15) as f32) + bias,
+        (((w >> 8) & 15) as f32) + bias,
+        (((w >> 12) & 15) as f32) + bias,
+        (((w >> 16) & 15) as f32) + bias,
+        (((w >> 20) & 15) as f32) + bias,
+        (((w >> 24) & 15) as f32) + bias,
+        (u7 as f32) + bias,
+    ]
+}
+
+/// Computes `<decode_e8_word(w), xv[0..8]>` without lookup tables.
+#[inline(always)]
+pub(crate) fn dot_e8_word(w: u32, xv: &[f32]) -> f32 {
+    let q = decode_e8_word(w);
+    let s0 = q[0].mul_add(xv[0], q[1].mul_add(xv[1], q[2].mul_add(xv[2], q[3] * xv[3])));
+    let s1 = q[4].mul_add(xv[4], q[5].mul_add(xv[5], q[6].mul_add(xv[6], q[7] * xv[7])));
+    s0 + s1
+}
+
+#[inline(always)]
+fn opp_parity_u4(ub: u8, yf: f32) -> u8 {
+    if ub == 0 {
+        1
+    } else if ub == 15 {
+        14
+    } else if yf >= (ub as f32) {
+        ub + 1
+    } else {
+        ub - 1
+    }
+}
+
+/// Solves one `8D` Gosset lattice vector under an `8x8` unit lower-triangular `LDL^T` metric.
+#[inline]
+pub(crate) fn solve_e8_8d_gptq(
+    wk8: &[f32; 8],
+    wb8: &[f32; 8],
+    al8: &[f32; 8],
+    m8: &[[f32; 8]; 8],
+) -> ([f32; 8], u32) {
+    let (mut best_loss, mut best_q, mut best_w) = (f32::INFINITY, [0.0f32; 8], 0u32);
+    for c in 0u8..=1u8 {
+        let bias = if c != 0 { -7.5f32 } else { -8.0f32 };
+        let (mut u_sel, mut q_sel, mut alt_u) = ([8u8; 8], [0.0f32; 8], [8u8; 8]);
+        let (mut alt_pen, mut y_arr, mut par_sum) = ([0.0f32; 8], [0.0f32; 8], 0u8);
+        for i in 0..8 {
+            let mut yi = wk8[i];
+            for j in 0..i {
+                yi += m8[i][j] * (wb8[j] - q_sel[j]);
+            }
+            y_arr[i] = yi;
+            let yf = yi - bias;
+            let ub = (yf.round() as i32).clamp(0, 15) as u8;
+            let qb = (ub as f32) + bias;
+            let u_opp = opp_parity_u4(ub, yf);
+            let qo = (u_opp as f32) + bias;
+            let cb = al8[i] * (yi - qb) * (yi - qb);
+            let co = al8[i] * (yi - qo) * (yi - qo);
+            u_sel[i] = ub;
+            q_sel[i] = qb;
+            alt_u[i] = u_opp;
+            alt_pen[i] = (co - cb).max(0.0);
+            par_sum ^= ub & 1;
+        }
+
+        let tot_loss = if par_sum != 0 {
+            let mut top3 = [0usize, 1, 2];
+            if alt_pen[top3[1]] < alt_pen[top3[0]] {
+                top3.swap(0, 1);
+            }
+            if alt_pen[top3[2]] < alt_pen[top3[1]] {
+                top3.swap(1, 2);
+                if alt_pen[top3[1]] < alt_pen[top3[0]] {
+                    top3.swap(0, 1);
+                }
+            }
+            for idx in 3..8 {
+                if alt_pen[idx] < alt_pen[top3[2]] {
+                    top3[2] = idx;
+                    if alt_pen[top3[2]] < alt_pen[top3[1]] {
+                        top3.swap(1, 2);
+                        if alt_pen[top3[1]] < alt_pen[top3[0]] {
+                            top3.swap(0, 1);
+                        }
+                    }
+                }
+            }
+            let (mut best_fl, mut best_fu, mut best_fq) = (f32::INFINITY, u_sel, q_sel);
+            for &idx_f in &top3 {
+                let (mut tu, mut tq) = (u_sel, q_sel);
+                tu[idx_f] = alt_u[idx_f];
+                tq[idx_f] = (tu[idx_f] as f32) + bias;
+                for i in (idx_f + 1)..8 {
+                    let mut yi = wk8[i];
+                    for j in 0..i {
+                        yi += m8[i][j] * (wb8[j] - tq[j]);
+                    }
+                    let yf = yi - bias;
+                    let mut ub = (yf.round() as i32).clamp(0, 15) as u8;
+                    if i == 7 {
+                        let req = (tu[0] ^ tu[1] ^ tu[2] ^ tu[3] ^ tu[4] ^ tu[5] ^ tu[6]) & 1;
+                        if (ub & 1) != req {
+                            ub = opp_parity_u4(ub, yf);
+                        }
+                    }
+                    tu[i] = ub;
+                    tq[i] = (ub as f32) + bias;
+                }
+                let mut fl = 0.0f32;
+                for i in 0..8 {
+                    let mut vi = wk8[i] - tq[i];
+                    for j in 0..i {
+                        vi += m8[i][j] * (wb8[j] - tq[j]);
+                    }
+                    fl = al8[i].mul_add(vi * vi, fl);
+                }
+                if fl < best_fl {
+                    best_fl = fl;
+                    best_fu = tu;
+                    best_fq = tq;
+                }
+            }
+            u_sel = best_fu;
+            q_sel = best_fq;
+            best_fl
+        } else {
+            let mut fl = 0.0f32;
+            for i in 0..8 {
+                let d = y_arr[i] - q_sel[i];
+                fl = al8[i].mul_add(d * d, fl);
+            }
+            fl
+        };
+
+        if tot_loss < best_loss {
+            best_loss = tot_loss;
+            best_q = q_sel;
+            best_w = pack_e8_word(&u_sel, c);
+        }
+    }
+    (best_q, best_w)
+}
+
+/// Solves one `32`-column `FWHT_32` block (`4` `E8` vectors + `1` `10-bit f16` scale) under `LDL^T`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(crate) fn solve_block32_e8_gptq(
+    lc0: usize, bw: usize, alpha: &[f32], m: &[f32], h_diag: &[f32],
+    work_blk: &[f32], wt_blk: &[f32], beta: f32, w_out: &mut [u32; 4], wq_out: &mut [f32; 32],
+) -> u16 {
+    let mut v_tgt = [0.0f32; 32];
+    let (mut e0, mut h_sum) = (0.0f32, 0.0f32);
+    for k in 0..32 {
+        let mut s = work_blk[k];
+        let mk = &m[(lc0 + k) * bw + lc0..];
+        for j in 0..k {
+            s += mk[j] * wt_blk[j];
+        }
+        v_tgt[k] = s;
+        let hk = h_diag[lc0 + k];
+        e0 += hk * work_blk[k] * work_blk[k];
+        h_sum += hk;
+    }
+    let rms = (e0 / h_sum.max(1e-12)).sqrt();
+    let mut sf16 = round_f16_12bit(f32_to_f16(rms / beta.max(0.5)));
+    let sc0 = f16_to_f32(sf16);
+    wq_out.fill(0.0);
+    w_out.fill(pack_e8_word(&[8; 8], 0));
+    if sc0 <= 0.0 {
+        return 0;
+    }
+
+    let (mut m8_arr, mut al8_arr) = ([[[0.0f32; 8]; 8]; 4], [[1.0f32; 8]; 4]);
+    for q8 in 0..4 {
+        let b0 = lc0 + q8 * 8;
+        for i in 0..8 {
+            al8_arr[q8][i] = alpha[b0 + i];
+            for j in 0..i {
+                m8_arr[q8][i][j] = m[(b0 + i) * bw + b0 + j];
+            }
+        }
+    }
+
+    let eval_given_sc = |sc: f32| -> (f32, [f32; 32], [u32; 4], [f32; 32]) {
+        let inv_sc = 1.0 / sc;
+        let (mut wk, mut wb) = ([0.0f32; 32], [0.0f32; 32]);
+        for k in 0..32 {
+            wk[k] = work_blk[k] * inv_sc;
+            wb[k] = wt_blk[k] * inv_sc;
+        }
+        let (mut q32, mut words) = ([0.0f32; 32], [0u32; 4]);
+        for q8 in 0..4 {
+            let i0 = q8 * 8;
+            let wk8: &[f32; 8] = wk[i0..i0 + 8].try_into().unwrap();
+            let wb8: &[f32; 8] = wb[i0..i0 + 8].try_into().unwrap();
+            let (oq, ow) = solve_e8_8d_gptq(wk8, wb8, &al8_arr[q8], &m8_arr[q8]);
+            q32[i0..i0 + 8].copy_from_slice(&oq);
+            words[q8] = ow;
+            for r in (i0 + 8)..32 {
+                let mr = &m[(lc0 + r) * bw + lc0 + i0..];
+                let mut acc = 0.0f32;
+                for j in 0..8 {
+                    acc = mr[j].mul_add(wb[i0 + j] - oq[j], acc);
+                }
+                wk[r] += acc;
+            }
+        }
+        let (mut vc, mut loss) = ([0.0f32; 32], 0.0f32);
+        for k in 0..32 {
+            let mut s = q32[k];
+            let mk = &m[(lc0 + k) * bw + lc0..];
+            for j in 0..k {
+                s += mk[j] * q32[j];
+            }
+            vc[k] = s;
+            let d = v_tgt[k] - sc * s;
+            loss = alpha[lc0 + k].mul_add(d * d, loss);
+        }
+        (loss, q32, words, vc)
+    };
+
+    let (loss0, mut best_q, mut best_w, vc0) = eval_given_sc(sc0);
+    let mut best_sc = sc0;
+    let (mut num, mut den) = (0.0f32, 0.0f32);
+    for k in 0..32 {
+        let ak = alpha[lc0 + k];
+        num = ak.mul_add(v_tgt[k] * vc0[k], num);
+        den = ak.mul_add(vc0[k] * vc0[k], den);
+    }
+    if den > 0.0 && num > 0.0 {
+        let sf_cand = round_f16_12bit(f32_to_f16((num / den).clamp(0.88 * sc0, 1.12 * sc0)));
+        let sc1 = f16_to_f32(sf_cand);
+        if sc1 > 0.0 && sf_cand != sf16 {
+            let (loss1, q1, w1, _) = eval_given_sc(sc1);
+            if loss1 <= loss0 {
+                sf16 = sf_cand;
+                best_sc = sc1;
+                best_q = q1;
+                best_w = w1;
+            }
+        }
+    }
+    for k in 0..32 {
+        wq_out[k] = best_sc * best_q[k];
+    }
+    *w_out = best_w;
+    sf16
+}
+
+/// Encodes `[rows, cols]` into `TurboWhtMatrix` (`bits = 7`) using a `256`-col `SuperBlockHessian`.
+pub(crate) fn encode_e8_superblock_gptq<F>(
+    rows: usize,
+    cols: usize,
+    mut fetch_rows: F,
+    hess: &SuperBlockHessian,
+    base_beta: f32,
+    mut on_chunk: Option<&mut dyn FnMut(usize, usize, &[f32])>,
+    threads: usize,
+) -> Result<TurboWhtMatrix>
+where
+    F: FnMut(usize, usize) -> Result<Vec<f32>>,
+{
+    let (padded_rows, padded_cols) = (rows.div_ceil(4) * 4, cols.div_ceil(256) * 256);
+    let (row_tiles, steps, n_blks32) = (padded_rows / 4, padded_cols / 256, padded_cols / 32);
+    let mut scales_f16 = vec![0u16; row_tiles * steps * 32];
+    let mut packed_words = vec![pack_e8_word(&[8; 8], 0); row_tiles * steps * 128];
+    let chunk_rows = if cols > 4096 { 256usize } else { 512usize };
+    let workers = threads.clamp(1, 32);
+    let inv_cols = 1.0 / (cols.max(1) as f64);
+
+    let mut r0 = 0usize;
+    while r0 < rows {
+        let r1 = (r0 + chunk_rows).min(rows);
+        let rc = r1 - r0;
+        let w_chunk = fetch_rows(r0, r1)?;
+        if w_chunk.len() != rc * cols {
+            return Err(Error::InvalidShape("fetch_rows returned wrong element count"));
+        }
+        if let Some(cb) = on_chunk.as_deref_mut() {
+            cb(r0, r1, &w_chunk);
+        }
+        let mut row_ms = vec![1.0f32; rc];
+        for r in 0..rc {
+            let mut ms = 0.0f64;
+            for (c, &v) in w_chunk[r * cols..(r + 1) * cols].iter().enumerate() {
+                let ca = hess.ch_amp[c] as f64;
+                ms += ca * ca * (v as f64) * (v as f64);
+            }
+            row_ms[r] = ((ms * inv_cols) as f32).max(1e-12);
+        }
+        let mut sorted = row_ms.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let mat_ms = sorted.get(rc / 2).copied().unwrap_or(1e-6).max(1e-12);
+        let row_betas: Vec<f32> = row_ms
+            .iter()
+            .map(|&ms| (base_beta * (ms / mat_ms).sqrt().powf(0.18).clamp(0.92, 1.16)).clamp(0.85, 4.00))
+            .collect();
+
+        let w_rot = rotate_rows_fwht32(&w_chunk, rc, cols, padded_cols, threads);
+        let mut work = w_rot.clone();
+        let mut sf_mat = vec![0u16; rc * n_blks32];
+        let mut w4_mat = vec![0u32; rc * n_blks32 * 4];
+        let mut err_panel = vec![0.0f32; rc * 32];
+
+        for sb in &hess.blocks {
+            for sbi in 0..(sb.bw / 32) {
+                let (lc0, c0) = (sbi * 32, sb.c0 + sbi * 32);
+                let g32 = c0 / 32;
+                let w_p = workers.min(rc.max(1));
+                let rpw = rc.div_ceil(w_p);
+                std::thread::scope(|s| {
+                    let (wt_ref, wk_ref, rb_ref) = (&w_rot, &work, &row_betas);
+                    for (ci, ((sf_b, w4_b), ep_b)) in sf_mat
+                        .chunks_mut(rpw * n_blks32)
+                        .zip(w4_mat.chunks_mut(rpw * n_blks32 * 4))
+                        .zip(err_panel.chunks_mut(rpw * 32))
+                        .enumerate()
+                    {
+                        let (rb0, nrb) = (ci * rpw, ep_b.len() / 32);
+                        s.spawn(move || {
+                            let (mut w_out, mut wq_out) = ([0u32; 4], [0.0f32; 32]);
+                            for dr in 0..nrb {
+                                let r = rb0 + dr;
+                                let sf = solve_block32_e8_gptq(
+                                    lc0, sb.bw, &sb.alpha, &sb.m, &sb.h_diag,
+                                    &wk_ref[r * padded_cols + c0..r * padded_cols + c0 + 32],
+                                    &wt_ref[r * padded_cols + c0..r * padded_cols + c0 + 32],
+                                    rb_ref[r], &mut w_out, &mut wq_out,
+                                );
+                                sf_b[dr * n_blks32 + g32] = sf;
+                                let off4 = (dr * n_blks32 + g32) * 4;
+                                w4_b[off4..off4 + 4].copy_from_slice(&w_out);
+                                let wt = &wt_ref[r * padded_cols + c0..r * padded_cols + c0 + 32];
+                                for k in 0..32 {
+                                    ep_b[dr * 32 + k] = wt[k] - wq_out[k];
+                                }
+                            }
+                        });
+                    }
+                });
+                if lc0 + 32 < sb.bw {
+                    sgemm_nt(
+                        rc, sb.bw - (lc0 + 32), 32, 1.0, &err_panel, 32,
+                        &sb.m[(lc0 + 32) * sb.bw + lc0..], sb.bw, 1.0, &mut work[c0 + 32..], padded_cols, threads,
+                    );
+                }
+            }
+        }
+
+        let tile0 = r0 / 4;
+        for tl in 0..rc.div_ceil(4) {
+            let g_tile = tile0 + tl;
+            for step in 0..steps {
+                let ts = g_tile * steps + step;
+                let sc32 = &mut scales_f16[ts * 32..(ts + 1) * 32];
+                let pw128 = &mut packed_words[ts * 128..(ts + 1) * 128];
+                for sr in 0..4 {
+                    let r = tl * 4 + sr;
+                    if r >= rc {
+                        continue;
+                    }
+                    for b8 in 0..8 {
+                        let g32 = step * 8 + b8;
+                        sc32[b8 * 4 + sr] = sf_mat[r * n_blks32 + g32];
+                        let off4 = (r * n_blks32 + g32) * 4;
+                        for sub in 0..4 {
+                            pw128[(b8 * 4 + sub) * 4 + sr] = w4_mat[off4 + sub];
+                        }
+                    }
+                }
+            }
+        }
+        r0 = r1;
+    }
+    Ok(TurboWhtMatrix { bits: 7, rows, cols, padded_rows, padded_cols, disk_bytes: 0, scales_f16, packed_words })
+}
+
+/// Encodes `[rows, cols]` into `bits = 7` using analytical `32x32` `HadamardBlockChol` (`encode` / `token_embd`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_e8_planes<F>(
+    rows: usize, cols: usize, padded_cols: usize, weights: &[f32],
+    h_rot: Option<&[f32]>, ch_amp: Option<&[f32]>, row_beta: F, threads: usize,
+) -> (Vec<u16>, Vec<u32>)
+where
+    F: Fn(usize) -> f32 + Sync,
+{
+    let padded_rows = rows.div_ceil(4) * 4;
+    let (row_tiles, steps, n_blks32) = (padded_rows / 4, padded_cols / 256, padded_cols / 32);
+    let mut blk_m = vec![[0.0f32; 1024]; n_blks32];
+    let mut blk_al = vec![[1.0f32; 32]; n_blks32];
+    let mut blk_hd = vec![[1.0f32; 32]; n_blks32];
+    for b in 0..n_blks32 {
+        let c0 = b * 32;
+        let amps = ch_amp.map_or(&[][..], |a| if c0 < a.len() { &a[c0..a.len().min(c0 + 32)] } else { &[] });
+        let chol = HadamardBlockChol::from_amps(amps);
+        let blk_sc = h_rot.and_then(|hr| hr.get(c0).copied()).unwrap_or(chol.mean_d).max(1e-6);
+        let ratio = blk_sc / chol.mean_d.max(1e-12);
+        let mut spec = chol.d_unrot;
+        for v in &mut spec {
+            *v *= ratio;
+        }
+        fwht32_inplace(&mut spec);
+        let inv_sq32 = 1.0 / 32.0f64.sqrt();
+        let mut s = [0.0f64; 1024];
+        for u in 0..32 {
+            for v in 0..32 {
+                s[u * 32 + v] = (spec[u ^ v] as f64) * inv_sq32;
+            }
+            s[u * 32 + u] = s[u * 32 + u].max(1e-8);
+            blk_hd[b][u] = s[u * 32 + u] as f32;
+        }
+        for k in (0..32).rev() {
+            let ak = s[k * 32 + k].max(1e-8);
+            blk_al[b][k] = ak as f32;
+            blk_m[b][k * 32 + k] = 1.0;
+            for j in 0..k {
+                blk_m[b][k * 32 + j] = (s[k * 32 + j] / ak) as f32;
+            }
+            for u in 0..k {
+                let mu = blk_m[b][k * 32 + u] as f64;
+                for v in 0..=u {
+                    s[u * 32 + v] -= ak * mu * (blk_m[b][k * 32 + v] as f64);
+                }
+            }
+        }
+    }
+
+    let mut scales_f16 = vec![0u16; row_tiles * steps * 32];
+    let mut packed_words = vec![pack_e8_word(&[8; 8], 0); row_tiles * steps * 128];
+    let workers = threads.max(1).min(row_tiles.max(1));
+
+    let encode_slice = |t0: usize, sc_sl: &mut [u16], pw_sl: &mut [u32]| {
+        let mut r_rot = [0.0f32; 32];
+        let (mut w_out, mut wq_out) = ([0u32; 4], [0.0f32; 32]);
+        for (dt, (sc_tile, pw_tile)) in sc_sl
+            .chunks_exact_mut(steps * 32)
+            .zip(pw_sl.chunks_exact_mut(steps * 128))
+            .enumerate()
+        {
+            let tile = t0 + dt;
+            for sr in 0..4 {
+                let r = tile * 4 + sr;
+                if r >= rows {
+                    continue;
+                }
+                let beta = row_beta(r).clamp(0.85, 3.40);
+                let src = &weights[r * cols..(r + 1) * cols];
+                for step in 0..steps {
+                    let sc32 = &mut sc_tile[step * 32..(step + 1) * 32];
+                    let pw128 = &mut pw_tile[step * 128..(step + 1) * 128];
+                    for b8 in 0..8 {
+                        let g32 = step * 8 + b8;
+                        let c0 = g32 * 32;
+                        r_rot.fill(0.0);
+                        for j in 0..32 {
+                            if c0 + j < cols {
+                                r_rot[j] = apply_col_sign(src[c0 + j], c0 + j);
+                            }
+                        }
+                        fwht32_inplace(&mut r_rot);
+                        sc32[b8 * 4 + sr] = solve_block32_e8_gptq(
+                            0, 32, &blk_al[g32], &blk_m[g32], &blk_hd[g32],
+                            &r_rot, &r_rot, beta, &mut w_out, &mut wq_out,
+                        );
+                        for sub in 0..4 {
+                            pw128[(b8 * 4 + sub) * 4 + sr] = w_out[sub];
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    if workers <= 1 || row_tiles < 8 {
+        encode_slice(0, &mut scales_f16, &mut packed_words);
+    } else {
+        let tpw = row_tiles.div_ceil(workers);
+        std::thread::scope(|s| {
+            for (ci, (sc_c, pw_c)) in scales_f16
+                .chunks_mut(tpw * steps * 32)
+                .zip(packed_words.chunks_mut(tpw * steps * 128))
+                .enumerate()
+            {
+                s.spawn(move || encode_slice(ci * tpw, sc_c, pw_c));
+            }
+        });
+    }
+    (scales_f16, packed_words)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_e8_word, encode_e8_superblock_gptq, pack_e8_word};
+    use crate::format::{read_vxt_model, write_vxt_model, PackedTensor, VxtEntry};
+    use crate::turbo_linalg::{sgemm_nt, SuperBlockHessian};
+
+    #[test]
+    fn e8_pack_decode_parity_and_ec_roundtrip() {
+        for c in 0u8..=1 {
+            let shift = if c != 0 { 0.5f32 } else { 0.0f32 };
+            let u = [0u8, 15, 3, 12, 8, 7, 11, 4];
+            let q = decode_e8_word(pack_e8_word(&u, c));
+            for j in 0..8 {
+                assert!((q[j] - ((u[j] as f32 - 8.0) + shift)).abs() < 1e-6);
+            }
+        }
+
+        let (rows, cols, n_tok) = (256usize, 512usize, 256usize);
+        let mut s = 0x517c_c1b7_2722_0a95u64;
+        let mut rnd = || -> f32 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((s >> 40) as f32) / 8388608.0 - 1.0
+        };
+        let x_tr: Vec<f32> = (0..n_tok * cols).map(|i| rnd() * if (i % cols) % 31 == 0 { 5.0 } else { 1.0 }).collect();
+        let x_te: Vec<f32> = (0..n_tok * cols).map(|i| rnd() * if (i % cols) % 31 == 0 { 5.0 } else { 1.0 }).collect();
+        let w: Vec<f32> = (0..rows * cols).map(|i| rnd() * if ((i % cols) / 32) % 2 == 0 { 0.08 } else { 0.03 }).collect();
+
+        let hess = SuperBlockHessian::build(&x_tr, None, n_tok, cols, cols, 2);
+        let m_e8 = encode_e8_superblock_gptq(rows, cols, |r0, r1| Ok(w[r0 * cols..r1 * cols].to_vec()), &hess, 1.44, None, 2).unwrap();
+        let m_t3 = crate::wht_turbo::TurboWhtMatrix::encode_with_ch_amp_threads(3, rows, cols, &w, None, Some(&hess.ch_amp), |_| 0.0, 2).unwrap();
+        assert!(m_e8.scales_f16.iter().all(|&v| (v & 0x003f) == 0));
+
+        let bytes = write_vxt_model(&[], &[
+            VxtEntry { name: "e8".into(), tensor: PackedTensor::TurboWht(m_e8.clone()) },
+            VxtEntry { name: "t3".into(), tensor: PackedTensor::TurboWht(m_t3) },
+        ]).unwrap();
+        let (_, entries) = read_vxt_model(&bytes).unwrap();
+        let PackedTensor::TurboWht(dec) = &entries[0].tensor else { panic!("expected TurboWht") };
+        assert_eq!(dec.scales_f16, m_e8.scales_f16);
+        assert_eq!(dec.packed_words, m_e8.packed_words);
+        assert!(dec.bits_per_weight() < entries[1].tensor.bits_per_weight(), "e8={:.4} vs t3={:.4}", dec.bits_per_weight(), entries[1].tensor.bits_per_weight());
+
+        let (w_dec, w_t3) = (entries[0].tensor.decode_f32(), entries[1].tensor.decode_f32());
+        let (mut y_ref, mut y_q, mut y_t3) = (vec![0.0f32; n_tok * rows], vec![0.0f32; n_tok * rows], vec![0.0f32; n_tok * rows]);
+        sgemm_nt(n_tok, rows, cols, 1.0, &x_te, cols, &w, cols, 0.0, &mut y_ref, rows, 2);
+        sgemm_nt(n_tok, rows, cols, 1.0, &x_te, cols, &w_dec, cols, 0.0, &mut y_q, rows, 2);
+        sgemm_nt(n_tok, rows, cols, 1.0, &x_te, cols, &w_t3, cols, 0.0, &mut y_t3, rows, 2);
+        let p_sig: f64 = y_ref.iter().map(|&v| (v as f64).powi(2)).sum();
+        let p_err: f64 = y_ref.iter().zip(&y_q).map(|(&a, &b)| ((a - b) as f64).powi(2)).sum();
+        let p_et3: f64 = y_ref.iter().zip(&y_t3).map(|(&a, &b)| ((a - b) as f64).powi(2)).sum();
+        let (sqnr_e8, sqnr_t3) = (10.0 * (p_sig / p_err).log10(), 10.0 * (p_sig / p_et3).log10());
+        assert!(sqnr_e8 > sqnr_t3 + 0.75, "e8={sqnr_e8:.2} dB ({:.3} bpw) vs t3={sqnr_t3:.2} dB ({:.3} bpw)", dec.bits_per_weight(), entries[1].tensor.bits_per_weight());
+    }
+}

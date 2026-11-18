@@ -374,7 +374,7 @@ fn pack_with_activation_calib(
     let (mut smooth_plan, prepacked) = if use_seq {
         let tok = BpeTokenizer::from_vxt_meta(&tok_entries)?;
         let map = run_sequential_turbo_pack(&gg, &cfg, &tok, calib_text, turbo_entropy_scale, eff_t, progress)?;
-        meta_kv.push(("model.turbo_version".to_owned(), b"v3-seq-gptq".to_vec()));
+        meta_kv.push(("model.turbo_version".to_owned(), b"v4-e8-gptq".to_vec()));
         (TurboCalibPlan::default(), Some(Mutex::new(map)))
     } else if mode == LlmPackMode::Turbo {
         (run_turbo_calibration(&gg, &cfg), None)

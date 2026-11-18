@@ -46,8 +46,9 @@ fn pop_bits(sbuf: &mut u64, sbits: &mut u32, spos: &mut usize, src: &[u8], n: u3
 }
 
 fn pack_ec_chunk(bits: u8, _t0: usize, _steps: usize, sc: &[u16], pw: &[u32]) -> Vec<u8> {
+    let sps = TurboWhtMatrix::scales_per_tile_step(bits);
     let wps = TurboWhtMatrix::words_per_tile_step(bits);
-    let total_ts = sc.len() / 8;
+    let total_ts = sc.len() / sps;
     let mut out = Vec::new();
     let sc_mode = if sc.iter().all(|&v| (v & 0x003f) == 0) {
         2u8
@@ -148,6 +149,16 @@ fn pack_ec_chunk(bits: u8, _t0: usize, _steps: usize, sc: &[u16], pw: &[u32]) ->
         }
         huff_encode(&idx_syms, &mut out);
         push_u8_slice(&mut out, &sgn_bytes);
+    } else if bits == 7 {
+        let mut pair_syms = Vec::with_capacity(total_ts * 384);
+        let mut tail_syms = Vec::with_capacity(total_ts * 128);
+        for &w in &pw[..total_ts * 128] {
+            let b = w.to_le_bytes();
+            pair_syms.extend_from_slice(&[b[0], b[1], b[2]]);
+            tail_syms.push(b[3]);
+        }
+        huff_encode(&pair_syms, &mut out);
+        huff_encode(&tail_syms, &mut out);
     } else {
         let zero_elide = bits == 4;
         let mut idx_bytes = Vec::with_capacity(total_ts * 256);
@@ -222,7 +233,8 @@ fn unpack_ec_chunk(
         }
     }
 
-    let total_ts = sc_out.len() / 8;
+    let sps = TurboWhtMatrix::scales_per_tile_step(bits);
+    let total_ts = sc_out.len() / sps;
     if bits == 2 {
         let mag_pairs = huff_decode(&mut r, total_ts * 128)?;
         let sgn_bytes = r.u8_vec()?;
@@ -299,6 +311,17 @@ fn unpack_ec_chunk(
                 }
             }
         }
+    } else if bits == 7 {
+        let pair_syms = huff_decode(&mut r, total_ts * 384)?;
+        let tail_syms = huff_decode(&mut r, total_ts * 128)?;
+        for (k, slot) in pw_out[..total_ts * 128].iter_mut().enumerate() {
+            *slot = u32::from_le_bytes([
+                pair_syms[k * 3],
+                pair_syms[k * 3 + 1],
+                pair_syms[k * 3 + 2],
+                tail_syms[k],
+            ]);
+        }
     } else {
         let zero_elide = bits == 4;
         let idx_bytes = huff_decode(&mut r, total_ts * 256)?;
@@ -349,6 +372,7 @@ fn unpack_ec_chunk(
 pub(crate) fn pack_turbo_ec(m: &TurboWhtMatrix, out: &mut Vec<u8>) {
     let row_tiles = m.padded_rows / 4;
     let steps = m.padded_cols / 256;
+    let sps = TurboWhtMatrix::scales_per_tile_step(m.bits);
     let wps = TurboWhtMatrix::words_per_tile_step(m.bits);
     let n_chunks = row_tiles.div_ceil(CHUNK_TILES);
     let mut chunks: Vec<Vec<u8>> = vec![Vec::new(); n_chunks];
@@ -357,7 +381,7 @@ pub(crate) fn pack_turbo_ec(m: &TurboWhtMatrix, out: &mut Vec<u8>) {
         for (ci, slot) in chunks.iter_mut().enumerate() {
             let t0 = ci * CHUNK_TILES;
             let ct = (row_tiles - t0).min(CHUNK_TILES);
-            let sc = &m.scales_f16[t0 * steps * 8..(t0 + ct) * steps * 8];
+            let sc = &m.scales_f16[t0 * steps * sps..(t0 + ct) * steps * sps];
             let pw = &m.packed_words[t0 * steps * wps..(t0 + ct) * steps * wps];
             let bits = m.bits;
             s.spawn(move || {
@@ -391,7 +415,7 @@ pub(crate) fn scan_turbo_ec<'a>(
     padded_cols: usize,
     r: &mut Cur<'a>,
 ) -> Result<PendingEcTensor<'a>> {
-    if !matches!(bits, 2 | 3 | 4 | 5 | 6) || padded_cols != cols.div_ceil(256) * 256 {
+    if !matches!(bits, 2 | 3 | 4 | 5 | 6 | 7) || padded_cols != cols.div_ceil(256) * 256 {
         return Err(Error::Format("invalid VXT EC-Turbo header".into()));
     }
     let payload_start = r.pos;
@@ -440,8 +464,9 @@ pub(crate) fn decode_pending_ec_batch(
         let padded_rows = j.rows.div_ceil(4) * 4;
         let row_tiles = padded_rows / 4;
         let steps = j.padded_cols / 256;
+        let sps = TurboWhtMatrix::scales_per_tile_step(j.bits);
         let wps = TurboWhtMatrix::words_per_tile_step(j.bits);
-        let mut scales_f16 = vec![0u16; row_tiles * steps * 8];
+        let mut scales_f16 = vec![0u16; row_tiles * steps * sps];
         let mut packed_words = vec![0u32; row_tiles * steps * wps];
         for ((ci, &bytes), (sc_ch, pw_ch)) in j
             .chunk_slices
@@ -449,7 +474,7 @@ pub(crate) fn decode_pending_ec_batch(
             .enumerate()
             .zip(
                 scales_f16
-                    .chunks_mut(CHUNK_TILES * steps * 8)
+                    .chunks_mut(CHUNK_TILES * steps * sps)
                     .zip(packed_words.chunks_mut(CHUNK_TILES * steps * wps)),
             )
         {

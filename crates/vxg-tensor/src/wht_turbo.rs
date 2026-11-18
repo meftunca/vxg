@@ -9,6 +9,7 @@
 //! - `Turbo4` (`bits = 6`, `4.125 bpw` GPU / `~3.99 bpw` EC): `Orth2D-64` (`~20.96 dB` SQNR).
 
 use crate::fp16::f16_to_f32;
+use crate::turbo_e8::{decode_e8_word, dot_e8_word, encode_e8_planes};
 use crate::wht2::fwht32_inplace;
 use crate::wht_turbo_enc::encode_turbo_planes;
 use crate::wht_turbo_gptq::encode_turbo_gptq_planes;
@@ -72,11 +73,20 @@ pub struct TurboWhtMatrix {
 
 impl TurboWhtMatrix {
     #[inline]
+    pub fn scales_per_tile_step(bits: u8) -> usize {
+        if bits == 7 {
+            32
+        } else {
+            8
+        }
+    }
+
+    #[inline]
     pub fn words_per_tile_step(bits: u8) -> usize {
         match bits {
             2 => 64,
             5 => 80,
-            6 => 128,
+            6 | 7 => 128,
             _ => 96,
         }
     }
@@ -85,6 +95,7 @@ impl TurboWhtMatrix {
         let default_lam = match bits {
             4 => 0.050,
             5 => 0.060,
+            7 => 1.750,
             _ => 0.0,
         };
         Self::encode_with_lambda(bits, rows, cols, weights, |_| default_lam)
@@ -149,9 +160,9 @@ impl TurboWhtMatrix {
     where
         F: Fn(usize) -> f32 + Sync,
     {
-        if !matches!(bits, 2 | 3 | 4 | 5 | 6) {
+        if !matches!(bits, 2 | 3 | 4 | 5 | 6 | 7) {
             return Err(Error::Format(
-                "TurboWhtMatrix bits must be 2, 3, 4 (EC-Turbo3), 5 (Turbo2.5), or 6 (Turbo4)".into(),
+                "TurboWhtMatrix bits must be 2, 3, 4 (EC-Turbo3), 5 (Turbo2.5), 6 (Turbo4), or 7 (Turbo-E8)".into(),
             ));
         }
         if rows == 0 || cols == 0 || weights.len() != rows.saturating_mul(cols) {
@@ -162,8 +173,21 @@ impl TurboWhtMatrix {
         let h_checked = h_rot.filter(|h| h.len() == padded_cols);
         let amp_checked = ch_amp.filter(|a| a.len() == cols);
         let wps = Self::words_per_tile_step(bits);
-        let (scales_f16, packed_words) =
-            if let Some(amp) = amp_checked.filter(|_| matches!(bits, 3 | 4 | 5 | 6)) {
+        let (scales_f16, packed_words) = if bits == 7 {
+            encode_e8_planes(
+                rows,
+                cols,
+                padded_cols,
+                weights,
+                h_checked,
+                amp_checked,
+                |r| {
+                    let v = row_lambda(r);
+                    if v > 0.5 { v } else { 1.75 }
+                },
+                threads.max(1),
+            )
+        } else if let Some(amp) = amp_checked.filter(|_| matches!(bits, 3 | 4 | 5 | 6)) {
                 encode_turbo_gptq_planes(
                     bits,
                     rows,
@@ -261,8 +285,9 @@ impl TurboWhtMatrix {
         let tile = r / 4;
         let sr = r % 4;
         let steps = self.padded_cols / 256;
+        let sps = Self::scales_per_tile_step(self.bits);
         let wps = Self::words_per_tile_step(self.bits);
-        let sc_tile = &self.scales_f16[tile * steps * 8..(tile + 1) * steps * 8];
+        let sc_tile = &self.scales_f16[tile * steps * sps..(tile + 1) * steps * sps];
         let pw_tile = &self.packed_words[tile * steps * wps..(tile + 1) * steps * wps];
         let mut rbuf = vec![0.0f32; self.padded_cols];
 
@@ -321,6 +346,19 @@ impl TurboWhtMatrix {
                     }
                 }
             }
+        } else if self.bits == 7 {
+            for step in 0..steps {
+                let sc_s = &sc_tile[step * 32..(step + 1) * 32];
+                let p128 = &pw_tile[step * 128..(step + 1) * 128];
+                for lane in 0..32 {
+                    let sc = f16_to_f32(sc_s[(lane >> 2) * 4 + sr]);
+                    let q = decode_e8_word(p128[lane * 4 + sr]);
+                    let base = step * 256 + lane * 8;
+                    for k in 0..8 {
+                        rbuf[base + k] = sc * q[k];
+                    }
+                }
+            }
         } else {
             let (_, _, lut64) = if self.bits == 4 {
                 ec_orth2d_tables()
@@ -374,10 +412,11 @@ impl TurboWhtMatrix {
 
         let run_tiles = |t0: usize, y_slice: &mut [f32]| {
             let steps = self.padded_cols / 256;
+            let sps = Self::scales_per_tile_step(self.bits);
             let wps = Self::words_per_tile_step(self.bits);
             for (dt, y4) in y_slice.chunks_mut(4).enumerate() {
                 let tile = t0 + dt;
-                let sc_tile = &self.scales_f16[tile * steps * 8..(tile + 1) * steps * 8];
+                let sc_tile = &self.scales_f16[tile * steps * sps..(tile + 1) * steps * sps];
                 let pw_tile = &self.packed_words[tile * steps * wps..(tile + 1) * steps * wps];
                 let mut acc = [0.0f32; 4];
 
@@ -455,6 +494,26 @@ impl TurboWhtMatrix {
                                         d = v2[0].mul_add(xv[p * 2], v2[1].mul_add(xv[p * 2 + 1], d));
                                     }
                                     acc[sr] = sc[sr].mul_add(d, acc[sr]);
+                                }
+                            }
+                        }
+                    }
+                } else if self.bits == 7 {
+                    for step in 0..steps {
+                        let sc_s = &sc_tile[step * 32..(step + 1) * 32];
+                        let p128 = &pw_tile[step * 128..(step + 1) * 128];
+                        for b8 in 0..8 {
+                            let sc = [
+                                f16_to_f32(sc_s[b8 * 4]),
+                                f16_to_f32(sc_s[b8 * 4 + 1]),
+                                f16_to_f32(sc_s[b8 * 4 + 2]),
+                                f16_to_f32(sc_s[b8 * 4 + 3]),
+                            ];
+                            for sub in 0..4 {
+                                let lane = b8 * 4 + sub;
+                                let xv = &x_rot[step * 256 + lane * 8..step * 256 + lane * 8 + 8];
+                                for sr in 0..4 {
+                                    acc[sr] = sc[sr].mul_add(dot_e8_word(p128[lane * 4 + sr], xv), acc[sr]);
                                 }
                             }
                         }

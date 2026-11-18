@@ -57,7 +57,10 @@ pub mod server;
 mod server_http;
 pub mod tokenizer;
 mod turbo_calib_corpus;
+mod turbo_e8;
+#[cfg(test)]
 mod turbo_full_gptq;
+#[cfg(test)]
 mod turbo_head_kld;
 mod turbo_linalg;
 mod turbo_seq_calib;

@@ -227,8 +227,9 @@ void vxt_encode_gemv_op(
             bool is_t2 = (op.sub == 2u);
             bool is_t25 = (op.sub == 5u);
             bool is_t4 = (op.sub == 6u);
+            bool is_e8 = (op.sub == 7u);
             bool use_nr8 = op.rows >= 4096u;
-            uint32_t tg_threads = (is_t2 || is_t25 || is_t4) ? 128u : 64u;
+            uint32_t tg_threads = (is_t2 || is_t25 || is_t4 || is_e8) ? 128u : 64u;
             uint32_t sgs_per_tg = tg_threads >> 5u;
             uint32_t base_rpt = sgs_per_tg * (use_nr8 ? 8u : 4u);
             uint32_t k_loop = (op.rows >= 131072u) ? 2u : 1u;
@@ -240,7 +241,9 @@ void vxt_encode_gemv_op(
                     ? (use_nr8 ? ctx->pso_turbo25_nr8 : ctx->pso_turbo25_nr4)
                     : (is_t4
                         ? (use_nr8 ? ctx->pso_turbo4_nr8 : ctx->pso_turbo4_nr4)
-                        : (use_nr8 ? ctx->pso_turbo3_nr8 : ctx->pso_turbo3_nr4)));
+                        : (is_e8
+                            ? (use_nr8 ? ctx->pso_turbo_e8_nr8 : ctx->pso_turbo_e8_nr4)
+                            : (use_nr8 ? ctx->pso_turbo3_nr8 : ctx->pso_turbo3_nr4))));
             uint32_t rows_per_tg = base_rpt * k_loop;
             MTLSize tg_t = MTLSizeMake(tg_threads, 1, 1);
             MTLSize grid_t = MTLSizeMake((op.rows + rows_per_tg - 1u) / rows_per_tg, 1, 1);
@@ -320,6 +323,8 @@ void* vxt_metal_create(char* dev_name_out, size_t dev_name_cap, char* err_out, s
         ctx->pso_turbo3_nr8 = vxt_build_pso(dev, lib, @"vxt_gemv_turbo3_nr8", err_out, err_cap);
         ctx->pso_turbo4_nr4 = vxt_build_pso(dev, lib, @"vxt_gemv_turbo4_nr4", err_out, err_cap);
         ctx->pso_turbo4_nr8 = vxt_build_pso(dev, lib, @"vxt_gemv_turbo4_nr8", err_out, err_cap);
+        ctx->pso_turbo_e8_nr4 = vxt_build_pso(dev, lib, @"vxt_gemv_turbo_e8_nr4", err_out, err_cap);
+        ctx->pso_turbo_e8_nr8 = vxt_build_pso(dev, lib, @"vxt_gemv_turbo_e8_nr8", err_out, err_cap);
 
         if (!ctx->pso_raw16 || !ctx->pso_raw32 || !ctx->pso_lossless_bf16 || !ctx->pso_lossless_fp16
             || !ctx->pso_cb4 || !ctx->pso_cb3 || !ctx->pso_q4_0
@@ -327,7 +332,8 @@ void* vxt_metal_create(char* dev_name_out, size_t dev_name_cap, char* err_out, s
             || !ctx->pso_turbo2_nr4 || !ctx->pso_turbo2_nr8
             || !ctx->pso_turbo25_nr4 || !ctx->pso_turbo25_nr8
             || !ctx->pso_turbo3_nr4 || !ctx->pso_turbo3_nr8
-            || !ctx->pso_turbo4_nr4 || !ctx->pso_turbo4_nr8) {
+            || !ctx->pso_turbo4_nr4 || !ctx->pso_turbo4_nr8
+            || !ctx->pso_turbo_e8_nr4 || !ctx->pso_turbo_e8_nr8) {
             delete ctx;
             return nullptr;
         }

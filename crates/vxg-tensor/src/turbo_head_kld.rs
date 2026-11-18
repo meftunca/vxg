@@ -45,7 +45,7 @@ pub(crate) fn align_rmsnorm_weights(
 }
 
 /// Winsorized, held-out-validated 2-step CG ridge alignment for tiny `ssm_alpha`/`ssm_beta` (`Lossless(F16)`).
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn align_tiny_proj_f16(
     w_orig: &[f32], rows: usize, cols: usize, x_stu: &[f32], x_ref: &[f32], n_tok: usize, threads: usize,
 ) -> Result<(PackedTensor, Vec<f32>, Vec<f32>)> {

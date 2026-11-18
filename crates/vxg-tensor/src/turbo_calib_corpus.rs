@@ -89,11 +89,16 @@ pub(crate) fn build_calib_sequences(
             return seqs;
         }
     }
-    CALIB_PASSAGES
-        .iter()
-        .take(max_seqs)
-        .filter_map(|p| {
-            let ids = tok.encode(p);
+    (0..max_seqs.min(CALIB_PASSAGES.len()))
+        .filter_map(|i| {
+            let mut ids = tok.encode(CALIB_PASSAGES[i]);
+            let sep = tok.encode("\n\n");
+            let mut step = 1usize;
+            while ids.len() < seq_len && step < CALIB_PASSAGES.len() {
+                ids.extend_from_slice(&sep);
+                ids.extend(tok.encode(CALIB_PASSAGES[(i + step * 5) % CALIB_PASSAGES.len()]));
+                step += 1;
+            }
             if ids.len() >= seq_len {
                 Some(ids[..seq_len].to_vec())
             } else {

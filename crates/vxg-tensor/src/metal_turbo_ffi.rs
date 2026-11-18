@@ -146,8 +146,9 @@ fn interleave_ffn_gu(fg: &TurboWhtMatrix, fu: &TurboWhtMatrix) -> Option<TurboWh
     {
         let n_blks = fg.rows / 32;
         let steps = fg.padded_cols / 256;
+        let sps = TurboWhtMatrix::scales_per_tile_step(fg.bits);
         let wps = TurboWhtMatrix::words_per_tile_step(fg.bits);
-        let sc_blk = 8 * steps * 8;
+        let sc_blk = 8 * steps * sps;
         let pw_blk = 8 * steps * wps;
         let mut scales_f16 = Vec::with_capacity(fg.scales_f16.len() * 2);
         let mut packed_words = Vec::with_capacity(fg.packed_words.len() * 2);

@@ -336,57 +336,50 @@ pub(crate) fn non_empty_slice(v: &[f32]) -> Option<&[f32]> {
     (!v.is_empty()).then_some(v)
 }
 
-/// Returns `(bits, base_lambda)` per tensor role for `VXT-Turbo v3` (`~2.97 bpw` on Qwen3.5-9B).
-pub(crate) fn turbo_v3_tensor_spec(
+/// Returns base Gosset `E8` grid density `beta` (`sc = rms / beta`) per tensor role for `VXT-Turbo v4`.
+pub(crate) fn turbo_v4_tensor_beta(
     name: &str,
     layer_idx: Option<usize>,
     n_layer: usize,
+    is_recurrent: bool,
     has_output_weight: bool,
-) -> (u8, f32) {
+) -> f32 {
     let n_lay = if n_layer > 0 { n_layer } else { 24 };
-    if name == "token_embd.weight" {
-        return if has_output_weight { (4, 0.024) } else { (6, 0.0) };
-    }
     if name == "output.weight" {
-        return (6, 0.0);
+        return 2.45;
     }
-    let is_kv_or_out = name.ends_with(".attn_k.weight")
+    if name == "token_embd.weight" {
+        return if has_output_weight { 2.15 } else { 2.35 };
+    }
+    let depth_m = match layer_idx {
+        Some(0) => 1.18,
+        Some(1) => 1.12,
+        Some(2) => 1.06,
+        Some(il) if il + 1 >= n_lay => 1.16,
+        Some(il) if il + 2 >= n_lay => 1.10,
+        Some(il) if il + 3 >= n_lay => 1.05,
+        Some(_) => 0.97,
+        None => 1.00,
+    } * if !is_recurrent && layer_idx.is_some() { 1.05 } else { 1.00 };
+
+    if name.ends_with(".attn_k.weight")
         || name.ends_with(".attn_v.weight")
         || name.ends_with(".attn_output.weight")
-        || name.ends_with(".ssm_out.weight");
-    if is_kv_or_out {
-        return (6, 0.0);
-    }
-    if name.ends_with(".attn_q.weight") {
-        return if layer_idx.is_some_and(|il| il <= 3 || il + 2 >= n_lay) { (6, 0.0) } else { (3, 0.0) };
-    }
-    let is_boundary = layer_idx.is_some_and(|il| il == 0 || il + 2 >= n_lay);
-    if name.ends_with(".attn_qkv.weight") {
-        if is_boundary {
-            (6, 0.0)
-        } else if layer_idx.is_some_and(|il| il <= 2 || il + 4 >= n_lay) {
-            (3, 0.0)
-        } else {
-            (4, 0.016)
-        }
+        || name.ends_with(".ssm_out.weight")
+    {
+        2.22 * depth_m
+    } else if name.ends_with(".attn_q.weight") {
+        1.90 * depth_m
+    } else if name.ends_with(".attn_qkv.weight") {
+        1.70 * depth_m
     } else if name.ends_with(".attn_gate.weight") {
-        if is_boundary { (6, 0.0) } else { (4, 0.020) }
+        1.64 * depth_m
     } else if name.ends_with(".ffn_down.weight") {
-        if layer_idx.is_some_and(|il| il <= 1 || il + 2 >= n_lay || il % 4 == 3) {
-            (3, 0.0)
-        } else {
-            (4, 0.018)
-        }
+        1.62 * depth_m
     } else if name.ends_with(".ffn_gate.weight") || name.ends_with(".ffn_up.weight") {
-        if layer_idx.is_some_and(|il| il <= 1 || il + 2 >= n_lay || il % 4 == 3) {
-            (4, 0.016)
-        } else if layer_idx.is_some_and(|il| 5 <= il && il + 5 < n_lay && matches!(il % 4, 1 | 2)) {
-            (5, 0.012)
-        } else {
-            (4, 0.024)
-        }
+        1.48 * depth_m
     } else {
-        (3, 0.0)
+        1.75 * depth_m
     }
 }
 

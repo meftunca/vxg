@@ -102,6 +102,8 @@ fn build_synthetic_qwen35_vxt(mode: u8) -> Vec<u8> {
                 3
             };
             PackedTensor::TurboWht(TurboWhtMatrix::encode(bits, rows, cols, &data).unwrap())
+        } else if mode == 9 {
+            PackedTensor::TurboWht(TurboWhtMatrix::encode(7, rows, cols, &data).unwrap())
         } else if mode == 2 {
             let bits = if name.contains("token_embd") {
                 2
@@ -248,7 +250,7 @@ fn hybrid_qwen35_1cmdbuf_metal_gpu_matches_cpu_across_cb4_and_wht2() {
 
 #[test]
 fn hybrid_qwen35_turbo_pipelined_gpu_matches_cpu_and_batched_decode() {
-    for mode in [2u8, 3u8, 8u8] {
+    for mode in [2u8, 3u8, 8u8, 9u8] {
         let vxt = build_synthetic_qwen35_vxt(mode);
         let mut cpu_model = LlmModel::from_vxt_bytes(&vxt, false, 2).unwrap();
         let mut st_cpu = cpu_model.new_state();
