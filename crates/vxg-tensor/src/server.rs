@@ -4,7 +4,7 @@
 //! threads, while HTTP handlers in [`crate::server_http`] query non-blocking [`ServerSnapshot`]s.
 
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -12,7 +12,17 @@ use serde_json::{json, Value};
 
 use crate::chat::{ChatMessage, ChatParams, ChatSession, ModelSummary, TurnMetrics};
 use crate::server_http::handle_http_conn;
+use crate::server_openai::format_prometheus_metrics;
 use crate::{Error, Result};
+
+#[derive(Default)]
+pub(crate) struct ServerCounters {
+    pub requests_total: AtomicU64,
+    pub queue_depth: AtomicUsize,
+    pub tokens_generated_total: AtomicU64,
+    pub prompt_tokens_total: AtomicU64,
+    pub cached_tokens_total: AtomicU64,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerSnapshot {
@@ -56,6 +66,7 @@ pub struct EmbeddedServerHandle {
     port: u16,
     tx: Arc<Mutex<mpsc::Sender<WorkerJob>>>,
     snap: Arc<Mutex<ServerSnapshot>>,
+    counters: Arc<ServerCounters>,
     cancel: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 }
@@ -106,9 +117,29 @@ impl EmbeddedServerHandle {
         Ok(())
     }
 
+    pub fn prometheus_metrics(&self) -> String {
+        let s = self.snapshot();
+        format_prometheus_metrics(
+            &s,
+            self.counters.requests_total.load(Ordering::Relaxed),
+            self.counters.queue_depth.load(Ordering::Relaxed),
+            self.counters.tokens_generated_total.load(Ordering::Relaxed),
+            self.counters.prompt_tokens_total.load(Ordering::Relaxed),
+            self.counters.cached_tokens_total.load(Ordering::Relaxed),
+        )
+    }
+
     pub(crate) fn send_job(&self, job: WorkerJob) -> Result<()> {
+        let is_chat = matches!(job, WorkerJob::Chat { .. });
+        if is_chat {
+            self.counters.queue_depth.fetch_add(1, Ordering::Relaxed);
+        }
         let guard = self.tx.lock().map_err(|_| Error::Io("worker mutex poisoned".into()))?;
-        guard.send(job).map_err(|_| Error::Io("inference worker closed".into()))
+        let res = guard.send(job).map_err(|_| Error::Io("inference worker closed".into()));
+        if is_chat && res.is_err() {
+            self.counters.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        }
+        res
     }
 }
 
@@ -126,20 +157,23 @@ impl EmbeddedServer {
             port: bound_port,
             ..ServerSnapshot::default()
         }));
+        let counters = Arc::new(ServerCounters::default());
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
 
         let snap_w = Arc::clone(&snap);
+        let counters_w = Arc::clone(&counters);
         let cancel_w = Arc::clone(&cancel);
         let worker_join = thread::Builder::new()
             .name("vxt-infer-worker".into())
-            .spawn(move || run_worker_loop(rx, snap_w, cancel_w))
+            .spawn(move || run_worker_loop(rx, snap_w, counters_w, cancel_w))
             .map_err(|e| Error::Io(e.to_string()))?;
 
         let handle = EmbeddedServerHandle {
             port: bound_port,
             tx: Arc::new(Mutex::new(tx)),
             snap,
+            counters,
             cancel,
             stop: Arc::clone(&stop),
         };
@@ -197,6 +231,7 @@ impl Drop for EmbeddedServer {
 fn run_worker_loop(
     rx: mpsc::Receiver<WorkerJob>,
     snap: Arc<Mutex<ServerSnapshot>>,
+    counters: Arc<ServerCounters>,
     cancel: Arc<AtomicBool>,
 ) {
     let mut session: Option<ChatSession> = None;
@@ -251,6 +286,7 @@ fn run_worker_loop(
             }
             WorkerJob::Chat { messages, params, events } => {
                 let Some(sess) = session.as_mut() else {
+                    counters.queue_depth.fetch_sub(1, Ordering::Relaxed);
                     let _ = events.send(StreamEvent::Err(
                         "No model loaded in VXT server. Load a .vxt or .gguf model first.".into(),
                     ));
@@ -263,8 +299,13 @@ fn run_worker_loop(
                 let res = sess.generate_chat(&messages, &params, &cancel, |chunk| {
                     events.send(StreamEvent::Chunk(chunk.to_owned())).is_ok()
                 });
+                counters.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                counters.requests_total.fetch_add(1, Ordering::Relaxed);
                 match res {
                     Ok((full_text, metrics)) => {
+                        counters.tokens_generated_total.fetch_add(metrics.generated_tokens as u64, Ordering::Relaxed);
+                        counters.prompt_tokens_total.fetch_add(metrics.prompt_tokens as u64, Ordering::Relaxed);
+                        counters.cached_tokens_total.fetch_add(metrics.cached_tokens as u64, Ordering::Relaxed);
                         if let Ok(mut s) = snap.lock() {
                             s.busy = false;
                             s.cached_tokens = sess.cached_token_count();

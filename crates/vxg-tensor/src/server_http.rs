@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 
 use crate::chat::{ChatMessage, ChatParams};
 use crate::server::{snapshot_to_json, EmbeddedServerHandle, StreamEvent, WorkerJob};
+use crate::server_openai::{
+    apply_openai_request_controls, extract_tool_calls, parse_stop_sequences, trim_at_stop_sequences,
+};
 
 fn unix_secs() -> u64 {
     SystemTime::now()
@@ -154,6 +157,16 @@ pub(crate) fn handle_http_conn(
         ("GET", "/health" | "/v1/vxt/status") => {
             write_json(&mut stream, "200 OK", &snapshot_to_json(&handle.snapshot()))
         }
+        ("GET", "/metrics") => {
+            let body_str = handle.prometheus_metrics();
+            let hdr = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                body_str.len()
+            );
+            stream.write_all(hdr.as_bytes())?;
+            stream.write_all(body_str.as_bytes())?;
+            stream.flush()
+        }
         ("GET", "/v1/models") => {
             let snap = handle.snapshot();
             let model_id = snap
@@ -201,6 +214,7 @@ pub(crate) fn handle_http_conn(
             }
         }
         ("POST", "/v1/chat/completions") => handle_chat_completions(&mut stream, &handle, &body),
+        ("POST", "/v1/completions") => handle_legacy_completions(&mut stream, &handle, &body),
         _ => write_json(
             &mut stream,
             "404 Not Found",
@@ -248,6 +262,8 @@ fn handle_chat_completions(
         );
     }
 
+    let has_tools = apply_openai_request_controls(&req, &mut messages);
+    let stops = parse_stop_sequences(&req);
     let is_stream = req.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let enable_thinking = req.get("enable_thinking").and_then(Value::as_bool).unwrap_or(false);
     let temp = req
@@ -316,7 +332,21 @@ fn handle_chat_completions(
                 &json!({ "error": { "message": e } }),
             );
         }
-        let (text, m) = done.unwrap_or_default();
+        let (raw_text, m) = done.unwrap_or_default();
+        let (trimmed, hit_user_stop) = trim_at_stop_sequences(&raw_text, &stops);
+        let (msg_obj, finish_reason) = if has_tools {
+            let (clean, calls) = extract_tool_calls(&trimmed, created);
+            if !calls.is_empty() {
+                let content_val = if clean.is_empty() { Value::Null } else { Value::String(clean) };
+                (json!({ "role": "assistant", "content": content_val, "tool_calls": calls }), "tool_calls".to_owned())
+            } else {
+                let fr = if hit_user_stop { "stop".to_owned() } else { m.finish_reason };
+                (json!({ "role": "assistant", "content": trimmed }), fr)
+            }
+        } else {
+            let fr = if hit_user_stop { "stop".to_owned() } else { m.finish_reason };
+            (json!({ "role": "assistant", "content": trimmed }), fr)
+        };
         return write_json(
             stream,
             "200 OK",
@@ -327,8 +357,8 @@ fn handle_chat_completions(
                 "model": model_id,
                 "choices": [{
                     "index": 0,
-                    "message": { "role": "assistant", "content": text },
-                    "finish_reason": m.finish_reason,
+                    "message": msg_obj,
+                    "finish_reason": finish_reason,
                 }],
                 "usage": {
                     "prompt_tokens": m.prompt_tokens,
@@ -392,4 +422,78 @@ fn handle_chat_completions(
         }
     }
     Ok(())
+}
+
+fn handle_legacy_completions(
+    stream: &mut TcpStream,
+    handle: &EmbeddedServerHandle,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return write_json(stream, "400 Bad Request", &json!({ "error": { "message": format!("invalid JSON: {e}") } }));
+        }
+    };
+    let prompt = req
+        .get("prompt")
+        .and_then(|p| p.as_str().or_else(|| p.as_array().and_then(|a| a.first()).and_then(Value::as_str)))
+        .unwrap_or("");
+    if prompt.is_empty() {
+        return write_json(stream, "400 Bad Request", &json!({ "error": { "message": "prompt cannot be empty" } }));
+    }
+    if handle.snapshot().model.is_none() {
+        return write_json(stream, "400 Bad Request", &json!({ "error": { "message": "No model loaded in VXT server." } }));
+    }
+    let stops = parse_stop_sequences(&req);
+    let temp = req.get("temperature").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    let max_tokens = req.get("max_tokens").and_then(Value::as_u64).unwrap_or(256) as usize;
+    let model_id = handle
+        .snapshot()
+        .model
+        .map(|m| m.model_name)
+        .unwrap_or_else(|| "vxt-local".into());
+    let (ev_tx, ev_rx) = mpsc::channel();
+    if let Err(e) = handle.send_job(WorkerJob::Chat {
+        messages: vec![ChatMessage::text("user", prompt)],
+        params: ChatParams { max_tokens, temperature: temp, presence_penalty: Some(0.0), enable_thinking: false },
+        events: ev_tx,
+    }) {
+        return write_json(stream, "500 Internal Server Error", &json!({ "error": { "message": e.to_string() } }));
+    }
+    let mut done = None;
+    let mut err = None;
+    while let Ok(ev) = ev_rx.recv() {
+        match ev {
+            StreamEvent::Chunk(_) => {}
+            StreamEvent::Done { full_text, metrics } => { done = Some((full_text, metrics)); break; }
+            StreamEvent::Err(e) => { err = Some(e); break; }
+        }
+    }
+    if let Some(e) = err {
+        return write_json(stream, "500 Internal Server Error", &json!({ "error": { "message": e } }));
+    }
+    let (raw, m) = done.unwrap_or_default();
+    let (text, hit_stop) = trim_at_stop_sequences(&raw, &stops);
+    let created = unix_secs();
+    write_json(
+        stream,
+        "200 OK",
+        &json!({
+            "id": format!("cmpl-vxt-{created}"),
+            "object": "text_completion",
+            "created": created,
+            "model": model_id,
+            "choices": [{
+                "text": text,
+                "index": 0,
+                "finish_reason": if hit_stop { "stop" } else { &m.finish_reason },
+            }],
+            "usage": {
+                "prompt_tokens": m.prompt_tokens,
+                "completion_tokens": m.generated_tokens,
+                "total_tokens": m.prompt_tokens + m.generated_tokens,
+            }
+        }),
+    )
 }

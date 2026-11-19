@@ -57,6 +57,7 @@ pub mod q4_0;
 pub mod safetensors;
 pub mod server;
 mod server_http;
+mod server_openai;
 pub mod tokenizer;
 mod turbo_calib_corpus;
 mod turbo_calib_ops;
