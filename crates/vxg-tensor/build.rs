@@ -25,6 +25,7 @@ fn archive(out: &Path, name: &str, objects: &[PathBuf]) {
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(vxt_has_metal)");
+    println!("cargo:rustc-check-cfg=cfg(vxt_has_cblas)");
     println!("cargo:rerun-if-changed=native/metal_internal.h");
     println!("cargo:rerun-if-changed=native/metal_cb4_fast.h");
     println!("cargo:rerun-if-changed=native/metal_gemv.mm");
@@ -44,8 +45,16 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CXX");
     println!("cargo:rerun-if-env-changed=AR");
     println!("cargo:rerun-if-env-changed=VXG_NO_METAL");
+    println!("cargo:rerun-if-env-changed=VXG_OPENBLAS");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if os == "macos" {
+        println!("cargo:rustc-link-lib=framework=Accelerate");
+        println!("cargo:rustc-cfg=vxt_has_cblas");
+    } else if os == "linux" && env::var("VXG_OPENBLAS").ok().as_deref() == Some("1") {
+        println!("cargo:rustc-link-lib=openblas");
+        println!("cargo:rustc-cfg=vxt_has_cblas");
+    }
     if os == "macos" && env::var_os("VXG_NO_METAL").is_none() {
         let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
         let gemv_src = fs::read_to_string("native/shaders/vxt_gemv.metal")

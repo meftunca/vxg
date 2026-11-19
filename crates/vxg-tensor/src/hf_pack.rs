@@ -176,7 +176,7 @@ pub fn pack_hf_model_to_vxt_with_calib(
                 eff_t,
                 progress,
             )?;
-            meta_kv.push(("model.turbo_version".to_owned(), b"v4-e8-gptq".to_vec()));
+            meta_kv.push(("model.turbo_version".to_owned(), b"v5-e8-rd-gptq".to_vec()));
             (TurboCalibPlan::default(), Some(Mutex::new(map)))
         } else if mode == LlmPackMode::Turbo {
             (run_turbo_calibration_from_source(&adapter, &cfg), None)

@@ -148,25 +148,11 @@ fn encode_untied_embd_e8(
     let steps = padded_cols / 256;
     let mut scales_f16 = Vec::with_capacity((padded_rows / 4) * steps * 32);
     let mut packed_words = Vec::with_capacity((padded_rows / 4) * steps * 128);
-    let inv_cols = 1.0 / (cols.max(1) as f64);
-    let mut ref_mat_ms = None;
-
     let mut r0 = 0usize;
     while r0 < rows {
         let r1 = (r0 + CHUNK).min(rows);
         let rc = r1 - r0;
         let chunk = fetch_rows(src, "token_embd.weight", r0, r1)?;
-        let row_ms: Vec<f32> = (0..rc)
-            .map(|r| {
-                let s2: f64 = chunk[r * cols..(r + 1) * cols].iter().map(|&v| (v as f64).powi(2)).sum();
-                ((s2 * inv_cols) as f32).max(1e-12)
-            })
-            .collect();
-        let mat_ms = *ref_mat_ms.get_or_insert_with(|| {
-            let mut s = row_ms.clone();
-            s.sort_by(|a, b| a.total_cmp(b));
-            s.get(rc / 2).copied().unwrap_or(1e-6).max(1e-12)
-        });
         let mat = TurboWhtMatrix::encode_with_ch_amp_threads(
             7,
             rc,
@@ -174,7 +160,7 @@ fn encode_untied_embd_e8(
             &chunk,
             None,
             Some(ch_amp),
-            |r| (base_beta * (row_ms[r] / mat_ms).sqrt().powf(0.15).clamp(0.92, 1.18)).clamp(0.90, 3.40),
+            |_| base_beta.clamp(0.90, 3.40),
             eff_threads,
         )?;
         scales_f16.extend_from_slice(&mat.scales_f16);

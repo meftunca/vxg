@@ -336,7 +336,7 @@ pub(crate) fn non_empty_slice(v: &[f32]) -> Option<&[f32]> {
     (!v.is_empty()).then_some(v)
 }
 
-/// Returns base Gosset `E8` grid density `beta` (`sc = rms / beta`) per tensor role for `VXT-Turbo v4`.
+/// Returns base Gosset `E8` grid density `beta` (`sc = rms / beta`) per tensor role for `VXT-Turbo v5`.
 pub(crate) fn turbo_v4_tensor_beta(
     name: &str,
     layer_idx: Option<usize>,
@@ -346,38 +346,36 @@ pub(crate) fn turbo_v4_tensor_beta(
 ) -> f32 {
     let n_lay = if n_layer > 0 { n_layer } else { 24 };
     if name == "output.weight" {
-        return 2.45;
+        return 2.60;
     }
     if name == "token_embd.weight" {
-        return if has_output_weight { 2.15 } else { 2.35 };
+        return if has_output_weight { 1.92 } else { 2.38 };
     }
     let depth_m = match layer_idx {
-        Some(0) => 1.18,
+        Some(0) => 1.20,
         Some(1) => 1.12,
         Some(2) => 1.06,
-        Some(il) if il + 1 >= n_lay => 1.16,
+        Some(il) if il + 1 >= n_lay => 1.18,
         Some(il) if il + 2 >= n_lay => 1.10,
         Some(il) if il + 3 >= n_lay => 1.05,
         Some(_) => 0.97,
         None => 1.00,
-    } * if !is_recurrent && layer_idx.is_some() { 1.05 } else { 1.00 };
+    } * if !is_recurrent && layer_idx.is_some() { 1.06 } else { 1.00 };
 
-    if name.ends_with(".attn_k.weight")
-        || name.ends_with(".attn_v.weight")
-        || name.ends_with(".attn_output.weight")
-        || name.ends_with(".ssm_out.weight")
-    {
-        2.22 * depth_m
+    if name.ends_with(".attn_k.weight") || name.ends_with(".attn_v.weight") {
+        2.75 * depth_m
+    } else if name.ends_with(".attn_output.weight") || name.ends_with(".ssm_out.weight") {
+        2.36 * depth_m
     } else if name.ends_with(".attn_q.weight") {
-        1.90 * depth_m
+        1.94 * depth_m
     } else if name.ends_with(".attn_qkv.weight") {
         1.70 * depth_m
     } else if name.ends_with(".attn_gate.weight") {
         1.64 * depth_m
     } else if name.ends_with(".ffn_down.weight") {
-        1.62 * depth_m
+        1.70 * depth_m
     } else if name.ends_with(".ffn_gate.weight") || name.ends_with(".ffn_up.weight") {
-        1.48 * depth_m
+        1.43 * depth_m
     } else {
         1.75 * depth_m
     }

@@ -57,7 +57,8 @@ fn pack_ec_chunk(bits: u8, _t0: usize, _steps: usize, sc: &[u16], pw: &[u32]) ->
     } else {
         0u8
     };
-    out.push(sc_mode);
+    let e8_cond = bits == 7 && total_ts >= 64;
+    out.push(sc_mode | if e8_cond { 0x80 } else { 0 });
 
     let mut prev_hi = [0u8; 4];
     let sc_hi: Vec<u8> = sc
@@ -150,15 +151,33 @@ fn pack_ec_chunk(bits: u8, _t0: usize, _steps: usize, sc: &[u16], pw: &[u32]) ->
         huff_encode(&idx_syms, &mut out);
         push_u8_slice(&mut out, &sgn_bytes);
     } else if bits == 7 {
-        let mut pair_syms = Vec::with_capacity(total_ts * 384);
-        let mut tail_syms = Vec::with_capacity(total_ts * 128);
-        for &w in &pw[..total_ts * 128] {
-            let b = w.to_le_bytes();
-            pair_syms.extend_from_slice(&[b[0], b[1], b[2]]);
-            tail_syms.push(b[3]);
+        if e8_cond {
+            let mut tail_syms = Vec::with_capacity(total_ts * 128);
+            let mut pair_c0 = Vec::with_capacity(total_ts * 192);
+            let mut pair_c1 = Vec::with_capacity(total_ts * 192);
+            for &w in &pw[..total_ts * 128] {
+                let b = w.to_le_bytes();
+                tail_syms.push(b[3]);
+                if (b[3] & 0x80) == 0 {
+                    pair_c0.extend_from_slice(&[b[0], b[1], b[2]]);
+                } else {
+                    pair_c1.extend_from_slice(&[b[0], b[1], b[2]]);
+                }
+            }
+            huff_encode(&tail_syms, &mut out);
+            huff_encode(&pair_c0, &mut out);
+            huff_encode(&pair_c1, &mut out);
+        } else {
+            let mut pair_syms = Vec::with_capacity(total_ts * 384);
+            let mut tail_syms = Vec::with_capacity(total_ts * 128);
+            for &w in &pw[..total_ts * 128] {
+                let b = w.to_le_bytes();
+                pair_syms.extend_from_slice(&[b[0], b[1], b[2]]);
+                tail_syms.push(b[3]);
+            }
+            huff_encode(&pair_syms, &mut out);
+            huff_encode(&tail_syms, &mut out);
         }
-        huff_encode(&pair_syms, &mut out);
-        huff_encode(&tail_syms, &mut out);
     } else {
         let zero_elide = bits == 4;
         let mut idx_bytes = Vec::with_capacity(total_ts * 256);
@@ -207,7 +226,9 @@ fn unpack_ec_chunk(
     pw_out: &mut [u32],
 ) -> Result<()> {
     let mut r = Cur { b: bytes, pos: 0 };
-    let sc_mode = r.u8()?;
+    let sc_mode_raw = r.u8()?;
+    let e8_cond = (sc_mode_raw & 0x80) != 0;
+    let sc_mode = sc_mode_raw & 0x7f;
     let mut sc_hi = huff_decode(&mut r, sc_out.len())?;
     let mut prev_hi = [0u8; 4];
     for (i, b) in sc_hi.iter_mut().enumerate() {
@@ -312,15 +333,34 @@ fn unpack_ec_chunk(
             }
         }
     } else if bits == 7 {
-        let pair_syms = huff_decode(&mut r, total_ts * 384)?;
-        let tail_syms = huff_decode(&mut r, total_ts * 128)?;
-        for (k, slot) in pw_out[..total_ts * 128].iter_mut().enumerate() {
-            *slot = u32::from_le_bytes([
-                pair_syms[k * 3],
-                pair_syms[k * 3 + 1],
-                pair_syms[k * 3 + 2],
-                tail_syms[k],
-            ]);
+        if e8_cond {
+            let tail_syms = huff_decode(&mut r, total_ts * 128)?;
+            let n_c0 = tail_syms.iter().filter(|&&b| (b & 0x80) == 0).count();
+            let n_c1 = tail_syms.len() - n_c0;
+            let pair_c0 = huff_decode(&mut r, n_c0 * 3)?;
+            let pair_c1 = huff_decode(&mut r, n_c1 * 3)?;
+            let (mut i0, mut i1) = (0usize, 0usize);
+            for (k, slot) in pw_out[..total_ts * 128].iter_mut().enumerate() {
+                let tb = tail_syms[k];
+                if (tb & 0x80) == 0 {
+                    *slot = u32::from_le_bytes([pair_c0[i0], pair_c0[i0 + 1], pair_c0[i0 + 2], tb]);
+                    i0 += 3;
+                } else {
+                    *slot = u32::from_le_bytes([pair_c1[i1], pair_c1[i1 + 1], pair_c1[i1 + 2], tb]);
+                    i1 += 3;
+                }
+            }
+        } else {
+            let pair_syms = huff_decode(&mut r, total_ts * 384)?;
+            let tail_syms = huff_decode(&mut r, total_ts * 128)?;
+            for (k, slot) in pw_out[..total_ts * 128].iter_mut().enumerate() {
+                *slot = u32::from_le_bytes([
+                    pair_syms[k * 3],
+                    pair_syms[k * 3 + 1],
+                    pair_syms[k * 3 + 2],
+                    tail_syms[k],
+                ]);
+            }
         }
     } else {
         let zero_elide = bits == 4;

@@ -1,12 +1,29 @@
-//! Multi-threaded CPU linear algebra (`sgemm_nt`), FWHT-32 batch rotation, cgroup-aware thread
-//! budgeting, and Super-Block (`SB = 256`) `LDL^T` Hessian + `32x32` block James-Stein drift operator.
+//! Multi-threaded CPU / BLAS linear algebra (`sgemm_nt`), FWHT-32 batch rotation, and
+//! cgroup-aware thread budgeting.
 
+pub(crate) use crate::turbo_hess::SuperBlockHessian;
 use crate::wht2::fwht32_inplace;
 use crate::wht_turbo::apply_col_sign;
-use crate::wht_turbo_gptq::HadamardBlockChol;
 
-pub(crate) const SB_COLS: usize = 256;
-const SQRT32: f64 = 5.656_854_249_492_381;
+#[cfg(vxt_has_cblas)]
+extern "C" {
+    fn cblas_sgemm(
+        order: i32,
+        trans_a: i32,
+        trans_b: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: f32,
+        a: *const f32,
+        lda: i32,
+        b: *const f32,
+        ldb: i32,
+        beta: f32,
+        c: *mut f32,
+        ldc: i32,
+    );
+}
 
 /// Determines safe worker count honoring Linux container CPU quotas (`cgroup` v2 & v1).
 pub(crate) fn effective_cpu_threads(requested: usize) -> usize {
@@ -153,12 +170,25 @@ pub(crate) fn sgemm_nt(
     b: &[f32], ldb: usize, beta: f32, c: &mut [f32], ldc: usize, threads: usize,
 ) {
     if m == 0 || n == 0 { return; }
+    let work = m.saturating_mul(n).saturating_mul(k);
+    #[cfg(vxt_has_cblas)]
+    if k > 0 && alpha != 0.0 && work >= 65_536
+        && m <= i32::MAX as usize && n <= i32::MAX as usize && k <= i32::MAX as usize
+        && lda <= i32::MAX as usize && ldb <= i32::MAX as usize && ldc <= i32::MAX as usize
+    {
+        unsafe {
+            cblas_sgemm(
+                101, 111, 112, m as i32, n as i32, k as i32, alpha,
+                a.as_ptr(), lda as i32, b.as_ptr(), ldb as i32, beta, c.as_mut_ptr(), ldc as i32,
+            );
+        }
+        return;
+    }
     for r in 0..m {
         let crow = &mut c[r * ldc..r * ldc + n];
         if beta == 0.0 { crow.fill(0.0); } else if beta != 1.0 { for v in crow { *v *= beta; } }
     }
     if k == 0 || alpha == 0.0 { return; }
-    let work = m.saturating_mul(n).saturating_mul(k);
     let workers = threads.clamp(1, 32);
     if workers > 1 && work >= 262_144 && m >= 32 {
         let rows_per_w = m.div_ceil(workers).div_ceil(4) * 4;
@@ -216,290 +246,9 @@ pub(crate) fn rotate_rows_fwht32(x: &[f32], n_tok: usize, cols: usize, padded_co
     out
 }
 
-pub(crate) struct SuperBlockBlock {
-    pub(crate) c0: usize,
-    pub(crate) bw: usize,
-    pub(crate) h_diag: Vec<f32>,
-    pub(crate) alpha: Vec<f32>,
-    /// Row-major `[bw, bw]` unit lower-triangular `M` (`A = M^T diag(alpha) M`).
-    pub(crate) m: Vec<f32>,
-    /// Optional `[bw, bw]` drift operator `B = alpha_eff * H_drift^{-1} C_b^T` (`W^* += W_b B^T`).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) b_drift: Option<Vec<f32>>,
-}
-
-pub(crate) struct SuperBlockHessian {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) x_stu_rot: Vec<f32>,
-    pub(crate) ch_amp: Vec<f32>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) tok_w: Vec<f32>,
-    pub(crate) blocks: Vec<SuperBlockBlock>,
-}
-
-fn solve_cholesky_32(h32: &[f64; 1024], rhs_mat: &[f32; 1024], scale: f64, vlen: usize) -> [f32; 1024] {
-    let mut l = [0.0f64; 1024];
-    for i in 0..32 {
-        let mut diag = h32[i * 32 + i];
-        for p in 0..i { diag -= l[i * 32 + p] * l[i * 32 + p]; }
-        let lii = diag.max(1e-12).sqrt();
-        l[i * 32 + i] = lii;
-        let inv = 1.0 / lii;
-        for r in (i + 1)..32 {
-            let mut sum = h32[r * 32 + i];
-            for p in 0..i { sum -= l[r * 32 + p] * l[i * 32 + p]; }
-            l[r * 32 + i] = sum * inv;
-        }
-    }
-    let (mut b32, mut tmp) = ([0.0f32; 1024], [0.0f64; 32]);
-    for col in 0..vlen {
-        for i in 0..32 {
-            let mut sum = scale * (rhs_mat[i * 32 + col] as f64);
-            for p in 0..i { sum -= l[i * 32 + p] * tmp[p]; }
-            tmp[i] = sum / l[i * 32 + i];
-        }
-        for i in (0..32).rev() {
-            let mut sum = tmp[i];
-            for r in (i + 1)..32 { sum -= l[r * 32 + i] * tmp[r]; }
-            tmp[i] = sum / l[i * 32 + i];
-            b32[i * 32 + col] = tmp[i] as f32;
-        }
-    }
-    for j in 0..vlen {
-        let row = &mut b32[j * 32..j * 32 + vlen];
-        let norm = row.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>().sqrt();
-        if norm > 0.18 {
-            let sc = (0.18 / norm) as f32;
-            for v in row { *v *= sc; }
-        }
-    }
-    b32
-}
-
-#[allow(clippy::too_many_arguments)]
-fn solve_drift_block32(
-    c0: usize, bw: usize, cols: usize, n_tok: usize, eff_n: f64, inv_md: f64,
-    padded_cols: usize, xb_t: &[f32], dxr: &[f32], tok_w: &[f32],
-    h_emp: &[f32], prior32: &[f64], blk_rel: &[f64],
-) -> Option<Vec<f32>> {
-    let mut b_out = vec![0.0f32; bw * bw];
-    let mut any_nonzero = false;
-    let scale_n = (1.0 / eff_n) as f32;
-    let mut dxb_32 = vec![0.0f32; 32 * n_tok];
-    let mut c_bt_32 = [0.0f32; 1024];
-
-    for sb32 in 0..(bw / 32) {
-        let (b0, gc0) = (sb32 * 32, c0 + sb32 * 32);
-        if gc0 >= cols { continue; }
-        let vlen = (cols - gc0).min(32);
-        let xb_32 = &xb_t[b0 * n_tok..(b0 + 32) * n_tok];
-        dxb_32.fill(0.0);
-        for t in 0..n_tok {
-            let r_dx = &dxr[t * padded_cols + gc0..t * padded_cols + gc0 + vlen];
-            let tw = tok_w[t];
-            for j in 0..vlen { dxb_32[j * n_tok + t] = r_dx[j] * tw; }
-        }
-        let (mut xs_n2, mut dx_n2, mut tok_prod) = (0.0f64, 0.0f64, 0.0f64);
-        for t in 0..n_tok {
-            let (mut xs_t, mut dx_t) = (0.0f64, 0.0f64);
-            for j in 0..32 {
-                let (sv, dv) = (xb_32[j * n_tok + t] as f64, dxb_32[j * n_tok + t] as f64);
-                xs_t += sv * sv;
-                dx_t += dv * dv;
-            }
-            xs_n2 += xs_t; dx_n2 += dx_t; tok_prod += xs_t * dx_t;
-        }
-        if dx_n2 <= 1e-16 * xs_n2 || xs_n2 <= 1e-30 { continue; }
-        c_bt_32.fill(0.0);
-        sgemm_nt(32, 32, n_tok, scale_n, xb_32, n_tok, &dxb_32, n_tok, 0.0, &mut c_bt_32, 32, 1);
-        let c32_f2_raw: f64 = c_bt_32.iter().map(|&v| (v as f64) * (v as f64)).sum();
-        let js = (1.0 - 2.5 * (tok_prod / (eff_n * eff_n)) / c32_f2_raw.max(1e-30)).max(0.0);
-        if js <= 1e-4 { continue; }
-        let mut h32 = [0.0f64; 1024];
-        let p_sl = &prior32[sb32 * 1024..(sb32 + 1) * 1024];
-        for u in 0..32 {
-            for v in 0..32 {
-                h32[u * 32 + v] = if u >= vlen || v >= vlen { if u == v { 1.0 } else { 0.0 } } else {
-                    0.80 * (h_emp[(b0 + u) * bw + (b0 + v)] as f64) * inv_md
-                        + 0.20 * p_sl[u * 32 + v] + if u == v { 0.20 * blk_rel[sb32] } else { 0.0 }
-                };
-            }
-        }
-        let alpha_eff = 0.55 * js * (1.0 / (1.0 + (dx_n2 / xs_n2).sqrt())).clamp(0.25, 1.0);
-        let b32 = solve_cholesky_32(&h32, &c_bt_32, alpha_eff * inv_md, vlen);
-        for j in 0..vlen { for col in 0..vlen { b_out[(b0 + j) * bw + (b0 + col)] = b32[j * 32 + col]; } }
-        any_nonzero = true;
-    }
-    any_nonzero.then_some(b_out)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_superblock(
-    c0: usize, n_tok: usize, eff_n: f64, cols: usize, padded_cols: usize,
-    x_stu_rot: &[f32], dx_rot: Option<&[f32]>, ch_amp: &[f32], tok_w: &[f32], threads: usize,
-) -> SuperBlockBlock {
-    let bw = (padded_cols - c0).min(SB_COLS);
-    let mut xb_t = vec![0.0f32; bw * n_tok];
-    for t in 0..n_tok {
-        let row = &x_stu_rot[t * padded_cols + c0..t * padded_cols + c0 + bw];
-        let tw = tok_w[t];
-        for j in 0..bw {
-            xb_t[j * n_tok + t] = row[j] * tw;
-        }
-    }
-    let mut h_emp = vec![0.0f32; bw * bw];
-    let scale_n = (1.0 / eff_n) as f32;
-    sgemm_nt(bw, bw, n_tok, scale_n, &xb_t, n_tok, &xb_t, n_tok, 0.0, &mut h_emp, bw, threads);
-
-    let (mut d_sum, mut d_cnt) = (0.0f64, 0usize);
-    for k in 0..bw {
-        if c0 + k < cols {
-            d_sum += (h_emp[k * bw + k] as f64).max(0.0);
-            d_cnt += 1;
-        }
-    }
-    let mean_d = (if d_cnt > 0 { d_sum / d_cnt as f64 } else { 1.0 }).max(1e-30);
-    let inv_md = 1.0 / mean_d;
-
-    let mut prior32 = vec![0.0f64; (bw / 32) * 1024];
-    let mut blk_rel = vec![1.0f64; bw / 32];
-    for sb32 in 0..(bw / 32) {
-        let gc0 = c0 + sb32 * 32;
-        let amps = if gc0 < cols { &ch_amp[gc0..cols.min(gc0 + 32)] } else { &[] };
-        let chol = HadamardBlockChol::from_amps(amps);
-        let rel_blk = if gc0 < cols { ((chol.mean_d as f64) * inv_md).clamp(0.15, 6.0) } else { 1.0 };
-        blk_rel[sb32] = rel_blk;
-        let p_scale = (rel_blk / (chol.mean_d as f64).max(1e-30)) as f32;
-        let mut spec = chol.d_unrot;
-        for v in &mut spec {
-            *v *= p_scale;
-        }
-        fwht32_inplace(&mut spec);
-        let pslice = &mut prior32[sb32 * 1024..(sb32 + 1) * 1024];
-        for u in 0..32 {
-            for v in 0..32 {
-                pslice[u * 32 + v] = (spec[u ^ v] as f64) / SQRT32;
-            }
-        }
-    }
-
-    let lw = (eff_n / (eff_n + 6.0 * (bw as f64))).clamp(0.05, 0.78);
-    let mut s = vec![0.0f64; bw * bw];
-    for u in 0..bw {
-        let valid_u = c0 + u < cols;
-        let sb32 = u / 32;
-        let u32 = u % 32;
-        let g128 = u / 128;
-        for v in 0..bw {
-            let valid_v = c0 + v < cols;
-            s[u * bw + v] = if !valid_u || !valid_v {
-                if u == v { 1.0 } else { 0.0 }
-            } else {
-                let hn = (h_emp[u * bw + v] as f64) * inv_md;
-                if sb32 == v / 32 {
-                    0.70 * hn + 0.20 * prior32[sb32 * 1024 + u32 * 32 + (v % 32)] + if u == v { 0.10 } else { 0.0 }
-                } else if g128 == v / 128 {
-                    0.50 * lw * hn
-                } else {
-                    0.35 * lw * hn
-                }
-            };
-        }
-        s[u * bw + u] = s[u * bw + u].max(1e-6);
-    }
-
-    let h_diag: Vec<f32> = (0..bw).map(|k| s[k * bw + k] as f32).collect();
-    let b_drift = dx_rot.and_then(|dxr| {
-        solve_drift_block32(c0, bw, cols, n_tok, eff_n, inv_md, padded_cols, &xb_t, dxr, tok_w, &h_emp, &prior32, &blk_rel)
-    });
-
-    // Reverse-order f64 LDL^T: H_reg = M^T diag(alpha) M, M unit lower-triangular.
-    let mut alpha = vec![1.0f32; bw];
-    let mut m = vec![0.0f32; bw * bw];
-    let mut mk = vec![0.0f64; bw];
-    for k in (0..bw).rev() {
-        let ak = s[k * bw + k].max(1e-6);
-        alpha[k] = ak as f32;
-        m[k * bw + k] = 1.0;
-        let inv_ak = 1.0 / ak;
-        for j in 0..k {
-            mk[j] = s[k * bw + j] * inv_ak;
-            m[k * bw + j] = mk[j] as f32;
-        }
-        for u in 0..k {
-            let a_mu = ak * mk[u];
-            let row_u = &mut s[u * bw..u * bw + u + 1];
-            for v in 0..=u {
-                row_u[v] -= a_mu * mk[v];
-            }
-        }
-    }
-    SuperBlockBlock { c0, bw, h_diag, alpha, m, b_drift }
-}
-
-impl SuperBlockHessian {
-    pub(crate) fn build(
-        x_stu: &[f32], x_ref: Option<&[f32]>, n_tok: usize, cols: usize, padded_cols: usize, threads: usize,
-    ) -> Self {
-        let inv_c = 1.0 / (cols.max(1) as f64);
-        let rms: Vec<f64> = (0..n_tok)
-            .map(|t| {
-                let s2: f64 = x_stu[t * cols..(t + 1) * cols].iter().map(|&v| (v as f64) * (v as f64)).sum();
-                (s2 * inv_c).sqrt()
-            })
-            .collect();
-        let mut sorted = rms.clone();
-        sorted.sort_by(|a, b| a.total_cmp(b));
-        let med = sorted.get(n_tok / 2).copied().unwrap_or(1.0).max(1e-12);
-        let cap = 4.0 * med;
-        let tok_w: Vec<f32> = rms.iter().map(|&r| if r > cap { (cap / r) as f32 } else { 1.0 }).collect();
-        let eff_n: f64 = tok_w.iter().map(|&w| (w as f64) * (w as f64)).sum::<f64>().max(1.0);
-
-        let mut sums = vec![0.0f64; cols];
-        for (t, row) in x_stu.chunks_exact(cols).enumerate() {
-            let tw = tok_w[t] as f64;
-            let tw2 = tw * tw;
-            for c in 0..cols {
-                let v = row[c] as f64;
-                sums[c] += tw2 * v * v;
-            }
-        }
-        let ch_amp: Vec<f32> = (0..cols).map(|c| ((sums[c] / eff_n).sqrt() as f32).max(1e-4)).collect();
-
-        let x_stu_rot = rotate_rows_fwht32(x_stu, n_tok, cols, padded_cols, threads);
-        let dx_rot = x_ref.map(|xr| {
-            let dx: Vec<f32> = xr.iter().zip(x_stu).map(|(&r, &s)| r - s).collect();
-            rotate_rows_fwht32(&dx, n_tok, cols, padded_cols, threads)
-        });
-
-        let n_sb = padded_cols.div_ceil(SB_COLS);
-        let sb_w = threads.clamp(1, 32).min(n_sb.max(1));
-        let sub_t = (threads / sb_w.max(1)).max(1);
-        let next_sb = std::sync::atomic::AtomicUsize::new(0);
-        let slots: Vec<std::sync::Mutex<Option<SuperBlockBlock>>> = (0..n_sb).map(|_| std::sync::Mutex::new(None)).collect();
-        let (xsr, dxr, camp, tw_ref) = (&x_stu_rot, dx_rot.as_deref(), &ch_amp, &tok_w);
-        std::thread::scope(|sc| {
-            for _ in 0..sb_w {
-                let (next_ref, slots_ref) = (&next_sb, &slots);
-                sc.spawn(move || loop {
-                    let bi = next_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if bi >= n_sb {
-                        break;
-                    }
-                    let blk = build_superblock(bi * SB_COLS, n_tok, eff_n, cols, padded_cols, xsr, dxr, camp, tw_ref, sub_t);
-                    *slots_ref[bi].lock().unwrap() = Some(blk);
-                });
-            }
-        });
-        let blocks: Vec<SuperBlockBlock> = slots.into_iter().map(|m| m.into_inner().unwrap().unwrap()).collect();
-
-        Self { x_stu_rot, ch_amp, tok_w, blocks }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{sgemm_nt, SuperBlockHessian};
+    use super::sgemm_nt;
 
     #[test]
     fn sgemm_nt_matches_naive_across_shapes() {
@@ -521,59 +270,5 @@ mod tests {
             let max_err = c_ref.iter().zip(&c_got).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
             assert!(max_err < 1e-4, "shape ({m},{n},{k}) beta={beta} max_err={max_err}");
         }
-    }
-
-    #[test]
-    fn superblock_ldl_and_drift_identities() {
-        let (n_tok, cols) = (256usize, 256usize);
-        let mut x_stu = vec![0.0f32; n_tok * cols];
-        let mut rng = 0x1234_5678_9abc_def0u64;
-        for t in 0..n_tok {
-            let factor = if t % 7 == 0 { 1.8 } else { 0.8 };
-            for c in 0..cols {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let z = (((rng >> 40) as f32) / 16777216.0 - 0.5) * factor;
-                x_stu[t * cols + c] = if c > 0 { 0.35 * x_stu[t * cols + c - 1] + z } else { z };
-            }
-        }
-        let x_ref: Vec<f32> = x_stu.iter().map(|&v| 1.15 * v).collect();
-        let hess = SuperBlockHessian::build(&x_stu, Some(&x_ref), n_tok, cols, cols, 2);
-        let b = &hess.blocks[0];
-        assert!(b.alpha.iter().all(|&a| a >= 0.099), "alpha floor violated: min={:?}", b.alpha.iter().copied().fold(f32::INFINITY, f32::min));
-
-        for j in 0..b.bw {
-            let mut diag_rec = 0.0f64;
-            for k in j..b.bw {
-                let mkj = b.m[k * b.bw + j] as f64;
-                diag_rec += (b.alpha[k] as f64) * mkj * mkj;
-            }
-            let rel = (diag_rec - b.h_diag[j] as f64).abs() / (b.h_diag[j] as f64).max(1e-8);
-            assert!(rel < 1e-4, "diag mismatch at {j}: rel={rel}");
-        }
-
-        let bd = b.b_drift.as_ref().expect("expected drift operator");
-        let rows = 16usize;
-        let w: Vec<f32> = (0..rows * cols).map(|i| (((i * 17) % 23) as f32 - 11.0) * 0.04).collect();
-        let mut w_star = w.clone();
-        sgemm_nt(rows, cols, cols, 1.0, &w, cols, bd, cols, 1.0, &mut w_star, cols, 1);
-
-        let (mut y_ref, mut y_base, mut y_star) = (vec![0.0; n_tok * rows], vec![0.0; n_tok * rows], vec![0.0; n_tok * rows]);
-        let xr_rot = super::rotate_rows_fwht32(&x_ref, n_tok, cols, cols, 1);
-        sgemm_nt(n_tok, rows, cols, 1.0, &xr_rot, cols, &w, cols, 0.0, &mut y_ref, rows, 1);
-        sgemm_nt(n_tok, rows, cols, 1.0, &hess.x_stu_rot, cols, &w, cols, 0.0, &mut y_base, rows, 1);
-        sgemm_nt(n_tok, rows, cols, 1.0, &hess.x_stu_rot, cols, &w_star, cols, 0.0, &mut y_star, rows, 1);
-        let e_base: f64 = y_ref.iter().zip(&y_base).map(|(a, c)| ((a - c) as f64).powi(2)).sum();
-        let e_star: f64 = y_ref.iter().zip(&y_star).map(|(a, c)| ((a - c) as f64).powi(2)).sum();
-        assert!(e_star < e_base * 0.85, "drift correction did not reduce loss: {e_star} vs {e_base}");
-
-        let x_noisy: Vec<f32> = x_stu.iter().map(|&v| {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            v + (((rng >> 40) as f32) / 16777216.0 - 0.5) * 0.05
-        }).collect();
-        let hess_n = SuperBlockHessian::build(&x_stu, Some(&x_noisy), n_tok, cols, cols, 2);
-        let max_rn = hess_n.blocks[0].b_drift.as_ref().map_or(0.0f64, |bmat| {
-            bmat.chunks_exact(cols).map(|r| r.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>().sqrt()).fold(0.0, f64::max)
-        });
-        assert!(max_rn < 0.03, "James-Stein failed to suppress spurious drift: max_rn={max_rn}");
     }
 }

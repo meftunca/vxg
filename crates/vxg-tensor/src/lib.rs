@@ -62,6 +62,7 @@ mod turbo_e8;
 mod turbo_full_gptq;
 #[cfg(test)]
 mod turbo_head_kld;
+mod turbo_hess;
 mod turbo_linalg;
 mod turbo_seq_calib;
 pub mod vision;
