@@ -1761,6 +1761,92 @@
         "ppl_ratio": 1.068281,
         "ppl_diff": 0.270276
       }
+    },
+    {
+      "slug": "gguf_q8_0",
+      "name": "GGUF Q8_0",
+      "family": "GGUF",
+      "file_bytes": 9528000000,
+      "data_start": 10968032,
+      "tensor_bytes": 9516773644,
+      "language_params": 8953803264,
+      "bpw": 8.503,
+      "eval_gpu": "NVIDIA GeForce RTX 5090, 32607 MiB, 12.0",
+      "wiki_ppl": 8.1951,
+      "wiki_delta_ppl": 0.009,
+      "wiki_ppl_pct": 0.109942,
+      "wiki_kld": {
+        "n_chunks": 16,
+        "mean": 0.0013,
+        "median": 0.0005,
+        "top1_same_pct": 98.68
+      },
+      "tr_ppl": 3.9554,
+      "tr_delta_ppl": -0.0029,
+      "tr_ppl_pct": -0.073264,
+      "tr_kld": {
+        "n_chunks": 19,
+        "mean": 0.0009,
+        "top1_same_pct": 98.8
+      }
+    },
+    {
+      "slug": "gguf_q6_k",
+      "name": "GGUF Q6_K",
+      "family": "GGUF",
+      "file_bytes": 7458000000,
+      "data_start": 10968032,
+      "tensor_bytes": 7447325865,
+      "language_params": 8953803264,
+      "bpw": 6.654,
+      "eval_gpu": "NVIDIA GeForce RTX 5090, 32607 MiB, 12.0",
+      "wiki_ppl": 8.2195,
+      "wiki_delta_ppl": 0.0334,
+      "wiki_ppl_pct": 0.408009,
+      "wiki_kld": {
+        "n_chunks": 16,
+        "mean": 0.0043,
+        "median": 0.0014,
+        "top1_same_pct": 97.45
+      },
+      "tr_ppl": 3.956,
+      "tr_delta_ppl": -0.0023,
+      "tr_ppl_pct": -0.058106,
+      "tr_kld": {
+        "n_chunks": 19,
+        "mean": 0.0022,
+        "top1_same_pct": 97.75
+      }
+    },
+    {
+      "slug": "vxt_turbo_hq",
+      "name": "VXT-Turbo-HQ (8-bit E8)",
+      "family": "VXT",
+      "archive_bytes": 6559220000,
+      "file_bytes": 6559220000,
+      "tensor_bytes": 6555303215,
+      "language_params": 8953803264,
+      "bpw": 5.857,
+      "pack_wall_sec": 1857.91,
+      "pack_peak_rss_kb": 33533844,
+      "eval_gpu": "NVIDIA GeForce RTX 5090, 32607 MiB, 12.0",
+      "wiki_ppl": 8.195,
+      "wiki_delta_ppl": 0.0089,
+      "wiki_ppl_pct": 0.108721,
+      "wiki_kld": {
+        "n_chunks": 16,
+        "mean": 0.0057,
+        "median": 0.0016,
+        "top1_same_pct": 97.38
+      },
+      "tr_ppl": 3.9684,
+      "tr_delta_ppl": 0.0101,
+      "tr_ppl_pct": 0.25516,
+      "tr_kld": {
+        "n_chunks": 19,
+        "mean": 0.0023,
+        "top1_same_pct": 97.79
+      }
     }
   ]
 }
