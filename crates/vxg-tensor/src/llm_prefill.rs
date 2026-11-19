@@ -549,13 +549,7 @@ pub(crate) fn prefill_cpu_tiled(
 
             if let Some(moe) = layer.ffn_moe.as_ref() {
                 for ti in 0..m {
-                    moe.forward(
-                        &normed[ti * dim..(ti + 1) * dim],
-                        &mut ffn_out[ti * dim..(ti + 1) * dim],
-                        model.cfg.ffn_gelu,
-                        None,
-                        threads,
-                    )?;
+                    moe.forward(&normed[ti * dim..(ti + 1) * dim], &mut ffn_out[ti * dim..(ti + 1) * dim], model.cfg.ffn_gelu, None, None, threads)?;
                 }
             } else {
                 layer.ffn_gate.cpu.gemm_cpu(&normed, m, &mut ffn_gate_b, threads);

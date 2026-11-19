@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::cuda::{upload_model_cuda, CudaEngine};
 use crate::format::{read_vxt_model, PackedTensor};
 use crate::gguf::GgufView;
 use crate::gguf_meta::{parse_gguf_kv, ModelConfig};
@@ -46,6 +47,7 @@ pub struct LlmModel {
     pub tokenizer: BpeTokenizer,
     pub total_compressed_bytes: usize,
     pub(crate) metal: Option<MetalEngine>,
+    pub(crate) cuda: Option<CudaEngine>,
     metal_turbo: Option<MetalTurboRunner>,
     metal_cb4_fast: Option<MetalCb4FastRunner>,
     metal_llm: Option<MetalLlmRunner>,
@@ -217,11 +219,19 @@ impl LlmModel {
             }
         }
 
+        let cuda = if use_gpu && metal.is_none() {
+            if let Ok(eng) = CudaEngine::new() {
+                upload_model_cuda(&eng, &mut token_embd, &mut output_head, &mut layers)?;
+                Some(eng)
+            } else { None }
+        } else { None };
+
         Ok(Self {
             cfg,
             tokenizer,
             total_compressed_bytes: archive_bytes,
             metal,
+            cuda,
             metal_turbo,
             metal_cb4_fast,
             metal_llm,
@@ -247,7 +257,10 @@ impl LlmModel {
                 format!("Apple Metal GPU ({}, 1-CmdBuf Fused)", m.device_name())
             }
             (Some(m), None, None, None) => format!("Apple Metal GPU ({})", m.device_name()),
-            (None, _, _, _) => format!("CPU ({} threads)", self.cpu_threads),
+            (None, _, _, _) => self.cuda.as_ref().map_or_else(
+                || format!("CPU ({} threads)", self.cpu_threads),
+                |c| format!("NVIDIA CUDA GPU ({})", c.device_name()),
+            ),
         };
         if let Some(vis) = self.vision.as_ref() {
             if vis.has_gpu() {

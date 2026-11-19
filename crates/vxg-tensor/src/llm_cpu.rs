@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::cuda::{CudaEngine, CudaPackedTensor};
 use crate::format::PackedTensor;
 use crate::gguf_meta::ModelConfig;
 use crate::llm::{KvCacheMode, LlmModel, LlmState};
@@ -16,15 +17,22 @@ use crate::{Error, Result};
 pub(crate) struct MatWeight {
     pub(crate) cpu: PackedTensor,
     pub(crate) gpu: Option<GpuPackedTensor>,
+    pub(crate) cuda: Option<CudaPackedTensor>,
 }
 
 impl MatWeight {
     pub(crate) fn cpu_only(cpu: PackedTensor) -> Self {
-        Self { cpu, gpu: None }
+        Self { cpu, gpu: None, cuda: None }
     }
     pub(crate) fn upload_gpu(&mut self, eng: &MetalEngine) -> Result<()> {
         if self.gpu.is_none() {
             self.gpu = Some(eng.upload_packed(&self.cpu)?);
+        }
+        Ok(())
+    }
+    pub(crate) fn upload_cuda(&mut self, eng: &CudaEngine) -> Result<()> {
+        if self.cuda.is_none() {
+            self.cuda = eng.upload_packed(&self.cpu)?;
         }
         Ok(())
     }
@@ -38,10 +46,13 @@ impl MatWeight {
         x: &[f32],
         y: &mut [f32],
         metal: Option<&mut MetalEngine>,
+        cuda: Option<&CudaEngine>,
         threads: usize,
     ) -> Result<()> {
         if let (Some(eng), Some(g)) = (metal, self.gpu.as_ref()) {
             let _ = g.run_gemv(eng, x, y, 1)?;
+        } else if let (Some(eng), Some(c)) = (cuda, self.cuda.as_ref()) {
+            eng.run_gemv(c, x, y)?;
         } else {
             self.cpu.gemv_cpu(x, y, threads);
         }
@@ -53,6 +64,7 @@ pub(crate) fn forward_multi(
     x: &[f32],
     jobs: &mut [(&MatWeight, &mut [f32])],
     metal: Option<&mut MetalEngine>,
+    cuda: Option<&CudaEngine>,
     threads: usize,
 ) -> Result<()> {
     if let Some(eng) = metal {
@@ -62,6 +74,16 @@ pub(crate) fn forward_multi(
                 .map(|(w, y)| (w.gpu.as_ref().unwrap(), &mut **y))
                 .collect();
             let _ = eng.run_multi_same_x(x, &mut gpu_jobs)?;
+            return Ok(());
+        }
+    }
+    if let Some(eng) = cuda {
+        if jobs.iter().all(|(w, _)| w.cuda.is_some()) {
+            let mut c_jobs: Vec<(&CudaPackedTensor, &mut [f32])> = jobs
+                .iter_mut()
+                .map(|(w, y)| (w.cuda.as_ref().unwrap(), &mut **y))
+                .collect();
+            eng.run_multi_same_x(x, &mut c_jobs)?;
             return Ok(());
         }
     }
@@ -305,6 +327,7 @@ pub(crate) fn forward_embed_step(
                         (ssm_beta, &mut beta_raw),
                     ],
                     model.metal.as_mut(),
+                    model.cuda.as_ref(),
                     threads,
                 )?;
                 step_deltanet_recurrent(
@@ -326,7 +349,7 @@ pub(crate) fn forward_embed_step(
                     eps,
                     &mut y_concat,
                 );
-                ssm_out.forward(&y_concat, &mut attn_out, model.metal.as_mut(), threads)?;
+                ssm_out.forward(&y_concat, &mut attn_out, model.metal.as_mut(), model.cuda.as_ref(), threads)?;
             }
             LayerAttn::FullGqa {
                 wq,
@@ -350,6 +373,7 @@ pub(crate) fn forward_embed_step(
                     &normed,
                     &mut [(wq, &mut q_raw), (wk, &mut k_cur), (wv, &mut v_cur)],
                     model.metal.as_mut(),
+                    model.cuda.as_ref(),
                     threads,
                 )?;
                 for (dst, bias) in [
@@ -447,7 +471,7 @@ pub(crate) fn forward_embed_step(
                         &mut att_cat,
                     );
                 }
-                wo.forward(&att_cat, &mut attn_out, model.metal.as_mut(), threads)?;
+                wo.forward(&att_cat, &mut attn_out, model.metal.as_mut(), model.cuda.as_ref(), threads)?;
             }
         }
 
@@ -460,7 +484,7 @@ pub(crate) fn forward_embed_step(
         rms_norm(&cur, &layer.post_attn_norm, eps, &mut normed);
 
         if let Some(moe) = layer.ffn_moe.as_ref() {
-            moe.forward(&normed, &mut ffn_out, model.cfg.ffn_gelu, model.metal.as_mut(), threads)?;
+            moe.forward(&normed, &mut ffn_out, model.cfg.ffn_gelu, model.metal.as_mut(), model.cuda.as_ref(), threads)?;
         } else {
             forward_multi(
                 &normed,
@@ -469,6 +493,7 @@ pub(crate) fn forward_embed_step(
                     (&layer.ffn_up, &mut ffn_up_buf),
                 ],
                 model.metal.as_mut(),
+                model.cuda.as_ref(),
                 threads,
             )?;
             if model.cfg.ffn_gelu {
@@ -482,7 +507,7 @@ pub(crate) fn forward_embed_step(
             }
             layer
                 .ffn_down
-                .forward(&ffn_gate_buf, &mut ffn_out, model.metal.as_mut(), threads)?;
+                .forward(&ffn_gate_buf, &mut ffn_out, model.metal.as_mut(), model.cuda.as_ref(), threads)?;
         }
         if let Some(fpn) = layer.ffn_post_norm.as_deref() {
             rms_norm_inplace(&mut ffn_out, fpn, eps);
@@ -496,7 +521,7 @@ pub(crate) fn forward_embed_step(
     if let Some(logits) = logits_out.as_deref_mut() {
         rms_norm(&cur, &model.output_norm, eps, &mut normed);
         let head = model.output_head.as_ref().unwrap_or(&model.token_embd);
-        head.forward(&normed, logits, model.metal.as_mut(), threads)?;
+        head.forward(&normed, logits, model.metal.as_mut(), model.cuda.as_ref(), threads)?;
     }
     Ok(())
 }

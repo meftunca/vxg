@@ -16,6 +16,7 @@ pub mod chat;
 mod chat_mm;
 pub mod cli_llm;
 pub mod codebook;
+pub mod cuda;
 mod entropy_pack;
 pub mod format;
 mod format_io;

@@ -26,6 +26,8 @@ fn archive(out: &Path, name: &str, objects: &[PathBuf]) {
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(vxt_has_metal)");
     println!("cargo:rustc-check-cfg=cfg(vxt_has_cblas)");
+    println!("cargo:rustc-check-cfg=cfg(vxt_has_cuda)");
+    println!("cargo:rerun-if-changed=native/cuda/vxt_cuda_gemv.cu");
     println!("cargo:rerun-if-changed=native/metal_internal.h");
     println!("cargo:rerun-if-changed=native/metal_cb4_fast.h");
     println!("cargo:rerun-if-changed=native/metal_gemv.mm");
@@ -46,14 +48,48 @@ fn main() {
     println!("cargo:rerun-if-env-changed=AR");
     println!("cargo:rerun-if-env-changed=VXG_NO_METAL");
     println!("cargo:rerun-if-env-changed=VXG_OPENBLAS");
+    println!("cargo:rerun-if-env-changed=VXG_CUDA");
+    println!("cargo:rerun-if-env-changed=VXG_CUDA_ARCH");
+    println!("cargo:rerun-if-env-changed=NVCC");
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if os == "macos" {
         println!("cargo:rustc-link-lib=framework=Accelerate");
         println!("cargo:rustc-cfg=vxt_has_cblas");
-    } else if os == "linux" && env::var("VXG_OPENBLAS").ok().as_deref() == Some("1") {
-        println!("cargo:rustc-link-lib=openblas");
-        println!("cargo:rustc-cfg=vxt_has_cblas");
+    } else if os == "linux" {
+        if env::var("VXG_OPENBLAS").ok().as_deref() == Some("1") {
+            println!("cargo:rustc-link-lib=openblas");
+            println!("cargo:rustc-cfg=vxt_has_cblas");
+        }
+        if env::var("VXG_CUDA").ok().as_deref() == Some("1") {
+            let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+            let nvcc = env::var("NVCC").unwrap_or_else(|_| "nvcc".into());
+            let arch = env::var("VXG_CUDA_ARCH").unwrap_or_else(|_| "native".into());
+            let obj = out.join("vxt_cuda_gemv.o");
+            run(
+                Command::new(&nvcc).args([
+                    "-std=c++17",
+                    "-O3",
+                    "--use_fast_math",
+                    "-Xcompiler",
+                    "-fPIC",
+                    &format!("-arch={arch}"),
+                    "-c",
+                    "native/cuda/vxt_cuda_gemv.cu",
+                    "-o",
+                ]).arg(&obj),
+                "NVIDIA CUDA Toolkit (nvcc) is required when VXG_CUDA=1",
+            );
+            archive(&out, "vxt_cuda_gemv", &[obj]);
+            for lib_dir in ["/usr/local/cuda/lib64", "/usr/local/cuda/lib64/stubs"] {
+                if Path::new(lib_dir).is_dir() {
+                    println!("cargo:rustc-link-search=native={lib_dir}");
+                }
+            }
+            println!("cargo:rustc-link-lib=cudart");
+            println!("cargo:rustc-link-lib=stdc++");
+            println!("cargo:rustc-cfg=vxt_has_cuda");
+        }
     }
     if os == "macos" && env::var_os("VXG_NO_METAL").is_none() {
         let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());

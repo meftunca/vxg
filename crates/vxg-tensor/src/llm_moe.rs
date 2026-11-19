@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::cuda::CudaEngine;
 use crate::format::PackedTensor;
 use crate::llm_cpu::MatWeight;
 use crate::llm_ops::{sigmoid, silu};
@@ -95,6 +96,21 @@ impl MoeFfn {
         }))
     }
 
+    pub(crate) fn upload_cuda(&mut self, eng: &CudaEngine) -> Result<()> {
+        self.router.upload_cuda(eng)?;
+        for exp in &mut self.experts {
+            exp.gate.upload_cuda(eng)?;
+            exp.up.upload_cuda(eng)?;
+            exp.down.upload_cuda(eng)?;
+        }
+        if let Some(sh) = self.shared.as_deref_mut() {
+            sh.gate.upload_cuda(eng)?;
+            sh.up.upload_cuda(eng)?;
+            sh.down.upload_cuda(eng)?;
+        }
+        Ok(())
+    }
+
     /// Runs sparse Top-K MoE forward for a single hidden state vector `x[dim]` -> `out[dim]`.
     pub(crate) fn forward(
         &self,
@@ -102,6 +118,7 @@ impl MoeFfn {
         out: &mut [f32],
         use_gelu: bool,
         mut metal: Option<&mut MetalEngine>,
+        cuda: Option<&CudaEngine>,
         threads: usize,
     ) -> Result<()> {
         let n_exp = self.experts.len();
@@ -111,7 +128,7 @@ impl MoeFfn {
             return Ok(());
         }
         let mut r_logits = vec![0.0f32; n_exp];
-        self.router.forward(x, &mut r_logits, metal.as_deref_mut(), threads)?;
+        self.router.forward(x, &mut r_logits, metal.as_deref_mut(), cuda, threads)?;
 
         let max_l = r_logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let mut probs = vec![0.0f32; n_exp];
@@ -141,14 +158,14 @@ impl MoeFfn {
             let exp = &self.experts[ei];
             let n_ff = exp.gate.rows();
             let (mut g_buf, mut u_buf) = (vec![0.0f32; n_ff], vec![0.0f32; n_ff]);
-            exp.gate.forward(x, &mut g_buf, metal.as_deref_mut(), threads)?;
-            exp.up.forward(x, &mut u_buf, metal.as_deref_mut(), threads)?;
+            exp.gate.forward(x, &mut g_buf, metal.as_deref_mut(), cuda, threads)?;
+            exp.up.forward(x, &mut u_buf, metal.as_deref_mut(), cuda, threads)?;
             if use_gelu {
                 for j in 0..n_ff { g_buf[j] = gelu_tanh_f32(g_buf[j]) * u_buf[j]; }
             } else {
                 for j in 0..n_ff { g_buf[j] = silu(g_buf[j]) * u_buf[j]; }
             }
-            exp.down.forward(&g_buf, &mut exp_out, metal.as_deref_mut(), threads)?;
+            exp.down.forward(&g_buf, &mut exp_out, metal.as_deref_mut(), cuda, threads)?;
             for j in 0..dim {
                 out[j] = w.mul_add(exp_out[j], out[j]);
             }
@@ -157,14 +174,14 @@ impl MoeFfn {
         if let Some(sh) = self.shared.as_deref() {
             let n_ff = sh.gate.rows();
             let (mut g_buf, mut u_buf) = (vec![0.0f32; n_ff], vec![0.0f32; n_ff]);
-            sh.gate.forward(x, &mut g_buf, metal.as_deref_mut(), threads)?;
-            sh.up.forward(x, &mut u_buf, metal.as_deref_mut(), threads)?;
+            sh.gate.forward(x, &mut g_buf, metal.as_deref_mut(), cuda, threads)?;
+            sh.up.forward(x, &mut u_buf, metal.as_deref_mut(), cuda, threads)?;
             if use_gelu {
                 for j in 0..n_ff { g_buf[j] = gelu_tanh_f32(g_buf[j]) * u_buf[j]; }
             } else {
                 for j in 0..n_ff { g_buf[j] = silu(g_buf[j]) * u_buf[j]; }
             }
-            sh.down.forward(&g_buf, &mut exp_out, metal.as_deref_mut(), threads)?;
+            sh.down.forward(&g_buf, &mut exp_out, metal.as_deref_mut(), cuda, threads)?;
             let scale = if let Some(rg) = sh.router_gate.as_deref() {
                 let mut dot = 0.0f32;
                 for (a, b) in x.iter().zip(rg.iter()) {
@@ -245,7 +262,7 @@ mod tests {
         let moe = MoeFfn::extract("blk.0", 2, &mut map).unwrap().unwrap();
         let x = [1.0f32, 0.5];
         let mut out = [0.0f32; 2];
-        moe.forward(&x, &mut out, false, None, 1).unwrap();
+        moe.forward(&x, &mut out, false, None, None, 1).unwrap();
 
         let p0 = 1.0f32 / (1.0 + (-1.0f32).exp());
         let p2 = 1.0 - p0;
