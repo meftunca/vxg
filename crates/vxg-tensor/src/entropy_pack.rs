@@ -3,6 +3,7 @@
 
 use crate::format_io::{push_u8_slice, Cur};
 use crate::huff::{huff_decode, huff_encode};
+use crate::turbo_e8_hq::{pack_e8_hq_ec, unpack_e8_hq_ec};
 use crate::wht_turbo::TurboWhtMatrix;
 use crate::wht_turbo_enc::{rademacher_sgn2, rademacher_sgn4};
 use crate::wht_turbo_tables::{ec_orth2d_nz_mask, orth4d64_nz_mask, unpack_t25_lane};
@@ -50,13 +51,9 @@ fn pack_ec_chunk(bits: u8, _t0: usize, _steps: usize, sc: &[u16], pw: &[u32]) ->
     let wps = TurboWhtMatrix::words_per_tile_step(bits);
     let total_ts = sc.len() / sps;
     let mut out = Vec::new();
-    let sc_mode = if sc.iter().all(|&v| (v & 0x003f) == 0) {
-        2u8
-    } else if sc.iter().all(|&v| (v & 0x000f) == 0) {
-        1u8
-    } else {
-        0u8
-    };
+    let sc_mode = if sc.iter().all(|&v| (v & 0x003f) == 0) { 2u8 }
+        else if sc.iter().all(|&v| (v & 0x000f) == 0) { 1u8 }
+        else { 0u8 };
     let e8_cond = bits == 7 && total_ts >= 64;
     out.push(sc_mode | if e8_cond { 0x80 } else { 0 });
 
@@ -178,6 +175,8 @@ fn pack_ec_chunk(bits: u8, _t0: usize, _steps: usize, sc: &[u16], pw: &[u32]) ->
             huff_encode(&pair_syms, &mut out);
             huff_encode(&tail_syms, &mut out);
         }
+    } else if bits == 8 {
+        pack_e8_hq_ec(total_ts, pw, &mut out);
     } else {
         let zero_elide = bits == 4;
         let mut idx_bytes = Vec::with_capacity(total_ts * 256);
@@ -354,14 +353,11 @@ fn unpack_ec_chunk(
             let pair_syms = huff_decode(&mut r, total_ts * 384)?;
             let tail_syms = huff_decode(&mut r, total_ts * 128)?;
             for (k, slot) in pw_out[..total_ts * 128].iter_mut().enumerate() {
-                *slot = u32::from_le_bytes([
-                    pair_syms[k * 3],
-                    pair_syms[k * 3 + 1],
-                    pair_syms[k * 3 + 2],
-                    tail_syms[k],
-                ]);
+                *slot = u32::from_le_bytes([pair_syms[k * 3], pair_syms[k * 3 + 1], pair_syms[k * 3 + 2], tail_syms[k]]);
             }
         }
+    } else if bits == 8 {
+        unpack_e8_hq_ec(total_ts, &mut r, pw_out)?;
     } else {
         let zero_elide = bits == 4;
         let idx_bytes = huff_decode(&mut r, total_ts * 256)?;
@@ -455,7 +451,7 @@ pub(crate) fn scan_turbo_ec<'a>(
     padded_cols: usize,
     r: &mut Cur<'a>,
 ) -> Result<PendingEcTensor<'a>> {
-    if !matches!(bits, 2 | 3 | 4 | 5 | 6 | 7) || padded_cols != cols.div_ceil(256) * 256 {
+    if !matches!(bits, 2 | 3 | 4 | 5 | 6 | 7 | 8) || padded_cols != cols.div_ceil(256) * 256 {
         return Err(Error::Format("invalid VXT EC-Turbo header".into()));
     }
     let payload_start = r.pos;

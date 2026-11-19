@@ -17,6 +17,7 @@ use crate::llm_prefill::gelu_tanh_f32;
 use crate::tokenizer::BpeTokenizer;
 use crate::turbo_calib_corpus::build_calib_sequences;
 use crate::turbo_e8::encode_e8_superblock_gptq;
+use crate::turbo_e8_hq::encode_e8_hq_superblock_gptq;
 use crate::turbo_linalg::{effective_cpu_threads, sgemm_nt, SuperBlockHessian};
 use crate::wht_turbo::TurboWhtMatrix;
 use crate::{Error, Result};
@@ -87,25 +88,28 @@ fn stream_proj_f32(
     Ok((rows, y_out))
 }
 
+const HQ_BETA_MUL: f32 = 6.20;
+
 fn pack_e8_proj(
     src: &dyn Cb4TensorSource,
     name: &str,
     hess: &SuperBlockHessian,
     beta: f32,
+    hq: bool,
     eff_threads: usize,
 ) -> Result<PackedTensor> {
     let (rows, cols) = src
         .matrix_dims(name)
         .ok_or_else(|| Error::Format(format!("missing projection '{name}'")))?;
-    let mat = encode_e8_superblock_gptq(
-        rows,
-        cols,
-        |r0, r1| fetch_rows(src, name, r0, r1),
-        hess,
-        beta,
-        None,
-        eff_threads,
-    )?;
+    let mat = if hq {
+        encode_e8_hq_superblock_gptq(
+            rows, cols, |r0, r1| fetch_rows(src, name, r0, r1), hess, beta * HQ_BETA_MUL, None, eff_threads,
+        )?
+    } else {
+        encode_e8_superblock_gptq(
+            rows, cols, |r0, r1| fetch_rows(src, name, r0, r1), hess, beta, None, eff_threads,
+        )?
+    };
     Ok(PackedTensor::TurboWht(mat))
 }
 
@@ -141,42 +145,30 @@ fn encode_untied_embd_e8(
     cols: usize,
     base_beta: f32,
     ch_amp: &[f32],
+    hq: bool,
     eff_threads: usize,
 ) -> Result<TurboWhtMatrix> {
     const CHUNK: usize = 4096;
     let (padded_rows, padded_cols) = (rows.div_ceil(4) * 4, pad_col(cols));
     let steps = padded_cols / 256;
+    let bits = if hq { 8u8 } else { 7u8 };
+    let wps = TurboWhtMatrix::words_per_tile_step(bits);
+    let eff_beta = if hq { (base_beta * HQ_BETA_MUL).clamp(1.20, 48.0) } else { base_beta.clamp(0.90, 3.40) };
     let mut scales_f16 = Vec::with_capacity((padded_rows / 4) * steps * 32);
-    let mut packed_words = Vec::with_capacity((padded_rows / 4) * steps * 128);
+    let mut packed_words = Vec::with_capacity((padded_rows / 4) * steps * wps);
     let mut r0 = 0usize;
     while r0 < rows {
         let r1 = (r0 + CHUNK).min(rows);
         let rc = r1 - r0;
         let chunk = fetch_rows(src, "token_embd.weight", r0, r1)?;
         let mat = TurboWhtMatrix::encode_with_ch_amp_threads(
-            7,
-            rc,
-            cols,
-            &chunk,
-            None,
-            Some(ch_amp),
-            |_| base_beta.clamp(0.90, 3.40),
-            eff_threads,
+            bits, rc, cols, &chunk, None, Some(ch_amp), |_| eff_beta, eff_threads,
         )?;
         scales_f16.extend_from_slice(&mat.scales_f16);
         packed_words.extend_from_slice(&mat.packed_words);
         r0 = r1;
     }
-    Ok(TurboWhtMatrix {
-        bits: 7,
-        rows,
-        cols,
-        padded_rows,
-        padded_cols,
-        disk_bytes: 0,
-        scales_f16,
-        packed_words,
-    })
+    Ok(TurboWhtMatrix { bits, rows, cols, padded_rows, padded_cols, disk_bytes: 0, scales_f16, packed_words })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,7 +245,7 @@ fn add_bias_rows(buf: &mut [f32], bias: Option<&[f32]>, n_tok: usize, cols: usiz
     }
 }
 
-/// Runs Clean-Teacher `VXT-Turbo v4` (`bits = 7` `E8`) layer-by-layer GPTQ calibration.
+/// Runs Clean-Teacher `VXT-Turbo v5` (`bits = 7` `E8`) / `VXT-Turbo-HQ` (`bits = 8` `E8-HQ`) calibration.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_sequential_turbo_pack(
     src: &dyn Cb4TensorSource,
@@ -261,6 +253,7 @@ pub(crate) fn run_sequential_turbo_pack(
     tok: &BpeTokenizer,
     calib_text: Option<&str>,
     turbo_entropy_scale: f32,
+    hq: bool,
     threads: usize,
     progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>,
 ) -> Result<HashMap<String, PackedTensor>> {
@@ -268,16 +261,17 @@ pub(crate) fn run_sequential_turbo_pack(
     let (req_len, req_seqs) = if cfg.n_vocab >= 1024 { (256usize, 16usize) } else { (64usize, 4usize) };
     let seqs = build_calib_sequences(tok, calib_text, req_len, req_seqs);
     if seqs.is_empty() {
-        return Err(Error::Format("sequential turbo v4 calibration yielded zero sequences".into()));
+        return Err(Error::Format("sequential turbo calibration yielded zero sequences".into()));
     }
     let (n_seq, seq_len) = (seqs.len(), seqs[0].len());
     let (n_tok, dim, eps, dim_pad) = (n_seq * seq_len, cfg.n_embd, cfg.rms_norm_eps, pad_col(cfg.n_embd));
     let has_output_weight = src.has_tensor("output.weight");
-    let ent_scale = turbo_entropy_scale.clamp(0.40, 2.50);
+    let ent_scale = turbo_entropy_scale.clamp(0.15, 3.00);
     let total_steps = cfg.n_layer + 2;
+    let label = if hq { "Turbo-HQ E8" } else { "Turbo v5 E8" };
 
     if let Some(cb) = progress {
-        if !cb(0, total_steps, "Turbo v4 E8-GPTQ kalibrasyonu başlatılıyor...") {
+        if !cb(0, total_steps, &format!("{label} kalibrasyonu başlatılıyor...")) {
             return Err(Error::Io("işlem kullanıcı tarafından iptal edildi".into()));
         }
     }
@@ -309,7 +303,7 @@ pub(crate) fn run_sequential_turbo_pack(
     if has_output_weight {
         let emb_beta = turbo_v4_tensor_beta("token_embd.weight", None, cfg.n_layer, false, true) / ent_scale;
         let ch_amp_embd = build_embd_ch_amp(src, dim);
-        let emb_mat = encode_untied_embd_e8(src, embd_rows, dim, emb_beta, &ch_amp_embd, eff_threads)?;
+        let emb_mat = encode_untied_embd_e8(src, embd_rows, dim, emb_beta, &ch_amp_embd, hq, eff_threads)?;
         out_map.insert("token_embd.weight".to_owned(), PackedTensor::TurboWht(emb_mat));
     }
 
@@ -318,7 +312,7 @@ pub(crate) fn run_sequential_turbo_pack(
     for il in 0..cfg.n_layer {
         let is_rec = cfg.is_recurrent_layer(il);
         if let Some(cb) = progress {
-            let msg = format!("Turbo v4 E8 katman kalibrasyonu {}/{} (rms={:.3})", il + 1, cfg.n_layer, vec_rms(&cur_ref));
+            let msg = format!("{label} katman kalibrasyonu {}/{} (rms={:.3})", il + 1, cfg.n_layer, vec_rms(&cur_ref));
             if !cb(il + 1, total_steps, &msg) {
                 return Err(Error::Io("işlem kullanıcı tarafından iptal edildi".into()));
             }
@@ -353,11 +347,11 @@ pub(crate) fn run_sequential_turbo_pack(
             let b_qkv = turbo_v4_tensor_beta(&qkv_name, Some(il), cfg.n_layer, true, has_output_weight) * gain / ent_scale;
             let b_gate = turbo_v4_tensor_beta(&gate_name, Some(il), cfg.n_layer, true, has_output_weight) * gain / ent_scale;
             let b_out = turbo_v4_tensor_beta(&sout_name, Some(il), cfg.n_layer, true, has_output_weight) * gain / ent_scale;
-            out_map.insert(qkv_name.clone(), pack_e8_proj(src, &qkv_name, &hess_attn, b_qkv, eff_threads)?);
-            out_map.insert(gate_name.clone(), pack_e8_proj(src, &gate_name, &hess_attn, b_gate, eff_threads)?);
+            out_map.insert(qkv_name.clone(), pack_e8_proj(src, &qkv_name, &hess_attn, b_qkv, hq, eff_threads)?);
+            out_map.insert(gate_name.clone(), pack_e8_proj(src, &gate_name, &hess_attn, b_gate, hq, eff_threads)?);
             let d_in = cfg.ssm_inner_size;
             let hess_o = SuperBlockHessian::build(&y_r, None, n_tok, d_in, pad_col(d_in), eff_threads);
-            out_map.insert(sout_name.clone(), pack_e8_proj(src, &sout_name, &hess_o, b_out, eff_threads)?);
+            out_map.insert(sout_name.clone(), pack_e8_proj(src, &sout_name, &hess_o, b_out, hq, eff_threads)?);
             or_
         } else {
             let (qn, kn, vn) = (format!("{pfx}.attn_q.weight"), format!("{pfx}.attn_k.weight"), format!("{pfx}.attn_v.weight"));
@@ -387,12 +381,12 @@ pub(crate) fn run_sequential_turbo_pack(
             let b_k = turbo_v4_tensor_beta(&kn, Some(il), cfg.n_layer, false, has_output_weight) * gain / ent_scale;
             let b_v = turbo_v4_tensor_beta(&vn, Some(il), cfg.n_layer, false, has_output_weight) * gain / ent_scale;
             let b_o = turbo_v4_tensor_beta(&oname, Some(il), cfg.n_layer, false, has_output_weight) * gain / ent_scale;
-            out_map.insert(qn.clone(), pack_e8_proj(src, &qn, &hess_attn, b_q, eff_threads)?);
-            out_map.insert(kn.clone(), pack_e8_proj(src, &kn, &hess_attn, b_k, eff_threads)?);
-            out_map.insert(vn.clone(), pack_e8_proj(src, &vn, &hess_attn, b_v, eff_threads)?);
+            out_map.insert(qn.clone(), pack_e8_proj(src, &qn, &hess_attn, b_q, hq, eff_threads)?);
+            out_map.insert(kn.clone(), pack_e8_proj(src, &kn, &hess_attn, b_k, hq, eff_threads)?);
+            out_map.insert(vn.clone(), pack_e8_proj(src, &vn, &hess_attn, b_v, hq, eff_threads)?);
             let att_dim = cfg.n_head * cfg.head_dim;
             let hess_o = SuperBlockHessian::build(&ar, None, n_tok, att_dim, pad_col(att_dim), eff_threads);
-            out_map.insert(oname.clone(), pack_e8_proj(src, &oname, &hess_o, b_o, eff_threads)?);
+            out_map.insert(oname.clone(), pack_e8_proj(src, &oname, &hess_o, b_o, hq, eff_threads)?);
             or_
         };
 
@@ -432,10 +426,10 @@ pub(crate) fn run_sequential_turbo_pack(
         let b_g = turbo_v4_tensor_beta(&fg_name, Some(il), cfg.n_layer, is_rec, has_output_weight) * gain_f / ent_scale;
         let b_u = turbo_v4_tensor_beta(&fu_name, Some(il), cfg.n_layer, is_rec, has_output_weight) * gain_f / ent_scale;
         let b_d = turbo_v4_tensor_beta(&fd_name, Some(il), cfg.n_layer, is_rec, has_output_weight) * gain_f / ent_scale;
-        out_map.insert(fg_name.clone(), pack_e8_proj(src, &fg_name, &hess_ffn, b_g, eff_threads)?);
-        out_map.insert(fu_name.clone(), pack_e8_proj(src, &fu_name, &hess_ffn, b_u, eff_threads)?);
+        out_map.insert(fg_name.clone(), pack_e8_proj(src, &fg_name, &hess_ffn, b_g, hq, eff_threads)?);
+        out_map.insert(fu_name.clone(), pack_e8_proj(src, &fu_name, &hess_ffn, b_u, hq, eff_threads)?);
         let hess_down = SuperBlockHessian::build(&g_r, None, n_tok, cfg.n_ff, pad_col(cfg.n_ff), eff_threads);
-        out_map.insert(fd_name.clone(), pack_e8_proj(src, &fd_name, &hess_down, b_d, eff_threads)?);
+        out_map.insert(fd_name.clone(), pack_e8_proj(src, &fd_name, &hess_down, b_d, hq, eff_threads)?);
 
         for i in 0..(n_tok * dim) {
             cur_ref[i] += ffn_r[i];
@@ -443,7 +437,7 @@ pub(crate) fn run_sequential_turbo_pack(
     }
 
     if let Some(cb) = progress {
-        let msg = format!("Turbo v4 LM-Head E8-GPTQ kodlanıyor... (rms={:.3})", vec_rms(&cur_ref));
+        let msg = format!("{label} LM-Head kodlanıyor... (rms={:.3})", vec_rms(&cur_ref));
         if !cb(cfg.n_layer + 1, total_steps, &msg) {
             return Err(Error::Io("işlem kullanıcı tarafından iptal edildi".into()));
         }
@@ -454,10 +448,10 @@ pub(crate) fn run_sequential_turbo_pack(
 
     if has_output_weight {
         let b_h = turbo_v4_tensor_beta("output.weight", None, cfg.n_layer, false, true) / ent_scale;
-        out_map.insert("output.weight".to_owned(), pack_e8_proj(src, "output.weight", &hess_head, b_h, eff_threads)?);
+        out_map.insert("output.weight".to_owned(), pack_e8_proj(src, "output.weight", &hess_head, b_h, hq, eff_threads)?);
     } else {
         let b_e = turbo_v4_tensor_beta("token_embd.weight", None, cfg.n_layer, false, false) / ent_scale;
-        out_map.insert("token_embd.weight".to_owned(), pack_e8_proj(src, "token_embd.weight", &hess_head, b_e, eff_threads)?);
+        out_map.insert("token_embd.weight".to_owned(), pack_e8_proj(src, "token_embd.weight", &hess_head, b_e, hq, eff_threads)?);
     }
     Ok(out_map)
 }
@@ -529,7 +523,7 @@ mod tests {
         for b in 33u8..126 { vocab.push((b as char).to_string()); }
         while vocab.len() < voc { vocab.push(format!("t{}", vocab.len())); }
         let tok = BpeTokenizer::from_vocab_and_merges(vocab, &[], None).unwrap();
-        let res = run_sequential_turbo_pack(&MockHybSource(map), &cfg, &tok, None, 1.0, 2, None).unwrap();
+        let res = run_sequential_turbo_pack(&MockHybSource(map), &cfg, &tok, None, 1.0, false, 2, None).unwrap();
         assert!(res.contains_key("token_embd.weight"));
         assert!(res.contains_key("output.weight"));
         assert!(!res.contains_key("blk.0.ssm_alpha.weight"));

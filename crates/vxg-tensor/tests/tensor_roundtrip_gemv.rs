@@ -311,13 +311,13 @@ fn cpu_and_metal_gpu_gemv_kernels_agree_across_all_6_pipelines() {
         let (_, wf_b) = generate_realistic_llm_weights(DType::BF16, r_b, cols, 302);
         let mut wf_ab = wf_a.clone();
         wf_ab.extend_from_slice(&wf_b);
-        for bits in [2u8, 3u8, 4u8, 5u8, 6u8, 7u8] {
+        for bits in [2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8] {
             let ta = TurboWhtMatrix::encode(bits, r_a, cols, &wf_a).unwrap();
             let tb = TurboWhtMatrix::encode(bits, r_b, cols, &wf_b).unwrap();
             let tab = TurboWhtMatrix::concat_vertical(&[&ta, &tb]).unwrap();
             let tab_direct = TurboWhtMatrix::encode(bits, r_a + r_b, cols, &wf_ab).unwrap();
             assert_eq!(tab.scales_f16, tab_direct.scales_f16);
-            if !matches!(bits, 4 | 5 | 7) {
+            if !matches!(bits, 4 | 5 | 7 | 8) {
                 assert_eq!(tab.packed_words, tab_direct.packed_words);
             }
             assert_eq!(

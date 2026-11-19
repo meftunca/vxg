@@ -59,7 +59,7 @@ pub fn pack_hf_model_to_vxt_with_calib(
     if !turbo_entropy_scale.is_finite() || turbo_entropy_scale < 0.0 {
         return Err(Error::Format("turbo entropy scale must be finite and nonnegative".into()));
     }
-    if mode != LlmPackMode::Turbo && turbo_entropy_scale != 1.0 {
+    if !mode.is_turbo() && turbo_entropy_scale != 1.0 {
         return Err(Error::Format("turbo entropy scale requires turbo mode".into()));
     }
     let hf = resolve_hf_model_dir(path).ok_or_else(|| {
@@ -134,7 +134,7 @@ pub fn pack_hf_model_to_vxt_with_calib(
             meta_kv.push(("vision.config".to_owned(), vcfg.to_json_bytes()));
         }
     }
-    if mode == LlmPackMode::Turbo && turbo_entropy_scale != 1.0 {
+    if mode.is_turbo() && turbo_entropy_scale != 1.0 {
         meta_kv.push((
             "model.turbo_entropy_scale".to_owned(),
             turbo_entropy_scale.to_string().into_bytes(),
@@ -160,10 +160,11 @@ pub fn pack_hf_model_to_vxt_with_calib(
         Cb4CalibPlan::default()
     };
     let use_seq = !no_calib
-        && mode == LlmPackMode::Turbo
+        && mode.is_turbo()
         && cfg.n_layer >= 4
         && cfg.n_embd >= 256
         && cfg.n_vocab >= 1024;
+    let is_hq = mode == LlmPackMode::TurboHq;
     let (turbo_plan, prepacked): (TurboCalibPlan, Option<Mutex<HashMap<String, PackedTensor>>>) =
         if use_seq {
             let tok = BpeTokenizer::from_vxt_meta(&tok_meta)?;
@@ -173,10 +174,12 @@ pub fn pack_hf_model_to_vxt_with_calib(
                 &tok,
                 calib_text,
                 turbo_entropy_scale,
+                is_hq,
                 eff_t,
                 progress,
             )?;
-            meta_kv.push(("model.turbo_version".to_owned(), b"v5-e8-rd-gptq".to_vec()));
+            let ver: &[u8] = if is_hq { b"v5-e8-hq-gptq" } else { b"v5-e8-rd-gptq" };
+            meta_kv.push(("model.turbo_version".to_owned(), ver.to_vec()));
             (TurboCalibPlan::default(), Some(Mutex::new(map)))
         } else if mode == LlmPackMode::Turbo {
             (run_turbo_calibration_from_source(&adapter, &cfg), None)

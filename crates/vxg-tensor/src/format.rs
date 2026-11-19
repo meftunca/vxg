@@ -262,7 +262,7 @@ pub fn write_vxt_model(meta_kv: &[(String, Vec<u8>)], entries: &[VxtEntry]) -> R
                 push_f32_slice(&mut out, data);
             }
             PackedTensor::TurboWht(m) => {
-                if matches!(m.bits, 2 | 3 | 4 | 5 | 6 | 7) {
+                if matches!(m.bits, 2 | 3 | 4 | 5 | 6 | 7 | 8) {
                     push_hdr(
                         &mut out,
                         KIND_TURBO_WHT_EC,
@@ -510,7 +510,7 @@ fn read_vxt_body(bytes: &[u8], body: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, V
             }
             KIND_TURBO_WHT => {
                 let bits = sub;
-                if !matches!(bits, 2 | 3 | 5 | 6 | 7) || padded_cols != cols.div_ceil(256) * 256 {
+                if !matches!(bits, 2 | 3 | 5 | 6 | 7 | 8) || padded_cols != cols.div_ceil(256) * 256 {
                     return Err(Error::Format("invalid VXT TurboWht header".into()));
                 }
                 let scales_f16 = r.u16_vec()?;

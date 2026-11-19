@@ -58,6 +58,7 @@ mod server_http;
 pub mod tokenizer;
 mod turbo_calib_corpus;
 mod turbo_e8;
+mod turbo_e8_hq;
 #[cfg(test)]
 mod turbo_full_gptq;
 #[cfg(test)]

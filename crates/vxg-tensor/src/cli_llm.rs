@@ -67,14 +67,14 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
         i += 1;
     }
 
-    if entropy_scale.is_some() && mode != LlmPackMode::Turbo {
-        return Err(Error::Format("--turbo-entropy-scale requires --mode turbo".into()));
+    if entropy_scale.is_some() && !mode.is_turbo() {
+        return Err(Error::Format("--turbo-entropy-scale requires --mode turbo or turbo-hq".into()));
     }
     if calib_path.is_some() && no_calib {
         return Err(Error::Format("--calib and --no-calib are mutually exclusive".into()));
     }
-    if (calib_path.is_some() || no_calib) && mode != LlmPackMode::Turbo {
-        return Err(Error::Format("--calib and --no-calib require --mode turbo".into()));
+    if (calib_path.is_some() || no_calib) && !mode.is_turbo() {
+        return Err(Error::Format("--calib and --no-calib require --mode turbo or turbo-hq".into()));
     }
     let scale = entropy_scale.unwrap_or(1.0);
     if !scale.is_finite() || scale < 0.0 {
@@ -89,7 +89,7 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
     let is_hf = !in_path.to_ascii_lowercase().ends_with(".gguf")
         && (in_p.is_dir() || crate::hf_pack::resolve_hf_model_dir(in_p).is_some());
     let prog = |cur: usize, tot: usize, msg: &str| -> bool {
-        if msg.starts_with("Turbo v3") {
+        if msg.starts_with("Turbo ") {
             eprintln!("[pack-model {cur}/{tot}] {msg}");
         }
         true

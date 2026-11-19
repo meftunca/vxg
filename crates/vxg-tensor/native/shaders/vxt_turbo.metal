@@ -1086,3 +1086,114 @@ kernel void vxt_gemv_turbo_e8_nr8(
         }
     }
 }
+
+inline float vxt_dot_e8_hq_row_f32(uint w0, uint w1, float4 x0, float4 x1) {
+    uchar4 b0 = as_type<uchar4>(w0);
+    uchar4 b1 = as_type<uchar4>(w1);
+    uint par = (uint(b0.x) ^ uint(b0.y) ^ uint(b0.z) ^ uint(b0.w) ^ uint(b1.x) ^ uint(b1.y) ^ uint(b1.z)) & 1u;
+    uint u7 = ((uint(b1.w) & 0x7fu) << 1u) | par;
+    float bias = (b1.w & 0x80u) ? -127.5f : -128.0f;
+    float4 v0 = float4(float(b0.x), float(b0.y), float(b0.z), float(b0.w)) + bias;
+    float4 v1 = float4(float(b1.x), float(b1.y), float(b1.z), float(u7)) + bias;
+    float4 p4 = fma(v0, x0, v1 * x1);
+    return (p4.x + p4.y) + (p4.z + p4.w);
+}
+
+inline float4 vxt_eval_turbo_e8_hq_tile(uint4 wa, uint4 wb, half4 sh, float4 x0, float4 x1, float4 acc) {
+    float d0 = vxt_dot_e8_hq_row_f32(wa.x, wa.y, x0, x1);
+    float d1 = vxt_dot_e8_hq_row_f32(wa.z, wa.w, x0, x1);
+    float d2 = vxt_dot_e8_hq_row_f32(wb.x, wb.y, x0, x1);
+    float d3 = vxt_dot_e8_hq_row_f32(wb.z, wb.w, x0, x1);
+    return fma(float4(sh), float4(d0, d1, d2, d3), acc);
+}
+
+kernel void vxt_gemv_turbo_e8_hq_nr4(
+    device const ushort* scales_f16 [[buffer(0)]],
+    device const uint* packed_words [[buffer(1)]],
+    device const float* x_rot_pad   [[buffer(2)]],
+    device float* y                 [[buffer(3)]],
+    constant TurboParams& p         [[buffer(4)]],
+    uint sg_id                      [[simdgroup_index_in_threadgroup]],
+    uint lane                       [[thread_index_in_simdgroup]],
+    uint3 tg_pos                    [[threadgroup_position_in_grid]]
+) {
+    uint tps = p.tiles_per_sg & 255u;
+    uint steps = p.padded_cols >> 8u;
+    uint b8 = lane >> 2u;
+    uint sg_base = (tg_pos.x * 4u + sg_id) * tps;
+
+    for (uint kt = 0u; kt < tps; ++kt) {
+        uint tile = sg_base + kt;
+        if ((tile << 2u) >= p.rows) break;
+        device const ushort* sc_tile = scales_f16 + ulong(tile) * ulong(steps) * 32ul;
+        device const uint* pw_tile = packed_words + ulong(tile) * ulong(steps) * 256ul;
+
+        float4 acc = float4(0.0f);
+        for (uint step = 0u; step < steps; ++step) {
+            device const float4* xp4 = (device const float4*)(x_rot_pad + (step << 8u) + (lane << 3u));
+            device const uint4* p64 = (device const uint4*)(pw_tile + step * 256u);
+            half4 sh = *(device const half4*)(sc_tile + (step << 5u) + (b8 << 2u));
+            acc = vxt_eval_turbo_e8_hq_tile(p64[lane * 2u], p64[lane * 2u + 1u], sh, xp4[0], xp4[1], acc);
+        }
+
+        float4 sum4 = simd_sum(acc);
+        if (lane == 0u) vxt_store_tile4(y, p.rows, tile, sum4);
+    }
+}
+
+kernel void vxt_gemv_turbo_e8_hq_nr8(
+    device const ushort* scales_f16 [[buffer(0)]],
+    device const uint* packed_words [[buffer(1)]],
+    device const float* x_rot_pad   [[buffer(2)]],
+    device float* y                 [[buffer(3)]],
+    constant TurboParams& p         [[buffer(4)]],
+    uint sg_id                      [[simdgroup_index_in_threadgroup]],
+    uint lane                       [[thread_index_in_simdgroup]],
+    uint3 tg_pos                    [[threadgroup_position_in_grid]]
+) {
+    uint tps = p.tiles_per_sg & 255u;
+    uint steps = p.padded_cols >> 8u;
+    uint b8 = lane >> 2u;
+    uint sg_pair_base = (tg_pos.x * 4u + sg_id) * tps;
+
+    for (uint kp = 0u; kp < tps; ++kp) {
+        uint tile0 = (sg_pair_base + kp) * 2u;
+        if ((tile0 << 2u) >= p.rows) break;
+        bool has_t1 = ((tile0 + 1u) << 2u) < p.rows;
+
+        device const ushort* sc0 = scales_f16 + ulong(tile0) * ulong(steps) * 32ul;
+        device const uint* pw0 = packed_words + ulong(tile0) * ulong(steps) * 256ul;
+        float4 acc0 = float4(0.0f);
+        float4 acc1 = float4(0.0f);
+
+        if (has_t1) {
+            device const ushort* sc1 = sc0 + ulong(steps) * 32ul;
+            device const uint* pw1 = pw0 + ulong(steps) * 256ul;
+            for (uint step = 0u; step < steps; ++step) {
+                device const float4* xp4 = (device const float4*)(x_rot_pad + (step << 8u) + (lane << 3u));
+                float4 x0 = xp4[0], x1 = xp4[1];
+                uint soff = (step << 5u) + (b8 << 2u);
+                device const uint4* p0 = (device const uint4*)(pw0 + step * 256u);
+                device const uint4* p1 = (device const uint4*)(pw1 + step * 256u);
+                acc0 = vxt_eval_turbo_e8_hq_tile(p0[lane * 2u], p0[lane * 2u + 1u], *(device const half4*)(sc0 + soff), x0, x1, acc0);
+                acc1 = vxt_eval_turbo_e8_hq_tile(p1[lane * 2u], p1[lane * 2u + 1u], *(device const half4*)(sc1 + soff), x0, x1, acc1);
+            }
+        } else {
+            for (uint step = 0u; step < steps; ++step) {
+                device const float4* xp4 = (device const float4*)(x_rot_pad + (step << 8u) + (lane << 3u));
+                device const uint4* p0 = (device const uint4*)(pw0 + step * 256u);
+                acc0 = vxt_eval_turbo_e8_hq_tile(
+                    p0[lane * 2u], p0[lane * 2u + 1u], *(device const half4*)(sc0 + (step << 5u) + (b8 << 2u)),
+                    xp4[0], xp4[1], acc0
+                );
+            }
+        }
+
+        float4 sum0 = simd_sum(acc0);
+        float4 sum1 = simd_sum(acc1);
+        if (lane == 0u) {
+            vxt_store_tile4(y, p.rows, tile0, sum0);
+            if (has_t1) vxt_store_tile4(y, p.rows, tile0 + 1u, sum1);
+        }
+    }
+}

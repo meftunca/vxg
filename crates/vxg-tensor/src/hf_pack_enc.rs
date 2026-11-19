@@ -265,7 +265,7 @@ pub(crate) fn encode_hf_item(
                 PackedTensor::Codebook(CodebookMatrix::encode(3, rows, cols, &f32s)?)
             }
         }
-        LlmPackMode::Turbo => {
+        LlmPackMode::Turbo | LlmPackMode::TurboHq => {
             let mut f32s = st.extract_f32(meta)?;
             for &(c, g) in col_scales {
                 if c < cols {

@@ -27,10 +27,15 @@ pub enum LlmPackMode {
     Cb3,
     Wht2,
     Turbo,
+    TurboHq,
     Q4_0,
 }
 
 impl LlmPackMode {
+    pub fn is_turbo(self) -> bool {
+        matches!(self, Self::Turbo | Self::TurboHq)
+    }
+
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "lossless" => Ok(Self::Lossless),
@@ -38,9 +43,10 @@ impl LlmPackMode {
             "cb3" => Ok(Self::Cb3),
             "wht2" => Ok(Self::Wht2),
             "turbo" | "turbo2" => Ok(Self::Turbo),
+            "turbo-hq" | "turbo_hq" | "hq" => Ok(Self::TurboHq),
             "q4_0" => Ok(Self::Q4_0),
             other => Err(Error::Format(format!(
-                "unknown --mode '{other}' (expected lossless|cb4|cb3|wht2|turbo|q4_0)"
+                "unknown --mode '{other}' (expected lossless|cb4|cb3|wht2|turbo|turbo-hq|q4_0)"
             ))),
         }
     }
@@ -52,6 +58,7 @@ impl LlmPackMode {
             Self::Cb3 => "cb3",
             Self::Wht2 => "wht2",
             Self::Turbo => "turbo",
+            Self::TurboHq => "turbo-hq",
             Self::Q4_0 => "q4_0",
         }
     }
@@ -227,7 +234,7 @@ fn encode_gguf_tensor_with_layers(
                 )?))
             }
         }
-        LlmPackMode::Turbo => {
+        LlmPackMode::Turbo | LlmPackMode::TurboHq => {
             let mut f32s = gg.extract_f32(meta)?;
             for &(c, g) in col_scales {
                 if c < cols {
@@ -236,16 +243,16 @@ fn encode_gguf_tensor_with_layers(
                     }
                 }
             }
-            Ok(PackedTensor::TurboWht(encode_turbo_calibrated_tensor(
-                &meta.name,
-                layer_idx,
-                rows,
-                cols,
-                &f32s,
-                n_layer,
-                plan,
-                turbo_entropy_scale,
-            )?))
+            if mode == LlmPackMode::TurboHq {
+                let beta = 8.0 / turbo_entropy_scale.clamp(0.15, 3.0);
+                Ok(PackedTensor::TurboWht(crate::wht_turbo::TurboWhtMatrix::encode_with_ch_amp_threads(
+                    8, rows, cols, &f32s, None, None, |_| beta, 1,
+                )?))
+            } else {
+                Ok(PackedTensor::TurboWht(encode_turbo_calibrated_tensor(
+                    &meta.name, layer_idx, rows, cols, &f32s, n_layer, plan, turbo_entropy_scale,
+                )?))
+            }
         }
         LlmPackMode::Q4_0 => {
             let f32s = gg.extract_f32(meta)?;
@@ -330,7 +337,7 @@ fn pack_with_activation_calib(
     if !turbo_entropy_scale.is_finite() || turbo_entropy_scale < 0.0 {
         return Err(Error::Format("turbo entropy scale must be finite and nonnegative".into()));
     }
-    if mode != LlmPackMode::Turbo && turbo_entropy_scale != 1.0 {
+    if !mode.is_turbo() && turbo_entropy_scale != 1.0 {
         return Err(Error::Format("turbo entropy scale requires turbo mode".into()));
     }
     let kv = parse_gguf_kv(gguf_bytes)?;
@@ -350,7 +357,7 @@ fn pack_with_activation_calib(
             mode.name().as_bytes().to_vec(),
         ),
     ];
-    if mode == LlmPackMode::Turbo && turbo_entropy_scale != 1.0 {
+    if mode.is_turbo() && turbo_entropy_scale != 1.0 {
         meta_kv.push(("model.turbo_entropy_scale".to_owned(), turbo_entropy_scale.to_string().into_bytes()));
     }
     let tok_entries = BpeTokenizer::to_vxt_meta_entries(&kv)?;
@@ -366,15 +373,17 @@ fn pack_with_activation_calib(
     let eff_t = effective_cpu_threads(threads);
     let workers = eff_t.min(n.max(1));
     let use_seq = allow_seq_calib
-        && mode == LlmPackMode::Turbo
+        && mode.is_turbo()
         && activation.is_none()
         && cfg.n_layer >= 4
         && cfg.n_embd >= 256
         && cfg.n_vocab >= 1024;
+    let is_hq = mode == LlmPackMode::TurboHq;
     let (mut smooth_plan, prepacked) = if use_seq {
         let tok = BpeTokenizer::from_vxt_meta(&tok_entries)?;
-        let map = run_sequential_turbo_pack(&gg, &cfg, &tok, calib_text, turbo_entropy_scale, eff_t, progress)?;
-        meta_kv.push(("model.turbo_version".to_owned(), b"v5-e8-rd-gptq".to_vec()));
+        let map = run_sequential_turbo_pack(&gg, &cfg, &tok, calib_text, turbo_entropy_scale, is_hq, eff_t, progress)?;
+        let ver: &[u8] = if is_hq { b"v5-e8-hq-gptq" } else { b"v5-e8-rd-gptq" };
+        meta_kv.push(("model.turbo_version".to_owned(), ver.to_vec()));
         (TurboCalibPlan::default(), Some(Mutex::new(map)))
     } else if mode == LlmPackMode::Turbo {
         (run_turbo_calibration(&gg, &cfg), None)
