@@ -11,6 +11,7 @@ import {
   Sparkles,
   Wand2,
 } from "lucide-react";
+import { HfHubCard } from "@/components/HfHubCard";
 import {
   Badge,
   Button,
@@ -28,35 +29,49 @@ import {
   createDemoTensor,
   inspectTensorFile,
   isTauriRuntime,
+  listenForgeProgress,
   type ConvertReport,
   type DiscoveredFile,
+  type ForgeProgressPayload,
   type InspectReport,
 } from "@/lib/vxt-bridge";
 
 const PACK_MODES = [
   {
+    id: "q4",
+    title: "VXT-Turbo-HQ · Q4 (E8-HQ)",
+    badge: "Önerilen · ~4.5 bpw",
+    desc: "GGUF Q4_K_M'yi ~0.9 bpw daha küçük boyutta geçer · Sıfır-OOM streaming · Metal & CUDA Resident",
+  },
+  {
+    id: "q6",
+    title: "VXT-Turbo-HQ · Q6 (E8-HQ)",
+    badge: "Q6_K'yı Geçer · ~6.27 bpw",
+    desc: "GGUF Q6_K'dan 0.43 GB daha küçük, PPL ve TR KLD (-32%) daha iyi · RTX 5090 739–796 tok/s",
+  },
+  {
+    id: "q8",
+    title: "VXT-Turbo-HQ · Q8 (E8-HQ)",
+    badge: "Q8_0'ı Geçer · ~7.71 bpw",
+    desc: "GGUF Q8_0'dan 0.89 GB daha küçük, PPL ve TR KLD (-55.6%) daha iyi · Stüdyo kalitesi",
+  },
+  {
+    id: "q3",
+    title: "VXT-Turbo v5 · Q3 (E8)",
+    badge: "Ultra Küçük · ~3.05 bpw",
+    desc: "5.2× sıkıştırma · Metal 300+ tok/s & RTX 5090 963 tok/s tam GPU-resident E8 çekirdeği",
+  },
+  {
     id: "cb4",
     title: "CB4-v2 + Sparse Outlier",
-    badge: "Önerilen · 3.64×",
-    desc: "~4.38 bpw · Orijinal BF16 kalitesi (36/40) + 176 tok/s CB4-Fast Metal",
+    badge: "0-ULP Metal · ~4.38 bpw",
+    desc: "Analitik super-weight kalibrasyonu + 0-ULP Metal CB4-Fast pipelined çekirdek",
   },
   {
     id: "lossless",
     title: "Lossless BF16 / FP16",
     badge: "0-ULP Bit-Exact",
     desc: "~11.4 bpw · %100 kayıpsız bit düzlemi + üs tablosu sıkıştırması",
-  },
-  {
-    id: "turbo",
-    title: "VXT-Turbo (WHT + EC)",
-    badge: "Ultra Küçük · 5.97×",
-    desc: "~2.68 bpw · Hadamard + entropi kodlamalı maksimum sıkıştırma",
-  },
-  {
-    id: "cb3",
-    title: "CB3 + Sparse Outlier",
-    badge: "4.6× Küçük",
-    desc: "~3.45 bpw · 3-bit kübik Lloyd-Max + seyrek FP16 outlier akışı",
   },
 ];
 
@@ -73,13 +88,33 @@ export function ForgeWorkspace({
 }: ForgeWorkspaceProps) {
   const [inputPath, setInputPath] = React.useState("");
   const [outputPath, setOutputPath] = React.useState("");
-  const [mode, setMode] = React.useState("cb4");
+  const [mode, setMode] = React.useState("q4");
   const [packAsLlm, setPackAsLlm] = React.useState(true);
   const [inspecting, setInspecting] = React.useState(false);
   const [converting, setConverting] = React.useState(false);
+  const [progress, setProgress] = React.useState<ForgeProgressPayload | null>(null);
   const [report, setReport] = React.useState<InspectReport | null>(null);
   const [convResult, setConvResult] = React.useState<ConvertReport | null>(null);
   const [err, setErr] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listenForgeProgress((payload) => {
+      setProgress(payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  const handleConverted = async (res: ConvertReport) => {
+    setConvResult(res);
+    const outRep = await inspectTensorFile(res.output_path);
+    setReport(outRep);
+    await onRefresh();
+  };
 
   const suggestOutputPath = (inPath: string, m: string) => {
     const trimmed = inPath.replace(/\/+$/, "");
@@ -163,13 +198,11 @@ export function ForgeWorkspace({
   const handleConvert = async () => {
     if (!inputPath || !outputPath) return;
     setErr(null);
+    setProgress(null);
     setConverting(true);
     try {
       const res = await convertToVxt(inputPath, outputPath, mode, packAsLlm);
-      setConvResult(res);
-      const outRep = await inspectTensorFile(res.output_path);
-      setReport(outRep);
-      await onRefresh();
+      await handleConverted(res);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -178,8 +211,21 @@ export function ForgeWorkspace({
   };
 
   return (
-    <div className="grid h-[calc(100vh-88px)] grid-cols-1 gap-4 lg:grid-cols-[430px_1fr] overflow-y-auto">
+    <div className="grid h-[calc(100vh-88px)] grid-cols-1 gap-4 lg:grid-cols-[440px_1fr] overflow-y-auto">
       <div className="space-y-4">
+        <HfHubCard
+          mode={mode}
+          busy={converting}
+          progress={progress}
+          discovered={discovered}
+          onBusyChange={setConverting}
+          onProgressReset={() => setProgress(null)}
+          onConverted={handleConverted}
+          onError={setErr}
+          onInspectPath={handleSelectInput}
+          onLoadIntoChat={onLoadIntoChat}
+          onRefresh={onRefresh}
+        />
         <Card className="bg-card/80">
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
@@ -290,9 +336,9 @@ export function ForgeWorkspace({
             {report && (report.format.startsWith("GGUF") || report.format.startsWith("HuggingFace")) && (
               <div className="flex items-center justify-between rounded-lg border bg-muted/30 px-3 py-2">
                 <div>
-                  <div className="text-xs font-medium">Tam Çalıştırılabilir LLM Paketi</div>
+                  <div className="text-xs font-medium">Tam Çalıştırılabilir LLM Paketi (Sıfır-OOM Streaming)</div>
                   <div className="text-[11px] text-muted-foreground">
-                    Tokenizer + ChatML + CB4-v2 analitik kalibrasyon dahil edilir
+                    Tokenizer + ChatML + LDL-GPTQ kalibrasyonu ile katman katman diske yazar (70B+ uyumlu)
                   </div>
                 </div>
                 <Switch checked={packAsLlm} onCheckedChange={setPackAsLlm} />

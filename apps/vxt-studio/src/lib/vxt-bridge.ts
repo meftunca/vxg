@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface LoadedModelInfo {
   path: string;
@@ -84,6 +85,14 @@ export interface ConvertReport {
   elapsed_s: number;
 }
 
+export interface ForgeProgressPayload {
+  phase: "download" | "pack" | string;
+  current: number;
+  total: number;
+  percent: number;
+  detail: string;
+}
+
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -157,4 +166,39 @@ export async function convertToVxt(
 
 export async function createDemoTensor(): Promise<InspectReport> {
   return invoke<InspectReport>("create_demo_tensor_cmd");
+}
+
+export async function downloadHfAndPack(
+  repoId: string,
+  mode: string,
+  hfToken?: string,
+  outputPath?: string,
+): Promise<ConvertReport> {
+  return invoke<ConvertReport>("download_hf_and_pack_cmd", {
+    repoId,
+    mode,
+    hfToken: hfToken?.trim() || null,
+    outputPath: outputPath?.trim() || null,
+  });
+}
+
+export async function cancelForgeJob(): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke("cancel_forge_job_cmd");
+  }
+}
+
+export async function deleteLocalModel(path: string): Promise<StudioState> {
+  return invoke<StudioState>("delete_model_cmd", { path });
+}
+
+export async function listenForgeProgress(
+  onEvent: (payload: ForgeProgressPayload) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) {
+    return () => {};
+  }
+  return listen<ForgeProgressPayload>("vxt-progress", (ev) => {
+    onEvent(ev.payload);
+  });
 }

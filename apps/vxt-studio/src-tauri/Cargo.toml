@@ -1,7 +1,7 @@
 [package]
 name = "vxt-studio"
 version = "0.1.0"
-description = "VXT Studio — Native Apple Metal Compressed-Domain LLM Chat & Tensor Forge"
+description = "VXT Studio — Production Compressed-Domain AI Chat, Multimodal Vision, OpenAI Server & Streaming .vxt Tensor Forge (Metal & CUDA)"
 edition = "2021"
 
 [lib]

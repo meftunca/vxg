@@ -6,6 +6,7 @@ import {
   Layers,
   Loader2,
   MessageSquare,
+  PowerOff,
   Radio,
   Server,
 } from "lucide-react";
@@ -24,8 +25,19 @@ import {
   fetchStudioState,
   isTauriRuntime,
   loadModel,
+  unloadModel,
   type StudioState,
 } from "@/lib/vxt-bridge";
+
+function shortBackendLabel(backend?: string): string {
+  if (!backend) return "GPU Hazır";
+  if (backend.includes("CUDA") && backend.includes("Resident")) return "CUDA Resident";
+  if (backend.includes("CUDA")) return "NVIDIA CUDA";
+  if (backend.includes("VXT-Turbo")) return "Metal VXT-Turbo";
+  if (backend.includes("CB4-Fast")) return "Metal CB4-Fast";
+  if (backend.includes("Metal")) return "Apple Metal";
+  return backend.split("(")[0].trim() || "CPU";
+}
 
 export default function App() {
   const [tab, setTab] = React.useState("chat");
@@ -75,6 +87,19 @@ export default function App() {
     }
   };
 
+  const handleUnloadModel = async () => {
+    setLoadErr(null);
+    setLoadingModel(true);
+    try {
+      const st = await unloadModel();
+      setStudio(st);
+    } catch (e) {
+      setLoadErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingModel(false);
+    }
+  };
+
   const runnableModels = (studio?.discovered_files ?? []).filter((f) => f.runnable_hint);
 
   return (
@@ -89,11 +114,11 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold tracking-tight">VXT Studio</span>
                 <Badge variant="outline" className="text-[10px]">
-                  CB4-v2 · Vision · Metal 0-ULP
+                  VXT-Turbo E8/HQ · Metal &amp; CUDA · Vision · MoE
                 </Badge>
               </div>
               <div className="text-[11px] text-muted-foreground">
-                Compressed-Domain AI Chat &amp; Local .vxt Tensor Forge
+                Production Compressed-Domain AI Runtime, Streaming .vxt Forge &amp; OpenAI Server
               </div>
             </div>
 
@@ -148,11 +173,15 @@ export default function App() {
               Model Aç
             </Button>
 
-            <Badge variant={studio?.model ? "default" : "secondary"} className="gap-1.5 py-1">
+            <Badge
+              variant={studio?.model ? "default" : "secondary"}
+              className="gap-1.5 py-1"
+              title={studio?.model?.backend || "Model bekleniyor"}
+            >
               {studio?.model ? (
                 <>
                   <Cpu className="h-3 w-3" />
-                  <span>Apple Metal Hazır</span>
+                  <span>{shortBackendLabel(studio.model.backend)}</span>
                 </>
               ) : (
                 <>
@@ -161,6 +190,19 @@ export default function App() {
                 </>
               )}
             </Badge>
+
+            {studio?.model && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground hover:text-red-400"
+                title="Modeli Bellekten Kaldır (Unload)"
+                disabled={loadingModel || studio.busy}
+                onClick={() => void handleUnloadModel()}
+              >
+                <PowerOff className="h-3.5 w-3.5" />
+              </Button>
+            )}
           </div>
         </header>
 

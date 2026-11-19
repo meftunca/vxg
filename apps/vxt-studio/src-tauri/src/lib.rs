@@ -1,28 +1,39 @@
 mod forge;
+mod hf_hub;
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use vxg_tensor::server::{snapshot_to_json, EmbeddedServer, EmbeddedServerHandle};
 
 use crate::forge::{
-    convert_tensor_to_vxt, create_demo_safetensors, default_demo_vxt_path, discover_local_files,
-    inspect_tensor_file, ConvertReport, InspectReport,
+    convert_tensor_to_vxt_with_progress, create_demo_safetensors, default_demo_vxt_path,
+    discover_local_files, inspect_tensor_file, ConvertReport, InspectReport,
+};
+use crate::hf_hub::{
+    default_hf_vxt_output_path, delete_vxt_model_file, download_hf_repo, ForgeProgressPayload,
 };
 
 struct AppState {
     _server: Mutex<EmbeddedServer>,
     handle: EmbeddedServerHandle,
+    forge_cancel: Arc<AtomicBool>,
 }
 
-#[tauri::command]
-fn get_studio_state(state: State<'_, AppState>) -> Value {
-    let snap = state.handle.snapshot();
+fn studio_snapshot_with_files(handle: &EmbeddedServerHandle) -> Value {
+    let snap = handle.snapshot();
     let mut v = snapshot_to_json(&snap);
     if let Some(obj) = v.as_object_mut() {
         obj.insert("discovered_files".into(), json!(discover_local_files()));
     }
     v
+}
+
+#[tauri::command]
+fn get_studio_state(state: State<'_, AppState>) -> Value {
+    studio_snapshot_with_files(&state.handle)
 }
 
 #[tauri::command]
@@ -36,7 +47,7 @@ async fn load_model_cmd(
     tauri::async_runtime::spawn_blocking(move || {
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         h.load_model(path, gpu, threads).map_err(|e| e.to_string())?;
-        Ok(snapshot_to_json(&h.snapshot()))
+        Ok(studio_snapshot_with_files(&h))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -45,19 +56,36 @@ async fn load_model_cmd(
 #[tauri::command]
 fn unload_model_cmd(state: State<'_, AppState>) -> Result<Value, String> {
     state.handle.unload_model().map_err(|e| e.to_string())?;
-    Ok(snapshot_to_json(&state.handle.snapshot()))
+    Ok(studio_snapshot_with_files(&state.handle))
 }
 
 #[tauri::command]
 fn reset_chat_cmd(state: State<'_, AppState>) -> Result<Value, String> {
     state.handle.reset_cache().map_err(|e| e.to_string())?;
-    Ok(snapshot_to_json(&state.handle.snapshot()))
+    Ok(studio_snapshot_with_files(&state.handle))
 }
 
 #[tauri::command]
 fn abort_chat_cmd(state: State<'_, AppState>) -> Value {
     state.handle.abort();
     json!({ "ok": true })
+}
+
+#[tauri::command]
+fn cancel_forge_job_cmd(state: State<'_, AppState>) -> Value {
+    state.forge_cancel.store(true, Ordering::SeqCst);
+    json!({ "ok": true })
+}
+
+#[tauri::command]
+fn delete_model_cmd(state: State<'_, AppState>, path: String) -> Result<Value, String> {
+    if let Some(loaded) = state.handle.snapshot().model {
+        if loaded.model_path == path {
+            let _ = state.handle.unload_model();
+        }
+    }
+    delete_vxt_model_file(&path).map_err(|e| e.to_string())?;
+    Ok(studio_snapshot_with_files(&state.handle))
 }
 
 #[tauri::command]
@@ -71,13 +99,90 @@ async fn inspect_file_cmd(path: String) -> Result<InspectReport, String> {
 
 #[tauri::command]
 async fn convert_vxt_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
     input_path: String,
     output_path: String,
     mode: String,
     pack_as_llm: bool,
 ) -> Result<ConvertReport, String> {
+    state.forge_cancel.store(false, Ordering::SeqCst);
+    let cancel = state.forge_cancel.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        convert_tensor_to_vxt(&input_path, &output_path, &mode, pack_as_llm)
+        let emit_pack = |done: usize, total: usize, name: &str| {
+            let pct = if total > 0 {
+                (done as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let _ = app.emit(
+                "vxt-progress",
+                ForgeProgressPayload {
+                    phase: "pack".into(),
+                    current: done as u64,
+                    total: total as u64,
+                    percent: pct.clamp(0.0, 100.0),
+                    detail: format!("Sıkıştırılıyor ({done}/{total}): {name}"),
+                },
+            );
+        };
+        convert_tensor_to_vxt_with_progress(
+            &input_path,
+            &output_path,
+            &mode,
+            pack_as_llm,
+            &cancel,
+            &emit_pack,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn download_hf_and_pack_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    repo_id: String,
+    mode: String,
+    hf_token: Option<String>,
+    output_path: Option<String>,
+) -> Result<ConvertReport, String> {
+    state.forge_cancel.store(false, Ordering::SeqCst);
+    let cancel = state.forge_cancel.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let out_path = match output_path.filter(|s| !s.trim().is_empty()) {
+            Some(p) => p,
+            None => default_hf_vxt_output_path(&repo_id, &mode)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let emit_dl = |p: ForgeProgressPayload| {
+            let _ = app.emit("vxt-progress", p);
+        };
+        let downloaded = download_hf_repo(&repo_id, hf_token.as_deref(), &cancel, &emit_dl)
+            .map_err(|e| e.to_string())?;
+        let in_str = downloaded.to_string_lossy().into_owned();
+        let emit_pack = |done: usize, total: usize, name: &str| {
+            let pct = if total > 0 {
+                (done as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let _ = app.emit(
+                "vxt-progress",
+                ForgeProgressPayload {
+                    phase: "pack".into(),
+                    current: done as u64,
+                    total: total as u64,
+                    percent: pct.clamp(0.0, 100.0),
+                    detail: format!(".vxt paketleniyor ({done}/{total}): {name}"),
+                },
+            );
+        };
+        convert_tensor_to_vxt_with_progress(&in_str, &out_path, &mode, true, &cancel, &emit_pack)
             .map_err(|e| e.to_string())
     })
     .await
@@ -113,6 +218,7 @@ pub fn run() {
         .manage(AppState {
             _server: Mutex::new(server),
             handle,
+            forge_cancel: Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![
             get_studio_state,
@@ -120,8 +226,11 @@ pub fn run() {
             unload_model_cmd,
             reset_chat_cmd,
             abort_chat_cmd,
+            cancel_forge_job_cmd,
+            delete_model_cmd,
             inspect_file_cmd,
             convert_vxt_cmd,
+            download_hf_and_pack_cmd,
             create_demo_tensor_cmd,
         ])
         .run(tauri::generate_context!())

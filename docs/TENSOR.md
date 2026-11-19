@@ -1,138 +1,129 @@
-# `vxg-tensor` (`.vxt`) — Compressed-Domain AI Model Codec, `CB4-Fast` Apple Metal LLM Engine & `VXT Studio`
+# `vxg-tensor` (`.vxt`) — Compressed-Domain AI Codec (`VXT-Turbo E8/E8-HQ`), Apple Metal & NVIDIA CUDA Resident LLM/VLM/MoE Engine & `VXT Studio`
 
-`crates/vxg-tensor` extends VXG from structured telemetry and columnar analytics into **neural network weight compression (`.vxt` `VXT1`), zero-decompression Apple Metal GPU / SIMD LLM inference, OpenAI-compatible SSE serving, and the `VXT Studio` desktop application (`apps/vxt-studio`)**.
+`crates/vxg-tensor` extends VXG into **neural network weight compression (`.vxt` `VXT1`), zero-decompression Apple Metal & NVIDIA CUDA GPU LLM/VLM/MoE inference, production OpenAI-compatible SSE serving with Prometheus metrics, and the `VXT Studio` desktop application (`apps/vxt-studio`)**.
 
-Instead of inflating compressed weights back to `BF16`/`FP16` in RAM or VRAM, `vxg-tensor` uploads the **compressed `.vxt` planes directly into Apple Silicon Unified Memory** and executes the entire autoregressive LLM forward pass (`RMSNorm`, `Gated-DeltaNet` recurrent state updates, `Flash-Decoding` `Gated-GQA`, `SwiGLU`, and `248,320`-vocab `LM Head`) directly from compressed representations on GPU.
+Instead of inflating compressed weights back to `BF16`/`FP16` in RAM or VRAM, `vxg-tensor` uploads the **compressed `.vxt` planes directly into Apple Silicon Unified Memory or NVIDIA GPU VRAM** and executes the entire autoregressive forward pass (`RMSNorm`, `Gated-DeltaNet`, `Flash-Decoding` `Gated-GQA`, `SwiGLU`/`GeGLU`, `MoE` Top-K routing, and `248,320`-vocab `LM Head` + GPU argmax) directly from compressed representations with **zero per-layer host syncs**.
 
 <TensorBenchmarkChart />
 
 ---
 
-## Key Highlights (`Qwen3.5-9B` & `Qwen3.5-2B` End-to-End + Multimodal Vision on Apple M2 Max)
+## Production Highlights (Apple M2 Max Metal & NVIDIA RTX 5090 CUDA)
 
-- **`Qwen3.5-9B` + Native Multimodal Vision (`VLM`, `4.82 GiB` / `4940.12 MiB`, `47.2 tok/s`, `244.3 GB/s` Compressed Stream)**:
-  - Shrinks official 4-shard `Qwen/Qwen3.5-9B` (`18,411.93 MiB` `BF16`, including `Qwen3_5VisionModel` ViT + `2x2` `PatchMerger` + untied `248,320 x 4096` `lm_head`) into a **single `4940.12 MiB` (`3.73x` smaller) `.vxt` file**.
-  - Executes full multimodal **Vision (`--image` CLI, OpenAI `image_url`, `VXT Studio` drag-and-drop / `Cmd+V` paste)** via Apple Accelerate AMX `cblas_sgemm` ViT + exact Metal **3D `M-RoPE` (`mrope_section = [11, 11, 10]`)** + multi-turn ViT feature & `KV`/`DeltaNet` prefix caching, sustaining **`47.15 tok/s` (`244.3 GB/s` compressed stream = `~910 GB/s` effective `BF16` BW)** on `Qwen3.5-9B`!
-- **`Qwen3.5-2B` `CB4-v2` + `CB4-Fast` All-GPU Engine (`988.42 MiB`, `~176 tok/s`, `BF16` Quality Parity)**:
-  - Shrinks `Qwen3.5-2B` from **`3600.80 MiB` (`.gguf` `BF16`) / `4337.52 MiB` (official HuggingFace `.safetensors`) -> `988.42 MiB` (`4.38 bpw`, `3.64x–4.39x` smaller)** — `32.4 MiB` smaller than `GGUF Q4_0` (`1020.83 MiB`).
-  - **Zero-Shot Analytical Super-Weight Calibration (`CB4-v2`)**: Propagates residual-writer channel RMS (`ffn_down`, `ssm_out`, `attn_output`), `RMSNorm` gains, and 2-hop `SwiGLU` / `DeltaNet` / `GQA` row sensitivities (`col_amp`) without touching any calibration prompts, reaching **`36/40` (`0.900`) strict 40-item free-generation parity with raw `BF16` (`36/40`)**, **`0.047588 nats` `4x16` split KL divergence (`-16.6%` vs `CB4-v1`)**, **`0.972549` logit cosine similarity**, and **`61/64` Top-1 agreement** ([`reports/cb4-v2-2026-11-08.md`](../reports/cb4-v2-2026-11-08.md)).
-  - **`MetalCb4FastRunner` (`0-ULP` Exact, `175.92 tok/s`)**: Packs all model layers (`NR = 2` step-major) and `248,320`-row vocabulary (`NR = 4` tile-major) into a single `256B`-aligned Metal arena with `32`-bit SRAM `c16` codebook LUTs, `64`-threadgroup split-state `FP32` `DeltaNet`, batched `M <= 32` prefill (`221.9 tok/s`), and `2`-deep `8`-step speculative command-buffer pipelining (`182.3 GB/s` effective compressed weight bandwidth).
-- **100% Bit-Exact Lossless (`VXT-Lossless-BF16`)**: Shrinks `Qwen3.5-2B` to **`2556.80 MiB` (`1.41x` smaller, `11.35 bpw`)** with **`0.000000 nats` KL divergence**, `1.000000` cosine similarity, and `100.0%` bit-for-bit weight identity at **`49.6 tok/s`** directly on compressed bit-planes.
-- **Ultra-Compact Sub-800 MiB & Sub-670 MiB Modes (`CB3`, `WHT2`, `VXT-Turbo`)**:
-  - `VXT-CB3+Outlier` (`3.38 bpw`): **`772.40 MiB` (`4.66x` smaller)** with **`0.1117 nats` KL** and **`80.4 tok/s`** GPU decode.
-  - `VXT-WHT2+Outlier` (`2.31 bpw` Walsh-Hadamard 2-bit FFN/Attn + `3.38 bpw` recurrent gates): **`645.96 MiB` (`5.57x` smaller)** at **`114.2 tok/s`** GPU decode (`140.9 tok/s` prefill).
-- **Direct HuggingFace Folder & `.gguf` Packing**: Converts raw HuggingFace model directories (`config.json` + `tokenizer.json` + single or sharded `model.safetensors.index.json`) or `.gguf` files directly into self-contained `.vxt` models without external Python/`llama.cpp` toolchains.
-- **Multi-Turn Stateful Chat, OpenAI SSE Server & `VXT Studio`**:
-  - Prefix-cached `KV + Recurrent Gated-DeltaNet` multi-turn `ChatSession` (`152+ tok/s` cached follow-up turns), official Qwen BPE pretokenizer (`NFC` + Unicode regex), `top-k/top-p` sampling, and exponential **DRY** suffix-clone anti-loop protection for long `--think` reasoning chains.
-  - Built-in OpenAI-compatible HTTP/SSE server (`vxg-tensor serve`, `/v1/models`, `/v1/chat/completions`) and standalone **`VXT Studio.app` / `.dmg`** desktop suite (`Tauri v2` + `React 19` + `shadcn/ui` + Vercel AI SDK).
+- **`VXT-Turbo-HQ` (`E8-HQ`, `bits = 8`) Beats `GGUF Q6_K` and `GGUF Q8_0` at Smaller Sizes (`Qwen3.5-9B`, 22-Model Eval — [`reports/qwen35-9b-compression-eval.json`](../reports/qwen35-9b-compression-eval.json))**:
+  - **`--preset q8` (`7.713 bpw`, `8.632 GB`)**: **`0.89 GB` smaller** than `GGUF Q8_0` (`8.503 bpw`, `9.517 GB`), beats `Q8_0` on Wiki 580ch PPL (`8.1826` vs `8.1951`), Wiki Med KLD (`0.0004` vs `0.0005`), and TR Mean KLD (`0.0004` vs `0.0009`, **`-55.6%`**), while tying TR Top-1 (`98.80%`).
+  - **`--preset q6` (`6.269 bpw`, `7.017 GB`)**: **`0.43 GB` smaller** than `GGUF Q6_K` (`6.654 bpw`, `7.447 GB`), beats `Q6_K` on Wiki 580ch PPL (`8.1883` vs `8.2195`), Wiki Med KLD (`0.0011` vs `0.0014`), Wiki Top-1 (`97.55%` vs `97.45%`), TR Mean KLD (`0.0015` vs `0.0022`, **`-31.8%`**), and TR Top-1 (`98.31%` vs `97.75%`).
+  - **`--preset q4` (`~4.50 bpw`)** & **`--preset q3` (`VXT-Turbo v5`, `E8`, `bits = 7`, `~3.05 bpw`)**: Dominate the sub-5 bpw Pareto frontier (`~0.9 bpw` smaller than `GGUF Q4_K_M`, `5.2x` smaller than `BF16`).
+- **Native 100% VRAM-Resident NVIDIA CUDA Runner (`VXT-Turbo Resident`, `native/cuda/vxt_cuda_llm.cu`)**:
+  - Verified live on **NVIDIA GeForce RTX 5090 (`sm_120`, CUDA 12.8.93)** with zero per-layer PCIe transfers, fused sibling multi-GEMV, split-K residual projections, register-cached `Gated-DeltaNet`, online-softmax FlashDecoding `Gated-GQA`, and 4-byte pinned GPU argmax readback:
+    - **`Qwen3.5-0.8B --preset q3` (`E8`, `323.02 MiB`)**: **`962.86 tok/s`** decode (**`1,186.2 tok/s`** prefill; **`55.5×`** faster than per-matrix CUDA, **`364.7×`** faster than 16-thread CPU), **100% token-for-token identical** to CPU across 94 generated tokens.
+    - **`Qwen3.5-0.8B --preset q6` (`E8-HQ`, `611.41 MiB`)**: **`738.63 tok/s`** CLI / **`796.28 tok/s`** OpenAI `serve` JSON mode (**`1,006–1,018 tok/s`** prefill, `473.5 GB/s` compressed stream), **`593.75 tok/s`** with `--temp 0.6` 248K-vocab sampling.
+    - Hybrid 4-stage unit-test parity (`0-layer embed`, `1-layer DeltaNet`, `1-layer Gated-GQA`, `2-layer Hybrid`): **`max_err = 2e-6 – 4e-6`**.
+- **Apple Metal Pipelined Runners (`VXT-Turbo Pipelined` & `CB4-Fast`)**:
+  - **`VXT-Turbo Pipelined`**: `297.94 tok/s` on `Qwen3.5-0.8B` (Apple M2 Max) with zero-LUT warp-shuffle `FWHT-32` + `E8`/`E8-HQ` decode and 2-deep pipelined `MTLCommandBuffer` bursts.
+  - **`Qwen3.5-9B` + Native Multimodal Vision (`VLM`, `4.82 GiB`, `47.15 tok/s`, `244.3 GB/s` compressed stream)**: Full `Qwen3_5VisionModel` ViT + `2×2` `PatchMerger` + exact Metal **3D `M-RoPE` (`mrope_section = [11, 11, 10]`)** + multi-turn ViT/KV/DeltaNet prefix caching.
+  - **`Qwen3.5-2B` `CB4-v2` + `CB4-Fast` (`988.42 MiB`, `175.92 tok/s`, `36/40` `BF16` parity)**: Zero-shot analytical super-weight calibration (`0.047588 nats` KL, `0.972549` cosine similarity).
+- **Zero-OOM Streaming `.vxt` Disk Writer & `3.13×` Faster Packing**:
+  - `VxtStreamWriter` (`format_stream.rs`, `llm_pack_stream.rs`) flushes each calibrated layer batch directly to disk so `27B`/`70B+` models pack in bounded RAM (`~4–8 GB` peak RSS).
+  - Hoisted thread pools, L1 `Block32Chol`, lock-free `sgemm_nt_k32_4x4`, and parallel archive encoding cut `Qwen3.5-9B` packing from **`30m58s -> 9m53s` (`3.13×`)** on Linux and `Qwen3.5-0.8B` from **`52.8s -> 21.7s`** (`turbo-hq`) on M2 Max.
+- **Mixture-of-Experts (`MoE`) & Production OpenAI Serving**:
+  - Full `MoE` routing (`llm_moe.rs`) supporting `Qwen3-MoE`, `Mixtral`, and `DeepSeek-MoE` (Top-K softmax router, per-expert SwiGLU/GeGLU, optional gated shared expert `shexp`).
+  - OpenAI-compatible HTTP/SSE server (`vxg-tensor serve`): `/v1/chat/completions` (SSE streaming, `tools`/`tool_calls`, `response_format` `json_object`/`json_schema`, `stop` sequences, Vision `image_url`), `/v1/completions`, `/v1/models`, `/health`, and **Prometheus `/metrics`**.
+  - Standalone **`VXT Studio`** desktop app (`apps/vxt-studio`, `Tauri v2` + `React 19` + `shadcn/ui` + Vercel AI SDK) with HuggingFace Hub direct download + streaming preset packing, multimodal Vision Chat, JSON mode/stop controls, and live `/metrics` API Hub.
 
 ---
 
-## Architecture & `CB4-Fast` Speculative Metal Pipeline
+## Architecture: Compressed-Domain GPU Pipelines (Metal & CUDA)
 
 ```mermaid
 flowchart LR
-    SRC["HuggingFace Dir (.safetensors + config + tokenizer) / GGUF"] -->|"vxg-tensor pack-model --mode cb4"| VXT["Self-Contained CB4-v2 .vxt (< 1 GiB)"]
-    VXT -->|"Zero-Copy mmap + Single 256B Metal Arena"| GPU["NR=2 Step-Major Layers + NR=4 Vocab in Unified Memory"]
-    PROMPT["Prompt / ChatML History"] -->|"M <= 32 Batched GEMM Prefill + KV/DeltaNet Prefix Cache"| STATE["Persistent GPU KV + Split-State FP32 DeltaNet"]
-    GPU --> PIPE["2-Deep x 8-Step Speculative MTLCommandBuffer Pipeline"]
+    SRC["HuggingFace Dir (.safetensors + config + tokenizer) / GGUF"] -->|"vxg-tensor pack-model --preset q4|q6|q8|q3 (Zero-OOM Streaming)"| VXT["Self-Contained .vxt (E8 / E8-HQ / CB4 / Lossless)"]
+    VXT -->|"Zero-Copy mmap + Direct Compressed Upload"| GPU["Apple Metal Arena / NVIDIA CUDA VRAM-Resident Weights"]
+    PROMPT["Prompt / ChatML / Vision 3D M-RoPE"] -->|"Single-Stream Prefill + Persistent KV & DeltaNet Prefix Cache"| STATE["GPU KV Cache + FP32 Gated-DeltaNet State"]
+    GPU --> PIPE["Zero-PCIe-Per-Layer Forward Pass (Fused FWHT-32 + E8/E8-HQ + Flash-GQA)"]
     STATE --> PIPE
-    PIPE -->|"0-ULP SRAM c16 LUT + GPU ArgMax / Top-K-P + DRY"| STREAM["176 tok/s CLI / OpenAI SSE / VXT Studio"]
+    PIPE -->|"GPU ArgMax (4B Pinned Readback) / Top-K-P + DRY"| STREAM["963 tok/s RTX 5090 · 298 tok/s M2 Max · OpenAI SSE · VXT Studio"]
 ```
 
-### Why Single-Arena + 2-Deep Pipelined `MTLCommandBuffer` Matters on Apple Silicon
+---
 
-Launching individual `GEMV` command buffers per projection (`97+` commits/token) incurs ~`450 us` of XNU/Metal scheduler overhead per token, capping throughput near `15 tok/s`.
+## 1. `Qwen3.5-9B` Quality & Size vs. `GGUF` (`reports/qwen35-9b-compression-eval.json`)
 
-`vxg-tensor` eliminates both CPU-GPU sync stalls and L1/SLC gather bottlenecks across two tiers:
-1. **`MetalCb4FastRunner` (`src/metal_cb4_fast.rs`, `native/metal_cb4_fast*.mm`, `native/shaders/vxt_cb4_fast*.metal`)**:
-   - **Single Contiguous Weight Arena**: Concatenates shared-input projections (`[wqkv; attn_gate]`, `[wq; wk; wv]`, `[ffn_gate; ffn_up]`) in `NR = 2` step-major layout (`256`-column coalesced SIMD transactions) and `token_embd` / `lm_head` in `NR = 4` tile-major layout.
-   - **Zero-ULP 32-Bit SRAM `c16` Codebook LUT**: Precomputes the exact cubic polynomial centroids once into `threadgroup` SRAM (`0-ULP` bit-identical to register polynomial `fma()`), eliminating inner-loop polynomial math.
-   - **`64`-TG Split-State `FP32` `DeltaNet` & `M = 1` Flash-GQA**: Partitions recurrent `128 x 128` head state updates across `64` threadgroups (`16` heads $\times 4$ `dv` splits) to saturate all Apple Silicon GPU cores even at batch size `1`.
-   - **`2`-Deep Speculative `8`-Step Burst Execution**: Enqueues `8` autoregressive steps per `MTLCommandBuffer` with GPU-side argmax token chaining and `FP32` `DeltaNet` state checkpoints, rolling back cleanly on mid-burst EOS (`<|im_end|>`) so multi-turn prefix caches remain exact.
-2. **Universal `MetalLlmRunner` (`src/metal_llm.rs`, `native/metal_llm.mm`)**: Executes `Lossless`, `CB3`, `WHT2`, and `Q4_0` `.vxt` models inside a single concurrent `MTLCommandBuffer` (`MTLDispatchTypeConcurrent` + `MTLBarrierScopeBuffers`).
+Evaluated across `22` archives on the exact same `Qwen/Qwen3.5-9B` base weights (WikiText-2 `580`-char PPL, Wiki Median KLD, Wiki Top-1, Turkish Mean KLD, and Turkish Top-1):
+
+| Format / Preset | `bpw` | Size (`GB`) | Wiki 580ch PPL ↓ | Wiki Med KLD ↓ | Wiki Top-1 ↑ | TR Mean KLD ↓ | TR Top-1 ↑ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`VXT-Turbo-HQ (Q8, s=0.25)`** | **`7.713`** | **`8.632`** | **`8.1826`** | **`0.0004`** | `98.18%` | **`0.0004`** | **`98.80%`** |
+| `GGUF Q8_0` *(reference)* | `8.503` | `9.517` | `8.1951` | `0.0005` | `98.27%` | `0.0009` | `98.80%` |
+| **`VXT-Turbo-HQ (Q6, s=0.75)`** | **`6.269`** | **`7.017`** | **`8.1883`** | **`0.0011`** | **`97.55%`** | **`0.0015`** | **`98.31%`** |
+| `GGUF Q6_K` *(reference)* | `6.654` | `7.447` | `8.2195` | `0.0014` | `97.45%` | `0.0022` | `97.75%` |
+
+---
+
+## 2. Live NVIDIA RTX 5090 CUDA Resident Speed (`Qwen3.5-0.8B`, `sm_120`, CUDA 12.8)
+
+| Preset / Path | Archive Size | Prefill (`tok/s`) | Decode (`tok/s`) | Speedup vs Per-Matrix CUDA (`17.5 tok/s`) | Speedup vs 16T CPU (`2.65 tok/s`) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **`--preset q3` (`E8`, `bits=7`) — `run`** | `323.02 MiB` | **`1,186.2`** | **`962.86`** | **`55.5×`** | **`364.7×`** |
+| **`--preset q6` (`E8-HQ`, `bits=8`) — `run`** | `611.41 MiB` | **`1,006.0`** | **`738.63`** | **`41.8×`** | **`277.7×`** |
+| **`--preset q6` (`E8-HQ`) — `serve` JSON API** | `611.41 MiB` | **`1,018.2`** | **`796.28`** | **`45.1×`** | **`299.4×`** |
+| **`--preset q6` (`--temp 0.6` 248K sampling)** | `611.41 MiB` | **`999.5`** | **`593.75`** | **`33.6×`** | **`223.2×`** |
+
+---
+
+## 3. Apple M2 Max Metal Benchmarks (`Qwen3.5-2B` & `Qwen3.5-9B`)
+
+| Model & Mode (`.vxt` / Reference) | Archive Size | Ratio vs `BF16` | `4×16` Split `KL` (nats) | 40-Item Strict Gen | Prefill (`tok/s`) | Decode (`tok/s`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `Qwen3.5-2B` Raw `BF16` Ref (`.gguf` / HF) | `3600.8 / 4337.5 MiB` | `1.00×` | `0.000000` | **`36 / 40`** | `40.2` | `38.4` |
+| `Qwen3.5-2B` **`VXT-Lossless-BF16`** | **`2556.80 MiB`** | `1.41× / 1.70×` | **`0.000000`** | **`36 / 40`** | `41.6` | `49.6` |
+| `Qwen3.5-2B` **`VXT-CB4-v2` (`CB4-Fast`)** | **`988.42 MiB`** | `3.64× / 4.39×` | **`0.047588`** | **`36 / 40`** | **`221.9`** | **`175.9`** |
+| `Qwen3.5-9B` **`VXT-CB4-v2` + Vision VLM** | **`4940.12 MiB`** | `3.73×` | — | Vision 3D M-RoPE | — | **`47.2`** |
+| `Qwen3.5-0.8B` **`VXT-Turbo-HQ` (`Metal`)** | `~611 MiB` | `2.66×` | — | Exact E8-HQ | — | **`297.9`** |
 
 ---
 
 ## Mathematical Codec Modes (`VXT1`)
 
-Every `.vxt` archive (`MAGIC = b"VXT1"`, version `1`) embeds `model.config`, Byte-Level BPE tables (`tokenizer.tokens`, `tokenizer.merges`, `tokenizer.types`), and `64`-byte-aligned compressed tensors with `64`-bit FNV-1a integrity verification:
+Every `.vxt` archive (`MAGIC = b"VXT1"`, version `1`) embeds `model.config`, Byte-Level BPE tables (`tokenizer.tokens`, `tokenizer.merges`, `tokenizer.types`), optional `vision.config`, and `64`-byte-aligned compressed tensors with `64`-bit FNV-1a integrity verification:
 
-1. **`VXT-Lossless-BF16` / `FP16` (`KIND_LOSSLESS = 1`)**: Sign + mantissa bit-planes + per-tensor **Top-7 Exponent LUT (`3`-bit index + escape stream)** in `256`-element superblocks (`11.35 bpw` on `Qwen3.5-2B`, `100%` bit-exact).
-2. **`VXT-CB4-v2` & `VXT-CB3` (`KIND_CODEBOOK = 2`)**:
-   - **Analytical Channel-Amplitude (`col_amp`) & Role-Aware Sparse `FP16` CSR Outliers**: Protects attention-sink / super-weight channels (e.g., `ch 1201` at `3.38x` RMS) and sensitive projections (`attn_k/v`, `attn_output`, `ssm_out`, `ffn_down`) in a compact `(col_u16, val_fp16)` CSR stream (`~0.5%–1.3%` density).
-   - **Alternating Weighted Lloyd-Max + `FP16`-Quantized Scale Optimization (`cb4_opt.rs`)**: Jointly optimizes group scales (snapped to exact `FP16`) and degree-3 polynomial centroids $c(u) = a_0 + u(a_1 + u(a_2 + u a_3))$.
-3. **`VXT-WHT2` & `VXT-Turbo` (`KIND_WHT2 = 4`, `KIND_TURBO_WHT = 5`)**: Applies an orthogonal $32 \times 32$ **Fast Walsh-Hadamard Transform** ($W_{\text{rot}} = W_{\text{bulk}} H_{32}$, $H_{32}^T H_{32} = I_{32}$) via register-only `simd_shuffle_xor` butterflies before low-bit (`2–4 bpw`) codebook / Huffman quantization.
-
----
-
-## Real-Model Benchmarks (`Qwen3.5-2B`, Apple M2 Max)
-
-### 1. End-to-End LLM Compression, Quality & Apple Metal Speed
-
-| Mode (`.vxt` / Reference) | Archive Size | Ratio vs `BF16` (`.gguf` / HF) | `4x16` Split `KL` (nats) | `4x16` `CosSim` | 40-Item Strict Gen | Prefill (`tok/s`) | Decode (`tok/s`) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Raw `BF16` Ref (`.gguf` / HF)** | `3600.8 / 4337.5 MiB` | `1.00x` | `0.000000` | `1.000000` | **`36 / 40` (`0.900`)** | `40.2` | `38.4` |
-| **`VXT-Lossless-BF16`** | **`2556.80 MiB`** | **`1.41x / 1.70x`** | **`0.000000`** | **`1.000000`** | **`36 / 40` (`0.900`)** | `41.6` | `49.6` |
-| **`GGUF-Q4_0` (`.vxt` ref)** | `1020.83 MiB` | `3.53x / 4.25x` | `0.053324`* | `0.954276`* | — | `160.0` | `137.3` |
-| **`VXT-CB4` (`v1` baseline)** | `988.60 MiB` | `3.64x / 4.39x` | `0.057072` | `0.964729` | `32 / 40` (`0.800`) | `133.0` | `105.0` (`173.2` fast) |
-| **`VXT-CB4-v2` (`CB4-Fast`)** | **`988.42 MiB`** | **`3.64x / 4.39x`** | **`0.047588`** | **`0.972549`** | **`36 / 40` (`0.900`)** | **`221.9`** | **`175.9`** |
-| **`VXT-CB3+Outlier`** | **`772.40 MiB`** | **`4.66x / 5.62x`** | `0.111692`* | `0.863824`* | — | `118.2` | `80.4` |
-| **`VXT-WHT2+Outlier` (Hybrid)** | **`645.96 MiB`** | **`5.57x / 6.71x`** | `0.799811`* | `0.646364`* | — | `140.9` | `114.2` |
-
-*\*16-step single-prompt teacher rollout (`vxg-tensor eval`); `CB4-v1` and `CB4-v2` report the stricter 4-category `4x16 = 64`-step independent split ([`reports/cb4-v2-2026-11-08.md`](../reports/cb4-v2-2026-11-08.md)).*
-
-### 2. Single-Matrix Fused Metal GPU `GEMV` (`token_embd.weight`, `248,320 x 2048`)
-
-| Kernel | Compressed Size | `bpw` | Ratio | Weight `SQNR` | `GEMV` `CosSim` | GPU Latency | Effective `BF16` BW | Speedup vs Raw `BF16` |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Raw `BF16` Baseline** | `970.00 MiB` | `16.00` | `1.00x` | Bit-Exact | `1.000000` | `2908.5 us` | `349.7 GB/s` | `1.00x` |
-| **`VXT-Lossless-BF16`** | `688.19 MiB` | `11.35` | `1.41x` | **Bit-Exact** | **`1.000000`** | `3768.6 us` | `269.9 GB/s` | `0.77x` |
-| **`GGUF-Q4_0-Ref`** | `272.81 MiB` | `4.50` | `3.56x` | `19.69 dB` | `0.993411` | `1021.4 us` | `995.8 GB/s` | `2.85x` |
-| **`VXT-CB4+Outlier`** | **`266.74 MiB`** | **`4.40`** | **`3.64x`** | **`20.68 dB`** | **`0.994593`** | `1431.6 us` | **`710.5 GB/s`** | **`2.03x`** |
-| **`VXT-CB3+Outlier`** | **`205.27 MiB`** | **`3.39`** | **`4.73x`** | **`15.40 dB`** | **`0.981885`** | `1747.1 us` | **`582.2 GB/s`** | **`1.66x`** |
-| **`VXT-WHT2+Outlier`** | **`143.68 MiB`** | **`2.37`** | **`6.75x`** | `9.74 dB` | `0.932103` | `1412.6 us` | **`720.0 GB/s`** | **`2.06x`** |
+1. **`VXT-Turbo` (`E8`, `bits = 7`) & `VXT-Turbo-HQ` (`E8-HQ`, `bits = 8`) (`KIND_TURBO_WHT = 5`)**:
+   - Deterministic `±1` column sign flips + blockwise $32 \times 32$ **Fast Walsh-Hadamard Transform** ($W_{\text{rot}} = W H_{32}$, executed via register-only warp-shuffle butterflies on Metal & CUDA).
+   - 8D Gosset Lattice (`E8` 4-bit / `E8-HQ` 8-bit even-parity coset) quantization solved under full-width `SuperBlockHessian` `act_order` `LDL-GPTQ` with Schur-complement Lagrangian water-filling (`Lagr(alpha)`), zero lookup tables on GPU, and exact `f16` 32-column sub-scales.
+2. **`VXT-Lossless-BF16` / `FP16` (`KIND_LOSSLESS = 1`)**: Sign + mantissa bit-planes + per-tensor Top-7 Exponent LUT (`11.35 bpw` on `Qwen3.5-2B`, `100%` bit-exact).
+3. **`VXT-CB4-v2` & `VXT-CB3` (`KIND_CODEBOOK = 2`)**: Analytical channel-amplitude (`col_amp`) + sparse `FP16` CSR outliers + alternating weighted Lloyd-Max cubic centroids.
 
 ---
 
 ## CLI, OpenAI Server & `VXT Studio` Quick Reference
 
 ```sh
-# Build the tensor codec + Apple Metal GPU engine
+# Build on macOS (Apple Metal GPU + Accelerate AMX automatically enabled)
 cargo build --release -p vxg-tensor --bin vxg-tensor
 
-# 1a. Pack a HuggingFace model folder (config.json + tokenizer.json + single/sharded .safetensors) -> CB4-v2 .vxt
-./target/release/vxg-tensor pack-model ./Qwen3.5-2B qwen35_2b_cb4_v2.vxt --mode cb4
+# Build on Linux with NVIDIA CUDA Resident GPU + OpenBLAS
+VXG_CUDA=1 VXG_OPENBLAS=1 VXG_CUDA_ARCH=native \
+  cargo build --release -p vxg-tensor --bin vxg-tensor
 
-# 1b. Or pack a GGUF LLM into a self-contained CB4-v2 .vxt archive
-./target/release/vxg-tensor pack-model Qwen3.5-2B-BF16.gguf qwen35_2b_cb4_v2.vxt --mode cb4
+# 1. Zero-OOM streaming pack from HuggingFace dir or GGUF using Pareto presets (q3|q4|q6|q8|lossless)
+./target/release/vxg-tensor pack-model ./Qwen3.5-9B Qwen3.5-9B-q6.vxt --preset q6 --threads 16
+./target/release/vxg-tensor pack-model Qwen3.5-9B-BF16.gguf Qwen3.5-9B-q4.vxt --preset q4 --threads 16
 
-# 2. Single-turn generation (176 tok/s greedy with --cb4-greedy, or sampled --think reasoning)
-./target/release/vxg-tensor run qwen35_2b_cb4_v2.vxt \
-  --cb4-greedy --temp 0 --presence-penalty 0 -n 256 \
+# 2. Run directly on Metal or NVIDIA CUDA Resident GPU (zero PCIe per layer)
+./target/release/vxg-tensor run Qwen3.5-9B-q6.vxt --temp 0 -n 256 \
   -p "Explain why memory bandwidth limits LLM inference in 3 bullet points."
 
-# 2b. Multimodal Vision generation (path, file://, or data:image/... URI)
+# 2b. Multimodal Vision (path, file://, or data:image/... URI)
 ./target/release/vxg-tensor run Qwen3.5-9B-cb4-v2.vxt \
-  --image screenshot.png --cb4-greedy --temp 0 --presence-penalty 0 -n 256 \
-  -p "Bu görseldeki diyagramı ve metinleri açıkla."
+  --image screenshot.png --temp 0 -n 256 -p "Bu görseldeki diyagramı açıkla."
 
-# 3. Interactive multi-turn terminal chat (stateful KV + DeltaNet prefix cache, /image <path>, /think, /clear)
-./target/release/vxg-tensor chat qwen35_2b_cb4_v2.vxt
+# 3. Interactive multi-turn terminal chat (stateful KV + DeltaNet prefix cache)
+./target/release/vxg-tensor chat Qwen3.5-9B-q6.vxt
 
-# 4. Launch the OpenAI-compatible SSE server (http://127.0.0.1:11435/v1/chat/completions)
-./target/release/vxg-tensor serve qwen35_2b_cb4_v2.vxt --port 11435
+# 4. Production OpenAI-compatible server (/v1/chat/completions, /v1/completions, tools, JSON mode, /metrics)
+./target/release/vxg-tensor serve Qwen3.5-9B-q6.vxt --port 11435
+curl -s http://127.0.0.1:11435/metrics
 
-# 5. Build the standalone macOS VXT Studio desktop app (.app + .dmg)
-cd apps/vxt-studio && pnpm install && pnpm tauri build
-```
-
-### Native Lossless Contract (`pack-native` / `verify-native`)
-
-For strict bit-exact archival of the `Qwen3.5-2B` language trunk retaining original HuggingFace tensor names, shapes, and raw `config.json` / `tokenizer.json` payloads:
-
-```sh
-vxg-tensor pack-native model.safetensors config.json tokenizer.json qwen35-native.vxt
-vxg-tensor verify-native model.safetensors config.json tokenizer.json qwen35-native.vxt
-vxg-tensor run qwen35-native.vxt --prompt "Hello" --raw --max-tokens 8
+# 5. Launch or bundle the standalone VXT Studio desktop app (Tauri v2 + React 19)
+cd apps/vxt-studio && pnpm install && pnpm tauri dev     # or: pnpm tauri build
 ```

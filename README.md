@@ -423,8 +423,8 @@ examples/ffi/            Zero-copy integration examples for C, Python, DuckDB/Ar
 native/shaders/core.gpu  Shared GPU kernel source (Metal, Vulkan GLSL, CUDA)
 native/                  Metal, Vulkan, and CUDA host bridges
 verification/            Independent Python reference model and C++ SIMT emulator
-crates/vxg-tensor/       Compressed-domain AI weight codec (.vxt), CB4-Fast Metal LLM/VLM (3D M-RoPE) & OpenAI SSE server
-apps/vxt-studio/         Tauri v2 + React + shadcn/ui + AI SDK desktop app (Multimodal Vision Chat, Tensor Forge & API Hub)
+crates/vxg-tensor/       Compressed-domain AI weight codec (.vxt, VXT-Turbo E8/E8-HQ), Apple Metal & NVIDIA CUDA Resident (963 tok/s RTX 5090) LLM/VLM/MoE runners, streaming packer & OpenAI SSE + Prometheus server
+apps/vxt-studio/         Tauri v2 + React 19 + shadcn/ui + AI SDK desktop app (HF Hub downloader, streaming Q3/Q4/Q6/Q8 .vxt Forge, Vision Chat & OpenAI/Prometheus API Hub)
 tests/                   Property, stress, differential SQL/Arrow/recovery, CI ratio gate & frozen `tests/vectors/`
 reports/                 Current benchmark artifacts (`real-public-*`, `covid-19-and-src-*`, `duckdb-*`, `ci-v0.4.1/`)
 archive/                 Archived historical milestone plans and early microbenchmark logs

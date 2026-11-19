@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -11,8 +12,11 @@ use vxg_tensor::codebook::{CodebookMatrix, Q4_0Matrix};
 use vxg_tensor::format::{read_vxt_model, write_vxt_archive, PackedTensor, VxtEntry};
 use vxg_tensor::gguf::GgufView;
 use vxg_tensor::gguf_meta::parse_gguf_kv;
-use vxg_tensor::hf_pack::{inspect_hf_model_dir, pack_hf_model_to_vxt, resolve_hf_model_dir};
-use vxg_tensor::llm_pack::{pack_gguf_model_to_vxt_with_entropy_scale, LlmPackMode};
+use vxg_tensor::hf_pack::{inspect_hf_model_dir, resolve_hf_model_dir};
+use vxg_tensor::llm_pack::LlmPackMode;
+use vxg_tensor::llm_pack_stream::{
+    pack_gguf_model_to_vxt_file, pack_hf_model_to_vxt_file, PackPreset,
+};
 use vxg_tensor::lossless::LosslessMatrix;
 use vxg_tensor::mmap::TensorBytes;
 use vxg_tensor::safetensors::{write_safetensors_u16, SafeTensorsView};
@@ -71,33 +75,21 @@ fn round2(v: f64) -> f64 {
 }
 
 pub fn default_demo_vxt_path() -> Option<String> {
-    if let Ok(home) = std::env::var("HOME") {
-        let p9b = Path::new(&home).join("Models/Qwen3.5-9B-cb4-v2.vxt");
-        if p9b.is_file() {
-            return Some(p9b.to_string_lossy().into_owned());
-        }
-    }
-    let candidates = [
-        "/Users/mapletechnologies/Models/Qwen3.5-9B-cb4-v2.vxt",
-        "/private/tmp/vxg-real-qualification-20261104/cb4-v2-20261108/Qwen3.5-2B-cb4-v2.vxt",
-        "/private/tmp/vxg-real-qualification-20261104/cb4-baseline-20261104/Qwen3.5-2B-cb4.vxt",
-    ];
-    candidates
+    let mut found: Vec<DiscoveredFile> = discover_local_files()
         .into_iter()
-        .find(|p| Path::new(p).is_file())
-        .map(str::to_owned)
+        .filter(|f| f.kind == "VXT" && f.runnable_hint)
+        .collect();
+    if let Some(first) = found.drain(..).next() {
+        return Some(first.path);
+    }
+    None
 }
 
 pub fn discover_local_files() -> Vec<DiscoveredFile> {
-    let mut dirs: Vec<PathBuf> = vec![
-        PathBuf::from("/private/tmp/vxg-real-qualification-20261104/cb4-v2-20261108"),
-        PathBuf::from("/private/tmp/vxg-real-qualification-20261104/cb4-baseline-20261104"),
-        PathBuf::from("/private/tmp/vxg-real-qualification-20261104/turbo-baseline"),
-        PathBuf::from("/private/tmp/vxg-real-qualification-20261104"),
-        PathBuf::from("/private/tmp/vxt-studio-demo"),
-    ];
+    let mut dirs: Vec<PathBuf> = vec![PathBuf::from("/private/tmp/vxt-studio-demo")];
     if let Ok(home) = std::env::var("HOME") {
         dirs.push(Path::new(&home).join("Models"));
+        dirs.push(Path::new(&home).join("Models/hf-hub"));
         dirs.push(Path::new(&home).join("Downloads"));
         let hf_hub = Path::new(&home).join(".cache/huggingface/hub");
         if let Ok(repos) = fs::read_dir(&hf_hub) {
@@ -169,18 +161,23 @@ pub fn discover_local_files() -> Vec<DiscoveredFile> {
         }
     }
     out.sort_by(|a, b| {
-        let rank = |name: &str| -> u8 {
-            if name.contains("9B") && name.contains("cb4-v2") {
+        let rank = |f: &DiscoveredFile| -> u8 {
+            let n = f.name.to_ascii_lowercase();
+            if f.kind == "VXT" && (n.contains("-q6") || n.contains("-q8") || n.contains("turbo-hq")) {
                 0
-            } else if name.contains("cb4-v2") {
+            } else if f.kind == "VXT" && (n.contains("-q4") || n.contains("-q3") || n.contains("turbo")) {
                 1
-            } else if name.contains("9B") {
+            } else if f.kind == "VXT" && n.contains("cb4") {
                 2
-            } else {
+            } else if f.kind == "VXT" {
                 3
+            } else if f.kind == "HF-DIR" {
+                4
+            } else {
+                5
             }
         };
-        rank(&a.name).cmp(&rank(&b.name)).then_with(|| a.name.cmp(&b.name))
+        rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
     });
     out
 }
@@ -348,11 +345,13 @@ pub fn inspect_tensor_file(path: &str) -> Result<InspectReport> {
     })
 }
 
-pub fn convert_tensor_to_vxt(
+pub fn convert_tensor_to_vxt_with_progress(
     input_path: &str,
     output_path: &str,
     mode: &str,
     pack_as_llm: bool,
+    cancel: &AtomicBool,
+    on_progress: &(dyn Fn(usize, usize, &str) + Sync),
 ) -> Result<ConvertReport> {
     let t0 = Instant::now();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
@@ -363,21 +362,42 @@ pub fn convert_tensor_to_vxt(
         }
     }
 
+    let cb = |done: usize, total: usize, name: &str| -> bool {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        on_progress(done, total, name);
+        true
+    };
+
+    let resolve_mode = |m: &str| -> Result<(LlmPackMode, f32, String)> {
+        if let Ok(preset) = PackPreset::parse(m) {
+            let (lm, sc) = preset.to_mode_and_scale();
+            Ok((lm, sc, format!("preset:{}", preset.name())))
+        } else {
+            let lm = LlmPackMode::parse(m)?;
+            Ok((lm, 1.0, lm.name().to_owned()))
+        }
+    };
+
+    let out_p = Path::new(output_path);
     let in_p = Path::new(input_path);
     if (pack_as_llm || in_p.is_dir())
         && !input_path.to_ascii_lowercase().ends_with(".gguf")
         && resolve_hf_model_dir(in_p).is_some()
     {
-        let llm_mode = LlmPackMode::parse(mode)?;
-        let (_cfg, raw_bytes, archive) = pack_hf_model_to_vxt(in_p, llm_mode, threads)?;
-        let (_, entries) = read_vxt_model(&archive)?;
-        fs::write(output_path, &archive).map_err(|e| Error::Io(e.to_string()))?;
+        let (llm_mode, ent_scale, label) = resolve_mode(mode)?;
+        let (_cfg, raw_bytes, out_bytes) = pack_hf_model_to_vxt_file(
+            in_p, out_p, llm_mode, threads, ent_scale, None, false, Some(&cb),
+        )?;
+        let mapped_out = TensorBytes::open(output_path)?;
+        let (_, entries) = read_vxt_model(mapped_out.as_slice())?;
         let in_mib = raw_bytes as f64 / (1024.0 * 1024.0);
-        let out_mib = archive.len() as f64 / (1024.0 * 1024.0);
+        let out_mib = out_bytes as f64 / (1024.0 * 1024.0);
         return Ok(ConvertReport {
             input_path: input_path.to_owned(),
             output_path: output_path.to_owned(),
-            mode: llm_mode.name().to_owned(),
+            mode: label,
             runnable_llm: true,
             tensor_count: entries.len(),
             input_mib: round2(in_mib),
@@ -391,17 +411,18 @@ pub fn convert_tensor_to_vxt(
     let bytes = mapped.as_slice();
 
     if pack_as_llm && bytes.starts_with(b"GGUF") {
-        let llm_mode = LlmPackMode::parse(mode)?;
-        let (_cfg, archive) =
-            pack_gguf_model_to_vxt_with_entropy_scale(bytes, llm_mode, threads, 1.0)?;
-        let (_, entries) = read_vxt_model(&archive)?;
-        fs::write(output_path, &archive).map_err(|e| Error::Io(e.to_string()))?;
+        let (llm_mode, ent_scale, label) = resolve_mode(mode)?;
+        let (_cfg, out_bytes) = pack_gguf_model_to_vxt_file(
+            bytes, out_p, llm_mode, threads, ent_scale, None, false, Some(&cb),
+        )?;
+        let mapped_out = TensorBytes::open(output_path)?;
+        let (_, entries) = read_vxt_model(mapped_out.as_slice())?;
         let in_mib = bytes.len() as f64 / (1024.0 * 1024.0);
-        let out_mib = archive.len() as f64 / (1024.0 * 1024.0);
+        let out_mib = out_bytes as f64 / (1024.0 * 1024.0);
         return Ok(ConvertReport {
             input_path: input_path.to_owned(),
             output_path: output_path.to_owned(),
-            mode: llm_mode.name().to_owned(),
+            mode: label,
             runnable_llm: true,
             tensor_count: entries.len(),
             input_mib: round2(in_mib),
@@ -413,11 +434,15 @@ pub fn convert_tensor_to_vxt(
 
     let mut entries = Vec::new();
     let encode_f32 = |m: &str, rows: usize, cols: usize, f32s: &[f32]| -> Result<PackedTensor> {
-        Ok(match m {
+        Ok(match m.to_ascii_lowercase().as_str() {
+            "q3" | "turbo" => PackedTensor::TurboWht(TurboWhtMatrix::encode(7, rows, cols, f32s)?),
+            "q4" | "q6" | "q8" | "turbo-hq" => {
+                PackedTensor::TurboWht(TurboWhtMatrix::encode(8, rows, cols, f32s)?)
+            }
             "cb4" => PackedTensor::Codebook(CodebookMatrix::encode(4, rows, cols, f32s)?),
             "cb3" => PackedTensor::Codebook(CodebookMatrix::encode(3, rows, cols, f32s)?),
             "wht2" => PackedTensor::Wht2(Wht2Matrix::encode(rows, cols, f32s)?),
-            "turbo" | "turbo2" => PackedTensor::TurboWht(TurboWhtMatrix::encode(2, rows, cols, f32s)?),
+            "turbo2" => PackedTensor::TurboWht(TurboWhtMatrix::encode(2, rows, cols, f32s)?),
             "turbo3" => PackedTensor::TurboWht(TurboWhtMatrix::encode(3, rows, cols, f32s)?),
             "q4_0" => PackedTensor::Q4_0(Q4_0Matrix::encode(rows, cols, f32s)),
             _ => return Err(Error::Format(format!("unsupported tensor pack mode '{m}'"))),

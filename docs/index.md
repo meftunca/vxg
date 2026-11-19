@@ -29,8 +29,8 @@ features:
     details: "1.17x–1.97x smaller than Zstd+Dict-9 [32..256K] on flat tabular & Covid-19 cumulative time series (`0.0963` vs `0.1495`); beats Zstd+Dict-9 on the 6-dataset real geomean (`0.1171` vs `0.1181` at `15.35 GB/s` 8T decode), while Zstd+Dict-9 leads individual nested-JSON/log/prose files and LZ4 leads unstructured GB/s."
   - title: "Calibrated 1T & 8T vs DuckDB 2.0 + Parquet (Up to 40M Rows)"
     details: "With zero-alloc GroupAccumSoa, Top-K zone-map pruning & row-bounded `--record-aligned`, VXG wins 15/15 in-cache 1T & 8T (`0.03–0.23 ms` 8T), 5/5 1T & 8T on 10M NDJSON (`1.31–4.31 ms` 8T, `8.10–31.06 ms` 1T), and 5/5 8T (4/5 1T) on 40M CSV, while DuckDB + Parquet leads 1T 40M CSV Top-10 and fixed-64K 10M NDJSON scans."
-  - title: "vxg-tensor (.vxt) AI Model Codec & Metal LLM"
-    details: "Zero-dependency LLM weight compression (1.41x bit-exact Lossless-BF16, 3.64x–3.73x CB4-v2 matching BF16 quality, 4.66x–5.57x CB3/WHT2) with 0-ULP Apple Metal GPU LLM & multimodal VLM inference."
+  - title: "vxg-tensor (.vxt) AI Model Codec, Metal & NVIDIA CUDA Resident LLM"
+    details: "VXT-Turbo E8/E8-HQ beats GGUF Q6_K (-0.43 GB, -32% TR KLD) and Q8_0 (-0.89 GB, -56% TR KLD) on Qwen3.5-9B; 962.86 tok/s Q3 / 796.28 tok/s Q6 on RTX 5090 CUDA Resident, 298 tok/s on Apple M2 Max Metal, MoE + Vision 3D M-RoPE, zero-OOM streaming packer, and OpenAI SSE + Prometheus server."
 ---
 
 ## Why VXG?
@@ -62,9 +62,9 @@ Traditional byte-stream LZ compressors (`LZ4`, `Zstd`) scan inputs sequentially 
 
 <CompressedOpsChart />
 
-### Compressed-Domain AI Model Weights & Apple Metal GPU LLM Inference (`vxg-tensor` / `.vxt`)
+### Compressed-Domain AI Model Weights & Apple Metal / NVIDIA CUDA LLM Inference (`vxg-tensor` / `.vxt`)
 
-`crates/vxg-tensor` brings VXG's compressed-domain philosophy to LLM weights (`GGUF` & `SafeTensors` -> `.vxt` `VXT1`), executing `Qwen3.5-2B` & `Qwen3.5-9B` directly from compressed Unified Memory planes inside a concurrent `MTLCommandBuffer` pipeline ([Full Specification & Benchmarks →](/TENSOR)):
+`crates/vxg-tensor` brings VXG's compressed-domain philosophy to LLM/VLM/MoE weights (`GGUF` & `SafeTensors` -> `.vxt` `VXT1` via zero-OOM streaming `--preset q3|q4|q6|q8|lossless`), beating `GGUF Q6_K` and `Q8_0` at smaller sizes on `Qwen3.5-9B` and executing directly on **Apple Metal (`298 tok/s` `0.8B`, `176 tok/s` `2B`, `47.2 tok/s` `9B + Vision`)** and **NVIDIA CUDA VRAM-Resident (`962.86 tok/s` `Q3` / `796.28 tok/s` `Q6` on RTX 5090)** ([Full Specification & Benchmarks →](/TENSOR)):
 
 <TensorBenchmarkChart compact />
 

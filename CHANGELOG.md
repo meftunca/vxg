@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.1 (`vxg-tensor` & `VXT Studio`) — `VXT-Turbo-HQ` (`E8-HQ`), 100% VRAM-Resident NVIDIA CUDA Runner (`963 tok/s` RTX 5090), Zero-OOM Streaming Packer, `MoE`, Production OpenAI API & `VXT Studio` Upgrade
+
+- **`VXT-Turbo-HQ` (`E8-HQ`, `bits = 8`) Gosset Lattice Quantizer (`crates/vxg-tensor/src/turbo_e8_hq.rs`, `reports/qwen35-9b-compression-eval.json`):**
+  - Added 8-bit even-parity 8D Gosset lattice (`E8-HQ`) with exact `f16` 32-column scales, full-width `SuperBlockHessian` `act_order` `LDL-GPTQ`, and Schur-complement Lagrangian water-filling (`Lagr(alpha)`).
+  - Across a 22-model `Qwen3.5-9B` evaluation against `GGUF`, **`VXT-Turbo-HQ (s=0.25)` (`7.713 bpw`, `8.632 GB`)** is **`0.89 GB` smaller than `GGUF Q8_0` (`9.517 GB`)** while beating `Q8_0` on Wiki 580ch PPL (`8.1826` vs `8.1951`), Wiki Med KLD (`0.0004` vs `0.0005`), and TR Mean KLD (`0.0004` vs `0.0009`, `-55.6%`); **`VXT-Turbo-HQ (s=0.75)` (`6.269 bpw`, `7.017 GB`)** is **`0.43 GB` smaller than `GGUF Q6_K` (`7.447 GB`)** while beating `Q6_K` on Wiki PPL (`8.1883` vs `8.2195`), Wiki Top-1 (`97.55%` vs `97.45%`), TR Mean KLD (`0.0015` vs `0.0022`, `-31.8%`), and TR Top-1 (`98.31%` vs `97.75%`).
+- **100% VRAM-Resident NVIDIA CUDA LLM Runner (`crates/vxg-tensor/native/cuda/vxt_cuda_llm.cu`, `src/cuda_llm.rs`, `native/cuda/vxt_cuda_gemv.cu`, `src/cuda.rs`):**
+  - Added native `nvcc` (`VXG_CUDA=1`) zero-LUT `E8`/`E8-HQ` GEMV + full VRAM-resident forward pass for hybrid `Qwen3.5` (Gated-DeltaNet + Gated-GQA + SwiGLU) and dense `Llama`/`Qwen2`/`Qwen3`/`Gemma` Transformers with zero per-layer PCIe syncs, fused sibling multi-GEMV, split-K residual projections, online-softmax FlashDecoding GQA, and 4-byte pinned GPU argmax readback.
+  - Verified live on **NVIDIA GeForce RTX 5090 (`sm_120`, CUDA 12.8.93)** (`37/37` unit tests, `2e-6 – 4e-6` hybrid logit parity): **`Qwen3.5-0.8B --preset q3` reaches `962.86 tok/s`** (`1,186.2 tok/s` prefill, **`55.5×`** over per-matrix CUDA, 100% token-for-token CPU parity) and **`--preset q6` reaches `738.63 tok/s` CLI / `796.28 tok/s` OpenAI `serve` JSON mode** (`473.5 GB/s` compressed stream).
+- **`3.13×` Packing Speedup & Zero-OOM Streaming `.vxt` Disk Writer (`src/format_stream.rs`, `src/llm_pack_stream.rs`, `src/turbo_linalg.rs`, `src/turbo_calib_ops.rs`):**
+  - Added `VxtStreamWriter<W>` (bit-exact with `write_vxt_model`) and `--preset q3|q4|q6|q8|lossless` streaming layer-by-layer to disk for bounded-RAM `27B`/`70B+` packing; cut `Qwen3.5-9B` Linux pack time from **`30m58s -> 9m53s` (`3.13×`)** and `Qwen3.5-0.8B` M2 Max pack time from **`52.8s -> 21.7s`**.
+- **Mixture-of-Experts (`MoE`) & Production OpenAI Serving (`src/llm_moe.rs`, `src/server_openai.rs`, `src/server_http.rs`):**
+  - Added Top-K softmax MoE routing + gated shared expert (`shexp`) for `Qwen3-MoE`, `Mixtral`, and `DeepSeek-MoE`.
+  - Extended `vxg-tensor serve` with `tools` / `<tool_call>` -> OpenAI `tool_calls`, `response_format` (`json_object` / `json_schema`), `stop` sequences, `POST /v1/completions`, and **Prometheus `GET /metrics`**.
+- **Production `VXT Studio` Upgrade (`apps/vxt-studio`):**
+  - Integrated HuggingFace Hub direct downloader + cancelable live progress, zero-OOM streaming `q4`/`q6`/`q8`/`q3`/`cb4`/`lossless` Pareto presets, dynamic Metal/CUDA backend status + model unload, Chat JSON Mode & stop sequences, and live `/v1/models` + `/health` + Prometheus `/metrics` API Hub.
+
 ## 0.6.0-rc.1 — Hybrid `mincore + pread` Cold/Partial-Cache Engine, Hardware `CRC32C`, Lock-Free `LIMIT` Projection, `StreamEncoder` Reuse & Wire Format Freeze (`Format v4/v5`)
 
 - **Automatic Hybrid `mincore(2)` + `1 MiB` Coalesced `pread(2)` Query Engine (`src/mmap/`, `src/frame.rs`):**

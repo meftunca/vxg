@@ -42,19 +42,19 @@ import {
 const DEMO_PROMPTS = [
   {
     label: "TR · Sıfır-Kopya Mimari",
-    text: "Sıkıştırılmış ağırlıklar (.vxt) üzerinde doğrudan GPU GEMV çalıştırmak bellek bant genişliği darboğazını nasıl çözer? 3 maddede özetle.",
+    text: "Sıkıştırılmış E8-HQ (.vxt) ağırlıkları üzerinde doğrudan GPU GEMV çalıştırmak bellek bant genişliği darboğazını nasıl çözer? 3 maddede özetle.",
   },
   {
     label: "Rust · Arena Kod Örneği",
     text: "Write a clean, idiomatic Rust bump-arena allocator struct with 64-byte alignment in ~25 lines of code.",
   },
   {
-    label: "Matematik · Hız Kazancı",
-    text: "Bir model 3.60 GB BF16 yerine 0.99 GB VXT-CB4 olarak saklanıyor ve M2 Max'te 182 GB/s akış hızıyla okunuyor. Saniyede yaklaşık kaç token üretir?",
+    label: "Matematik · RTX 5090 & M2 Max",
+    text: "Bir model 18.4 GB BF16 yerine 7.0 GB VXT-Turbo-HQ (Q6) olarak saklanıyor ve RTX 5090'da 1.79 TB/s bant genişliğiyle okunuyor. Teorik maksimum decode hızı kaç tok/s olur?",
   },
   {
     label: "EN · MoE + Vision",
-    text: "Why do Mixture-of-Experts (MoE) vision-language models benefit disproportionately from 4-bit codebook + sparse FP16 outlier compression on unified-memory laptops?",
+    text: "Why do Mixture-of-Experts (MoE) vision-language models benefit disproportionately from E8 lattice quantization and streaming disk packing?",
   },
 ];
 
@@ -119,6 +119,8 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
   const [temperature, setTemperature] = React.useState(0.6);
   const [maxTokens, setMaxTokens] = React.useState(1024);
   const [enableThinking, setEnableThinking] = React.useState(false);
+  const [jsonMode, setJsonMode] = React.useState(false);
+  const [stopSeqs, setStopSeqs] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [attachments, setAttachments] = React.useState<VisionAttachment[]>([]);
   const [dragOver, setDragOver] = React.useState(false);
@@ -135,6 +137,8 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
     effectiveTemp,
     maxTokens,
     enableThinking,
+    jsonMode,
+    stopSeqs,
     systemPrompt,
   });
   cfgRef.current = {
@@ -144,6 +148,8 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
     effectiveTemp,
     maxTokens,
     enableThinking,
+    jsonMode,
+    stopSeqs,
     systemPrompt,
   };
 
@@ -161,6 +167,16 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
           if (reqInit?.body && typeof reqInit.body === "string") {
             const payload = JSON.parse(reqInit.body);
             payload.enable_thinking = cfg.enableThinking;
+            if (cfg.jsonMode) {
+              payload.response_format = { type: "json_object" };
+            }
+            const stops = cfg.stopSeqs
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+            if (stops.length > 0) {
+              payload.stop = stops;
+            }
             if (cfg.useFastGreedy) {
               payload.presence_penalty = 0.0;
             } else {
@@ -315,6 +331,11 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
                 <Badge variant="outline" className="font-mono text-muted-foreground">
                   prefill {m.prefill_ms.toFixed(0)} ms ({m.cached_tokens} cache + {m.new_prefill_tokens} new)
                 </Badge>
+                {m.decode_path && (
+                  <Badge variant="outline" className="font-mono text-[10px] text-primary">
+                    {m.decode_path}
+                  </Badge>
+                )}
               </>
             )}
           </div>
@@ -335,8 +356,9 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
               </h2>
               <p className="mt-1 text-xs text-muted-foreground max-w-lg">
                 Vercel AI SDK (<code>useChat</code> + <code>streamText</code>) doğrudan cihazdaki{" "}
-                <code>.vxt</code> Metal motoruna bağlanır. Görselleri sürükleyip bırakabilir,{" "}
-                <code>Cmd+V</code> ile yapıştırabilir veya sol alttaki ikondan ekleyebilirsiniz.
+                <code>.vxt</code> GPU motoruna (Apple Metal / NVIDIA CUDA Resident) bağlanır.
+                Görselleri sürükleyip bırakabilir, <code>Cmd+V</code> ile yapıştırabilir veya sol
+                alttaki ikondan ekleyebilirsiniz.
               </p>
 
               {!loaded && (
@@ -467,9 +489,17 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
 
           <div className="flex items-center justify-between gap-2">
             <div>
-              <div className="text-xs font-medium">CB4-Fast Greedy (0-ULP)</div>
+              <div className="text-xs font-medium">
+                {loaded?.turbo_fast
+                  ? loaded.backend.includes("CUDA")
+                    ? "CUDA Resident Greedy"
+                    : "VXT-Turbo Fast Greedy"
+                  : "GPU Fast Greedy (0-ULP)"}
+              </div>
               <div className="text-[11px] text-muted-foreground">
-                Pipelined 2×8-tok Metal çekirdeği (~176 tok/s)
+                {loaded?.turbo_fast
+                  ? "Tam GPU-resident E8/E8-HQ çekirdeği (temp=0)"
+                  : "Pipelined CB4-Fast / Metal GPU çekirdeği (temp=0)"}
               </div>
             </div>
             <Switch
@@ -479,6 +509,16 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
                 if (checked) setEnableThinking(false);
               }}
             />
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <div className="text-xs font-medium">JSON Modu (Structured)</div>
+              <div className="text-[11px] text-muted-foreground">
+                <code>response_format: json_object</code>
+              </div>
+            </div>
+            <Switch checked={jsonMode} onCheckedChange={setJsonMode} />
           </div>
 
           {!useFastGreedy && (
@@ -528,6 +568,16 @@ export function ChatWorkspace({ studio, onRefresh, onSwitchToForge }: ChatWorksp
               step={64}
               value={maxTokens}
               onChange={(e) => setMaxTokens(Number(e.target.value) || 512)}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="text-xs font-medium">Stop Dizileri (Virgülle)</div>
+            <Input
+              value={stopSeqs}
+              onChange={(e) => setStopSeqs(e.target.value)}
+              placeholder="Örn: END, ###"
+              className="font-mono text-xs"
             />
           </div>
 
