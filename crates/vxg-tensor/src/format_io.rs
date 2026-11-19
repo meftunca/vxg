@@ -2,14 +2,20 @@
 
 use crate::{Error, Result};
 
+pub(crate) const FNV1A64_INIT: u64 = 0xcbf2_9ce4_8422_2325;
+
 #[inline]
-pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
+pub(crate) fn fnv1a64_update(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
         h ^= b as u64;
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
+}
+
+#[inline]
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
+    fnv1a64_update(FNV1A64_INIT, bytes)
 }
 
 #[inline]

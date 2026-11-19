@@ -64,7 +64,7 @@ impl LlmPackMode {
     }
 }
 
-fn should_skip_layer(name: &str, n_layer: usize) -> bool {
+pub(crate) fn should_skip_layer(name: &str, n_layer: usize) -> bool {
     if let Some(rest) = name.strip_prefix("blk.") {
         if let Some((idx_s, _)) = rest.split_once('.') {
             if let Ok(il) = idx_s.parse::<usize>() {
@@ -93,7 +93,7 @@ pub fn encode_gguf_tensor(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_gguf_tensor_with_layers(
+pub(crate) fn encode_gguf_tensor_with_layers(
     gg: &GgufView<'_>,
     meta: &GgufTensorMeta,
     mode: LlmPackMode,

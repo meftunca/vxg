@@ -181,7 +181,7 @@ pub fn write_vxt_archive(entries: &[VxtEntry]) -> Result<Vec<u8>> {
     write_vxt_model(&[], entries)
 }
 
-fn serialize_vxt_entry(entry: &VxtEntry) -> Vec<u8> {
+pub(crate) fn serialize_vxt_entry(entry: &VxtEntry) -> Vec<u8> {
     let mut sec = Vec::new();
     let nb = entry.name.as_bytes();
     sec.extend_from_slice(&(nb.len() as u32).to_le_bytes());

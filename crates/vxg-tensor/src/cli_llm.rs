@@ -10,6 +10,7 @@ use crate::chat_mm::build_single_turn_vlm_prompt;
 use crate::llm::{compare_logits, sample_logits, LlmModel};
 use crate::llm_ops::{has_severe_loop, sample_logits_top_k_p, TokenPenaltyTracker};
 use crate::llm_pack::LlmPackMode;
+use crate::llm_pack_stream::{pack_gguf_model_to_vxt_file, pack_hf_model_to_vxt_file, PackPreset};
 use crate::turbo_linalg::effective_cpu_threads;
 use crate::mmap::TensorBytes;
 use crate::vision::EncodedVisionImage;
@@ -18,12 +19,13 @@ use crate::{Error, Result};
 pub fn cmd_pack_model(args: &[String]) -> Result<()> {
     if args.len() < 2 {
         return Err(Error::Format(
-            "usage: vxg-tensor pack-model <in.gguf | hf_model_dir | model.safetensors> <out.vxt> [--mode lossless|cb4|cb3|wht2|turbo|q4_0] [--threads T] [--turbo-entropy-scale S] [--calib <file.txt> | --no-calib]".into(),
+            "usage: vxg-tensor pack-model <in.gguf | hf_model_dir | model.safetensors> <out.vxt> [--preset q3|q4|q6|q8|lossless | --mode lossless|cb4|cb3|wht2|turbo|turbo-hq|q4_0] [--threads T] [--turbo-entropy-scale S] [--calib <file.txt> | --no-calib]".into(),
         ));
     }
     let in_path = &args[0];
     let out_path = &args[1];
-    let mut mode = LlmPackMode::Lossless;
+    let mut mode: Option<LlmPackMode> = None;
+    let mut preset: Option<PackPreset> = None;
     let mut entropy_scale = None;
     let mut calib_path: Option<String> = None;
     let mut no_calib = false;
@@ -32,12 +34,15 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
+            "--preset" => {
+                i += 1;
+                let s = args.get(i).ok_or_else(|| Error::Format("missing value for --preset".into()))?;
+                preset = Some(PackPreset::parse(s)?);
+            }
             "--mode" => {
                 i += 1;
-                let s = args
-                    .get(i)
-                    .ok_or_else(|| Error::Format("missing value for --mode".into()))?;
-                mode = LlmPackMode::parse(s)?;
+                let s = args.get(i).ok_or_else(|| Error::Format("missing value for --mode".into()))?;
+                mode = Some(LlmPackMode::parse(s)?);
             }
             "--turbo-entropy-scale" => {
                 i += 1;
@@ -46,19 +51,13 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
             }
             "--calib" => {
                 i += 1;
-                let p = args
-                    .get(i)
-                    .ok_or_else(|| Error::Format("missing value for --calib".into()))?;
+                let p = args.get(i).ok_or_else(|| Error::Format("missing value for --calib".into()))?;
                 calib_path = Some(p.clone());
             }
-            "--no-calib" => {
-                no_calib = true;
-            }
+            "--no-calib" => { no_calib = true; }
             "--threads" => {
                 i += 1;
-                let req: usize = args
-                    .get(i)
-                    .and_then(|s| s.parse().ok())
+                let req: usize = args.get(i).and_then(|s| s.parse().ok())
                     .ok_or_else(|| Error::Format("invalid --threads".into()))?;
                 threads = effective_cpu_threads(req);
             }
@@ -67,6 +66,16 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
         i += 1;
     }
 
+    if preset.is_some() && mode.is_some() {
+        return Err(Error::Format("--preset and --mode are mutually exclusive".into()));
+    }
+    let (mode, default_scale, tag) = if let Some(p) = preset {
+        let (m, s) = p.to_mode_and_scale();
+        (m, s, format!("preset:{}", p.name()))
+    } else {
+        let m = mode.unwrap_or(LlmPackMode::Lossless);
+        (m, 1.0, m.name().to_owned())
+    };
     if entropy_scale.is_some() && !mode.is_turbo() {
         return Err(Error::Format("--turbo-entropy-scale requires --mode turbo or turbo-hq".into()));
     }
@@ -76,7 +85,7 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
     if (calib_path.is_some() || no_calib) && !mode.is_turbo() {
         return Err(Error::Format("--calib and --no-calib require --mode turbo or turbo-hq".into()));
     }
-    let scale = entropy_scale.unwrap_or(1.0);
+    let scale = entropy_scale.unwrap_or(default_scale);
     if !scale.is_finite() || scale < 0.0 {
         return Err(Error::Format("--turbo-entropy-scale must be finite and nonnegative".into()));
     }
@@ -86,56 +95,35 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
     };
     let t0 = Instant::now();
     let in_p = Path::new(in_path);
+    let out_p = Path::new(out_path);
     let is_hf = !in_path.to_ascii_lowercase().ends_with(".gguf")
         && (in_p.is_dir() || crate::hf_pack::resolve_hf_model_dir(in_p).is_some());
     let prog = |cur: usize, tot: usize, msg: &str| -> bool {
-        if msg.starts_with("Turbo ") {
+        if msg.starts_with("Turbo") {
             eprintln!("[pack-model {cur}/{tot}] {msg}");
         }
         true
     };
-    let (cfg, in_len, archive) = if is_hf {
-        let (cfg, raw_bytes, archive) = crate::hf_pack::pack_hf_model_to_vxt_with_calib(
-            in_p,
-            mode,
-            threads,
-            scale,
-            calib_text.as_deref(),
-            no_calib,
-            Some(&prog),
+    let (cfg, in_len, out_len) = if is_hf {
+        let (cfg, raw_bytes, out_bytes) = pack_hf_model_to_vxt_file(
+            in_p, out_p, mode, threads, scale, calib_text.as_deref(), no_calib, Some(&prog),
         )?;
-        (cfg, raw_bytes as usize, archive)
+        (cfg, raw_bytes, out_bytes)
     } else {
         let mapped = TensorBytes::open(in_path)?;
         let in_bytes = mapped.as_slice();
-        let (cfg, archive) = crate::llm_pack::pack_gguf_model_to_vxt_with_calib(
-            in_bytes,
-            mode,
-            threads,
-            scale,
-            calib_text.as_deref(),
-            no_calib,
-            Some(&prog),
+        let (cfg, out_bytes) = pack_gguf_model_to_vxt_file(
+            in_bytes, out_p, mode, threads, scale, calib_text.as_deref(), no_calib, Some(&prog),
         )?;
-        (cfg, in_bytes.len(), archive)
+        (cfg, in_bytes.len() as u64, out_bytes)
     };
-    fs::write(Path::new(out_path), &archive).map_err(|e| Error::Io(e.to_string()))?;
 
     let in_mib = in_len as f64 / (1024.0 * 1024.0);
-    let out_mib = archive.len() as f64 / (1024.0 * 1024.0);
-    let ratio = (in_len as f64) / (archive.len().max(1) as f64);
+    let out_mib = out_len as f64 / (1024.0 * 1024.0);
+    let ratio = (in_len as f64) / (out_len.max(1) as f64);
     println!(
         "Packed LLM '{}' (arch={}, {} layers, vocab={}) [{}] -> {}\n  {:.2} MiB -> {:.2} MiB ({:.2}x compression) in {:.2}s",
-        cfg.model_name,
-        cfg.arch,
-        cfg.n_layer,
-        cfg.n_vocab,
-        mode.name(),
-        out_path,
-        in_mib,
-        out_mib,
-        ratio,
-        t0.elapsed().as_secs_f64()
+        cfg.model_name, cfg.arch, cfg.n_layer, cfg.n_vocab, tag, out_path, in_mib, out_mib, ratio, t0.elapsed().as_secs_f64()
     );
     Ok(())
 }

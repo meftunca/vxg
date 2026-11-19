@@ -183,7 +183,8 @@ fn add_bias_rows(buf: &mut [f32], bias: Option<&[f32]>, n_tok: usize, cols: usiz
     }
 }
 
-/// Runs Clean-Teacher `VXT-Turbo v5` (`bits = 7` `E8`) / `VXT-Turbo-HQ` (`bits = 8` `E8-HQ`) calibration.
+/// Runs Clean-Teacher `VXT-Turbo v5` (`bits = 7` `E8`) / `VXT-Turbo-HQ` (`bits = 8` `E8-HQ`) calibration
+/// and collects all packed tensors into a `HashMap` (for in-memory callers and tests).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_sequential_turbo_pack(
     src: &dyn Cb4TensorSource,
@@ -195,6 +196,41 @@ pub(crate) fn run_sequential_turbo_pack(
     threads: usize,
     progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>,
 ) -> Result<HashMap<String, PackedTensor>> {
+    let mut out_map = HashMap::new();
+    run_sequential_turbo_pack_streaming(
+        src,
+        cfg,
+        tok,
+        calib_text,
+        turbo_entropy_scale,
+        hq,
+        threads,
+        progress,
+        &mut |batch| {
+            for (k, v) in batch {
+                out_map.insert(k, v);
+            }
+            Ok(())
+        },
+    )?;
+    Ok(out_map)
+}
+
+/// Streaming variant of [`run_sequential_turbo_pack`]: invokes `on_batch` after `token_embd`, after
+/// each transformer layer's attention & FFN projections, and after `output.weight`, allowing callers
+/// to flush compressed sections directly to disk and keep peak RAM bounded even for `27B`/`70B+` models.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_sequential_turbo_pack_streaming(
+    src: &dyn Cb4TensorSource,
+    cfg: &ModelConfig,
+    tok: &BpeTokenizer,
+    calib_text: Option<&str>,
+    turbo_entropy_scale: f32,
+    hq: bool,
+    threads: usize,
+    progress: Option<&(dyn Fn(usize, usize, &str) -> bool + Sync)>,
+    on_batch: &mut dyn FnMut(Vec<(String, PackedTensor)>) -> Result<()>,
+) -> Result<()> {
     let eff_threads = effective_cpu_threads(threads);
     let (req_len, req_seqs) = if cfg.n_vocab >= 1024 { (256usize, 16usize) } else { (64usize, 4usize) };
     let seqs = build_calib_sequences(tok, calib_text, req_len, req_seqs);
@@ -237,12 +273,11 @@ pub(crate) fn run_sequential_turbo_pack(
     }
     drop(row_cache);
 
-    let mut out_map: HashMap<String, PackedTensor> = HashMap::new();
     if has_output_weight {
         let emb_beta = turbo_v4_tensor_beta("token_embd.weight", None, cfg.n_layer, false, true) / ent_scale;
         let ch_amp_embd = build_embd_ch_amp(src, dim);
         let emb_mat = encode_untied_embd_e8(src, embd_rows, dim, emb_beta, &ch_amp_embd, hq, eff_threads)?;
-        out_map.insert("token_embd.weight".to_owned(), PackedTensor::TurboWht(emb_mat));
+        on_batch(vec![("token_embd.weight".to_owned(), PackedTensor::TurboWht(emb_mat))])?;
     }
 
     let (mut ema_attn, mut ema_ffn) = (0.0f32, 0.0f32);
@@ -285,11 +320,13 @@ pub(crate) fn run_sequential_turbo_pack(
             let b_qkv = turbo_v4_tensor_beta(&qkv_name, Some(il), cfg.n_layer, true, has_output_weight) * gain / ent_scale;
             let b_gate = turbo_v4_tensor_beta(&gate_name, Some(il), cfg.n_layer, true, has_output_weight) * gain / ent_scale;
             let b_out = turbo_v4_tensor_beta(&sout_name, Some(il), cfg.n_layer, true, has_output_weight) * gain / ent_scale;
-            out_map.insert(qkv_name.clone(), pack_e8_proj(src, &qkv_name, &hess_attn, b_qkv, hq, eff_threads)?);
-            out_map.insert(gate_name.clone(), pack_e8_proj(src, &gate_name, &hess_attn, b_gate, hq, eff_threads)?);
+            let mut batch = Vec::with_capacity(3);
+            batch.push((qkv_name.clone(), pack_e8_proj(src, &qkv_name, &hess_attn, b_qkv, hq, eff_threads)?));
+            batch.push((gate_name.clone(), pack_e8_proj(src, &gate_name, &hess_attn, b_gate, hq, eff_threads)?));
             let d_in = cfg.ssm_inner_size;
             let hess_o = SuperBlockHessian::build(&y_r, None, n_tok, d_in, pad_col(d_in), eff_threads);
-            out_map.insert(sout_name.clone(), pack_e8_proj(src, &sout_name, &hess_o, b_out, hq, eff_threads)?);
+            batch.push((sout_name.clone(), pack_e8_proj(src, &sout_name, &hess_o, b_out, hq, eff_threads)?));
+            on_batch(batch)?;
             or_
         } else {
             let (qn, kn, vn) = (format!("{pfx}.attn_q.weight"), format!("{pfx}.attn_k.weight"), format!("{pfx}.attn_v.weight"));
@@ -319,12 +356,14 @@ pub(crate) fn run_sequential_turbo_pack(
             let b_k = turbo_v4_tensor_beta(&kn, Some(il), cfg.n_layer, false, has_output_weight) * gain / ent_scale;
             let b_v = turbo_v4_tensor_beta(&vn, Some(il), cfg.n_layer, false, has_output_weight) * gain / ent_scale;
             let b_o = turbo_v4_tensor_beta(&oname, Some(il), cfg.n_layer, false, has_output_weight) * gain / ent_scale;
-            out_map.insert(qn.clone(), pack_e8_proj(src, &qn, &hess_attn, b_q, hq, eff_threads)?);
-            out_map.insert(kn.clone(), pack_e8_proj(src, &kn, &hess_attn, b_k, hq, eff_threads)?);
-            out_map.insert(vn.clone(), pack_e8_proj(src, &vn, &hess_attn, b_v, hq, eff_threads)?);
+            let mut batch = Vec::with_capacity(4);
+            batch.push((qn.clone(), pack_e8_proj(src, &qn, &hess_attn, b_q, hq, eff_threads)?));
+            batch.push((kn.clone(), pack_e8_proj(src, &kn, &hess_attn, b_k, hq, eff_threads)?));
+            batch.push((vn.clone(), pack_e8_proj(src, &vn, &hess_attn, b_v, hq, eff_threads)?));
             let att_dim = cfg.n_head * cfg.head_dim;
             let hess_o = SuperBlockHessian::build(&ar, None, n_tok, att_dim, pad_col(att_dim), eff_threads);
-            out_map.insert(oname.clone(), pack_e8_proj(src, &oname, &hess_o, b_o, hq, eff_threads)?);
+            batch.push((oname.clone(), pack_e8_proj(src, &oname, &hess_o, b_o, hq, eff_threads)?));
+            on_batch(batch)?;
             or_
         };
 
@@ -364,10 +403,12 @@ pub(crate) fn run_sequential_turbo_pack(
         let b_g = turbo_v4_tensor_beta(&fg_name, Some(il), cfg.n_layer, is_rec, has_output_weight) * gain_f / ent_scale;
         let b_u = turbo_v4_tensor_beta(&fu_name, Some(il), cfg.n_layer, is_rec, has_output_weight) * gain_f / ent_scale;
         let b_d = turbo_v4_tensor_beta(&fd_name, Some(il), cfg.n_layer, is_rec, has_output_weight) * gain_f / ent_scale;
-        out_map.insert(fg_name.clone(), pack_e8_proj(src, &fg_name, &hess_ffn, b_g, hq, eff_threads)?);
-        out_map.insert(fu_name.clone(), pack_e8_proj(src, &fu_name, &hess_ffn, b_u, hq, eff_threads)?);
+        let mut ffn_batch = Vec::with_capacity(3);
+        ffn_batch.push((fg_name.clone(), pack_e8_proj(src, &fg_name, &hess_ffn, b_g, hq, eff_threads)?));
+        ffn_batch.push((fu_name.clone(), pack_e8_proj(src, &fu_name, &hess_ffn, b_u, hq, eff_threads)?));
         let hess_down = SuperBlockHessian::build(&g_r, None, n_tok, cfg.n_ff, pad_col(cfg.n_ff), eff_threads);
-        out_map.insert(fd_name.clone(), pack_e8_proj(src, &fd_name, &hess_down, b_d, hq, eff_threads)?);
+        ffn_batch.push((fd_name.clone(), pack_e8_proj(src, &fd_name, &hess_down, b_d, hq, eff_threads)?));
+        on_batch(ffn_batch)?;
 
         for i in 0..(n_tok * dim) {
             cur_ref[i] += ffn_r[i];
@@ -386,12 +427,12 @@ pub(crate) fn run_sequential_turbo_pack(
 
     if has_output_weight {
         let b_h = turbo_v4_tensor_beta("output.weight", None, cfg.n_layer, false, true) / ent_scale;
-        out_map.insert("output.weight".to_owned(), pack_e8_proj(src, "output.weight", &hess_head, b_h, hq, eff_threads)?);
+        on_batch(vec![("output.weight".to_owned(), pack_e8_proj(src, "output.weight", &hess_head, b_h, hq, eff_threads)?)])?;
     } else {
         let b_e = turbo_v4_tensor_beta("token_embd.weight", None, cfg.n_layer, false, false) / ent_scale;
-        out_map.insert("token_embd.weight".to_owned(), pack_e8_proj(src, "token_embd.weight", &hess_head, b_e, hq, eff_threads)?);
+        on_batch(vec![("token_embd.weight".to_owned(), pack_e8_proj(src, "token_embd.weight", &hess_head, b_e, hq, eff_threads)?)])?;
     }
-    Ok(out_map)
+    Ok(())
 }
 
 #[cfg(test)]
