@@ -3,7 +3,7 @@
 //! SIMD bitfield packing (`VXT-Turbo-E8`, `bits = 7`).
 
 use crate::fp16::{f16_to_f32, f32_to_f16};
-use crate::turbo_linalg::{rotate_rows_fwht32, sgemm_nt, SuperBlockHessian};
+use crate::turbo_linalg::{rotate_rows_fwht32, sgemm_nt, Block32Chol, SuperBlockHessian};
 use crate::wht2::fwht32_inplace;
 use crate::wht_turbo::{apply_col_sign, TurboWhtMatrix};
 use crate::wht_turbo_gptq::HadamardBlockChol;
@@ -57,61 +57,86 @@ fn opp_parity_u4(ub: u8, yf: f32) -> u8 {
 }
 
 /// Solves one `8D` Gosset lattice vector under an `8x8` unit lower-triangular `LDL^T` metric.
+/// Returns `(q, word, weighted_loss)` with delta-updated branch-and-bound parity search.
 #[inline]
 pub(crate) fn solve_e8_8d_gptq(
     wk8: &[f32; 8], wb8: &[f32; 8], al8: &[f32; 8], m8: &[[f32; 8]; 8],
-) -> ([f32; 8], u32) {
+) -> ([f32; 8], u32, f32) {
     let (mut best_loss, mut best_q, mut best_w) = (f32::INFINITY, [0.0f32; 8], 0u32);
     for c in 0u8..=1u8 {
         let bias = if c != 0 { -7.5f32 } else { -8.0f32 };
         let (mut u_sel, mut q_sel, mut alt_u) = ([8u8; 8], [0.0f32; 8], [8u8; 8]);
-        let (mut y_arr, mut par_sum) = ([0.0f32; 8], 0u8);
+        let (mut y_arr, mut e_sel, mut d_sel, mut par_sum) = ([0.0f32; 8], [0.0f32; 8], [0.0f32; 8], 0u8);
         for i in 0..8 {
             let mut yi = wk8[i];
-            for j in 0..i { yi += m8[i][j] * (wb8[j] - q_sel[j]); }
+            for j in 0..i { yi = m8[i][j].mul_add(e_sel[j], yi); }
             y_arr[i] = yi;
             let yf = yi - bias;
             let ub = (yf.round() as i32).clamp(0, 15) as u8;
+            let q = (ub as f32) + bias;
             u_sel[i] = ub;
-            q_sel[i] = (ub as f32) + bias;
+            q_sel[i] = q;
+            e_sel[i] = wb8[i] - q;
+            d_sel[i] = yi - q;
             alt_u[i] = opp_parity_u4(ub, yf);
             par_sum ^= ub & 1;
         }
         let tot_loss = if par_sum != 0 {
-            let (mut best_fl, mut best_fu, mut best_fq) = (f32::INFINITY, u_sel, q_sel);
-            for idx_f in 0..8 {
-                let (mut tu, mut tq) = (u_sel, q_sel);
-                tu[idx_f] = alt_u[idx_f];
-                tq[idx_f] = (tu[idx_f] as f32) + bias;
+            let mut prefix_fl = [0.0f32; 8];
+            let mut p_acc = 0.0f32;
+            let (mut best_i0, mut best_pen0) = (7usize, f32::INFINITY);
+            for i in 0..8 {
+                prefix_fl[i] = p_acc;
+                let d0 = d_sel[i];
+                let l0 = al8[i] * d0 * d0;
+                p_acc += l0;
+                let df = y_arr[i] - ((alt_u[i] as f32) + bias);
+                let pen = al8[i] * df * df - l0;
+                if pen < best_pen0 { best_pen0 = pen; best_i0 = i; }
+            }
+            let (mut best_fl, mut best_fu, mut best_fq) = (best_loss, u_sel, q_sel);
+            for step in 0..8 {
+                let idx_f = if step == 0 { best_i0 } else {
+                    let cand = 7 - (step - 1);
+                    if cand == best_i0 { continue; }
+                    cand
+                };
+                let mut fl = prefix_fl[idx_f];
+                if fl >= best_fl { continue; }
+                let uf = alt_u[idx_f];
+                let qf = (uf as f32) + bias;
+                let df = y_arr[idx_f] - qf;
+                fl = al8[idx_f].mul_add(df * df, fl);
+                if fl >= best_fl { continue; }
+                let (mut tu, mut tq, mut dq) = (u_sel, q_sel, [0.0f32; 8]);
+                tu[idx_f] = uf;
+                tq[idx_f] = qf;
+                dq[idx_f] = q_sel[idx_f] - qf;
+                let mut ok = true;
                 for i in (idx_f + 1)..8 {
-                    let mut yi = wk8[i];
-                    for j in 0..i { yi += m8[i][j] * (wb8[j] - tq[j]); }
+                    let mut yi = y_arr[i];
+                    for j in idx_f..i { yi = m8[i][j].mul_add(dq[j], yi); }
                     let yf = yi - bias;
                     let mut ub = (yf.round() as i32).clamp(0, 15) as u8;
                     if i == 7 {
                         let req = (tu[0] ^ tu[1] ^ tu[2] ^ tu[3] ^ tu[4] ^ tu[5] ^ tu[6]) & 1;
                         if (ub & 1) != req { ub = opp_parity_u4(ub, yf); }
                     }
+                    let qi = (ub as f32) + bias;
                     tu[i] = ub;
-                    tq[i] = (ub as f32) + bias;
+                    tq[i] = qi;
+                    dq[i] = q_sel[i] - qi;
+                    let di = yi - qi;
+                    fl = al8[i].mul_add(di * di, fl);
+                    if fl >= best_fl { ok = false; break; }
                 }
-                let mut fl = 0.0f32;
-                for i in 0..8 {
-                    let mut vi = wk8[i] - tq[i];
-                    for j in 0..i { vi += m8[i][j] * (wb8[j] - tq[j]); }
-                    fl = al8[i].mul_add(vi * vi, fl);
-                }
-                if fl < best_fl { best_fl = fl; best_fu = tu; best_fq = tq; }
+                if ok && fl < best_fl { best_fl = fl; best_fu = tu; best_fq = tq; }
             }
-            u_sel = best_fu;
-            q_sel = best_fq;
+            if best_fl < best_loss { u_sel = best_fu; q_sel = best_fq; }
             best_fl
         } else {
             let mut fl = 0.0f32;
-            for i in 0..8 {
-                let d = y_arr[i] - q_sel[i];
-                fl = al8[i].mul_add(d * d, fl);
-            }
+            for i in 0..8 { fl = al8[i].mul_add(d_sel[i] * d_sel[i], fl); }
             fl
         };
         if tot_loss < best_loss {
@@ -120,29 +145,22 @@ pub(crate) fn solve_e8_8d_gptq(
             best_w = pack_e8_word(&u_sel, c);
         }
     }
-    (best_q, best_w)
+    (best_q, best_w, best_loss)
 }
 
-/// Solves one `32`-column `FWHT_32` block (`4` `E8` vectors + R-D optimal `10-bit f16` scale).
+/// Solves one `32`-column `FWHT_32` block using L1-resident `Block32Chol` (`4` `E8` vectors + R-D `10-bit f16` scale).
 #[allow(clippy::too_many_arguments)]
 #[inline]
-pub(crate) fn solve_block32_e8_gptq(
-    lc0: usize, bw: usize, alpha: &[f32], m: &[f32], h_diag: &[f32],
-    work_blk: &[f32], wt_blk: &[f32], beta: f32, rd_radius: i32, rd_slope: f32,
-    w_out: &mut [u32; 4], wq_out: &mut [f32; 32],
+pub(crate) fn solve_block32_e8_chol(
+    ch: &Block32Chol, work_blk: &[f32], wt_blk: &[f32], beta: f32,
+    rd_radius: i32, rd_slope: f32, w_out: &mut [u32; 4], wq_out: &mut [f32; 32],
 ) -> u16 {
-    let mut v_tgt = [0.0f32; 32];
-    let (mut e0, mut h_sum, mut al_sum, mut max_abs) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut e0, mut h_sum, mut max_abs) = (0.0f32, 0.0f32, 0.0f32);
     for k in 0..32 {
-        let mut s = work_blk[k];
-        let mk = &m[(lc0 + k) * bw + lc0..];
-        for j in 0..k { s += mk[j] * wt_blk[j]; }
-        v_tgt[k] = s;
         let wk = work_blk[k];
-        let hk = h_diag[lc0 + k];
-        e0 += hk * wk * wk;
+        let hk = ch.hd32[k];
+        e0 = (hk * wk).mul_add(wk, e0);
         h_sum += hk;
-        al_sum += alpha[lc0 + k];
         let av = wk.abs();
         if av > max_abs { max_abs = av; }
     }
@@ -154,50 +172,36 @@ pub(crate) fn solve_block32_e8_gptq(
     w_out.fill(pack_e8_word(&[8; 8], 0));
     if sc0 <= 0.0 { return 0; }
 
-    let (mut m8_arr, mut al8_arr) = ([[[0.0f32; 8]; 8]; 4], [[1.0f32; 8]; 4]);
-    for q8 in 0..4 {
-        let b0 = lc0 + q8 * 8;
-        for i in 0..8 {
-            al8_arr[q8][i] = alpha[b0 + i];
-            for j in 0..i { m8_arr[q8][i][j] = m[(b0 + i) * bw + b0 + j]; }
-        }
-    }
-
     let eval_given_sc = |sc: f32| -> (f32, [f32; 32], [u32; 4]) {
         let inv_sc = 1.0 / sc;
         let (mut wk, mut wb) = ([0.0f32; 32], [0.0f32; 32]);
         for k in 0..32 { wk[k] = work_blk[k] * inv_sc; wb[k] = wt_blk[k] * inv_sc; }
-        let (mut q32, mut words) = ([0.0f32; 32], [0u32; 4]);
+        let (mut q32, mut words, mut raw_loss) = ([0.0f32; 32], [0u32; 4], 0.0f32);
         for q8 in 0..4 {
             let i0 = q8 * 8;
-            let (oq, ow) = solve_e8_8d_gptq(
+            let (oq, ow, l8) = solve_e8_8d_gptq(
                 wk[i0..i0 + 8].try_into().unwrap(),
                 wb[i0..i0 + 8].try_into().unwrap(),
-                &al8_arr[q8], &m8_arr[q8],
+                &ch.al8[q8], &ch.m8[q8],
             );
             q32[i0..i0 + 8].copy_from_slice(&oq);
             words[q8] = ow;
-            for r in (i0 + 8)..32 {
-                let mr = &m[(lc0 + r) * bw + lc0 + i0..];
-                let mut acc = 0.0f32;
-                for j in 0..8 { acc = mr[j].mul_add(wb[i0 + j] - oq[j], acc); }
-                wk[r] += acc;
+            raw_loss += l8;
+            if i0 + 8 < 32 {
+                let mut e8 = [0.0f32; 8];
+                for j in 0..8 { e8[j] = wb[i0 + j] - oq[j]; }
+                for r in (i0 + 8)..32 {
+                    let mr = &ch.m32[r][i0..i0 + 8];
+                    let a0 = mr[0].mul_add(e8[0], mr[1].mul_add(e8[1], mr[2].mul_add(e8[2], mr[3] * e8[3])));
+                    let a1 = mr[4].mul_add(e8[4], mr[5].mul_add(e8[5], mr[6].mul_add(e8[6], mr[7] * e8[7])));
+                    wk[r] += a0 + a1;
+                }
             }
         }
-        let mut loss = 0.0f32;
-        for k in 0..32 {
-            let mut s = q32[k];
-            let mk = &m[(lc0 + k) * bw + lc0..];
-            for j in 0..k { s += mk[j] * q32[j]; }
-            let d = v_tgt[k] - sc * s;
-            loss = alpha[lc0 + k].mul_add(d * d, loss);
-        }
-        (loss, q32, words)
+        (sc * sc * raw_loss, q32, words)
     };
 
-    // Exact Lagrangian R-D scale search over neighboring 10-bit f16 discrete grid points:
-    // min_sf  D(sf) + rd_slope * (al_sum * G(E8) * sc0^2) * (-log2(sc / sc0)).
-    let rd_lam = rd_slope * al_sum * E8_NORM_MSE * sc0 * sc0;
+    let rd_lam = rd_slope * ch.al_sum * E8_NORM_MSE * sc0 * sc0;
     let (mut best_obj, mut best_sf, mut best_sc) = (f32::INFINITY, sf0, sc0);
     let (mut best_q, mut best_w) = ([0.0f32; 32], [0u32; 4]);
     let sf0_i = sf0 as i32;
@@ -235,20 +239,31 @@ where
     let (row_tiles, steps, n_blks32) = (padded_rows / 4, padded_cols / 256, padded_cols / 32);
     let mut scales_f16 = vec![0u16; row_tiles * steps * 32];
     let mut packed_words = vec![pack_e8_word(&[8; 8], 0); row_tiles * steps * 128];
-    let chunk_rows = if cols > 4096 { 256usize } else { 512usize };
+    let chunk_rows = if cols > 4096 { 512usize } else { 1024usize };
     let workers = threads.clamp(1, 32);
     let eff_base_beta = (base_beta * BETA_RD_COMP).clamp(0.75, 4.00);
 
     let mut blk_sqrt_m = vec![1.0f32; n_blks32];
+    let mut sb_chols: Vec<Vec<Block32Chol>> = Vec::with_capacity(hess.blocks.len());
+    let mut max_bw = 0usize;
     for sb in &hess.blocks {
+        max_bw = max_bw.max(sb.bw);
+        let nb = sb.bw / 32;
+        let mut chols = Vec::with_capacity(nb);
         for (sbi, &orig_b) in sb.blk_ord.iter().enumerate() {
             let g32 = sb.c0 / 32 + orig_b;
             let lc0 = sbi * 32;
-            let mean_m: f32 = sb.alpha[lc0..lc0 + 32].iter().sum::<f32>() * (1.0 / 32.0);
-            blk_sqrt_m[g32] = mean_m.max(1e-6).sqrt();
+            let chol = Block32Chol::from_sb(lc0, sb.bw, &sb.alpha, &sb.m, &sb.h_diag);
+            blk_sqrt_m[g32] = (chol.al_sum * (1.0 / 32.0)).max(1e-6).sqrt();
+            chols.push(chol);
         }
+        sb_chols.push(chols);
     }
     let valid_blks = cols.div_ceil(32).min(n_blks32).max(1);
+
+    let mut blk_betas = vec![eff_base_beta; chunk_rows * n_blks32];
+    let mut sf_mat = vec![0u16; chunk_rows * n_blks32];
+    let mut w4_mat = vec![0u32; chunk_rows * n_blks32 * 4];
 
     let mut r0 = 0usize;
     while r0 < rows {
@@ -261,84 +276,86 @@ where
         if let Some(cb) = on_chunk.as_deref_mut() { cb(r0, r1, &w_chunk); }
 
         let w_rot = rotate_rows_fwht32(&w_chunk, rc, cols, padded_cols, threads);
-        let mut blk_betas = vec![eff_base_beta; rc * n_blks32];
-        for r in 0..rc {
-            let dst = &mut blk_betas[r * n_blks32..(r + 1) * n_blks32];
-            let row_w = &w_rot[r * padded_cols..(r + 1) * padded_cols];
-            let mut log_sum = 0.0f64;
-            for g32 in 0..valid_blks {
-                let sl = &row_w[g32 * 32..(g32 + 1) * 32];
-                let rms = (sl.iter().map(|&v| v * v).sum::<f32>() * (1.0 / 32.0)).max(1e-12).sqrt();
-                let sc = (blk_sqrt_m[g32] * rms).max(1e-12).powf(LAGR_P);
-                dst[g32] = sc;
-                log_sum += (sc as f64).ln();
-            }
-            let inv_gm = (-(log_sum / valid_blks as f64)).exp() as f32;
-            for g32 in 0..valid_blks {
-                dst[g32] = (eff_base_beta * (dst[g32] * inv_gm).clamp(0.48, 2.10)).clamp(0.72, 4.00);
-            }
-            for g32 in valid_blks..n_blks32 { dst[g32] = eff_base_beta; }
-        }
+        let w_p = workers.min(rc.max(1));
+        let rpw = rc.div_ceil(w_p);
+        let (bb_sl, sf_sl, w4_sl) = (
+            &mut blk_betas[..rc * n_blks32],
+            &mut sf_mat[..rc * n_blks32],
+            &mut w4_mat[..rc * n_blks32 * 4],
+        );
 
-        let mut sf_mat = vec![0u16; rc * n_blks32];
-        let mut w4_mat = vec![0u32; rc * n_blks32 * 4];
-        let mut err_panel = vec![0.0f32; rc * 32];
-
-        for sb in &hess.blocks {
-            let nb = sb.bw / 32;
-            let mut w_sb = vec![0.0f32; rc * sb.bw];
-            for r in 0..rc {
-                let src_row = &w_rot[r * padded_cols..(r + 1) * padded_cols];
-                let dst_row = &mut w_sb[r * sb.bw..(r + 1) * sb.bw];
-                for (sbi, &orig_b) in sb.blk_ord.iter().enumerate() {
-                    let src_c0 = sb.c0 + orig_b * 32;
-                    dst_row[sbi * 32..(sbi + 1) * 32].copy_from_slice(&src_row[src_c0..src_c0 + 32]);
-                }
-            }
-            let mut work_sb = w_sb.clone();
-
-            for sbi in 0..nb {
-                let lc0 = sbi * 32;
-                let orig_g32 = sb.c0 / 32 + sb.blk_ord[sbi];
-                let w_p = workers.min(rc.max(1));
-                let rpw = rc.div_ceil(w_p);
-                std::thread::scope(|s| {
-                    let (wt_ref, wk_ref, bb_ref) = (&w_sb, &work_sb, &blk_betas);
-                    for (ci, ((sf_b, w4_b), ep_b)) in sf_mat
-                        .chunks_mut(rpw * n_blks32)
-                        .zip(w4_mat.chunks_mut(rpw * n_blks32 * 4))
-                        .zip(err_panel.chunks_mut(rpw * 32))
-                        .enumerate()
-                    {
-                        let (rb0, nrb) = (ci * rpw, ep_b.len() / 32);
-                        s.spawn(move || {
-                            let (mut w_out, mut wq_out) = ([0u32; 4], [0.0f32; 32]);
+        std::thread::scope(|s| {
+            let (wr_ref, bsm_ref, h_ref, ch_ref) = (&w_rot, &blk_sqrt_m, hess, &sb_chols);
+            for (ci, ((bb_b, sf_b), w4_b)) in bb_sl
+                .chunks_mut(rpw * n_blks32)
+                .zip(sf_sl.chunks_mut(rpw * n_blks32))
+                .zip(w4_sl.chunks_mut(rpw * n_blks32 * 4))
+                .enumerate()
+            {
+                let rb0 = ci * rpw;
+                let nrb = bb_b.len() / n_blks32;
+                s.spawn(move || {
+                    for dr in 0..nrb {
+                        let r = rb0 + dr;
+                        let dst = &mut bb_b[dr * n_blks32..(dr + 1) * n_blks32];
+                        let row_w = &wr_ref[r * padded_cols..(r + 1) * padded_cols];
+                        let mut log_sum = 0.0f64;
+                        for g32 in 0..valid_blks {
+                            let sl = &row_w[g32 * 32..(g32 + 1) * 32];
+                            let rms = (sl.iter().map(|&v| v * v).sum::<f32>() * (1.0 / 32.0)).max(1e-12).sqrt();
+                            let sc = (bsm_ref[g32] * rms).max(1e-12).powf(LAGR_P);
+                            dst[g32] = sc;
+                            log_sum += (sc as f64).ln();
+                        }
+                        let inv_gm = (-(log_sum / valid_blks as f64)).exp() as f32;
+                        for g32 in 0..valid_blks {
+                            dst[g32] = (eff_base_beta * (dst[g32] * inv_gm).clamp(0.48, 2.10)).clamp(0.72, 4.00);
+                        }
+                        for g32 in valid_blks..n_blks32 { dst[g32] = eff_base_beta; }
+                    }
+                    let mut w_sb = vec![0.0f32; nrb * max_bw];
+                    let mut work_sb = vec![0.0f32; nrb * max_bw];
+                    let mut err_panel = vec![0.0f32; nrb * 32];
+                    let (mut w_out, mut wq_out) = ([0u32; 4], [0.0f32; 32]);
+                    for (sb_idx, sb) in h_ref.blocks.iter().enumerate() {
+                        let (bw, nb) = (sb.bw, sb.bw / 32);
+                        for dr in 0..nrb {
+                            let src_row = &wr_ref[(rb0 + dr) * padded_cols..(rb0 + dr + 1) * padded_cols];
+                            let dst_row = &mut w_sb[dr * bw..(dr + 1) * bw];
+                            for (sbi, &orig_b) in sb.blk_ord.iter().enumerate() {
+                                let src_c0 = sb.c0 + orig_b * 32;
+                                dst_row[sbi * 32..(sbi + 1) * 32].copy_from_slice(&src_row[src_c0..src_c0 + 32]);
+                            }
+                        }
+                        work_sb[..nrb * bw].copy_from_slice(&w_sb[..nrb * bw]);
+                        let chols = &ch_ref[sb_idx];
+                        for sbi in 0..nb {
+                            let lc0 = sbi * 32;
+                            let orig_g32 = sb.c0 / 32 + sb.blk_ord[sbi];
+                            let chol = &chols[sbi];
                             for dr in 0..nrb {
-                                let r = rb0 + dr;
-                                let sf = solve_block32_e8_gptq(
-                                    lc0, sb.bw, &sb.alpha, &sb.m, &sb.h_diag,
-                                    &wk_ref[r * sb.bw + lc0..r * sb.bw + lc0 + 32],
-                                    &wt_ref[r * sb.bw + lc0..r * sb.bw + lc0 + 32],
-                                    bb_ref[r * n_blks32 + orig_g32], RD_RADIUS, TWO_LN2,
+                                let wt = &w_sb[dr * bw + lc0..dr * bw + lc0 + 32];
+                                let wk = &work_sb[dr * bw + lc0..dr * bw + lc0 + 32];
+                                let sf = solve_block32_e8_chol(
+                                    chol, wk, wt, bb_b[dr * n_blks32 + orig_g32], RD_RADIUS, TWO_LN2,
                                     &mut w_out, &mut wq_out,
                                 );
                                 sf_b[dr * n_blks32 + orig_g32] = sf;
                                 let off4 = (dr * n_blks32 + orig_g32) * 4;
                                 w4_b[off4..off4 + 4].copy_from_slice(&w_out);
-                                let wt = &wt_ref[r * sb.bw + lc0..r * sb.bw + lc0 + 32];
-                                for k in 0..32 { ep_b[dr * 32 + k] = wt[k] - wq_out[k]; }
+                                for k in 0..32 { err_panel[dr * 32 + k] = wt[k] - wq_out[k]; }
                             }
-                        });
+                            if lc0 + 32 < bw {
+                                sgemm_nt(
+                                    nrb, bw - (lc0 + 32), 32, 1.0, &err_panel, 32,
+                                    &chol.m_tail, 32, 1.0, &mut work_sb[lc0 + 32..], bw, 1,
+                                );
+                            }
+                        }
                     }
                 });
-                if lc0 + 32 < sb.bw {
-                    sgemm_nt(
-                        rc, sb.bw - (lc0 + 32), 32, 1.0, &err_panel, 32,
-                        &sb.m[(lc0 + 32) * sb.bw + lc0..], sb.bw, 1.0, &mut work_sb[lc0 + 32..], sb.bw, threads,
-                    );
-                }
             }
-        }
+        });
 
         let tile0 = r0 / 4;
         for tl in 0..rc.div_ceil(4) {
@@ -375,9 +392,7 @@ where
 {
     let padded_rows = rows.div_ceil(4) * 4;
     let (row_tiles, steps, n_blks32) = (padded_rows / 4, padded_cols / 256, padded_cols / 32);
-    let mut blk_m = vec![[0.0f32; 1024]; n_blks32];
-    let mut blk_al = vec![[1.0f32; 32]; n_blks32];
-    let mut blk_hd = vec![[1.0f32; 32]; n_blks32];
+    let mut blk_chols: Vec<Block32Chol> = Vec::with_capacity(n_blks32);
     for b in 0..n_blks32 {
         let c0 = b * 32;
         let amps = ch_amp.map_or(&[][..], |a| if c0 < a.len() { &a[c0..a.len().min(c0 + 32)] } else { &[] });
@@ -388,22 +403,23 @@ where
         for v in &mut spec { *v *= ratio; }
         fwht32_inplace(&mut spec);
         let inv_sq32 = 1.0 / 32.0f64.sqrt();
-        let mut s = [0.0f64; 1024];
+        let (mut s, mut bm, mut bal, mut bhd) = ([0.0f64; 1024], [0.0f32; 1024], [1.0f32; 32], [1.0f32; 32]);
         for u in 0..32 {
             for v in 0..32 { s[u * 32 + v] = (spec[u ^ v] as f64) * inv_sq32; }
             s[u * 32 + u] = s[u * 32 + u].max(1e-8);
-            blk_hd[b][u] = s[u * 32 + u] as f32;
+            bhd[u] = s[u * 32 + u] as f32;
         }
         for k in (0..32).rev() {
             let ak = s[k * 32 + k].max(1e-8);
-            blk_al[b][k] = ak as f32;
-            blk_m[b][k * 32 + k] = 1.0;
-            for j in 0..k { blk_m[b][k * 32 + j] = (s[k * 32 + j] / ak) as f32; }
+            bal[k] = ak as f32;
+            bm[k * 32 + k] = 1.0;
+            for j in 0..k { bm[k * 32 + j] = (s[k * 32 + j] / ak) as f32; }
             for u in 0..k {
-                let mu = blk_m[b][k * 32 + u] as f64;
-                for v in 0..=u { s[u * 32 + v] -= ak * mu * (blk_m[b][k * 32 + v] as f64); }
+                let mu = bm[k * 32 + u] as f64;
+                for v in 0..=u { s[u * 32 + v] -= ak * mu * (bm[k * 32 + v] as f64); }
             }
         }
+        blk_chols.push(Block32Chol::from_sb(0, 32, &bal, &bm, &bhd));
     }
 
     let mut scales_f16 = vec![0u16; row_tiles * steps * 32];
@@ -435,9 +451,8 @@ where
                             if c0 + j < cols { r_rot[j] = apply_col_sign(src[c0 + j], c0 + j); }
                         }
                         fwht32_inplace(&mut r_rot);
-                        sc32[b8 * 4 + sr] = solve_block32_e8_gptq(
-                            0, 32, &blk_al[g32], &blk_m[g32], &blk_hd[g32],
-                            &r_rot, &r_rot, beta, RD_RADIUS, TWO_LN2, &mut w_out, &mut wq_out,
+                        sc32[b8 * 4 + sr] = solve_block32_e8_chol(
+                            &blk_chols[g32], &r_rot, &r_rot, beta, RD_RADIUS, TWO_LN2, &mut w_out, &mut wq_out,
                         );
                         for sub in 0..4 { pw128[(b8 * 4 + sub) * 4 + sr] = w_out[sub]; }
                     }

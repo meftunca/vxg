@@ -12,10 +12,11 @@ use crate::cb4_calib::Cb4TensorSource;
 use crate::format::PackedTensor;
 use crate::gguf_meta::ModelConfig;
 use crate::llm_calib::turbo_v4_tensor_beta;
-use crate::llm_ops::{rms_norm, rms_norm_inplace, silu, step_deltanet_recurrent, step_full_gqa};
+use crate::llm_ops::{rms_norm, rms_norm_inplace, silu};
 use crate::llm_prefill::gelu_tanh_f32;
 use crate::tokenizer::BpeTokenizer;
 use crate::turbo_calib_corpus::build_calib_sequences;
+use crate::turbo_calib_ops::{run_deltanet_calib_fast, run_gqa_calib_fast};
 use crate::turbo_e8::encode_e8_superblock_gptq;
 use crate::turbo_e8_hq::encode_e8_hq_superblock_gptq;
 use crate::turbo_linalg::{effective_cpu_threads, sgemm_nt, SuperBlockHessian};
@@ -171,69 +172,6 @@ fn encode_untied_embd_e8(
     Ok(TurboWhtMatrix { bits, rows, cols, padded_rows, padded_cols, disk_bytes: 0, scales_f16, packed_words })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_deltanet_sequences(
-    cfg: &ModelConfig, n_seq: usize, seq_len: usize, qkv: &[f32], z: &[f32],
-    alpha: &[f32], beta: &[f32], conv1d: &[f32], ssm_a: &[f32], dt_bias: &[f32], ssm_norm: &[f32],
-) -> Vec<f32> {
-    let (d_inner, n_vh) = (cfg.ssm_inner_size, cfg.ssm_dt_rank);
-    let conv_ch = d_inner + 2 * cfg.ssm_group_count * cfg.ssm_state_size;
-    let conv_hist = cfg.ssm_conv_kernel.saturating_sub(1) * conv_ch;
-    let dv = d_inner / n_vh.max(1);
-    let ssm_len = n_vh * dv * cfg.ssm_state_size;
-    let mut out = vec![0.0f32; n_seq * seq_len * d_inner];
-
-    std::thread::scope(|s| {
-        for (si, out_s) in out.chunks_exact_mut(seq_len * d_inner).enumerate() {
-            s.spawn(move || {
-                let (mut conv_st, mut ssm_st) = (vec![0.0f32; conv_hist], vec![0.0f32; ssm_len]);
-                for p in 0..seq_len {
-                    let t = si * seq_len + p;
-                    step_deltanet_recurrent(
-                        &qkv[t * conv_ch..(t + 1) * conv_ch], &z[t * d_inner..(t + 1) * d_inner],
-                        &alpha[t * n_vh..(t + 1) * n_vh], &beta[t * n_vh..(t + 1) * n_vh],
-                        conv1d, ssm_a, dt_bias, ssm_norm, &mut conv_st, &mut ssm_st,
-                        cfg.ssm_group_count, n_vh, cfg.ssm_state_size, dv, cfg.ssm_conv_kernel,
-                        cfg.rms_norm_eps, &mut out_s[p * d_inner..(p + 1) * d_inner],
-                    );
-                }
-            });
-        }
-    });
-    out
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_gqa_sequences(
-    cfg: &ModelConfig, n_seq: usize, seq_len: usize, gated_q: bool,
-    q: &[f32], k: &[f32], v: &[f32], q_norm: Option<&[f32]>, k_norm: Option<&[f32]>,
-) -> Vec<f32> {
-    let (nh, nkv, hd) = (cfg.n_head, cfg.n_head_kv, cfg.head_dim);
-    let q_dim = q.len() / (n_seq * seq_len).max(1);
-    let (kv_dim, att_dim) = (nkv * hd, nh * hd);
-    let mut out = vec![0.0f32; n_seq * seq_len * att_dim];
-
-    std::thread::scope(|s| {
-        for (si, out_s) in out.chunks_exact_mut(seq_len * att_dim).enumerate() {
-            s.spawn(move || {
-                let (mut kc, mut vc) = (Vec::with_capacity(seq_len * kv_dim), Vec::with_capacity(seq_len * kv_dim));
-                let (mut k_tmp, mut v_tmp) = (vec![0.0f32; kv_dim], vec![0.0f32; kv_dim]);
-                for p in 0..seq_len {
-                    let t = si * seq_len + p;
-                    k_tmp.copy_from_slice(&k[t * kv_dim..(t + 1) * kv_dim]);
-                    v_tmp.copy_from_slice(&v[t * kv_dim..(t + 1) * kv_dim]);
-                    step_full_gqa(
-                        &q[t * q_dim..(t + 1) * q_dim], &mut k_tmp, &mut v_tmp, q_norm, k_norm, gated_q,
-                        nh, nkv, hd, p, cfg.rope_dim, cfg.rope_freq_base, cfg.rope_neox, cfg.rms_norm_eps,
-                        &mut kc, &mut vc, &mut out_s[p * att_dim..(p + 1) * att_dim],
-                    );
-                }
-            });
-        }
-    });
-    out
-}
-
 fn add_bias_rows(buf: &mut [f32], bias: Option<&[f32]>, n_tok: usize, cols: usize) {
     if let Some(b) = bias {
         for t in 0..n_tok {
@@ -333,7 +271,7 @@ pub(crate) fn run_sequential_turbo_pack(
             let ssm_a = fetch_vec(src, &format!("{pfx}.ssm_a"))?;
             let dt_bias = fetch_vec(src, &format!("{pfx}.ssm_dt.bias"))?;
             let ssm_norm = fetch_vec(src, &format!("{pfx}.ssm_norm.weight"))?;
-            let y_r = run_deltanet_sequences(cfg, n_seq, seq_len, &qkv_r, &z_r, &a_r, &b_r, &conv1d, &ssm_a, &dt_bias, &ssm_norm);
+            let y_r = run_deltanet_calib_fast(cfg, n_seq, seq_len, &qkv_r, &z_r, &a_r, &b_r, &conv1d, &ssm_a, &dt_bias, &ssm_norm, eff_threads);
             let (_, mut or_) = stream_proj_f32(src, &sout_name, &y_r, n_tok, eff_threads)?;
             if let Some(apn) = src.extract_f32(&format!("{pfx}.attn_post_norm.weight")) {
                 for t in 0..n_tok {
@@ -366,7 +304,7 @@ pub(crate) fn run_sequential_turbo_pack(
             let q_norm = src.extract_f32(&format!("{pfx}.attn_q_norm.weight"));
             let k_norm = src.extract_f32(&format!("{pfx}.attn_k_norm.weight"));
             let gated_q = q_rows == cfg.n_head * cfg.head_dim * 2;
-            let ar = run_gqa_sequences(cfg, n_seq, seq_len, gated_q, &qr, &kr, &vr, q_norm.as_deref(), k_norm.as_deref());
+            let ar = run_gqa_calib_fast(cfg, n_seq, seq_len, gated_q, &qr, &kr, &vr, q_norm.as_deref(), k_norm.as_deref(), eff_threads);
             let (_, mut or_) = stream_proj_f32(src, &oname, &ar, n_tok, eff_threads)?;
             if let Some(apn) = src.extract_f32(&format!("{pfx}.attn_post_norm.weight")) {
                 for t in 0..n_tok {

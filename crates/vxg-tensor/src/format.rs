@@ -181,6 +181,61 @@ pub fn write_vxt_archive(entries: &[VxtEntry]) -> Result<Vec<u8>> {
     write_vxt_model(&[], entries)
 }
 
+fn serialize_vxt_entry(entry: &VxtEntry) -> Vec<u8> {
+    let mut sec = Vec::new();
+    let nb = entry.name.as_bytes();
+    sec.extend_from_slice(&(nb.len() as u32).to_le_bytes());
+    sec.extend_from_slice(nb);
+    match &entry.tensor {
+        PackedTensor::Lossless(m) => {
+            push_hdr(&mut sec, KIND_LOSSLESS, matches!(m.dtype, DType::F16) as u8, m.rows, m.cols, m.padded_cols);
+            sec.extend_from_slice(&m.lut);
+            push_u8_slice(&mut sec, &m.base_bytes);
+            push_u32_slice(&mut sec, &m.code_words);
+            push_u32_slice(&mut sec, &m.sb_esc_offsets);
+            push_u8_slice(&mut sec, &m.esc_bytes);
+        }
+        PackedTensor::Codebook(m) => {
+            push_hdr(&mut sec, KIND_CODEBOOK, m.bits, m.rows, m.cols, m.padded_cols);
+            for &c in &m.centroids { sec.extend_from_slice(&c.to_le_bytes()); }
+            push_u16_slice(&mut sec, &m.scales_f16);
+            push_u32_slice(&mut sec, &m.packed_words);
+            push_u32_slice(&mut sec, &m.outlier_row_ptr);
+            push_u32_slice(&mut sec, &m.outliers_packed);
+        }
+        PackedTensor::Q4_0(m) => {
+            push_hdr(&mut sec, KIND_Q4_0, 0, m.rows, m.cols, m.padded_cols);
+            push_u16_slice(&mut sec, &m.scales_f16);
+            push_u32_slice(&mut sec, &m.qs_words);
+        }
+        PackedTensor::Wht2(m) => {
+            push_hdr(&mut sec, KIND_WHT2, 2, m.rows, m.cols, m.padded_cols);
+            for &c in &m.centroids { sec.extend_from_slice(&c.to_le_bytes()); }
+            push_u16_slice(&mut sec, &m.scales_f16);
+            push_u32_slice(&mut sec, &m.packed_words);
+            push_u32_slice(&mut sec, &m.outlier_row_ptr);
+            push_u32_slice(&mut sec, &m.outliers_packed);
+        }
+        PackedTensor::RawF32 { rows, cols, data } => {
+            push_hdr(&mut sec, KIND_RAW_F32, 0, *rows, *cols, *cols);
+            push_f32_slice(&mut sec, data);
+        }
+        PackedTensor::TurboWht(m) => {
+            if matches!(m.bits, 2 | 3 | 4 | 5 | 6 | 7 | 8) {
+                push_hdr(&mut sec, KIND_TURBO_WHT_EC, m.bits, m.rows, m.cols, m.padded_cols);
+                pack_turbo_ec(m, &mut sec);
+            } else {
+                push_hdr(&mut sec, KIND_TURBO_WHT, m.bits, m.rows, m.cols, m.padded_cols);
+                push_u16_slice(&mut sec, &m.scales_f16);
+                push_u32_slice(&mut sec, &m.packed_words);
+            }
+        }
+    }
+    let checksum = fnv1a64(&sec);
+    sec.extend_from_slice(&checksum.to_le_bytes());
+    sec
+}
+
 /// Serializes model metadata KV pairs + [`VxtEntry`] tensors into a self-contained `.vxt` archive.
 pub fn write_vxt_model(meta_kv: &[(String, Vec<u8>)], entries: &[VxtEntry]) -> Result<Vec<u8>> {
     let count = u32::try_from(entries.len())
@@ -188,106 +243,49 @@ pub fn write_vxt_model(meta_kv: &[(String, Vec<u8>)], entries: &[VxtEntry]) -> R
     let mcount = u32::try_from(meta_kv.len())
         .map_err(|_| Error::Format("too many metadata entries in VXT archive".into()))?;
 
-    let mut out = Vec::new();
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&count.to_le_bytes());
-    out.extend_from_slice(&mcount.to_le_bytes());
-
+    let mut hdr = Vec::new();
+    hdr.extend_from_slice(MAGIC);
+    hdr.extend_from_slice(&VERSION.to_le_bytes());
+    hdr.extend_from_slice(&count.to_le_bytes());
+    hdr.extend_from_slice(&mcount.to_le_bytes());
     for (k, v) in meta_kv {
         let kb = k.as_bytes();
-        out.extend_from_slice(&(kb.len() as u32).to_le_bytes());
-        out.extend_from_slice(kb);
+        hdr.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+        hdr.extend_from_slice(kb);
         let packed_v = compress_meta_blob(v);
-        push_u8_slice(&mut out, &packed_v);
+        push_u8_slice(&mut hdr, &packed_v);
     }
 
-    for entry in entries {
-        pad64(&mut out);
-        let section_start = out.len();
-        let nb = entry.name.as_bytes();
-        out.extend_from_slice(&(nb.len() as u32).to_le_bytes());
-        out.extend_from_slice(nb);
+    let workers = crate::turbo_linalg::effective_cpu_threads(0).min(entries.len().max(1));
+    let mut sections: Vec<Vec<u8>> = if workers > 1 && entries.len() >= 4 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::Mutex<Vec<u8>>> = (0..entries.len()).map(|_| std::sync::Mutex::new(Vec::new())).collect();
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                let (n_ref, s_ref) = (&next, &slots);
+                s.spawn(move || loop {
+                    let idx = n_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= entries.len() { break; }
+                    let sec = serialize_vxt_entry(&entries[idx]);
+                    *s_ref[idx].lock().unwrap() = sec;
+                });
+            }
+        });
+        slots.into_iter().map(|m| m.into_inner().unwrap()).collect()
+    } else {
+        entries.iter().map(serialize_vxt_entry).collect()
+    };
 
-        match &entry.tensor {
-            PackedTensor::Lossless(m) => {
-                push_hdr(
-                    &mut out,
-                    KIND_LOSSLESS,
-                    matches!(m.dtype, DType::F16) as u8,
-                    m.rows,
-                    m.cols,
-                    m.padded_cols,
-                );
-                out.extend_from_slice(&m.lut);
-                push_u8_slice(&mut out, &m.base_bytes);
-                push_u32_slice(&mut out, &m.code_words);
-                push_u32_slice(&mut out, &m.sb_esc_offsets);
-                push_u8_slice(&mut out, &m.esc_bytes);
-            }
-            PackedTensor::Codebook(m) => {
-                push_hdr(
-                    &mut out,
-                    KIND_CODEBOOK,
-                    m.bits,
-                    m.rows,
-                    m.cols,
-                    m.padded_cols,
-                );
-                for &c in &m.centroids {
-                    out.extend_from_slice(&c.to_le_bytes());
-                }
-                push_u16_slice(&mut out, &m.scales_f16);
-                push_u32_slice(&mut out, &m.packed_words);
-                push_u32_slice(&mut out, &m.outlier_row_ptr);
-                push_u32_slice(&mut out, &m.outliers_packed);
-            }
-            PackedTensor::Q4_0(m) => {
-                push_hdr(&mut out, KIND_Q4_0, 0, m.rows, m.cols, m.padded_cols);
-                push_u16_slice(&mut out, &m.scales_f16);
-                push_u32_slice(&mut out, &m.qs_words);
-            }
-            PackedTensor::Wht2(m) => {
-                push_hdr(&mut out, KIND_WHT2, 2, m.rows, m.cols, m.padded_cols);
-                for &c in &m.centroids {
-                    out.extend_from_slice(&c.to_le_bytes());
-                }
-                push_u16_slice(&mut out, &m.scales_f16);
-                push_u32_slice(&mut out, &m.packed_words);
-                push_u32_slice(&mut out, &m.outlier_row_ptr);
-                push_u32_slice(&mut out, &m.outliers_packed);
-            }
-            PackedTensor::RawF32 { rows, cols, data } => {
-                push_hdr(&mut out, KIND_RAW_F32, 0, *rows, *cols, *cols);
-                push_f32_slice(&mut out, data);
-            }
-            PackedTensor::TurboWht(m) => {
-                if matches!(m.bits, 2 | 3 | 4 | 5 | 6 | 7 | 8) {
-                    push_hdr(
-                        &mut out,
-                        KIND_TURBO_WHT_EC,
-                        m.bits,
-                        m.rows,
-                        m.cols,
-                        m.padded_cols,
-                    );
-                    pack_turbo_ec(m, &mut out);
-                } else {
-                    push_hdr(
-                        &mut out,
-                        KIND_TURBO_WHT,
-                        m.bits,
-                        m.rows,
-                        m.cols,
-                        m.padded_cols,
-                    );
-                    push_u16_slice(&mut out, &m.scales_f16);
-                    push_u32_slice(&mut out, &m.packed_words);
-                }
-            }
-        }
-        let checksum = fnv1a64(&out[section_start..]);
-        out.extend_from_slice(&checksum.to_le_bytes());
+    let mut total = hdr.len();
+    for sec in &sections {
+        total = (total + 63) & !63;
+        total += sec.len();
+    }
+    let mut out = Vec::with_capacity(total + 8);
+    out.extend_from_slice(&hdr);
+    for sec in sections.drain(..) {
+        pad64(&mut out);
+        out.extend_from_slice(&sec);
     }
     let archive_crc = fnv1a64(&out);
     out.extend_from_slice(&archive_crc.to_le_bytes());

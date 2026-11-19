@@ -136,6 +136,79 @@ fn sgemm_nt_band_inner<const USE_FMA: bool>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn sgemm_nt_k32_4x4_inner<const USE_FMA: bool>(
+    m: usize, n: usize, alpha: f32, a: &[f32], b: &[f32], c: &mut [f32], ldc: usize,
+) {
+    macro_rules! fm { ($x:expr, $y:expr, $z:expr) => { if USE_FMA { ($x).mul_add($y, $z) } else { $z + ($x) * ($y) } }; }
+    #[inline(always)]
+    fn hsum4(v: [f32; 4]) -> f32 { (v[0] + v[2]) + (v[1] + v[3]) }
+    let mut r = 0usize;
+    while r + 4 <= m {
+        let (a0, a1, a2, a3) = (
+            &a[r * 32..r * 32 + 32],
+            &a[(r + 1) * 32..(r + 1) * 32 + 32],
+            &a[(r + 2) * 32..(r + 2) * 32 + 32],
+            &a[(r + 3) * 32..(r + 3) * 32 + 32],
+        );
+        let mut j = 0usize;
+        while j + 4 <= n {
+            let (b0, b1, b2, b3) = (
+                &b[j * 32..j * 32 + 32],
+                &b[(j + 1) * 32..(j + 1) * 32 + 32],
+                &b[(j + 2) * 32..(j + 2) * 32 + 32],
+                &b[(j + 3) * 32..(j + 3) * 32 + 32],
+            );
+            let mut s = [[[0.0f32; 4]; 4]; 4];
+            let mut p = 0usize;
+            while p < 32 {
+                for l in 0..4 {
+                    let (av0, av1, av2, av3) = (a0[p + l], a1[p + l], a2[p + l], a3[p + l]);
+                    let (bv0, bv1, bv2, bv3) = (b0[p + l], b1[p + l], b2[p + l], b3[p + l]);
+                    s[0][0][l] = fm!(av0, bv0, s[0][0][l]); s[0][1][l] = fm!(av0, bv1, s[0][1][l]);
+                    s[0][2][l] = fm!(av0, bv2, s[0][2][l]); s[0][3][l] = fm!(av0, bv3, s[0][3][l]);
+                    s[1][0][l] = fm!(av1, bv0, s[1][0][l]); s[1][1][l] = fm!(av1, bv1, s[1][1][l]);
+                    s[1][2][l] = fm!(av1, bv2, s[1][2][l]); s[1][3][l] = fm!(av1, bv3, s[1][3][l]);
+                    s[2][0][l] = fm!(av2, bv0, s[2][0][l]); s[2][1][l] = fm!(av2, bv1, s[2][1][l]);
+                    s[2][2][l] = fm!(av2, bv2, s[2][2][l]); s[2][3][l] = fm!(av2, bv3, s[2][3][l]);
+                    s[3][0][l] = fm!(av3, bv0, s[3][0][l]); s[3][1][l] = fm!(av3, bv1, s[3][1][l]);
+                    s[3][2][l] = fm!(av3, bv2, s[3][2][l]); s[3][3][l] = fm!(av3, bv3, s[3][3][l]);
+                }
+                p += 4;
+            }
+            for rr in 0..4 {
+                let crow = &mut c[(r + rr) * ldc + j..(r + rr) * ldc + j + 4];
+                for cc in 0..4 { crow[cc] = fm!(alpha, hsum4(s[rr][cc]), crow[cc]); }
+            }
+            j += 4;
+        }
+        for jj in j..n {
+            let bj = &b[jj * 32..jj * 32 + 32];
+            for (rr, ar) in [a0, a1, a2, a3].iter().enumerate() {
+                c[(r + rr) * ldc + jj] = fm!(alpha, dot8(ar, bj), c[(r + rr) * ldc + jj]);
+            }
+        }
+        r += 4;
+    }
+    for rr in r..m {
+        let ar = &a[rr * 32..rr * 32 + 32];
+        let crow = &mut c[rr * ldc..rr * ldc + n];
+        for (jj, cv) in crow.iter_mut().enumerate() {
+            *cv = fm!(alpha, dot8(ar, &b[jj * 32..jj * 32 + 32]), *cv);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn sgemm_nt_k32_4x4_avx2(
+    m: usize, n: usize, alpha: f32, a: &[f32], b: &[f32], c: &mut [f32], ldc: usize,
+) {
+    sgemm_nt_k32_4x4_inner::<true>(m, n, alpha, a, b, c, ldc);
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[allow(clippy::too_many_arguments)]
@@ -151,6 +224,22 @@ fn sgemm_nt_band(
     m: usize, n: usize, k: usize, alpha: f32, a: &[f32], lda: usize,
     b: &[f32], ldb: usize, c: &mut [f32], ldc: usize,
 ) {
+    if k == 32 && lda == 32 && ldb == 32 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+                unsafe { sgemm_nt_k32_4x4_avx2(m, n, alpha, a, b, c, ldc); }
+                return;
+            }
+            sgemm_nt_k32_4x4_inner::<false>(m, n, alpha, a, b, c, ldc);
+            return;
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            sgemm_nt_k32_4x4_inner::<true>(m, n, alpha, a, b, c, ldc);
+            return;
+        }
+    }
     #[cfg(target_arch = "x86_64")]
     {
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
@@ -172,7 +261,7 @@ pub(crate) fn sgemm_nt(
     if m == 0 || n == 0 { return; }
     let work = m.saturating_mul(n).saturating_mul(k);
     #[cfg(vxt_has_cblas)]
-    if (cfg!(target_os = "macos") || threads > 1) && k > 0 && alpha != 0.0 && work >= 65_536
+    if (cfg!(target_os = "macos") || threads > 1) && k > 0 && alpha != 0.0 && work >= 32_768
         && m <= i32::MAX as usize && n <= i32::MAX as usize && k <= i32::MAX as usize
         && lda <= i32::MAX as usize && ldb <= i32::MAX as usize && ldc <= i32::MAX as usize
     {
@@ -244,6 +333,82 @@ pub(crate) fn rotate_rows_fwht32(x: &[f32], n_tok: usize, cols: usize, padded_co
         rot_chunk(0, &mut out);
     }
     out
+}
+
+/// L1-resident `32x32` Cholesky sub-block + contiguous packed `[rem, 32]` Schur tail `m_tail`.
+pub(crate) struct Block32Chol {
+    pub m32: [[f32; 32]; 32],
+    pub m8: [[[f32; 8]; 8]; 4],
+    pub al32: [f32; 32],
+    pub al8: [[f32; 8]; 4],
+    pub hd32: [f32; 32],
+    pub al_sum: f32,
+    pub m_tail: Vec<f32>,
+}
+
+impl Block32Chol {
+    pub(crate) fn from_sb(lc0: usize, bw: usize, alpha: &[f32], m: &[f32], h_diag: &[f32]) -> Self {
+        let rem = bw.saturating_sub(lc0 + 32);
+        let mut m_tail = vec![0.0f32; rem * 32];
+        for j in 0..rem {
+            let src = &m[(lc0 + 32 + j) * bw + lc0..(lc0 + 32 + j) * bw + lc0 + 32];
+            m_tail[j * 32..(j + 1) * 32].copy_from_slice(src);
+        }
+        let mut out = Self {
+            m32: [[0.0f32; 32]; 32],
+            m8: [[[0.0f32; 8]; 8]; 4],
+            al32: [1.0f32; 32],
+            al8: [[1.0f32; 8]; 4],
+            hd32: [1.0f32; 32],
+            al_sum: 0.0,
+            m_tail,
+        };
+        for i in 0..32 {
+            let a = alpha[lc0 + i];
+            out.al32[i] = a;
+            out.al_sum += a;
+            out.hd32[i] = h_diag[lc0 + i];
+            let mr = &m[(lc0 + i) * bw + lc0..];
+            for j in 0..i {
+                out.m32[i][j] = mr[j];
+            }
+        }
+        for q8 in 0..4 {
+            let o = q8 * 8;
+            for i in 0..8 {
+                out.al8[q8][i] = out.al32[o + i];
+                for j in 0..i {
+                    out.m8[q8][i][j] = out.m32[o + i][o + j];
+                }
+            }
+        }
+        out
+    }
+}
+
+#[inline(always)]
+fn dot8(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len();
+    let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut s4, mut s5, mut s6, mut s7) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let mut i = 0usize;
+    while i + 8 <= n {
+        s0 = a[i].mul_add(b[i], s0);
+        s1 = a[i + 1].mul_add(b[i + 1], s1);
+        s2 = a[i + 2].mul_add(b[i + 2], s2);
+        s3 = a[i + 3].mul_add(b[i + 3], s3);
+        s4 = a[i + 4].mul_add(b[i + 4], s4);
+        s5 = a[i + 5].mul_add(b[i + 5], s5);
+        s6 = a[i + 6].mul_add(b[i + 6], s6);
+        s7 = a[i + 7].mul_add(b[i + 7], s7);
+        i += 8;
+    }
+    let mut s = (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7);
+    while i < n {
+        s = a[i].mul_add(b[i], s);
+        i += 1;
+    }
+    s
 }
 
 #[cfg(test)]

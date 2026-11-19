@@ -210,11 +210,27 @@ fn build_superblock(
     x_stu_rot: &[f32], dx_rot: Option<&[f32]>, ch_amp: &[f32], tok_w: &[f32], threads: usize,
 ) -> SuperBlockBlock {
     let mut xb_t = vec![0.0f32; bw * n_tok];
-    for t in 0..n_tok {
-        let row = &x_stu_rot[t * padded_cols + c0..t * padded_cols + c0 + bw];
-        let tw = tok_w[t];
-        for j in 0..bw {
-            xb_t[j * n_tok + t] = row[j] * tw;
+    let w_tr = threads.clamp(1, 32).min(bw.div_ceil(64).max(1));
+    if w_tr > 1 && bw * n_tok >= 262_144 {
+        let jpw = bw.div_ceil(w_tr);
+        std::thread::scope(|sc| {
+            for (ci, dst_blk) in xb_t.chunks_mut(jpw * n_tok).enumerate() {
+                let j0 = ci * jpw;
+                let nj = dst_blk.len() / n_tok;
+                sc.spawn(move || {
+                    for t in 0..n_tok {
+                        let row = &x_stu_rot[t * padded_cols + c0 + j0..t * padded_cols + c0 + j0 + nj];
+                        let tw = tok_w[t];
+                        for dj in 0..nj { dst_blk[dj * n_tok + t] = row[dj] * tw; }
+                    }
+                });
+            }
+        });
+    } else {
+        for t in 0..n_tok {
+            let row = &x_stu_rot[t * padded_cols + c0..t * padded_cols + c0 + bw];
+            let tw = tok_w[t];
+            for j in 0..bw { xb_t[j * n_tok + t] = row[j] * tw; }
         }
     }
     let mut h_emp = vec![0.0f32; bw * bw];
@@ -276,42 +292,51 @@ fn build_superblock(
     let diag_damp = (DIAG_DAMP_BASE * (1.0 + 0.55 * (bw as f64) / eff_n)).clamp(0.03, 0.16);
 
     let mut s = vec![0.0f32; bw * bw];
-    for bu in 0..nb {
-        let ou = blk_ord[bu];
-        let u0 = bu * 32;
-        let ou0 = ou * 32;
-        for bv in 0..nb {
-            let ov = blk_ord[bv];
-            let v0 = bv * 32;
-            let ov0 = ov * 32;
-            let same = bu == bv;
-            let p_sl = &prior32[ou * 1024..(ou + 1) * 1024];
-            for du in 0..32 {
-                let gu = c0 + ou0 + du;
-                let valid_u = gu < cols;
-                let dst_row = &mut s[(u0 + du) * bw + v0..(u0 + du) * bw + v0 + 32];
-                let h_row = &h_emp[(ou0 + du) * bw + ov0..(ou0 + du) * bw + ov0 + 32];
-                for dv in 0..32 {
-                    let gv = c0 + ov0 + dv;
-                    let val = if !valid_u || gv >= cols {
-                        if same && du == dv { 1.0 } else { 0.0 }
-                    } else {
-                        let hn = (h_row[dv] as f64) * inv_md;
-                        if same {
-                            let mut v = (lam_cross + lam_in) * hn + lam_prior * p_sl[du * 32 + dv];
-                            if du == dv {
-                                v += lam_diag * hn + diag_damp;
+    let w_s = threads.clamp(1, 32).min(nb.max(1));
+    let bpw_s = nb.div_ceil(w_s);
+    std::thread::scope(|sc| {
+        let (bo_ref, he_ref, pr_ref) = (&blk_ord, &h_emp, &prior32);
+        for (ci, s_blk) in s.chunks_mut(bpw_s * 32 * bw).enumerate() {
+            let bu0 = ci * bpw_s;
+            let nbu = s_blk.len() / (32 * bw);
+            sc.spawn(move || {
+                for dbu in 0..nbu {
+                    let bu = bu0 + dbu;
+                    let ou = bo_ref[bu];
+                    let ou0 = ou * 32;
+                    let p_sl = &pr_ref[ou * 1024..(ou + 1) * 1024];
+                    for bv in 0..nb {
+                        let ov = bo_ref[bv];
+                        let v0 = bv * 32;
+                        let ov0 = ov * 32;
+                        let same = bu == bv;
+                        for du in 0..32 {
+                            let gu = c0 + ou0 + du;
+                            let valid_u = gu < cols;
+                            let dst_row = &mut s_blk[(dbu * 32 + du) * bw + v0..(dbu * 32 + du) * bw + v0 + 32];
+                            let h_row = &he_ref[(ou0 + du) * bw + ov0..(ou0 + du) * bw + ov0 + 32];
+                            for dv in 0..32 {
+                                let gv = c0 + ov0 + dv;
+                                let val = if !valid_u || gv >= cols {
+                                    if same && du == dv { 1.0 } else { 0.0 }
+                                } else {
+                                    let hn = (h_row[dv] as f64) * inv_md;
+                                    if same {
+                                        let mut v = (lam_cross + lam_in) * hn + lam_prior * p_sl[du * 32 + dv];
+                                        if du == dv { v += lam_diag * hn + diag_damp; }
+                                        v
+                                    } else {
+                                        lam_cross * hn
+                                    }
+                                };
+                                dst_row[dv] = val as f32;
                             }
-                            v
-                        } else {
-                            lam_cross * hn
                         }
-                    };
-                    dst_row[dv] = val as f32;
+                    }
                 }
-            }
+            });
         }
-    }
+    });
     for k in 0..bw {
         if s[k * bw + k] < 1e-6 {
             s[k * bw + k] = 1e-6;

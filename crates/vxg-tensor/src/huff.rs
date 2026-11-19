@@ -101,9 +101,20 @@ pub(crate) fn huff_encode(data: &[u8], out: &mut Vec<u8>) {
         out.push(0);
         return;
     }
+    let (mut c0, mut c1, mut c2, mut c3) = ([0u64; 256], [0u64; 256], [0u64; 256], [0u64; 256]);
+    let mut chunks = data.chunks_exact(4);
+    for ch in &mut chunks {
+        c0[ch[0] as usize] += 1;
+        c1[ch[1] as usize] += 1;
+        c2[ch[2] as usize] += 1;
+        c3[ch[3] as usize] += 1;
+    }
+    for &b in chunks.remainder() {
+        c0[b as usize] += 1;
+    }
     let mut counts = [0u64; 256];
-    for &b in data {
-        counts[b as usize] += 1;
+    for i in 0..256 {
+        counts[i] = c0[i] + c1[i] + c2[i] + c3[i];
     }
     let active = counts.iter().filter(|&&c| c > 0).count();
     if active == 1 {
@@ -134,6 +145,7 @@ pub(crate) fn huff_encode(data: &[u8], out: &mut Vec<u8>) {
         }
     }
 
+    out.reserve(data.len() + 140);
     out.push(2);
     for pair in lens.chunks_exact(2) {
         out.push(pair[0] | (pair[1] << 4));
