@@ -172,7 +172,7 @@ pub(crate) fn sgemm_nt(
     if m == 0 || n == 0 { return; }
     let work = m.saturating_mul(n).saturating_mul(k);
     #[cfg(vxt_has_cblas)]
-    if k > 0 && alpha != 0.0 && work >= 65_536
+    if (cfg!(target_os = "macos") || threads > 1) && k > 0 && alpha != 0.0 && work >= 65_536
         && m <= i32::MAX as usize && n <= i32::MAX as usize && k <= i32::MAX as usize
         && lda <= i32::MAX as usize && ldb <= i32::MAX as usize && ldc <= i32::MAX as usize
     {
