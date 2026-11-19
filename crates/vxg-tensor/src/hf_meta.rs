@@ -508,7 +508,12 @@ pub(crate) fn map_hf_tensor_name(
         "linear_attn.norm.weight" => ("ssm_norm.weight", HfTransform::Identity),
         "linear_attn.A_log" => ("ssm_a", HfTransform::NegExp),
         "linear_attn.dt_bias" => ("ssm_dt.bias", HfTransform::Identity),
-        _ => return None,
+        _ => {
+            if let Some(moe_name) = crate::llm_moe::map_hf_moe_suffix(il, suffix) {
+                return Some((moe_name, HfTransform::Identity));
+            }
+            return None;
+        }
     };
     Some((format!("blk.{il}.{dst_suf}"), tf))
 }

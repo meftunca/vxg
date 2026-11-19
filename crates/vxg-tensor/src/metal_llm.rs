@@ -458,6 +458,9 @@ impl MetalLlmRunner {
         layers: &mut [DecoderLayer],
         output_norm: &[f32],
     ) -> Result<Option<Self>> {
+        if layers.iter().any(|ly| ly.ffn_moe.is_some()) {
+            return Ok(None);
+        }
         token_embd.upload_gpu(eng)?;
         if let Some(h) = output_head.as_mut() {
             h.upload_gpu(eng)?;

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crate::format::PackedTensor;
 use crate::gguf_meta::ModelConfig;
 use crate::llm::{KvCacheMode, LlmModel, LlmState};
+use crate::llm_moe::MoeFfn;
 use crate::llm_ops::{rms_norm, silu, step_deltanet_recurrent, step_full_gqa};
 use crate::llm_prefill::{gelu_tanh_f32, rms_norm_inplace, step_full_gqa_q8};
 use crate::metal::{GpuPackedTensor, MetalEngine};
@@ -105,6 +106,7 @@ pub(crate) struct DecoderLayer {
     pub(crate) ffn_gate: MatWeight,
     pub(crate) ffn_up: MatWeight,
     pub(crate) ffn_down: MatWeight,
+    pub(crate) ffn_moe: Option<MoeFfn>,
 }
 
 pub(crate) fn extract_decoder_layers(
@@ -169,15 +171,27 @@ pub(crate) fn extract_decoder_layers(
                 gated_q,
             }
         };
+        let ffn_moe = MoeFfn::extract(&pfx, 0, map)?;
+        let (ffn_gate, ffn_up, ffn_down) = if ffn_moe.is_some() {
+            let empty = || MatWeight::cpu_only(PackedTensor::RawF32 { rows: 0, cols: 0, data: Vec::new() });
+            (empty(), empty(), empty())
+        } else {
+            (
+                take_mat(map, &format!("{pfx}.ffn_gate.weight"))?,
+                take_mat(map, &format!("{pfx}.ffn_up.weight"))?,
+                take_mat(map, &format!("{pfx}.ffn_down.weight"))?,
+            )
+        };
         layers.push(DecoderLayer {
             attn_norm,
             post_attn_norm,
             attn_post_norm,
             ffn_post_norm,
             attn,
-            ffn_gate: take_mat(map, &format!("{pfx}.ffn_gate.weight"))?,
-            ffn_up: take_mat(map, &format!("{pfx}.ffn_up.weight"))?,
-            ffn_down: take_mat(map, &format!("{pfx}.ffn_down.weight"))?,
+            ffn_gate,
+            ffn_up,
+            ffn_down,
+            ffn_moe,
         });
     }
     Ok(layers)
@@ -445,27 +459,31 @@ pub(crate) fn forward_embed_step(
         }
         rms_norm(&cur, &layer.post_attn_norm, eps, &mut normed);
 
-        forward_multi(
-            &normed,
-            &mut [
-                (&layer.ffn_gate, &mut ffn_gate_buf),
-                (&layer.ffn_up, &mut ffn_up_buf),
-            ],
-            model.metal.as_mut(),
-            threads,
-        )?;
-        if model.cfg.ffn_gelu {
-            for i in 0..model.cfg.n_ff {
-                ffn_gate_buf[i] = gelu_tanh_f32(ffn_gate_buf[i]) * ffn_up_buf[i];
-            }
+        if let Some(moe) = layer.ffn_moe.as_ref() {
+            moe.forward(&normed, &mut ffn_out, model.cfg.ffn_gelu, model.metal.as_mut(), threads)?;
         } else {
-            for i in 0..model.cfg.n_ff {
-                ffn_gate_buf[i] = silu(ffn_gate_buf[i]) * ffn_up_buf[i];
+            forward_multi(
+                &normed,
+                &mut [
+                    (&layer.ffn_gate, &mut ffn_gate_buf),
+                    (&layer.ffn_up, &mut ffn_up_buf),
+                ],
+                model.metal.as_mut(),
+                threads,
+            )?;
+            if model.cfg.ffn_gelu {
+                for i in 0..model.cfg.n_ff {
+                    ffn_gate_buf[i] = gelu_tanh_f32(ffn_gate_buf[i]) * ffn_up_buf[i];
+                }
+            } else {
+                for i in 0..model.cfg.n_ff {
+                    ffn_gate_buf[i] = silu(ffn_gate_buf[i]) * ffn_up_buf[i];
+                }
             }
+            layer
+                .ffn_down
+                .forward(&ffn_gate_buf, &mut ffn_out, model.metal.as_mut(), threads)?;
         }
-        layer
-            .ffn_down
-            .forward(&ffn_gate_buf, &mut ffn_out, model.metal.as_mut(), threads)?;
         if let Some(fpn) = layer.ffn_post_norm.as_deref() {
             rms_norm_inplace(&mut ffn_out, fpn, eps);
         }

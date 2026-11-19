@@ -547,18 +547,30 @@ pub(crate) fn prefill_cpu_tiled(
                 );
             }
 
-            layer.ffn_gate.cpu.gemm_cpu(&normed, m, &mut ffn_gate_b, threads);
-            layer.ffn_up.cpu.gemm_cpu(&normed, m, &mut ffn_up_b, threads);
-            if model.cfg.ffn_gelu {
-                for (g, &u) in ffn_gate_b.iter_mut().zip(ffn_up_b.iter()) {
-                    *g = gelu_tanh_f32(*g) * u;
+            if let Some(moe) = layer.ffn_moe.as_ref() {
+                for ti in 0..m {
+                    moe.forward(
+                        &normed[ti * dim..(ti + 1) * dim],
+                        &mut ffn_out[ti * dim..(ti + 1) * dim],
+                        model.cfg.ffn_gelu,
+                        None,
+                        threads,
+                    )?;
                 }
             } else {
-                for (g, &u) in ffn_gate_b.iter_mut().zip(ffn_up_b.iter()) {
-                    *g = silu(*g) * u;
+                layer.ffn_gate.cpu.gemm_cpu(&normed, m, &mut ffn_gate_b, threads);
+                layer.ffn_up.cpu.gemm_cpu(&normed, m, &mut ffn_up_b, threads);
+                if model.cfg.ffn_gelu {
+                    for (g, &u) in ffn_gate_b.iter_mut().zip(ffn_up_b.iter()) {
+                        *g = gelu_tanh_f32(*g) * u;
+                    }
+                } else {
+                    for (g, &u) in ffn_gate_b.iter_mut().zip(ffn_up_b.iter()) {
+                        *g = silu(*g) * u;
+                    }
                 }
+                layer.ffn_down.cpu.gemm_cpu(&ffn_gate_b, m, &mut ffn_out, threads);
             }
-            layer.ffn_down.cpu.gemm_cpu(&ffn_gate_b, m, &mut ffn_out, threads);
 
             if let Some(fpn) = layer.ffn_post_norm.as_deref() {
                 for ti in 0..m {

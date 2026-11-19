@@ -30,6 +30,7 @@ mod huff;
 pub mod llm;
 mod llm_calib;
 mod llm_cpu;
+mod llm_moe;
 pub mod llm_ops;
 pub mod llm_pack;
 pub mod llm_pack_stream;
