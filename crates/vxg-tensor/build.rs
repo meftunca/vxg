@@ -28,6 +28,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(vxt_has_cblas)");
     println!("cargo:rustc-check-cfg=cfg(vxt_has_cuda)");
     println!("cargo:rerun-if-changed=native/cuda/vxt_cuda_gemv.cu");
+    println!("cargo:rerun-if-changed=native/cuda/vxt_cuda_llm.cu");
     println!("cargo:rerun-if-changed=native/metal_internal.h");
     println!("cargo:rerun-if-changed=native/metal_cb4_fast.h");
     println!("cargo:rerun-if-changed=native/metal_gemv.mm");
@@ -65,22 +66,31 @@ fn main() {
             let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
             let nvcc = env::var("NVCC").unwrap_or_else(|_| "nvcc".into());
             let arch = env::var("VXG_CUDA_ARCH").unwrap_or_else(|_| "native".into());
-            let obj = out.join("vxt_cuda_gemv.o");
-            run(
-                Command::new(&nvcc).args([
-                    "-std=c++17",
-                    "-O3",
-                    "--use_fast_math",
-                    "-Xcompiler",
-                    "-fPIC",
-                    &format!("-arch={arch}"),
-                    "-c",
-                    "native/cuda/vxt_cuda_gemv.cu",
-                    "-o",
-                ]).arg(&obj),
-                "NVIDIA CUDA Toolkit (nvcc) is required when VXG_CUDA=1",
-            );
-            archive(&out, "vxt_cuda_gemv", &[obj]);
+            let mut objs = Vec::new();
+            for (src, obj_name) in [
+                ("native/cuda/vxt_cuda_gemv.cu", "vxt_cuda_gemv.o"),
+                ("native/cuda/vxt_cuda_llm.cu", "vxt_cuda_llm.o"),
+            ] {
+                let obj = out.join(obj_name);
+                run(
+                    Command::new(&nvcc)
+                        .args([
+                            "-std=c++17",
+                            "-O3",
+                            "--use_fast_math",
+                            "-Xcompiler",
+                            "-fPIC",
+                            &format!("-arch={arch}"),
+                            "-c",
+                            src,
+                            "-o",
+                        ])
+                        .arg(&obj),
+                    "NVIDIA CUDA Toolkit (nvcc) is required when VXG_CUDA=1",
+                );
+                objs.push(obj);
+            }
+            archive(&out, "vxt_cuda_gemv", &objs);
             for lib_dir in ["/usr/local/cuda/lib64", "/usr/local/cuda/lib64/stubs"] {
                 if Path::new(lib_dir).is_dir() {
                     println!("cargo:rustc-link-search=native={lib_dir}");

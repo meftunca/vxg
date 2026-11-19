@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::cuda::{upload_model_cuda, CudaEngine};
+use crate::cuda_llm::{CudaTurboRunner, CudaTurboState};
 use crate::format::{read_vxt_model, PackedTensor};
 use crate::gguf::GgufView;
 use crate::gguf_meta::{parse_gguf_kv, ModelConfig};
@@ -32,6 +33,7 @@ pub struct LlmState {
     pub kv_mode: KvCacheMode,
     cb4_failed: bool,
     turbo_gpu: Option<MetalTurboState>,
+    cuda_turbo_gpu: Option<CudaTurboState>,
     cb4_fast_gpu: Option<MetalCb4FastState>,
     gpu: Option<MetalLlmState>,
     pub(crate) k_caches: Vec<Vec<f32>>,
@@ -48,6 +50,7 @@ pub struct LlmModel {
     pub total_compressed_bytes: usize,
     pub(crate) metal: Option<MetalEngine>,
     pub(crate) cuda: Option<CudaEngine>,
+    cuda_turbo: Option<CudaTurboRunner>,
     metal_turbo: Option<MetalTurboRunner>,
     metal_cb4_fast: Option<MetalCb4FastRunner>,
     metal_llm: Option<MetalLlmRunner>,
@@ -219,57 +222,43 @@ impl LlmModel {
             }
         }
 
-        let cuda = if use_gpu && metal.is_none() {
+        let (mut cuda, mut cuda_turbo) = (None, None);
+        if use_gpu && metal.is_none() {
             if let Ok(eng) = CudaEngine::new() {
-                upload_model_cuda(&eng, &mut token_embd, &mut output_head, &mut layers)?;
-                Some(eng)
-            } else { None }
-        } else { None };
+                let head_cpu = output_head.as_ref().map(|h| &h.cpu);
+                cuda_turbo = CudaTurboRunner::try_from_layers(
+                    &eng, &cfg, &token_embd.cpu, &output_norm, head_cpu, &layers,
+                )?;
+                if cuda_turbo.is_none() {
+                    upload_model_cuda(&eng, &mut token_embd, &mut output_head, &mut layers)?;
+                }
+                cuda = Some(eng);
+            }
+        }
 
         Ok(Self {
-            cfg,
-            tokenizer,
-            total_compressed_bytes: archive_bytes,
-            metal,
-            cuda,
-            metal_turbo,
-            metal_cb4_fast,
-            metal_llm,
-            cpu_threads: threads,
-            cb4_greedy_enabled: false,
-            token_embd,
-            output_norm,
-            output_head,
-            layers,
-            vision,
+            cfg, tokenizer, total_compressed_bytes: archive_bytes, metal, cuda, cuda_turbo,
+            metal_turbo, metal_cb4_fast, metal_llm, cpu_threads: threads, cb4_greedy_enabled: false,
+            token_embd, output_norm, output_head, layers, vision,
         })
     }
 
     pub fn backend_label(&self) -> String {
         let base = match (&self.metal, &self.metal_turbo, &self.metal_cb4_fast, &self.metal_llm) {
-            (Some(m), Some(_), _, _) => {
-                format!("Apple Metal GPU ({}, VXT-Turbo Pipelined)", m.device_name())
-            }
-            (Some(m), None, Some(_), _) => {
-                format!("Apple Metal GPU ({}, 1-CmdBuf Fused, CB4-Fast Pipelined)", m.device_name())
-            }
-            (Some(m), None, None, Some(_)) => {
-                format!("Apple Metal GPU ({}, 1-CmdBuf Fused)", m.device_name())
-            }
+            (Some(m), Some(_), _, _) => format!("Apple Metal GPU ({}, VXT-Turbo Pipelined)", m.device_name()),
+            (Some(m), None, Some(_), _) => format!("Apple Metal GPU ({}, 1-CmdBuf Fused, CB4-Fast Pipelined)", m.device_name()),
+            (Some(m), None, None, Some(_)) => format!("Apple Metal GPU ({}, 1-CmdBuf Fused)", m.device_name()),
             (Some(m), None, None, None) => format!("Apple Metal GPU ({})", m.device_name()),
-            (None, _, _, _) => self.cuda.as_ref().map_or_else(
-                || format!("CPU ({} threads)", self.cpu_threads),
-                |c| format!("NVIDIA CUDA GPU ({})", c.device_name()),
-            ),
+            (None, _, _, _) => match (&self.cuda, &self.cuda_turbo) {
+                (_, Some(ct)) => format!("NVIDIA CUDA GPU ({}, VXT-Turbo Resident)", ct.device_name()),
+                (Some(c), None) => format!("NVIDIA CUDA GPU ({})", c.device_name()),
+                (None, None) => format!("CPU ({} threads)", self.cpu_threads),
+            },
         };
-        if let Some(vis) = self.vision.as_ref() {
-            if vis.has_gpu() {
-                format!("{base} + Vision (Metal GPU)")
-            } else {
-                format!("{base} + Vision")
-            }
-        } else {
-            base
+        match self.vision.as_ref() {
+            Some(vis) if vis.has_gpu() => format!("{base} + Vision (Metal GPU)"),
+            Some(_) => format!("{base} + Vision"),
+            None => base,
         }
     }
 
@@ -289,7 +278,7 @@ impl LlmModel {
     }
 
     pub fn has_turbo_fast_decode(&self) -> bool {
-        self.metal_turbo.is_some()
+        self.metal_turbo.is_some() || self.cuda_turbo.is_some()
     }
 
     pub fn has_cb4_fast_decode(&self) -> bool {
@@ -303,17 +292,16 @@ impl LlmModel {
     pub fn new_state_with_kv(&self, kv_mode: KvCacheMode) -> LlmState {
         let want_q8 = kv_mode == KvCacheMode::Q8_0 && self.cfg.head_dim % 32 == 0;
         let turbo_gpu = self.metal_turbo.as_ref().and_then(|tr| tr.new_state().ok());
-        let cb4_fast_gpu = if turbo_gpu.is_none() {
+        let cuda_turbo_gpu = if turbo_gpu.is_none() {
+            self.cuda_turbo.as_ref().and_then(|ct| ct.new_state().ok())
+        } else { None };
+        let cb4_fast_gpu = if turbo_gpu.is_none() && cuda_turbo_gpu.is_none() {
             self.metal_cb4_fast.as_ref().and_then(|cf| cf.new_state(want_q8).ok())
-        } else {
-            None
-        };
-        let gpu = if turbo_gpu.is_none() && cb4_fast_gpu.is_none() && !want_q8 {
+        } else { None };
+        let gpu = if turbo_gpu.is_none() && cuda_turbo_gpu.is_none() && cb4_fast_gpu.is_none() && !want_q8 {
             self.metal_llm.as_ref().and_then(|r| r.new_state().ok())
-        } else {
-            None
-        };
-        let is_cpu = turbo_gpu.is_none() && cb4_fast_gpu.is_none() && gpu.is_none();
+        } else { None };
+        let is_cpu = turbo_gpu.is_none() && cuda_turbo_gpu.is_none() && cb4_fast_gpu.is_none() && gpu.is_none();
         let (mut k_caches, mut v_caches, conv_states, ssm_states) = if is_cpu {
             alloc_cpu_state_vecs(&self.cfg)
         } else {
@@ -334,25 +322,18 @@ impl LlmModel {
             }
         }
         LlmState {
-            pos: 0,
-            rope_delta: 0,
+            pos: 0, rope_delta: 0,
             kv_mode: if want_q8 { KvCacheMode::Q8_0 } else { KvCacheMode::Fp32 },
-            cb4_failed: false,
-            turbo_gpu,
-            cb4_fast_gpu,
-            gpu,
-            k_caches,
-            v_caches,
-            k_q8,
-            v_q8,
-            conv_states,
-            ssm_states,
+            cb4_failed: false, turbo_gpu, cuda_turbo_gpu, cb4_fast_gpu, gpu,
+            k_caches, v_caches, k_q8, v_q8, conv_states, ssm_states,
         }
     }
 
     pub fn kv_cache_bytes(&self, state: &LlmState) -> usize {
         if let Some(cst) = state.cb4_fast_gpu.as_ref() {
             cst.kv_bytes()
+        } else if let Some(ct) = state.cuda_turbo_gpu.as_ref() {
+            ct.kv_bytes()
         } else {
             cpu_kv_cache_bytes(state)
         }
@@ -372,6 +353,9 @@ impl LlmModel {
         if state.rope_delta == 0 {
             if let (Some(tr), Some(tst)) = (self.metal_turbo.as_ref(), state.turbo_gpu.as_mut()) {
                 return tr.prefill_tokens(tst, &mut state.pos, prompt_ids, logits_out);
+            }
+            if let (Some(ct), Some(cst)) = (self.cuda_turbo.as_ref(), state.cuda_turbo_gpu.as_mut()) {
+                return ct.prefill_tokens(cst, &mut state.pos, prompt_ids, logits_out);
             }
         }
         if let (Some(cf), Some(cst)) = (self.metal_cb4_fast.as_ref(), state.cb4_fast_gpu.as_mut()) {
@@ -418,10 +402,11 @@ impl LlmModel {
             return Ok(());
         }
 
-        if state.gpu.is_some() || state.turbo_gpu.is_some() {
+        if state.gpu.is_some() || state.turbo_gpu.is_some() || state.cuda_turbo_gpu.is_some() {
             if state.pos == 0 {
                 state.gpu = None;
                 state.turbo_gpu = None;
+                state.cuda_turbo_gpu = None;
                 let (k, v, c, s) = alloc_cpu_state_vecs(&self.cfg);
                 state.k_caches = k;
                 state.v_caches = v;
@@ -462,10 +447,13 @@ impl LlmModel {
         if state.cb4_failed {
             return Err(Error::Unsupported("CB4 device failure invalidated this state; create a new state".into()));
         }
-        let (Some(tr), Some(tst)) = (self.metal_turbo.as_ref(), state.turbo_gpu.as_mut()) else {
-            return Err(Error::Unsupported("Turbo fast decode unavailable".into()));
-        };
-        tr.generate_greedy_fast(tst, &mut state.pos, prompt_ids, first_tok, max_new_tokens, use_sketch, presence_pen, stop_ids, on_token)
+        if let (Some(tr), Some(tst)) = (self.metal_turbo.as_ref(), state.turbo_gpu.as_mut()) {
+            return tr.generate_greedy_fast(tst, &mut state.pos, prompt_ids, first_tok, max_new_tokens, use_sketch, presence_pen, stop_ids, on_token);
+        }
+        if let (Some(ct), Some(cst)) = (self.cuda_turbo.as_ref(), state.cuda_turbo_gpu.as_mut()) {
+            return ct.generate_greedy_fast(cst, &mut state.pos, first_tok, max_new_tokens, presence_pen, stop_ids, on_token);
+        }
+        Err(Error::Unsupported("Turbo fast decode unavailable".into()))
     }
 
     /// Opt in to exact CB4 embedding decode and full-head GPU greedy selection.
@@ -564,6 +552,11 @@ impl LlmModel {
         if state.rope_delta == 0 {
             if let (Some(tr), Some(tst)) = (self.metal_turbo.as_ref(), state.turbo_gpu.as_mut()) {
                 tr.step_single(tst, state.pos as u32, token_id, logits_out)?;
+                state.pos += 1;
+                return Ok(());
+            }
+            if let (Some(ct), Some(cst)) = (self.cuda_turbo.as_ref(), state.cuda_turbo_gpu.as_mut()) {
+                ct.step_single(cst, state.pos as u32, token_id, logits_out)?;
                 state.pos += 1;
                 return Ok(());
             }
