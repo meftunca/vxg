@@ -8,9 +8,9 @@ use core::ptr::{null_mut, NonNull};
 use crate::format::PackedTensor;
 use crate::fp16::f32_to_f16;
 use crate::gguf_meta::ModelConfig;
+use crate::llm::{DecoderLayer, LayerAttn, MatWeight};
 use crate::metal::MetalEngine;
-use crate::metal_ffi::{cbuf_to_str, GpuBuf};
-use crate::metal_llm_turbo::{is_turbo_compatible, TurboAttnCpuSpec, TurboLayerCpuSpec};
+use crate::metal_ffi::cbuf_to_str;
 use crate::wht_turbo::{turbo_fwht32_padded, TurboWhtMatrix};
 use crate::{Error, Result};
 
@@ -36,55 +36,59 @@ struct VxtLlmConfig {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct VxtTurboMat {
-    bits: u32,
+struct VxtArenaMatC {
+    scales_off: usize,
+    packed_off: usize,
     rows: u32,
     cols: u32,
     padded_cols: u32,
-    scales_buf: *mut c_void,
-    packed_buf: *mut c_void,
+    bits: u32,
 }
 
-impl VxtTurboMat {
+impl VxtArenaMatC {
     fn zero() -> Self {
         Self {
-            bits: 0,
+            scales_off: 0,
+            packed_off: 0,
             rows: 0,
             cols: 0,
             padded_cols: 0,
-            scales_buf: null_mut(),
-            packed_buf: null_mut(),
+            bits: 0,
         }
     }
 }
 
 #[repr(C)]
-struct VxtTurboLayerDesc {
+struct VxtArenaLayerDescC {
     is_recurrent: u32,
     gated_q: u32,
-    has_split_gate: u32,
     gqa_flags: u32,
-    attn_norm_buf: *mut c_void,
-    post_attn_norm_buf: *mut c_void,
-    w_qkv: VxtTurboMat,
-    w_gate_sep: VxtTurboMat,
-    ab_rot_f16_buf: *mut c_void,
-    w_out: VxtTurboMat,
-    vec0_buf: *mut c_void,
-    vec1_buf: *mut c_void,
-    vec2_buf: *mut c_void,
-    vec3_buf: *mut c_void,
-    vec4_buf: *mut c_void,
-    w_ffn_gu: VxtTurboMat,
-    w_ffn_down: VxtTurboMat,
+    has_split_gate: u32,
+    attn_norm_off: usize,
+    post_attn_norm_off: usize,
+    w_qkv: VxtArenaMatC,
+    w_gate_sep: VxtArenaMatC,
+    ab_rot_f16_off: usize,
+    w_out: VxtArenaMatC,
+    vec0_off: usize,
+    vec1_off: usize,
+    vec2_off: usize,
+    vec3_off: usize,
+    vec4_off: usize,
+    w_ffn_gu: VxtArenaMatC,
+    w_ffn_down: VxtArenaMatC,
 }
 
 extern "C" {
-    fn vxt_metal_turbo_create(
-        gemv_ctx: *mut c_void, cfg: *const VxtLlmConfig, embed_mat: *const VxtTurboMat,
-        layers: *const VxtTurboLayerDesc, output_norm_buf: *mut c_void,
-        output_head_mat: *const VxtTurboMat, err_out: *mut c_char, err_cap: usize,
+    fn vxt_metal_turbo_arena_begin(
+        gemv_ctx: *mut c_void, cfg: *const VxtLlmConfig, total_arena_bytes: usize,
+        out_arena_ptr: *mut *mut c_void, err_out: *mut c_char, err_cap: usize,
     ) -> *mut c_void;
+    fn vxt_metal_turbo_arena_finalize(
+        runner: *mut c_void, embed_mat: *const VxtArenaMatC, output_head_mat: *const VxtArenaMatC,
+        output_norm_off: usize, layers: *const VxtArenaLayerDescC,
+        err_out: *mut c_char, err_cap: usize,
+    ) -> i32;
     fn vxt_metal_turbo_destroy(runner: *mut c_void);
     fn vxt_metal_turbo_state_create(runner: *mut c_void, err_out: *mut c_char, err_cap: usize) -> *mut c_void;
     fn vxt_metal_turbo_state_destroy(state: *mut c_void);
@@ -173,34 +177,12 @@ fn interleave_ffn_gu(fg: &TurboWhtMatrix, fu: &TurboWhtMatrix) -> Option<TurboWh
     }
 }
 
-fn upload_tmat(
-    ctx: NonNull<c_void>,
-    pool: &mut Vec<GpuBuf>,
-    m: &TurboWhtMatrix,
-) -> Result<VxtTurboMat> {
-    let sc = GpuBuf::upload(ctx, &m.scales_f16)?;
-    let pw = GpuBuf::upload(ctx, &m.packed_words)?;
-    let desc = VxtTurboMat {
-        bits: m.bits as u32,
-        rows: m.rows as u32,
-        cols: m.cols as u32,
-        padded_cols: m.padded_cols as u32,
-        scales_buf: sc.as_ptr(),
-        packed_buf: pw.as_ptr(),
-    };
-    pool.push(sc);
-    pool.push(pw);
-    Ok(desc)
-}
-
-fn upload_ab_rot_f16(
-    ctx: NonNull<c_void>,
-    pool: &mut Vec<GpuBuf>,
+fn build_ab_rot_f16(
     alpha: &PackedTensor,
     beta: &PackedTensor,
     n_vh: usize,
     dim: usize,
-) -> Result<*mut c_void> {
+) -> Vec<u16> {
     let padded_cols = dim.div_ceil(256) * 256;
     let a_f32 = alpha.decode_f32();
     let b_f32 = beta.decode_f32();
@@ -212,132 +194,244 @@ fn upload_ab_rot_f16(
             rot_f16.extend(r_rot.into_iter().map(f32_to_f16));
         }
     }
-    let b = GpuBuf::upload(ctx, &rot_f16)?;
-    let p = b.as_ptr();
-    pool.push(b);
-    Ok(p)
+    rot_f16
+}
+
+fn align256(len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        ((len + 255) & !255).max(256)
+    }
+}
+
+fn mat_arena_bytes(m: &TurboWhtMatrix) -> usize {
+    align256(m.scales_f16.len() * 2) + align256(m.packed_words.len() * 4)
+}
+
+fn concat_compatible(a: &TurboWhtMatrix, b: &TurboWhtMatrix) -> bool {
+    a.bits == b.bits
+        && a.cols == b.cols
+        && a.padded_cols == b.padded_cols
+        && a.rows % 4 == 0
+        && b.rows % 4 == 0
+}
+
+fn can_concat3(a: &TurboWhtMatrix, b: &TurboWhtMatrix, c: &TurboWhtMatrix) -> bool {
+    concat_compatible(a, b) && concat_compatible(a, c)
+}
+
+fn check_layers_turbo_compatible(
+    cfg: &ModelConfig,
+    token_embd: &PackedTensor,
+    output_head: Option<&PackedTensor>,
+    layers: &[DecoderLayer],
+) -> bool {
+    if cfg.ffn_gelu || (cfg.embed_scale - 1.0).abs() > 1e-6 {
+        return false;
+    }
+    if !matches!(token_embd, PackedTensor::TurboWht(_)) {
+        return false;
+    }
+    if let Some(h) = output_head {
+        if !matches!(h, PackedTensor::TurboWht(_)) {
+            return false;
+        }
+    }
+    for ly in layers {
+        if ly.attn_post_norm.is_some() || ly.ffn_post_norm.is_some() {
+            return false;
+        }
+        let (
+            PackedTensor::TurboWht(fg),
+            PackedTensor::TurboWht(fu),
+            PackedTensor::TurboWht(_),
+        ) = (&ly.ffn_gate.cpu, &ly.ffn_up.cpu, &ly.ffn_down.cpu)
+        else {
+            return false;
+        };
+        if !concat_compatible(fg, fu) {
+            return false;
+        }
+        match &ly.attn {
+            LayerAttn::LinearDeltaNet {
+                wqkv,
+                wqkv_gate,
+                ssm_out,
+                ..
+            } => {
+                let dv = cfg.ssm_inner_size.checked_div(cfg.ssm_dt_rank).unwrap_or(0);
+                if dv == 0 || dv % 32 != 0 || dv > 512 || cfg.ssm_state_size > 512 {
+                    return false;
+                }
+                if !matches!(
+                    (&wqkv.cpu, &wqkv_gate.cpu, &ssm_out.cpu),
+                    (
+                        PackedTensor::TurboWht(_),
+                        PackedTensor::TurboWht(_),
+                        PackedTensor::TurboWht(_)
+                    )
+                ) {
+                    return false;
+                }
+            }
+            LayerAttn::FullGqa { wq, wk, wv, wo, .. } => {
+                if cfg.head_dim == 0 || cfg.head_dim % 32 != 0 || cfg.head_dim > 512 {
+                    return false;
+                }
+                let (
+                    PackedTensor::TurboWht(mq),
+                    PackedTensor::TurboWht(mk),
+                    PackedTensor::TurboWht(mv),
+                    PackedTensor::TurboWht(_),
+                ) = (&wq.cpu, &wk.cpu, &wv.cpu, &wo.cpu)
+                else {
+                    return false;
+                };
+                if !concat_compatible(mk, mv) || mq.rows % 4 != 0 {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+struct ArenaWriter {
+    base: *mut u8,
+    cursor: usize,
+    cap: usize,
+}
+
+impl ArenaWriter {
+    fn write_slice<T>(&mut self, s: &[T]) -> usize {
+        let len = std::mem::size_of_val(s);
+        if len == 0 {
+            return 0;
+        }
+        let step = align256(len);
+        assert!(
+            self.cursor + step <= self.cap,
+            "Metal Turbo arena overflow: {} + {} > {}",
+            self.cursor,
+            step,
+            self.cap
+        );
+        let off = self.cursor;
+        unsafe {
+            std::ptr::copy_nonoverlapping(s.as_ptr() as *const u8, self.base.add(off), len);
+        }
+        self.cursor += step;
+        off
+    }
+
+    fn write_opt<T>(&mut self, opt: Option<&[T]>) -> usize {
+        match opt {
+            Some(s) => self.write_slice(s),
+            None => 0,
+        }
+    }
+
+    fn write_mat(&mut self, m: &TurboWhtMatrix) -> VxtArenaMatC {
+        let scales_off = self.write_slice(&m.scales_f16);
+        let packed_off = self.write_slice(&m.packed_words);
+        VxtArenaMatC {
+            scales_off,
+            packed_off,
+            rows: m.rows as u32,
+            cols: m.cols as u32,
+            padded_cols: m.padded_cols as u32,
+            bits: m.bits as u32,
+        }
+    }
+}
+
+fn empty_mat_weight() -> MatWeight {
+    MatWeight::cpu_only(PackedTensor::RawF32 {
+        rows: 0,
+        cols: 0,
+        data: Vec::new(),
+    })
 }
 
 impl TurboRunnerInner {
-    pub fn try_new(
+    /// Streams CPU weights directly into a single Metal `weight_arena_buf` layer-by-layer,
+    /// draining & freeing each CPU layer as it is copied so physical RAM stays flat (~1× model
+    /// size instead of ~2.5–3× peak during load).
+    pub fn try_new_draining(
         eng: &MetalEngine,
         cfg: &ModelConfig,
-        token_embd: &PackedTensor,
+        token_embd: &mut MatWeight,
         output_norm: &[f32],
-        output_head: Option<&PackedTensor>,
-        layers: &[TurboLayerCpuSpec<'_>],
+        output_head: &mut Option<MatWeight>,
+        layers: &mut Vec<DecoderLayer>,
     ) -> Result<Option<Self>> {
-        if !is_turbo_compatible(cfg, token_embd, output_head, layers) {
+        let head_ref = output_head.as_ref().map(|h| &h.cpu);
+        if !check_layers_turbo_compatible(cfg, &token_embd.cpu, head_ref, layers) {
             return Ok(None);
         }
-        let ctx = eng.raw_ctx();
-        let mut bufs = Vec::with_capacity(layers.len() * 14 + 8);
 
-        let up_f32 = |pool: &mut Vec<GpuBuf>, s: &[f32]| -> Result<*mut c_void> {
-            let b = GpuBuf::upload(ctx, s)?;
-            let p = b.as_ptr();
-            pool.push(b);
-            Ok(p)
-        };
-        let up_opt = |pool: &mut Vec<GpuBuf>, opt: Option<&[f32]>| -> Result<*mut c_void> {
-            match opt {
-                Some(s) => up_f32(pool, s),
-                None => Ok(null_mut()),
-            }
-        };
-
-        let PackedTensor::TurboWht(emb_m) = token_embd else {
+        // Pass 1: Compute exact total arena bytes without allocating any temporary matrices.
+        let mut total_bytes: usize = 256;
+        let PackedTensor::TurboWht(emb_m) = &token_embd.cpu else {
             return Ok(None);
         };
-        let embed_desc = upload_tmat(ctx, &mut bufs, emb_m)?;
-        let head_desc = match output_head {
-            Some(PackedTensor::TurboWht(hm)) => upload_tmat(ctx, &mut bufs, hm)?,
-            None => embed_desc,
-            _ => return Ok(None),
-        };
-        let output_norm_buf = up_f32(&mut bufs, output_norm)?;
+        total_bytes += mat_arena_bytes(emb_m);
+        if let Some(PackedTensor::TurboWht(hm)) = head_ref {
+            total_bytes += mat_arena_bytes(hm);
+        }
+        total_bytes += align256(std::mem::size_of_val(output_norm));
+        let ab_padded_cols = cfg.n_embd.div_ceil(256) * 256;
+        let ab_bytes = align256(2 * cfg.ssm_dt_rank * ab_padded_cols * 2);
 
-        let mut descs = Vec::with_capacity(layers.len());
-        for ly in layers {
-            let attn_norm_buf = up_f32(&mut bufs, ly.attn_norm)?;
-            let post_attn_norm_buf = up_f32(&mut bufs, ly.post_attn_norm)?;
+        for ly in layers.iter() {
+            total_bytes += align256(std::mem::size_of_val(ly.attn_norm.as_slice()));
+            total_bytes += align256(std::mem::size_of_val(ly.post_attn_norm.as_slice()));
             let (
                 PackedTensor::TurboWht(fg),
                 PackedTensor::TurboWht(fu),
                 PackedTensor::TurboWht(fd),
-            ) = (ly.ffn_gate, ly.ffn_up, ly.ffn_down)
+            ) = (&ly.ffn_gate.cpu, &ly.ffn_up.cpu, &ly.ffn_down.cpu)
             else {
                 return Ok(None);
             };
-            let Some(gu_cat) = interleave_ffn_gu(fg, fu) else {
-                return Ok(None);
-            };
-            let w_ffn_gu = upload_tmat(ctx, &mut bufs, &gu_cat)?;
-            let w_ffn_down = upload_tmat(ctx, &mut bufs, fd)?;
+            total_bytes += align256((fg.scales_f16.len() + fu.scales_f16.len()) * 2);
+            total_bytes += align256((fg.packed_words.len() + fu.packed_words.len()) * 4);
+            total_bytes += mat_arena_bytes(fd);
 
             match &ly.attn {
-                TurboAttnCpuSpec::LinearDeltaNet {
+                LayerAttn::LinearDeltaNet {
                     wqkv,
                     wqkv_gate,
-                    ssm_alpha,
-                    ssm_beta,
                     ssm_out,
                     ssm_conv1d,
                     ssm_a,
                     ssm_dt_bias,
                     ssm_norm,
+                    ..
                 } => {
                     let (
                         PackedTensor::TurboWht(mq),
                         PackedTensor::TurboWht(mg),
                         PackedTensor::TurboWht(mo),
-                    ) = (wqkv, wqkv_gate, ssm_out)
+                    ) = (&wqkv.cpu, &wqkv_gate.cpu, &ssm_out.cpu)
                     else {
                         return Ok(None);
                     };
-                    let (has_split_gate, w_qkv, w_gate_sep) =
-                        if let Some(cat) = TurboWhtMatrix::concat_vertical(&[mq, mg]) {
-                            (
-                                0u32,
-                                upload_tmat(ctx, &mut bufs, &cat)?,
-                                VxtTurboMat::zero(),
-                            )
-                        } else {
-                            (
-                                1u32,
-                                upload_tmat(ctx, &mut bufs, mq)?,
-                                upload_tmat(ctx, &mut bufs, mg)?,
-                            )
-                        };
-                    let ab_rot_f16_buf = upload_ab_rot_f16(
-                        ctx,
-                        &mut bufs,
-                        ssm_alpha,
-                        ssm_beta,
-                        cfg.ssm_dt_rank,
-                        cfg.n_embd,
-                    )?;
-                    descs.push(VxtTurboLayerDesc {
-                        is_recurrent: 1,
-                        gated_q: 0,
-                        has_split_gate,
-                        gqa_flags: 0,
-                        attn_norm_buf,
-                        post_attn_norm_buf,
-                        w_qkv,
-                        w_gate_sep,
-                        ab_rot_f16_buf,
-                        w_out: upload_tmat(ctx, &mut bufs, mo)?,
-                        vec0_buf: up_f32(&mut bufs, ssm_conv1d)?,
-                        vec1_buf: up_f32(&mut bufs, ssm_a)?,
-                        vec2_buf: up_f32(&mut bufs, ssm_dt_bias)?,
-                        vec3_buf: up_f32(&mut bufs, ssm_norm)?,
-                        vec4_buf: null_mut(),
-                        w_ffn_gu,
-                        w_ffn_down,
-                    });
+                    if concat_compatible(mq, mg) {
+                        total_bytes += align256((mq.scales_f16.len() + mg.scales_f16.len()) * 2);
+                        total_bytes += align256((mq.packed_words.len() + mg.packed_words.len()) * 4);
+                    } else {
+                        total_bytes += mat_arena_bytes(mq) + mat_arena_bytes(mg);
+                    }
+                    total_bytes += ab_bytes;
+                    total_bytes += mat_arena_bytes(mo);
+                    total_bytes += align256(std::mem::size_of_val(ssm_conv1d.as_slice()));
+                    total_bytes += align256(std::mem::size_of_val(ssm_a.as_slice()));
+                    total_bytes += align256(std::mem::size_of_val(ssm_dt_bias.as_slice()));
+                    total_bytes += align256(std::mem::size_of_val(ssm_norm.as_slice()));
                 }
-                TurboAttnCpuSpec::FullGqa {
+                LayerAttn::FullGqa {
                     wq,
                     wk,
                     wv,
@@ -347,59 +441,36 @@ impl TurboRunnerInner {
                     q_bias,
                     k_bias,
                     v_bias,
-                    gated_q,
+                    ..
                 } => {
                     let (
                         PackedTensor::TurboWht(mq),
                         PackedTensor::TurboWht(mk),
                         PackedTensor::TurboWht(mv),
                         PackedTensor::TurboWht(mo),
-                    ) = (wq, wk, wv, wo)
+                    ) = (&wq.cpu, &wk.cpu, &wv.cpu, &wo.cpu)
                     else {
                         return Ok(None);
                     };
-                    let (has_split_gate, w_qkv, w_gate_sep) =
-                        if let Some(qkv_cat) = TurboWhtMatrix::concat_vertical(&[mq, mk, mv]) {
-                            (
-                                0u32,
-                                upload_tmat(ctx, &mut bufs, &qkv_cat)?,
-                                VxtTurboMat::zero(),
-                            )
-                        } else if let Some(kv_cat) = TurboWhtMatrix::concat_vertical(&[mk, mv]) {
-                            (
-                                1u32,
-                                upload_tmat(ctx, &mut bufs, mq)?,
-                                upload_tmat(ctx, &mut bufs, &kv_cat)?,
-                            )
-                        } else {
-                            return Ok(None);
-                        };
-                    let flags = (*gated_q as u32)
-                        | ((cfg.rope_neox as u32) << 1)
-                        | ((q_norm.is_some() as u32) << 2)
-                        | ((k_norm.is_some() as u32) << 3)
-                        | ((q_bias.is_some() as u32) << 4)
-                        | ((k_bias.is_some() as u32) << 5)
-                        | ((v_bias.is_some() as u32) << 6);
-                    descs.push(VxtTurboLayerDesc {
-                        is_recurrent: 0,
-                        gated_q: *gated_q as u32,
-                        has_split_gate,
-                        gqa_flags: flags,
-                        attn_norm_buf,
-                        post_attn_norm_buf,
-                        w_qkv,
-                        w_gate_sep,
-                        ab_rot_f16_buf: null_mut(),
-                        w_out: upload_tmat(ctx, &mut bufs, mo)?,
-                        vec0_buf: up_opt(&mut bufs, *q_norm)?,
-                        vec1_buf: up_opt(&mut bufs, *k_norm)?,
-                        vec2_buf: up_opt(&mut bufs, *q_bias)?,
-                        vec3_buf: up_opt(&mut bufs, *k_bias)?,
-                        vec4_buf: up_opt(&mut bufs, *v_bias)?,
-                        w_ffn_gu,
-                        w_ffn_down,
-                    });
+                    if can_concat3(mq, mk, mv) {
+                        total_bytes += align256(
+                            (mq.scales_f16.len() + mk.scales_f16.len() + mv.scales_f16.len()) * 2,
+                        );
+                        total_bytes += align256(
+                            (mq.packed_words.len() + mk.packed_words.len() + mv.packed_words.len())
+                                * 4,
+                        );
+                    } else {
+                        total_bytes += mat_arena_bytes(mq);
+                        total_bytes += align256((mk.scales_f16.len() + mv.scales_f16.len()) * 2);
+                        total_bytes += align256((mk.packed_words.len() + mv.packed_words.len()) * 4);
+                    }
+                    total_bytes += mat_arena_bytes(mo);
+                    for opt in [q_norm, k_norm, q_bias, k_bias, v_bias] {
+                        if let Some(v) = opt.as_ref() {
+                            total_bytes += align256(std::mem::size_of_val(v.as_slice()));
+                        }
+                    }
                 }
             }
         }
@@ -423,24 +494,218 @@ impl TurboRunnerInner {
             ssm_dt_rank: cfg.ssm_dt_rank as u32,
         };
 
+        let mut arena_ptr: *mut c_void = null_mut();
         let mut err_buf = [0u8; 512];
-        let ptr = unsafe {
-            vxt_metal_turbo_create(
-                ctx.as_ptr(),
+        let raw_ptr = unsafe {
+            vxt_metal_turbo_arena_begin(
+                eng.raw_ctx().as_ptr(),
                 &c_cfg,
-                &embed_desc,
-                descs.as_ptr(),
-                output_norm_buf,
-                &head_desc,
+                total_bytes,
+                &mut arena_ptr,
                 err_buf.as_mut_ptr() as *mut c_char,
                 err_buf.len(),
             )
         };
-        let Some(raw) = NonNull::new(ptr) else {
+        let Some(raw) = NonNull::new(raw_ptr) else {
             return Err(Error::Backend(cbuf_to_str(&err_buf)));
         };
-        drop(bufs);
-        Ok(Some(Self { raw }))
+        // Wrap immediately in RAII so any error cleanly destroys `raw`.
+        let runner = Self { raw };
+        let mut w = ArenaWriter {
+            base: arena_ptr as *mut u8,
+            cursor: 256,
+            cap: total_bytes,
+        };
+
+        // Pass 2: Drain & copy weights directly into `weight_arena_buf` (1 layer at a time!).
+        let embed_am = {
+            let emb_owned = std::mem::replace(token_embd, empty_mat_weight());
+            let PackedTensor::TurboWht(emb_m) = emb_owned.cpu else {
+                unreachable!()
+            };
+            w.write_mat(&emb_m)
+        };
+        let head_am = match output_head.take() {
+            Some(head_owned) => {
+                let PackedTensor::TurboWht(hm) = head_owned.cpu else {
+                    unreachable!()
+                };
+                w.write_mat(&hm)
+            }
+            None => embed_am,
+        };
+        let output_norm_off = w.write_slice(output_norm);
+
+        let mut arena_layers = Vec::with_capacity(layers.len());
+        for ly in layers.drain(..) {
+            let attn_norm_off = w.write_slice(&ly.attn_norm);
+            let post_attn_norm_off = w.write_slice(&ly.post_attn_norm);
+            let (
+                PackedTensor::TurboWht(fg),
+                PackedTensor::TurboWht(fu),
+                PackedTensor::TurboWht(fd),
+            ) = (ly.ffn_gate.cpu, ly.ffn_up.cpu, ly.ffn_down.cpu)
+            else {
+                unreachable!()
+            };
+            let gu_cat = interleave_ffn_gu(&fg, &fu)
+                .ok_or_else(|| Error::Backend("ffn_gu interleave failed".into()))?;
+            drop(fg);
+            drop(fu);
+            let w_ffn_gu = w.write_mat(&gu_cat);
+            drop(gu_cat);
+            let w_ffn_down = w.write_mat(&fd);
+            drop(fd);
+
+            match ly.attn {
+                LayerAttn::LinearDeltaNet {
+                    wqkv,
+                    wqkv_gate,
+                    ssm_alpha,
+                    ssm_beta,
+                    ssm_out,
+                    ssm_conv1d,
+                    ssm_a,
+                    ssm_dt_bias,
+                    ssm_norm,
+                } => {
+                    let (
+                        PackedTensor::TurboWht(mq),
+                        PackedTensor::TurboWht(mg),
+                        PackedTensor::TurboWht(mo),
+                    ) = (wqkv.cpu, wqkv_gate.cpu, ssm_out.cpu)
+                    else {
+                        unreachable!()
+                    };
+                    let (has_split_gate, w_qkv, w_gate_sep) =
+                        if let Some(cat) = TurboWhtMatrix::concat_vertical(&[&mq, &mg]) {
+                            drop(mq);
+                            drop(mg);
+                            let am = w.write_mat(&cat);
+                            drop(cat);
+                            (0u32, am, VxtArenaMatC::zero())
+                        } else {
+                            let aq = w.write_mat(&mq);
+                            drop(mq);
+                            let ag = w.write_mat(&mg);
+                            drop(mg);
+                            (1u32, aq, ag)
+                        };
+                    let ab = build_ab_rot_f16(&ssm_alpha.cpu, &ssm_beta.cpu, cfg.ssm_dt_rank, cfg.n_embd);
+                    drop(ssm_alpha);
+                    drop(ssm_beta);
+                    let ab_rot_f16_off = w.write_slice(&ab);
+                    drop(ab);
+                    let w_out = w.write_mat(&mo);
+                    drop(mo);
+                    arena_layers.push(VxtArenaLayerDescC {
+                        is_recurrent: 1,
+                        gated_q: 0,
+                        gqa_flags: 0,
+                        has_split_gate,
+                        attn_norm_off,
+                        post_attn_norm_off,
+                        w_qkv,
+                        w_gate_sep,
+                        ab_rot_f16_off,
+                        w_out,
+                        vec0_off: w.write_slice(&ssm_conv1d),
+                        vec1_off: w.write_slice(&ssm_a),
+                        vec2_off: w.write_slice(&ssm_dt_bias),
+                        vec3_off: w.write_slice(&ssm_norm),
+                        vec4_off: 0,
+                        w_ffn_gu,
+                        w_ffn_down,
+                    });
+                }
+                LayerAttn::FullGqa {
+                    wq,
+                    wk,
+                    wv,
+                    wo,
+                    q_norm,
+                    k_norm,
+                    q_bias,
+                    k_bias,
+                    v_bias,
+                    gated_q,
+                } => {
+                    let (
+                        PackedTensor::TurboWht(mq),
+                        PackedTensor::TurboWht(mk),
+                        PackedTensor::TurboWht(mv),
+                        PackedTensor::TurboWht(mo),
+                    ) = (wq.cpu, wk.cpu, wv.cpu, wo.cpu)
+                    else {
+                        unreachable!()
+                    };
+                    let (has_split_gate, w_qkv, w_gate_sep) =
+                        if let Some(qkv_cat) = TurboWhtMatrix::concat_vertical(&[&mq, &mk, &mv]) {
+                            drop(mq);
+                            drop(mk);
+                            drop(mv);
+                            let am = w.write_mat(&qkv_cat);
+                            drop(qkv_cat);
+                            (0u32, am, VxtArenaMatC::zero())
+                        } else {
+                            let aq = w.write_mat(&mq);
+                            drop(mq);
+                            let kv_cat = TurboWhtMatrix::concat_vertical(&[&mk, &mv])
+                                .ok_or_else(|| Error::Backend("gqa kv concat failed".into()))?;
+                            drop(mk);
+                            drop(mv);
+                            let akv = w.write_mat(&kv_cat);
+                            drop(kv_cat);
+                            (1u32, aq, akv)
+                        };
+                    let w_out = w.write_mat(&mo);
+                    drop(mo);
+                    let flags = (gated_q as u32)
+                        | ((cfg.rope_neox as u32) << 1)
+                        | ((q_norm.is_some() as u32) << 2)
+                        | ((k_norm.is_some() as u32) << 3)
+                        | ((q_bias.is_some() as u32) << 4)
+                        | ((k_bias.is_some() as u32) << 5)
+                        | ((v_bias.is_some() as u32) << 6);
+                    arena_layers.push(VxtArenaLayerDescC {
+                        is_recurrent: 0,
+                        gated_q: gated_q as u32,
+                        gqa_flags: flags,
+                        has_split_gate,
+                        attn_norm_off,
+                        post_attn_norm_off,
+                        w_qkv,
+                        w_gate_sep,
+                        ab_rot_f16_off: 0,
+                        w_out,
+                        vec0_off: w.write_opt(q_norm.as_deref()),
+                        vec1_off: w.write_opt(k_norm.as_deref()),
+                        vec2_off: w.write_opt(q_bias.as_deref()),
+                        vec3_off: w.write_opt(k_bias.as_deref()),
+                        vec4_off: w.write_opt(v_bias.as_deref()),
+                        w_ffn_gu,
+                        w_ffn_down,
+                    });
+                }
+            }
+        }
+        layers.shrink_to_fit();
+
+        let rc = unsafe {
+            vxt_metal_turbo_arena_finalize(
+                runner.raw.as_ptr(),
+                &embed_am,
+                &head_am,
+                output_norm_off,
+                arena_layers.as_ptr(),
+                err_buf.as_mut_ptr() as *mut c_char,
+                err_buf.len(),
+            )
+        };
+        if rc != 0 {
+            return Err(Error::Backend(cbuf_to_str(&err_buf)));
+        }
+        Ok(Some(runner))
     }
 
     pub fn new_state(&self) -> Result<TurboStateInner> {

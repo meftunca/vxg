@@ -5,121 +5,12 @@
 //! - 2-Stage Hadamard MMSE Sign-Sketch + Exact Block-Verified `LM Head` (`0` extra `.vxt` bytes)
 //! - 2-Deep Zero-Bubble Pipelined `MTLCommandBuffer` Streaming + Lossless N-gram `M = 4` `GEMM` Bursts
 
-use crate::format::PackedTensor;
 use crate::gguf_meta::ModelConfig;
-use crate::llm::{DecoderLayer, LayerAttn};
+use crate::llm::{DecoderLayer, MatWeight};
 use crate::metal::MetalEngine;
 #[cfg(not(vxt_has_metal))]
 use crate::Error;
 use crate::Result;
-
-#[cfg_attr(not(vxt_has_metal), allow(dead_code))]
-pub(crate) enum TurboAttnCpuSpec<'a> {
-    LinearDeltaNet {
-        wqkv: &'a PackedTensor,
-        wqkv_gate: &'a PackedTensor,
-        ssm_alpha: &'a PackedTensor,
-        ssm_beta: &'a PackedTensor,
-        ssm_out: &'a PackedTensor,
-        ssm_conv1d: &'a [f32],
-        ssm_a: &'a [f32],
-        ssm_dt_bias: &'a [f32],
-        ssm_norm: &'a [f32],
-    },
-    FullGqa {
-        wq: &'a PackedTensor,
-        wk: &'a PackedTensor,
-        wv: &'a PackedTensor,
-        wo: &'a PackedTensor,
-        q_norm: Option<&'a [f32]>,
-        k_norm: Option<&'a [f32]>,
-        q_bias: Option<&'a [f32]>,
-        k_bias: Option<&'a [f32]>,
-        v_bias: Option<&'a [f32]>,
-        gated_q: bool,
-    },
-}
-
-#[cfg_attr(not(vxt_has_metal), allow(dead_code))]
-pub(crate) struct TurboLayerCpuSpec<'a> {
-    pub attn_norm: &'a [f32],
-    pub post_attn_norm: &'a [f32],
-    pub attn: TurboAttnCpuSpec<'a>,
-    pub ffn_gate: &'a PackedTensor,
-    pub ffn_up: &'a PackedTensor,
-    pub ffn_down: &'a PackedTensor,
-}
-
-#[cfg_attr(not(vxt_has_metal), allow(dead_code))]
-pub(crate) fn is_turbo_compatible(
-    cfg: &ModelConfig,
-    token_embd: &PackedTensor,
-    output_head: Option<&PackedTensor>,
-    layers: &[TurboLayerCpuSpec<'_>],
-) -> bool {
-    if cfg.ffn_gelu || (cfg.embed_scale - 1.0).abs() > 1e-6 {
-        return false;
-    }
-    if !matches!(token_embd, PackedTensor::TurboWht(_)) {
-        return false;
-    }
-    if let Some(h) = output_head {
-        if !matches!(h, PackedTensor::TurboWht(_)) {
-            return false;
-        }
-    }
-    for ly in layers {
-        let (PackedTensor::TurboWht(fg), PackedTensor::TurboWht(fu), PackedTensor::TurboWht(_)) =
-            (ly.ffn_gate, ly.ffn_up, ly.ffn_down)
-        else {
-            return false;
-        };
-        if fg.bits != fu.bits || fg.rows % 4 != 0 {
-            return false;
-        }
-        match &ly.attn {
-            TurboAttnCpuSpec::LinearDeltaNet {
-                wqkv,
-                wqkv_gate,
-                ssm_out,
-                ..
-            } => {
-                let dv = cfg.ssm_inner_size.checked_div(cfg.ssm_dt_rank).unwrap_or(0);
-                if dv == 0 || dv % 32 != 0 || dv > 512 || cfg.ssm_state_size > 512 {
-                    return false;
-                }
-                if !matches!(
-                    (wqkv, wqkv_gate, ssm_out),
-                    (
-                        PackedTensor::TurboWht(_),
-                        PackedTensor::TurboWht(_),
-                        PackedTensor::TurboWht(_)
-                    )
-                ) {
-                    return false;
-                }
-            }
-            TurboAttnCpuSpec::FullGqa { wq, wk, wv, wo, .. } => {
-                if cfg.head_dim == 0 || cfg.head_dim % 32 != 0 || cfg.head_dim > 512 {
-                    return false;
-                }
-                let (
-                    PackedTensor::TurboWht(mq),
-                    PackedTensor::TurboWht(mk),
-                    PackedTensor::TurboWht(mv),
-                    PackedTensor::TurboWht(_),
-                ) = (wq, wk, wv, wo)
-                else {
-                    return false;
-                };
-                if mk.bits != mv.bits || mq.rows % 4 != 0 || mk.rows % 4 != 0 {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
 
 pub struct MetalTurboState {
     #[cfg(vxt_has_metal)]
@@ -149,85 +40,20 @@ impl MetalTurboRunner {
     pub(crate) fn try_from_layers(
         eng: &MetalEngine,
         cfg: &ModelConfig,
-        token_embd: &PackedTensor,
+        token_embd: &mut MatWeight,
         output_norm: &[f32],
-        output_head: Option<&PackedTensor>,
-        layers: &[DecoderLayer],
+        output_head: &mut Option<MatWeight>,
+        layers: &mut Vec<DecoderLayer>,
     ) -> Result<Option<Self>> {
-        if cfg.ffn_gelu
-            || (cfg.embed_scale - 1.0).abs() > 1e-6
-            || layers
-                .iter()
-                .any(|l| l.attn_post_norm.is_some() || l.ffn_post_norm.is_some())
-        {
-            return Ok(None);
-        }
-        let mut specs = Vec::with_capacity(layers.len());
-        for ly in layers {
-            let attn = match &ly.attn {
-                LayerAttn::LinearDeltaNet {
-                    wqkv,
-                    wqkv_gate,
-                    ssm_alpha,
-                    ssm_beta,
-                    ssm_out,
-                    ssm_conv1d,
-                    ssm_a,
-                    ssm_dt_bias,
-                    ssm_norm,
-                } => TurboAttnCpuSpec::LinearDeltaNet {
-                    wqkv: &wqkv.cpu,
-                    wqkv_gate: &wqkv_gate.cpu,
-                    ssm_alpha: &ssm_alpha.cpu,
-                    ssm_beta: &ssm_beta.cpu,
-                    ssm_out: &ssm_out.cpu,
-                    ssm_conv1d,
-                    ssm_a,
-                    ssm_dt_bias,
-                    ssm_norm,
-                },
-                LayerAttn::FullGqa {
-                    wq,
-                    wk,
-                    wv,
-                    wo,
-                    q_norm,
-                    k_norm,
-                    q_bias,
-                    k_bias,
-                    v_bias,
-                    gated_q,
-                } => TurboAttnCpuSpec::FullGqa {
-                    wq: &wq.cpu,
-                    wk: &wk.cpu,
-                    wv: &wv.cpu,
-                    wo: &wo.cpu,
-                    q_norm: q_norm.as_deref(),
-                    k_norm: k_norm.as_deref(),
-                    q_bias: q_bias.as_deref(),
-                    k_bias: k_bias.as_deref(),
-                    v_bias: v_bias.as_deref(),
-                    gated_q: *gated_q,
-                },
-            };
-            specs.push(TurboLayerCpuSpec {
-                attn_norm: &ly.attn_norm,
-                post_attn_norm: &ly.post_attn_norm,
-                attn,
-                ffn_gate: &ly.ffn_gate.cpu,
-                ffn_up: &ly.ffn_up.cpu,
-                ffn_down: &ly.ffn_down.cpu,
-            });
-        }
         #[cfg(vxt_has_metal)]
         {
-            Ok(crate::metal_turbo_ffi::TurboRunnerInner::try_new(
+            Ok(crate::metal_turbo_ffi::TurboRunnerInner::try_new_draining(
                 eng,
                 cfg,
                 token_embd,
                 output_norm,
                 output_head,
-                &specs,
+                layers,
             )?
             .map(|inner| Self {
                 inner,
@@ -236,7 +62,7 @@ impl MetalTurboRunner {
         }
         #[cfg(not(vxt_has_metal))]
         {
-            let _ = (eng, cfg, token_embd, output_norm, output_head, specs);
+            let _ = (eng, cfg, token_embd, output_norm, output_head, layers);
             Ok(None)
         }
     }

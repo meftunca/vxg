@@ -106,6 +106,7 @@ pub struct LlmModel {
     pub cfg: ModelConfig,
     pub tokenizer: BpeTokenizer,
     pub total_compressed_bytes: usize,
+    source_path: Option<String>,
     pub(crate) metal: Option<MetalEngine>,
     pub(crate) cuda: Option<CudaEngine>,
     pub(crate) cuda_turbo: Option<CudaTurboRunner>,
@@ -114,6 +115,7 @@ pub struct LlmModel {
     metal_llm: Option<MetalLlmRunner>,
     pub(crate) cpu_threads: usize,
     cb4_greedy_enabled: bool,
+    cb4_embed_is_4bit: bool,
     pub(crate) token_embd: MatWeight,
     pub(crate) output_norm: Vec<f32>,
     pub(crate) output_head: Option<MatWeight>,
@@ -125,10 +127,10 @@ impl LlmModel {
     pub fn load_file(path: &str, use_gpu: bool, cpu_threads: usize) -> Result<Self> {
         let mapped = TensorBytes::open(path)?;
         let bytes = mapped.as_slice();
-        if bytes.starts_with(b"VXT1") {
-            Self::from_vxt_bytes(bytes, use_gpu, cpu_threads)
+        let mut model = if bytes.starts_with(b"VXT1") {
+            Self::from_vxt_bytes(bytes, use_gpu, cpu_threads)?
         } else if bytes.starts_with(b"GGUF") {
-            Self::from_gguf_bytes(bytes, use_gpu, cpu_threads)
+            Self::from_gguf_bytes(bytes, use_gpu, cpu_threads)?
         } else {
             let dir = std::path::Path::new(path)
                 .parent()
@@ -138,8 +140,10 @@ impl LlmModel {
             let tokenizer = std::fs::read(dir.join("tokenizer.json"))
                 .map_err(|e| Error::Io(format!("native tokenizer.json: {e}")))?;
             let (cfg, tok, map) = crate::native_qwen35::load_source(bytes, &config, &tokenizer)?;
-            Self::assemble(cfg, tok, None, map, bytes.len(), use_gpu, cpu_threads)
-        }
+            Self::assemble(cfg, tok, None, map, bytes.len(), use_gpu, cpu_threads)?
+        };
+        model.source_path = Some(path.to_owned());
+        Ok(model)
     }
 
     pub fn from_vxt_bytes(bytes: &[u8], use_gpu: bool, cpu_threads: usize) -> Result<Self> {
@@ -262,13 +266,16 @@ impl LlmModel {
         let mut output_head = map.remove("output.weight").map(MatWeight::cpu_only);
         let mut layers = extract_decoder_layers(&cfg, &mut map)?;
 
+        let cb4_embed_is_4bit =
+            matches!(&token_embd.cpu, PackedTensor::Codebook(cb) if cb.bits == 4);
+
         let (mut metal_turbo, mut metal_cb4_fast, mut metal_llm) = (None, None, None);
         if let Some(eng) = metal.as_ref() {
-            let head_cpu = output_head.as_ref().map(|h| &h.cpu);
             metal_turbo = MetalTurboRunner::try_from_layers(
-                eng, &cfg, &token_embd.cpu, &output_norm, head_cpu, &layers,
+                eng, &cfg, &mut token_embd, &output_norm, &mut output_head, &mut layers,
             )?;
             if metal_turbo.is_none() {
+                let head_cpu = output_head.as_ref().map(|h| &h.cpu);
                 metal_cb4_fast = MetalCb4FastRunner::try_from_layers(
                     eng, &cfg, &token_embd.cpu, &output_norm, head_cpu, &layers,
                 )?;
@@ -294,10 +301,36 @@ impl LlmModel {
             }
         }
 
+        // Once all weights live inside a resident GPU runner (`MetalTurboRunner`, `CudaTurboRunner`,
+        // or `MetalCb4FastRunner`), drop any remaining duplicate CPU copies immediately so Apple
+        // Silicon Unified Memory never holds 2x the model size (`~20 GB -> ~10 GB` on 9B Q6).
+        if cuda_turbo.is_some() {
+            layers.clear();
+            layers.shrink_to_fit();
+            output_head = None;
+            token_embd = MatWeight::cpu_only(PackedTensor::RawF32 {
+                rows: 0,
+                cols: 0,
+                data: Vec::new(),
+            });
+        } else if metal_cb4_fast.is_some() {
+            layers.clear();
+            layers.shrink_to_fit();
+            output_head = None;
+            if vision.is_none() {
+                token_embd = MatWeight::cpu_only(PackedTensor::RawF32 {
+                    rows: 0,
+                    cols: 0,
+                    data: Vec::new(),
+                });
+            }
+        }
+
         Ok(Self {
-            cfg, tokenizer, total_compressed_bytes: archive_bytes, metal, cuda, cuda_turbo,
-            metal_turbo, metal_cb4_fast, metal_llm, cpu_threads: threads, cb4_greedy_enabled: false,
-            token_embd, output_norm, output_head, layers, vision,
+            cfg, tokenizer, total_compressed_bytes: archive_bytes, source_path: None, metal, cuda,
+            cuda_turbo, metal_turbo, metal_cb4_fast, metal_llm, cpu_threads: threads,
+            cb4_greedy_enabled: false, cb4_embed_is_4bit, token_embd, output_norm, output_head,
+            layers, vision,
         })
     }
 
@@ -422,6 +455,29 @@ impl LlmModel {
         prefill_cpu_tiled(self, state, prompt_ids, logits_out)
     }
 
+    fn ensure_cpu_weights_hydrated(&mut self) -> Result<()> {
+        if !self.layers.is_empty() {
+            return Ok(());
+        }
+        let path = self.source_path.clone().ok_or_else(|| {
+            Error::Unsupported(
+                "multimodal CPU fallback requires a file-backed model to hydrate CPU weights".into(),
+            )
+        })?;
+        let mapped = TensorBytes::open(&path)?;
+        let bytes = mapped.as_slice();
+        let (_meta_kv, entries) = read_vxt_model(bytes)?;
+        let mut map: HashMap<String, PackedTensor> =
+            entries.into_iter().map(|e| (e.name, e.tensor)).collect();
+        self.token_embd = MatWeight::cpu_only(
+            map.remove("token_embd.weight")
+                .ok_or_else(|| Error::Format("missing model tensor 'token_embd.weight'".into()))?,
+        );
+        self.output_head = map.remove("output.weight").map(MatWeight::cpu_only);
+        self.layers = extract_decoder_layers(&self.cfg, &mut map)?;
+        Ok(())
+    }
+
     pub fn prefill_multimodal(
         &mut self,
         state: &mut LlmState,
@@ -436,6 +492,9 @@ impl LlmModel {
             return Err(Error::Unsupported(
                 "CB4 device failure invalidated this state; create a new state".into(),
             ));
+        }
+        if self.metal_cb4_fast.is_none() && self.layers.is_empty() {
+            self.ensure_cpu_weights_hydrated()?;
         }
         let vcfg = self
             .vision
@@ -516,12 +575,7 @@ impl LlmModel {
 
     /// Opt in to exact CB4 embedding decode and full-head GPU greedy selection.
     pub fn enable_cb4_greedy(&mut self) -> Result<()> {
-        let PackedTensor::Codebook(embedding) = &self.token_embd.cpu else {
-            return Err(Error::Unsupported(
-                "CB4 greedy requires a four-bit Codebook embedding".into(),
-            ));
-        };
-        if embedding.bits != 4 {
+        if !self.cb4_embed_is_4bit {
             return Err(Error::Unsupported(
                 "CB4 greedy requires a four-bit Codebook embedding".into(),
             ));
@@ -530,6 +584,11 @@ impl LlmModel {
             self.cb4_greedy_enabled = true;
             return Ok(());
         }
+        let PackedTensor::Codebook(embedding) = &self.token_embd.cpu else {
+            return Err(Error::Unsupported(
+                "CB4 greedy requires a four-bit Codebook embedding".into(),
+            ));
+        };
         let gpu = self.token_embd.gpu.as_ref().ok_or_else(|| {
             Error::Unsupported("CB4 greedy requires an uploaded Metal embedding".into())
         })?;

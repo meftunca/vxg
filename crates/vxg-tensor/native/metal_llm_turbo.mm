@@ -1137,20 +1137,18 @@ static void run_vxt_timing_probe(MetalTurboRunner* r);
 
 extern "C" {
 
-void* vxt_metal_turbo_create(
+void* vxt_metal_turbo_arena_begin(
     void* raw_gemv_ctx,
     const VxtLlmConfig* cfg,
-    const VxtTurboMat* embed_mat,
-    const VxtTurboLayerDesc* layer_descs,
-    void* output_norm_buf,
-    const VxtTurboMat* output_head_mat,
+    size_t total_arena_bytes,
+    void** out_arena_ptr,
     char* err_out,
     size_t err_cap
 ) {
     @autoreleasepool {
         auto* src_ctx = static_cast<MetalGemvCtx*>(raw_gemv_ctx);
-        if (!src_ctx || !cfg || !embed_mat || !layer_descs || !output_norm_buf || !output_head_mat) {
-            vxt_write_err(err_out, err_cap, "null argument to vxt_metal_turbo_create");
+        if (!src_ctx || !cfg || !out_arena_ptr || total_arena_bytes < 256u) {
+            vxt_write_err(err_out, err_cap, "invalid argument to vxt_metal_turbo_arena_begin");
             return nullptr;
         }
         auto* r = new MetalTurboRunner();
@@ -1265,19 +1263,104 @@ void* vxt_metal_turbo_create(
                           ([r->pso_m1_ffn_gu_e8 maxTotalThreadsPerThreadgroup] >= 512u) &&
                           ([r->pso_m1_ffn_gu_e8_hq maxTotalThreadsPerThreadgroup] >= 512u);
 
-        // 1. Repack `Turbo3`/`EC-Turbo3` (6-bit row words) & `Turbo2.5` swizzle once in-place
+        r->weight_arena_buf = [dev newBufferWithLength:total_arena_bytes options:MTLResourceStorageModeShared];
+        if (!r->weight_arena_buf) {
+            vxt_write_err(err_out, err_cap, "failed to allocate Metal weight_arena_buf");
+            delete r;
+            return nullptr;
+        }
+        uint8_t* dst_base = static_cast<uint8_t*>([r->weight_arena_buf contents]);
+        std::memset(dst_base, 0, 256u);
+        *out_arena_ptr = dst_base;
+        return r;
+    }
+}
+
+int vxt_metal_turbo_arena_finalize(
+    void* raw_runner,
+    const VxtArenaMatC* embed_mat,
+    const VxtArenaMatC* output_head_mat,
+    size_t output_norm_off,
+    const VxtArenaLayerDescC* layer_descs,
+    char* err_out,
+    size_t err_cap
+) {
+    @autoreleasepool {
+        auto* r = static_cast<MetalTurboRunner*>(raw_runner);
+        if (!r || !embed_mat || !output_head_mat || !layer_descs || !r->weight_arena_buf) {
+            vxt_write_err(err_out, err_cap, "invalid argument to vxt_metal_turbo_arena_finalize");
+            return -1;
+        }
+        const VxtLlmConfig* cfg = &r->cfg;
+        id<MTLDevice> dev = r->gemv.device;
+        uint8_t* dst_base = static_cast<uint8_t*>([r->weight_arena_buf contents]);
+
+        auto to_am = [](const VxtArenaMatC& m) -> ArenaMat {
+            ArenaMat am;
+            am.scales_off = m.scales_off;
+            am.packed_off = m.packed_off;
+            am.rows = m.rows;
+            am.cols = m.cols;
+            am.padded_cols = m.padded_cols;
+            am.bits = m.bits;
+            return am;
+        };
+
+        r->embed_mat = to_am(*embed_mat);
+        r->output_head_mat = to_am(*output_head_mat);
+        r->output_norm_off = output_norm_off;
+
+        uint32_t max_rot = r->output_head_mat.padded_cols;
+        uint32_t max_gqa_qkv = 16u;
+        uint32_t max_gqa_kv = std::max<uint32_t>(2u * cfg->n_head_kv * cfg->head_dim, 16u);
+        uint32_t max_gu = 2u * cfg->n_ff;
+
+        r->layers.resize(cfg->n_layer);
+        for (uint32_t il = 0; il < cfg->n_layer; ++il) {
+            const auto& L = layer_descs[il];
+            ArenaLayerDesc& AL = r->layers[il];
+            AL.is_recurrent = L.is_recurrent;
+            AL.gated_q = L.gated_q;
+            AL.gqa_flags = L.gqa_flags;
+            AL.has_split_gate = L.has_split_gate;
+            AL.attn_norm_off = L.attn_norm_off;
+            AL.post_attn_norm_off = L.post_attn_norm_off;
+            AL.w_qkv = to_am(L.w_qkv);
+            AL.w_gate_sep = to_am(L.w_gate_sep);
+            AL.ab_rot_f16_off = L.ab_rot_f16_off;
+            AL.w_out = to_am(L.w_out);
+            AL.vec0_off = L.vec0_off;
+            AL.vec1_off = L.vec1_off;
+            AL.vec2_off = L.vec2_off;
+            AL.vec3_off = L.vec3_off;
+            AL.vec4_off = L.vec4_off;
+            AL.w_ffn_gu = to_am(L.w_ffn_gu);
+            AL.w_ffn_down = to_am(L.w_ffn_down);
+
+            max_rot = std::max(max_rot, AL.w_qkv.padded_cols);
+            max_rot = std::max(max_rot, AL.w_out.padded_cols);
+            max_rot = std::max(max_rot, AL.w_ffn_gu.padded_cols);
+            max_rot = std::max(max_rot, AL.w_ffn_down.padded_cols);
+            if (!AL.is_recurrent) {
+                max_gqa_qkv = std::max(max_gqa_qkv, AL.w_qkv.rows);
+                if (AL.has_split_gate != 0u) max_gqa_kv = std::max(max_gqa_kv, AL.w_gate_sep.rows);
+            }
+            max_gu = std::max(max_gu, AL.w_ffn_gu.rows);
+        }
+
+        // Repack `Turbo3`/`EC-Turbo3` (6-bit row words) & `Turbo2.5` swizzle in-place inside `weight_arena_buf`
         {
-            std::vector<void*> seen_pw;
+            std::vector<size_t> seen_off;
             auto swz_t25 = [](uint32_t c) -> uint32_t {
                 return ((c >> 6u) & 3u) | ((c & 63u) << 2u) | (c & 0x300u);
             };
-            auto repack_mat = [&](const VxtTurboMat& m) {
-                if ((m.bits != 3u && m.bits != 4u && m.bits != 5u) || !m.packed_buf) return;
-                for (void* p : seen_pw) if (p == m.packed_buf) return;
-                seen_pw.push_back(m.packed_buf);
+            auto repack_mat = [&](const ArenaMat& m) {
+                if ((m.bits != 3u && m.bits != 4u && m.bits != 5u) || m.packed_off == 0u) return;
+                for (size_t off : seen_off) if (off == m.packed_off) return;
+                seen_off.push_back(m.packed_off);
                 uint32_t tiles = (m.rows + 3u) / 4u;
                 uint32_t steps = m.padded_cols >> 8u;
-                uint32_t* pw = static_cast<uint32_t*>([(__bridge id<MTLBuffer>)m.packed_buf contents]);
+                uint32_t* pw = reinterpret_cast<uint32_t*>(dst_base + m.packed_off);
                 size_t total_ts = size_t(tiles) * size_t(steps);
                 constexpr size_t CHUNK_TS = 256u;
                 size_t n_chunks = (total_ts + CHUNK_TS - 1u) / CHUNK_TS;
@@ -1333,108 +1416,14 @@ void* vxt_metal_turbo_create(
                     for (size_t ci = 0; ci < n_chunks; ++ci) repack_range(ci);
                 }
             };
-            repack_mat(*embed_mat);
-            repack_mat(*output_head_mat);
-            for (uint32_t il = 0; il < cfg->n_layer; ++il) {
-                const auto& L = layer_descs[il];
-                repack_mat(L.w_qkv);
-                repack_mat(L.w_gate_sep);
-                repack_mat(L.w_out);
-                repack_mat(L.w_ffn_gu);
-                repack_mat(L.w_ffn_down);
-            }
-        }
-
-        // 2. Pack all weights into ONE 256-byte aligned `weight_arena_buf` (offset 0 = 256 zeroed dummy bytes)
-        size_t total_arena_bytes = 256u;
-        std::vector<std::pair<void*, size_t>> arena_map;
-        arena_map.reserve(cfg->n_layer * 16u + 8u);
-        auto reg_buf = [&](void* raw) -> size_t {
-            if (!raw) return 0u;
-            for (const auto& kv : arena_map) {
-                if (kv.first == raw) return kv.second;
-            }
-            size_t len = [(__bridge id<MTLBuffer>)raw length];
-            size_t aligned = (len + 255u) & ~size_t(255u);
-            size_t off = total_arena_bytes;
-            total_arena_bytes += std::max<size_t>(aligned, 256u);
-            arena_map.push_back({raw, off});
-            return off;
-        };
-        auto reg_mat = [&](const VxtTurboMat& m) -> ArenaMat {
-            ArenaMat am;
-            am.scales_off = reg_buf(m.scales_buf);
-            am.packed_off = reg_buf(m.packed_buf);
-            am.rows = m.rows;
-            am.cols = m.cols;
-            am.padded_cols = m.padded_cols;
-            am.bits = m.bits;
-            return am;
-        };
-
-        r->embed_mat = reg_mat(*embed_mat);
-        r->output_head_mat = reg_mat(*output_head_mat);
-        r->output_norm_off = reg_buf(output_norm_buf);
-
-        uint32_t max_rot = r->output_head_mat.padded_cols;
-        uint32_t max_gqa_qkv = 16u;
-        uint32_t max_gqa_kv = std::max<uint32_t>(2u * cfg->n_head_kv * cfg->head_dim, 16u);
-        uint32_t max_gu = 2u * cfg->n_ff;
-
-        r->layers.resize(cfg->n_layer);
-        for (uint32_t il = 0; il < cfg->n_layer; ++il) {
-            const auto& L = layer_descs[il];
-            ArenaLayerDesc& AL = r->layers[il];
-            AL.is_recurrent = L.is_recurrent;
-            AL.gated_q = L.gated_q;
-            AL.gqa_flags = L.gqa_flags;
-            AL.has_split_gate = L.has_split_gate;
-            AL.attn_norm_off = reg_buf(L.attn_norm_buf);
-            AL.post_attn_norm_off = reg_buf(L.post_attn_norm_buf);
-            AL.w_qkv = reg_mat(L.w_qkv);
-            AL.w_gate_sep = reg_mat(L.w_gate_sep);
-            AL.ab_rot_f16_off = reg_buf(L.ab_rot_f16_buf);
-            AL.w_out = reg_mat(L.w_out);
-            AL.vec0_off = reg_buf(L.vec0_buf);
-            AL.vec1_off = reg_buf(L.vec1_buf);
-            AL.vec2_off = reg_buf(L.vec2_buf);
-            AL.vec3_off = reg_buf(L.vec3_buf);
-            AL.vec4_off = reg_buf(L.vec4_buf);
-            AL.w_ffn_gu = reg_mat(L.w_ffn_gu);
-            AL.w_ffn_down = reg_mat(L.w_ffn_down);
-
-            max_rot = std::max(max_rot, AL.w_qkv.padded_cols);
-            max_rot = std::max(max_rot, AL.w_out.padded_cols);
-            max_rot = std::max(max_rot, AL.w_ffn_gu.padded_cols);
-            max_rot = std::max(max_rot, AL.w_ffn_down.padded_cols);
-            if (!AL.is_recurrent) {
-                max_gqa_qkv = std::max(max_gqa_qkv, AL.w_qkv.rows);
-                if (AL.has_split_gate != 0u) max_gqa_kv = std::max(max_gqa_kv, AL.w_gate_sep.rows);
-            }
-            max_gu = std::max(max_gu, AL.w_ffn_gu.rows);
-        }
-
-        r->weight_arena_buf = [dev newBufferWithLength:total_arena_bytes options:MTLResourceStorageModeShared];
-        if (!r->weight_arena_buf) {
-            vxt_write_err(err_out, err_cap, "failed to allocate Metal weight_arena_buf");
-            delete r;
-            return nullptr;
-        }
-        {
-            uint8_t* dst_base = static_cast<uint8_t*>([r->weight_arena_buf contents]);
-            std::memset(dst_base, 0, 256u);
-            const auto* amap = arena_map.data();
-            size_t amap_len = arena_map.size();
-            if (amap_len >= 16u) {
-                dispatch_apply(amap_len, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
-                    id<MTLBuffer> sb = (__bridge id<MTLBuffer>)amap[i].first;
-                    std::memcpy(dst_base + amap[i].second, [sb contents], [sb length]);
-                });
-            } else {
-                for (size_t i = 0; i < amap_len; ++i) {
-                    id<MTLBuffer> sb = (__bridge id<MTLBuffer>)amap[i].first;
-                    std::memcpy(dst_base + amap[i].second, [sb contents], [sb length]);
-                }
+            repack_mat(r->embed_mat);
+            repack_mat(r->output_head_mat);
+            for (const auto& AL : r->layers) {
+                repack_mat(AL.w_qkv);
+                repack_mat(AL.w_gate_sep);
+                repack_mat(AL.w_out);
+                repack_mat(AL.w_ffn_gu);
+                repack_mat(AL.w_ffn_down);
             }
         }
 
@@ -1491,8 +1480,7 @@ void* vxt_metal_turbo_create(
             !r->sync_cnt_buf || !r->logits_buf || !r->sketch_signs_buf || !r->sketch_l1_buf ||
             !r->surv_blk_buf || !r->tok_ring_buf) {
             vxt_write_err(err_out, err_cap, "failed to allocate Metal Turbo buffers");
-            delete r;
-            return nullptr;
+            return -2;
         }
 
         id<MTLCommandBuffer> cmd = [r->gemv.queue commandBuffer];
@@ -1519,8 +1507,7 @@ void* vxt_metal_turbo_create(
         [cmd waitUntilCompleted];
         if ([cmd status] != MTLCommandBufferStatusCompleted) {
             vxt_write_err(err_out, err_cap, "vxt_build_lm_sketch failed on GPU");
-            delete r;
-            return nullptr;
+            return -3;
         }
         r->has_coherent_dev = (static_cast<const uint32_t*>([r->caps_buf contents])[0] != 0u);
 
@@ -1541,7 +1528,7 @@ void* vxt_metal_turbo_create(
         }
 
         if (std::getenv("VXT_TIMING")) run_vxt_timing_probe(r);
-        return r;
+        return 0;
     }
 }
 

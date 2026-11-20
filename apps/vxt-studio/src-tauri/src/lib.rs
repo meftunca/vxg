@@ -33,8 +33,11 @@ fn studio_snapshot_with_files(handle: &EmbeddedServerHandle) -> Value {
 }
 
 #[tauri::command]
-fn get_studio_state(state: State<'_, AppState>) -> Value {
-    studio_snapshot_with_files(&state.handle)
+async fn get_studio_state(state: State<'_, AppState>) -> Result<Value, String> {
+    let h = state.handle.clone();
+    tauri::async_runtime::spawn_blocking(move || studio_snapshot_with_files(&h))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -55,15 +58,25 @@ async fn load_model_cmd(
 }
 
 #[tauri::command]
-fn unload_model_cmd(state: State<'_, AppState>) -> Result<Value, String> {
-    state.handle.unload_model().map_err(|e| e.to_string())?;
-    Ok(studio_snapshot_with_files(&state.handle))
+async fn unload_model_cmd(state: State<'_, AppState>) -> Result<Value, String> {
+    let h = state.handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        h.unload_model().map_err(|e| e.to_string())?;
+        Ok(studio_snapshot_with_files(&h))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn reset_chat_cmd(state: State<'_, AppState>) -> Result<Value, String> {
-    state.handle.reset_cache().map_err(|e| e.to_string())?;
-    Ok(studio_snapshot_with_files(&state.handle))
+async fn reset_chat_cmd(state: State<'_, AppState>) -> Result<Value, String> {
+    let h = state.handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        h.reset_cache().map_err(|e| e.to_string())?;
+        Ok(studio_snapshot_with_files(&h))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -79,14 +92,19 @@ fn cancel_forge_job_cmd(state: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
-fn delete_model_cmd(state: State<'_, AppState>, path: String) -> Result<Value, String> {
-    if let Some(loaded) = state.handle.snapshot().model {
-        if loaded.model_path == path {
-            let _ = state.handle.unload_model();
+async fn delete_model_cmd(state: State<'_, AppState>, path: String) -> Result<Value, String> {
+    let h = state.handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(loaded) = h.snapshot().model {
+            if loaded.model_path == path {
+                let _ = h.unload_model();
+            }
         }
-    }
-    delete_vxt_model_file(&path).map_err(|e| e.to_string())?;
-    Ok(studio_snapshot_with_files(&state.handle))
+        delete_vxt_model_file(&path).map_err(|e| e.to_string())?;
+        Ok(studio_snapshot_with_files(&h))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

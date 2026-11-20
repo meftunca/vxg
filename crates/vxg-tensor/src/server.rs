@@ -267,13 +267,17 @@ fn run_worker_loop(
                 }
             }
             WorkerJob::Unload { reply } => {
-                session = None;
+                let old = session.take();
                 if let Ok(mut s) = snap.lock() {
                     s.busy = false;
                     s.cached_tokens = 0;
                     s.model = None;
+                    s.last_metrics = None;
                 }
+                // Reply BEFORE dropping the multi-GB GPU session so UI/API never stalls while
+                // macOS Metal releases unified memory pages in the background worker.
                 let _ = reply.send(());
+                drop(old);
             }
             WorkerJob::Reset { reply } => {
                 if let Some(sess) = session.as_mut() {

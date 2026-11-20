@@ -423,7 +423,7 @@ export default function App() {
               {studio?.model && (
                 <button
                   type="button"
-                  disabled={loadingModel || studio.busy}
+                  disabled={loadingModel}
                   onClick={() => void handleUnloadModel()}
                   title="Modeli GPU belleğinden kaldır"
                   className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-zinc-500 transition hover:bg-red-500/15 hover:text-red-400 cursor-pointer"

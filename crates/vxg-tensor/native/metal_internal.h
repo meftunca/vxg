@@ -63,33 +63,33 @@ struct VxtLlmLayerDesc {
     VxtMetalOp op_ffn_down;
 };
 
-struct VxtTurboMat {
-    uint32_t bits;
+struct VxtArenaMatC {
+    size_t scales_off;
+    size_t packed_off;
     uint32_t rows;
     uint32_t cols;
     uint32_t padded_cols;
-    void* scales_buf;
-    void* packed_buf;
+    uint32_t bits;
 };
 
-struct VxtTurboLayerDesc {
+struct VxtArenaLayerDescC {
     uint32_t is_recurrent;
     uint32_t gated_q;
-    uint32_t has_split_gate;
     uint32_t gqa_flags;
-    void* attn_norm_buf;
-    void* post_attn_norm_buf;
-    VxtTurboMat w_qkv;
-    VxtTurboMat w_gate_sep;
-    void* ab_rot_f16_buf;
-    VxtTurboMat w_out;
-    void* vec0_buf;
-    void* vec1_buf;
-    void* vec2_buf;
-    void* vec3_buf;
-    void* vec4_buf;
-    VxtTurboMat w_ffn_gu;
-    VxtTurboMat w_ffn_down;
+    uint32_t has_split_gate;
+    size_t attn_norm_off;
+    size_t post_attn_norm_off;
+    VxtArenaMatC w_qkv;
+    VxtArenaMatC w_gate_sep;
+    size_t ab_rot_f16_off;
+    VxtArenaMatC w_out;
+    size_t vec0_off;
+    size_t vec1_off;
+    size_t vec2_off;
+    size_t vec3_off;
+    size_t vec4_off;
+    VxtArenaMatC w_ffn_gu;
+    VxtArenaMatC w_ffn_down;
 };
 
 } // extern "C"
