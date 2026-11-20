@@ -15,6 +15,7 @@ import {
   FolderOpen,
   ImagePlus,
   Loader2,
+  Minimize2,
   PanelLeft,
   PowerOff,
   RefreshCw,
@@ -222,7 +223,7 @@ export function ChatWorkspace({
 }: ChatWorkspaceProps) {
   const [cb4Greedy, setCb4Greedy] = React.useState(true);
   const [temperature, setTemperature] = React.useState(0.6);
-  const [maxTokens, setMaxTokens] = React.useState(1536);
+  const [maxTokens, setMaxTokens] = React.useState(4096);
   const [enableThinking, setEnableThinking] = React.useState(false);
   const [jsonMode, setJsonMode] = React.useState(false);
   const [stopSeqs, setStopSeqs] = React.useState("");
@@ -231,6 +232,8 @@ export function ChatWorkspace({
   const [dragOver, setDragOver] = React.useState(false);
   const [modelMenuOpen, setModelMenuOpen] = React.useState(false);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const [compacting, setCompacting] = React.useState(false);
+  const [compactNotice, setCompactNotice] = React.useState<string | null>(null);
 
   const modelMenuRef = React.useRef<HTMLDivElement>(null);
   const settingsRef = React.useRef<HTMLDivElement>(null);
@@ -400,8 +403,81 @@ export function ChatWorkspace({
     stop();
     setMessages([]);
     setAttachments([]);
+    setCompactNotice(null);
     await resetChatCache(baseUrl);
     await onRefresh();
+  };
+
+  const handleCompactContext = async () => {
+    if (!loaded || isStreaming || compacting || messages.length < 4) return;
+    setCompacting(true);
+    setCompactNotice(null);
+    try {
+      const keepTail = 2;
+      const older = messages.slice(0, messages.length - keepTail);
+      const recent = messages.slice(messages.length - keepTail);
+      const transcript = older
+        .map((m) => `${m.role === "user" ? "Kullanıcı" : "Asistan"}: ${m.content.trim()}`)
+        .join("\n\n")
+        .slice(0, 24000);
+
+      const resp = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer vxt-local",
+        },
+        body: JSON.stringify({
+          model: modelId,
+          stream: false,
+          temperature: 0.0,
+          presence_penalty: 0.0,
+          enable_thinking: false,
+          max_tokens: 768,
+          messages: [
+            {
+              role: "system",
+              content:
+                "Sen bir bağlam sıkıştırma motorusun. Verilen sohbet geçmişini sonraki mesajlar için tüm kritik kararları, kod detaylarını, dosya yollarını ve sayısal sonuçları koruyarak kısa maddeler halinde özetle. Gereksiz sohbeti çıkar.",
+            },
+            {
+              role: "user",
+              content: `Aşağıdaki sohbet geçmişini sıkıştırılmış bağlam özeti olarak yaz:\n\n${transcript}`,
+            },
+          ],
+        }),
+      });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      const summary = String(data?.choices?.[0]?.message?.content ?? "").trim();
+      if (!summary) {
+        throw new Error("Boş özet döndü");
+      }
+      const beforeCount = messages.length;
+      const compactedMessages: Message[] = [
+        {
+          id: `compact-user-${Date.now()}`,
+          role: "user",
+          content: `[Sıkıştırılmış Önceki Sohbet Bağlamı — ${older.length} mesaj özetlendi]\n\n${summary}`,
+        },
+        {
+          id: `compact-asst-${Date.now()}`,
+          role: "assistant",
+          content: "Anlaşıldı, sıkıştırılmış bağlam özetini aldım. Kaldığımız yerden devam edebiliriz.",
+        },
+        ...recent,
+      ];
+      await resetChatCache(baseUrl);
+      setMessages(compactedMessages);
+      setCompactNotice(`Bağlam sıkıştırıldı (${beforeCount} → ${compactedMessages.length} mesaj · KV temizlendi)`);
+      await onRefresh();
+    } catch (e) {
+      setCompactNotice(`Sıkıştırma başarısız: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCompacting(false);
+    }
   };
 
   const loaded = studio?.model;
@@ -632,6 +708,22 @@ export function ChatWorkspace({
 
         {/* Right Header Controls */}
         <div className="flex items-center gap-2">
+          {loaded && messages.length >= 4 && (
+            <button
+              type="button"
+              disabled={isStreaming || compacting}
+              onClick={() => void handleCompactContext()}
+              title="Eski mesajları özetleyip KV önbelleğini temizle"
+              className="flex h-8 items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 text-xs text-zinc-300 transition hover:bg-white/[0.07] hover:text-zinc-100 disabled:opacity-45 cursor-pointer"
+            >
+              {compacting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
+              ) : (
+                <Minimize2 className="h-3.5 w-3.5 text-emerald-400" />
+              )}
+              <span className="hidden sm:inline">{compacting ? "Sıkıştırılıyor..." : "Sıkıştır"}</span>
+            </button>
+          )}
           {metrics && (
             <div
               className="hidden md:flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.025] px-2.5 py-1 text-[11px] font-mono text-zinc-400"
@@ -701,18 +793,47 @@ export function ChatWorkspace({
                   />
                 </div>
 
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-xs">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
                     <span className="text-zinc-400">Max Tokens</span>
-                    <span className="font-mono text-zinc-200">{maxTokens}</span>
+                    <input
+                      type="number"
+                      min={128}
+                      max={65536}
+                      step={256}
+                      value={maxTokens}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (Number.isFinite(n)) {
+                          setMaxTokens(Math.max(128, Math.min(65536, Math.round(n))));
+                        }
+                      }}
+                      className="w-20 rounded-md border border-white/[0.08] bg-[#151518] px-2 py-0.5 text-right font-mono text-xs text-zinc-200 focus:border-emerald-500/50 focus:outline-none"
+                    />
                   </div>
                   <Slider
-                    value={[maxTokens]}
+                    value={[Math.min(maxTokens, 32768)]}
                     min={128}
-                    max={4096}
-                    step={128}
+                    max={32768}
+                    step={256}
                     onValueChange={([v]) => setMaxTokens(v)}
                   />
+                  <div className="flex items-center gap-1">
+                    {[2048, 4096, 8192, 16384, 32768].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setMaxTokens(preset)}
+                        className={`flex-1 rounded-md py-1 text-[10px] font-mono transition cursor-pointer ${
+                          maxTokens === preset
+                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                            : "bg-white/[0.03] text-zinc-400 border border-white/[0.06] hover:text-zinc-200"
+                        }`}
+                      >
+                        {preset / 1024}K
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -787,6 +908,18 @@ export function ChatWorkspace({
       </header>
 
       {/* ── Centered Editorial Message Stream ──────────────────────────────── */}
+      {compactNotice && (
+        <div className="border-b border-emerald-500/20 bg-emerald-500/[0.08] px-4 py-1.5 text-center text-xs text-emerald-300 flex items-center justify-center gap-3">
+          <span>{compactNotice}</span>
+          <button
+            type="button"
+            onClick={() => setCompactNotice(null)}
+            className="text-[11px] text-emerald-200/70 hover:text-emerald-100 cursor-pointer"
+          >
+            Kapat
+          </button>
+        </div>
+      )}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-6">
         <div className="mx-auto flex min-h-full max-w-[760px] flex-col py-8">
           {messages.length === 0 ? (

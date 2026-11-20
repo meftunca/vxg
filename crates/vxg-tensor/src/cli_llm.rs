@@ -452,7 +452,7 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
         t_decode = Instant::now();
         let mut ids = Vec::with_capacity(max_tokens);
         let mut in_think = enable_thinking && !raw_prompt && is_qwen3;
-        let think_budget = (max_tokens * 3 / 4).clamp(256, 6144);
+        let think_budget = (max_tokens * 3 / 4).clamp(256, 32768);
         let close_nl = model.tokenizer.encode("\n</think>\n\n");
         let close_after_nl = model.tokenizer.encode("</think>\n\n");
         let mut last_ended_nl = false;

@@ -46,7 +46,7 @@ pub struct ChatParams {
 impl Default for ChatParams {
     fn default() -> Self {
         Self {
-            max_tokens: 512,
+            max_tokens: 4096,
             temperature: 0.0,
             presence_penalty: Some(0.0),
             enable_thinking: false,
@@ -327,7 +327,7 @@ impl ChatSession {
             return Err(Error::Format("messages cannot be empty".into()));
         }
         cancel.store(false, Ordering::Relaxed);
-        let max_tokens = params.max_tokens.clamp(1, 8192);
+        let max_tokens = params.max_tokens.clamp(1, 65536);
         let temp = params.temperature.max(0.0);
         let is_qwen_think = matches!(self.model.cfg.arch.as_str(), "qwen3" | "qwen35");
 
@@ -573,7 +573,7 @@ impl ChatSession {
             exempt.extend(think_end_id);
             let mut tracker = TokenPenaltyTracker::new(self.model.cfg.n_vocab, &exempt);
             let mut in_think = is_qwen_think && params.enable_thinking;
-            let think_budget = (max_tokens * 3 / 4).clamp(256, 6144);
+            let think_budget = (max_tokens * 3 / 4).clamp(256, 32768);
             let close_nl = if in_think { self.model.tokenizer.encode("\n</think>\n\n") } else { Vec::new() };
             let close_after = if in_think { self.model.tokenizer.encode("</think>\n\n") } else { Vec::new() };
             let mut ids = Vec::with_capacity(max_tokens);

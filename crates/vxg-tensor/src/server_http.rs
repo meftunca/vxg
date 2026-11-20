@@ -274,7 +274,7 @@ fn handle_chat_completions(
         .get("max_completion_tokens")
         .or_else(|| req.get("max_tokens"))
         .and_then(Value::as_u64)
-        .unwrap_or(if enable_thinking { 2048 } else { 1024 }) as usize;
+        .unwrap_or(if enable_thinking { 8192 } else { 4096 }) as usize;
     let presence_penalty = req
         .get("presence_penalty")
         .and_then(Value::as_f64)
@@ -447,7 +447,7 @@ fn handle_legacy_completions(
     }
     let stops = parse_stop_sequences(&req);
     let temp = req.get("temperature").and_then(Value::as_f64).unwrap_or(0.0) as f32;
-    let max_tokens = req.get("max_tokens").and_then(Value::as_u64).unwrap_or(256) as usize;
+    let max_tokens = req.get("max_tokens").and_then(Value::as_u64).unwrap_or(4096) as usize;
     let model_id = handle
         .snapshot()
         .model
