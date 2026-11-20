@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "VXT Studio — Compressed-Domain Metal AI & Tensor Forge",
+        "title": "VXT Studio",
         "width": 1340,
         "height": 860,
         "minWidth": 980,

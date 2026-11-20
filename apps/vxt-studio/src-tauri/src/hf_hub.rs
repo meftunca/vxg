@@ -20,6 +20,131 @@ pub struct ForgeProgressPayload {
     pub detail: String,
 }
 
+#[derive(Clone, Serialize)]
+pub struct HfSearchModel {
+    pub id: String,
+    pub downloads: u64,
+    pub likes: u64,
+    pub pipeline_tag: Option<String>,
+    pub gated: bool,
+    pub vision: bool,
+    pub format_hint: String,
+    pub arch_hint: Option<String>,
+}
+
+fn url_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            b' ' => out.push_str("%20"),
+            other => {
+                out.push('%');
+                out.push_str(&format!("{other:02X}"));
+            }
+        }
+    }
+    out
+}
+
+pub fn search_hf_models(query: &str, hf_token: Option<&str>) -> Result<Vec<HfSearchModel>> {
+    let q = query.trim();
+    let api_url = if q.is_empty() {
+        "https://huggingface.co/api/models?search=Qwen3.5&limit=16&sort=downloads&direction=-1"
+            .to_string()
+    } else {
+        format!(
+            "https://huggingface.co/api/models?search={}&limit=18&sort=downloads&direction=-1",
+            url_encode_query(q)
+        )
+    };
+    let mut cmd = Command::new("/usr/bin/curl");
+    cmd.args(["-sSL", "--fail-with-body", "--max-time", "20"]);
+    if let Some(tok) = hf_token.map(str::trim).filter(|t| !t.is_empty()) {
+        cmd.arg("-H").arg(format!("Authorization: Bearer {tok}"));
+    }
+    cmd.arg(&api_url);
+    let out = cmd
+        .output()
+        .map_err(|e| Error::Io(format!("curl çalıştırılamadı: {e}")))?;
+    if !out.status.success() {
+        let body = String::from_utf8_lossy(&out.stderr);
+        return Err(Error::Io(format!(
+            "HuggingFace arama hatası: {}",
+            body.trim()
+        )));
+    }
+    let arr: Vec<Value> = serde_json::from_slice(&out.stdout)
+        .map_err(|e| Error::Format(format!("HF arama JSON okunamadı: {e}")))?;
+    let mut results = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let tags: Vec<String> = item
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_safetensors = tags.iter().any(|t| t == "safetensors");
+        let has_gguf = tags.iter().any(|t| t == "gguf") || id.to_ascii_lowercase().contains("gguf");
+        if !has_safetensors && !has_gguf {
+            continue;
+        }
+        let pipeline_tag = item
+            .get("pipeline_tag")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let vision = pipeline_tag.as_deref() == Some("image-text-to-text")
+            || tags
+                .iter()
+                .any(|t| t == "image-text-to-text" || t == "vision" || t == "multimodal");
+        let gated = match item.get("gated") {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(s)) => !s.is_empty() && s != "false",
+            _ => false,
+        };
+        let arch_hint = [
+            ("qwen3_5", "Qwen3.5"),
+            ("qwen3-moe", "Qwen3-MoE"),
+            ("qwen3", "Qwen3"),
+            ("qwen2", "Qwen2"),
+            ("llama", "Llama"),
+            ("gemma", "Gemma"),
+            ("mixtral", "Mixtral"),
+            ("deepseek", "DeepSeek"),
+        ]
+        .iter()
+        .find(|(k, _)| {
+            tags.iter().any(|t| t.contains(k)) || id.to_ascii_lowercase().contains(k)
+        })
+        .map(|(_, label)| (*label).to_string());
+
+        results.push(HfSearchModel {
+            id: id.to_owned(),
+            downloads: item.get("downloads").and_then(Value::as_u64).unwrap_or(0),
+            likes: item.get("likes").and_then(Value::as_u64).unwrap_or(0),
+            pipeline_tag,
+            gated,
+            vision,
+            format_hint: if has_safetensors {
+                "SafeTensors".into()
+            } else {
+                "GGUF".into()
+            },
+            arch_hint,
+        });
+    }
+    Ok(results)
+}
+
 #[derive(Clone)]
 struct RemoteFile {
     rfilename: String,

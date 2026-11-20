@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "katex/dist/katex.min.css";
 
 @theme inline {
   --color-background: hsl(var(--background));
@@ -28,32 +29,266 @@
 
 :root,
 .dark {
-  --background: 240 10% 4.5%;
-  --foreground: 0 0% 98%;
-  --card: 240 9% 7%;
-  --card-foreground: 0 0% 98%;
-  --popover: 240 10% 6%;
-  --popover-foreground: 0 0% 98%;
-  --primary: 160 84% 44%;
-  --primary-foreground: 240 10% 4%;
-  --secondary: 240 5% 13%;
-  --secondary-foreground: 0 0% 96%;
-  --muted: 240 5% 12%;
-  --muted-foreground: 240 5% 64%;
-  --accent: 240 5% 15%;
-  --accent-foreground: 0 0% 98%;
-  --destructive: 0 72% 54%;
+  --background: 240 5% 10.5%;
+  --foreground: 240 6% 93%;
+  --card: 240 5% 13%;
+  --card-foreground: 240 6% 93%;
+  --popover: 240 6% 12%;
+  --popover-foreground: 240 6% 94%;
+  --primary: 160 72% 45%;
+  --primary-foreground: 240 10% 6%;
+  --secondary: 240 5% 16.5%;
+  --secondary-foreground: 240 5% 92%;
+  --muted: 240 5% 15.5%;
+  --muted-foreground: 240 5% 59%;
+  --accent: 240 5% 18%;
+  --accent-foreground: 240 6% 95%;
+  --destructive: 0 72% 56%;
   --destructive-foreground: 0 0% 98%;
-  --border: 240 5% 16%;
-  --input: 240 5% 16%;
-  --ring: 160 84% 44%;
-  --radius: 0.65rem;
+  --border: 240 5% 19%;
+  --input: 240 5% 19%;
+  --ring: 160 72% 45%;
+  --radius: 0.7rem;
 }
 
 * {
-  border-color: hsl(var(--border));
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #19191c;
+  color: #ececef;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", system-ui, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+code,
+pre,
+.font-mono {
+  font-family: "SF Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Subtle macOS-like thin scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* ── Editorial Markdown Prose (Claude / Codex style) ───────────────────────── */
+.vxt-prose {
+  font-size: 15px;
+  line-height: 1.72;
+  color: #e6e6ea;
+  word-wrap: break-word;
+}
+
+.vxt-prose > *:first-child {
+  margin-top: 0;
+}
+.vxt-prose > *:last-child {
+  margin-bottom: 0;
+}
+
+.vxt-prose p {
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+}
+
+.vxt-prose h1,
+.vxt-prose h2,
+.vxt-prose h3,
+.vxt-prose h4 {
+  color: #f7f7f9;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+  margin-top: 1.4em;
+  margin-bottom: 0.55em;
+}
+
+.vxt-prose h1 {
+  font-size: 1.45em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.vxt-prose h2 {
+  font-size: 1.22em;
+}
+.vxt-prose h3 {
+  font-size: 1.08em;
+}
+
+.vxt-prose strong {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.vxt-prose em {
+  color: #d7d7de;
+}
+
+.vxt-prose a {
+  color: #5eead4;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: rgba(94, 234, 212, 0.4);
+}
+.vxt-prose a:hover {
+  color: #99f6e4;
+  text-decoration-color: #99f6e4;
+}
+
+.vxt-prose ul,
+.vxt-prose ol {
+  margin-top: 0.65em;
+  margin-bottom: 0.8em;
+  padding-left: 1.5em;
+}
+.vxt-prose ul {
+  list-style-type: disc;
+}
+.vxt-prose ol {
+  list-style-type: decimal;
+}
+.vxt-prose li {
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
+}
+.vxt-prose li::marker {
+  color: #7c7c89;
+}
+
+.vxt-prose blockquote {
+  margin: 0.9em 0;
+  padding: 0.35em 0 0.35em 1em;
+  border-left: 2.5px solid rgba(52, 211, 153, 0.5);
+  color: #b4b4c0;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 0 6px 6px 0;
+}
+
+.vxt-prose hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 1.4em 0;
+}
+
+.vxt-prose :not(pre) > code {
+  font-size: 0.86em;
+  background: rgba(255, 255, 255, 0.075);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: #f3f4f6;
+  padding: 0.14em 0.4em;
+  border-radius: 5px;
+}
+
+.vxt-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.88em;
+  overflow: hidden;
+  border-radius: 8px;
+}
+.vxt-prose thead {
+  background: rgba(255, 255, 255, 0.045);
+}
+.vxt-prose th {
+  text-align: left;
+  font-weight: 600;
+  color: #f2f2f5;
+  padding: 0.55em 0.85em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.vxt-prose td {
+  padding: 0.5em 0.85em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: #d6d6dd;
+}
+.vxt-prose tr:last-child td {
+  border-bottom: none;
+}
+
+.vxt-prose .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.4em 0;
+}
+
+/* ── Refined Codex/Dark Syntax Highlighting (highlight.js) ─────────────────── */
+.hljs {
+  background: transparent;
+  color: #e4e4ec;
+}
+.hljs-comment,
+.hljs-quote {
+  color: #6b7280;
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-addition {
+  color: #c084fc;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet {
+  color: #fbbf24;
+}
+.hljs-string,
+.hljs-doctag,
+.hljs-regexp {
+  color: #6ee7b7;
+}
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #60a5fa;
+}
+.hljs-attribute,
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-class .hljs-title,
+.hljs-type {
+  color: #93c5fd;
+}
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-meta,
+.hljs-link {
+  color: #f472b6;
+}
+.hljs-deletion {
+  color: #f87171;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
 }

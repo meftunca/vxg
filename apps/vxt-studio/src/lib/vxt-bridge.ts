@@ -93,6 +93,17 @@ export interface ForgeProgressPayload {
   detail: string;
 }
 
+export interface HfSearchModel {
+  id: string;
+  downloads: number;
+  likes: number;
+  pipeline_tag: string | null;
+  gated: boolean;
+  vision: boolean;
+  format_hint: string;
+  arch_hint: string | null;
+}
+
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -180,6 +191,49 @@ export async function downloadHfAndPack(
     hfToken: hfToken?.trim() || null,
     outputPath: outputPath?.trim() || null,
   });
+}
+
+export async function searchHfModels(
+  query: string,
+  hfToken?: string,
+): Promise<HfSearchModel[]> {
+  if (isTauriRuntime()) {
+    return invoke<HfSearchModel[]>("search_hf_models_cmd", {
+      query,
+      hfToken: hfToken?.trim() || null,
+    });
+  }
+  const q = encodeURIComponent(query.trim() || "Qwen3.5");
+  const r = await fetch(
+    `https://huggingface.co/api/models?search=${q}&limit=16&sort=downloads&direction=-1`,
+  );
+  if (!r.ok) throw new Error(`HF API ${r.status}`);
+  const arr = (await r.json()) as Array<{
+    id?: string;
+    downloads?: number;
+    likes?: number;
+    pipeline_tag?: string;
+    gated?: boolean | string;
+    tags?: string[];
+  }>;
+  return arr
+    .filter((m) => m.id)
+    .map((m) => {
+      const tags = (m.tags ?? []).map((t) => t.toLowerCase());
+      return {
+        id: m.id!,
+        downloads: m.downloads ?? 0,
+        likes: m.likes ?? 0,
+        pipeline_tag: m.pipeline_tag ?? null,
+        gated: Boolean(m.gated && m.gated !== "false"),
+        vision:
+          m.pipeline_tag === "image-text-to-text" ||
+          tags.includes("image-text-to-text") ||
+          tags.includes("vision"),
+        format_hint: tags.includes("safetensors") ? "SafeTensors" : "GGUF",
+        arch_hint: null,
+      };
+    });
 }
 
 export async function cancelForgeJob(): Promise<void> {

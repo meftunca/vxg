@@ -1,45 +1,17 @@
 import * as React from "react";
-import { Activity, Check, Copy, Globe, Radio, Server, Terminal } from "lucide-react";
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/primitives";
+import { Activity, Globe, PanelLeft, Radio, Server, Terminal } from "lucide-react";
+import { HighlightedSnippet } from "@/components/MarkdownRenderer";
 import type { StudioState } from "@/lib/vxt-bridge";
 
-function CodeSnippet({ title, code }: { title: string; code: string }) {
-  const [copied, setCopied] = React.useState(false);
-  return (
-    <Card className="bg-card/80">
-      <CardHeader className="flex flex-row items-center justify-between py-3 px-4 border-b">
-        <CardTitle className="text-xs font-semibold">{title}</CardTitle>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => {
-            void navigator.clipboard.writeText(code);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          }}
-        >
-          {copied ? <Check className="h-3.5 w-3.5 text-primary" /> : <Copy className="h-3.5 w-3.5" />}
-          {copied ? "Kopyalandı" : "Kopyala"}
-        </Button>
-      </CardHeader>
-      <CardContent className="p-4">
-        <pre className="overflow-x-auto font-mono text-xs text-muted-foreground leading-relaxed">
-          {code}
-        </pre>
-      </CardContent>
-    </Card>
-  );
-}
-
-export function ApiHubWorkspace({ studio }: { studio: StudioState | null }) {
+export function ApiHubWorkspace({
+  studio,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: {
+  studio: StudioState | null;
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+}) {
   const baseUrl = studio?.base_url || "http://127.0.0.1:11435/v1";
   const rootUrl = baseUrl.replace(/\/v1$/, "");
   const modelName = studio?.model?.name || "qwen35-9b";
@@ -111,73 +83,117 @@ curl -s ${baseUrl}/completions \\
 curl -s ${rootUrl}/metrics`;
 
   return (
-    <div className="h-[calc(100vh-88px)] space-y-4 overflow-y-auto pr-1">
-      <Card className="bg-card/80">
-        <CardHeader className="pb-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Globe className="h-4 w-4 text-primary" />
-                Production OpenAI Uyumlu Sunucu (Cursor / AI SDK / OpenAI / Prometheus)
-              </CardTitle>
-              <CardDescription>
-                Gömülü Rust sunucusu SSE <code>/v1/chat/completions</code> (<code>tools</code>,{" "}
-                <code>response_format</code> JSON/Schema, <code>stop</code>, Vision{" "}
-                <code>image_url</code>), <code>/v1/completions</code>, <code>/v1/models</code>,{" "}
-                <code>/health</code> ve Prometheus <code>/metrics</code> uçlarını sunar.
-              </CardDescription>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge className="gap-1.5 font-mono">
-                <Radio className="h-3 w-3 animate-pulse" />
-                {baseUrl}
-              </Badge>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void probeEndpoint("GET /v1/models", `${baseUrl}/models`)}
-              >
-                <Terminal className="h-3.5 w-3.5" />
-                /v1/models
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void probeEndpoint("GET /health", `${rootUrl}/health`)}
-              >
-                <Server className="h-3.5 w-3.5" />
-                /health
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void probeEndpoint("GET /metrics (Prometheus)", `${rootUrl}/metrics`, true)}
-              >
-                <Activity className="h-3.5 w-3.5 text-emerald-400" />
-                /metrics
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        {pingResult && (
-          <CardContent className="space-y-1.5">
-            {pingLabel && (
-              <div className="font-mono text-[11px] text-muted-foreground">{pingLabel}</div>
-            )}
-            <pre className="max-h-64 overflow-auto rounded-lg border bg-background/70 p-3 font-mono text-xs text-emerald-400">
-              {pingResult}
-            </pre>
-          </CardContent>
-        )}
-      </Card>
+    <div className="flex h-full flex-col bg-[#19191c]">
+      <header className="flex h-[54px] shrink-0 items-center justify-between border-b border-white/[0.06] px-5">
+        <div className="flex items-center gap-3">
+          {sidebarCollapsed && (
+            <button
+              type="button"
+              onClick={onToggleSidebar}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-400 transition hover:bg-white/[0.06] hover:text-zinc-100 cursor-pointer"
+            >
+              <PanelLeft className="h-4 w-4" />
+            </button>
+          )}
+          <Globe className="h-4 w-4 text-emerald-400" />
+          <h1 className="text-sm font-semibold text-zinc-100">OpenAI API &amp; Telemetri</h1>
+        </div>
+        <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 font-mono text-xs text-emerald-300">
+          <Radio className="h-3 w-3 animate-pulse" />
+          <span>{baseUrl}</span>
+        </div>
+      </header>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <CodeSnippet title="Vercel AI SDK (@ai-sdk/openai-compatible)" code={aiSdkCode} />
-        <CodeSnippet title="Python OpenAI SDK (JSON Mode)" code={pythonCode} />
-      </div>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <CodeSnippet title="cURL · OpenAI Tool Calling & Stop Sequences" code={toolsCode} />
-        <CodeSnippet title="cURL · /v1/completions & Prometheus /metrics" code={legacyCode} />
+      <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="mx-auto max-w-4xl space-y-5">
+          {/* Live Endpoint Probe Card */}
+          <div className="rounded-2xl border border-white/[0.07] bg-[#1e1e23] p-5 space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="space-y-1">
+                <h2 className="text-sm font-semibold text-zinc-100">
+                  Yerel Production Sunucu (Cursor · OpenAI SDK · Vercel AI SDK · Prometheus)
+                </h2>
+                <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
+                  Gömülü Rust HTTP/SSE motoru <code className="text-zinc-300">/v1/chat/completions</code>{" "}
+                  (<code className="text-zinc-300">tools</code>,{" "}
+                  <code className="text-zinc-300">response_format</code> JSON/Schema,{" "}
+                  <code className="text-zinc-300">stop</code>, Vision{" "}
+                  <code className="text-zinc-300">image_url</code>),{" "}
+                  <code className="text-zinc-300">/v1/completions</code>,{" "}
+                  <code className="text-zinc-300">/v1/models</code>,{" "}
+                  <code className="text-zinc-300">/health</code> ve Prometheus{" "}
+                  <code className="text-zinc-300">/metrics</code> uçlarını sunar.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void probeEndpoint("GET /v1/models", `${baseUrl}/models`)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs text-zinc-200 transition hover:bg-white/[0.08] cursor-pointer"
+                >
+                  <Terminal className="h-3.5 w-3.5 text-zinc-400" />
+                  /v1/models
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void probeEndpoint("GET /health", `${rootUrl}/health`)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs text-zinc-200 transition hover:bg-white/[0.08] cursor-pointer"
+                >
+                  <Server className="h-3.5 w-3.5 text-zinc-400" />
+                  /health
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void probeEndpoint("GET /metrics (Prometheus)", `${rootUrl}/metrics`, true)
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-300 transition hover:bg-emerald-500/15 cursor-pointer"
+                >
+                  <Activity className="h-3.5 w-3.5" />
+                  /metrics
+                </button>
+              </div>
+            </div>
+
+            {pingResult && (
+              <div className="overflow-hidden rounded-xl border border-white/[0.07] bg-[#121215]">
+                <div className="flex items-center justify-between border-b border-white/[0.06] px-3.5 py-2 text-[11px] font-mono text-zinc-400">
+                  <span>{pingLabel}</span>
+                  <button
+                    type="button"
+                    onClick={() => setPingResult(null)}
+                    className="text-zinc-500 hover:text-zinc-200 cursor-pointer"
+                  >
+                    Kapat
+                  </button>
+                </div>
+                <pre className="max-h-64 overflow-auto p-3.5 font-mono text-xs text-emerald-300/90 leading-relaxed">
+                  {pingResult}
+                </pre>
+              </div>
+            )}
+          </div>
+
+          {/* Syntax-Highlighted Integration Snippets */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <HighlightedSnippet title="Vercel AI SDK (TypeScript)" lang="typescript" code={aiSdkCode} />
+            <HighlightedSnippet
+              title="OpenAI Python SDK (JSON Mode)"
+              lang="python"
+              code={pythonCode}
+            />
+            <HighlightedSnippet
+              title="cURL · Function Calling / Tools & Stop"
+              lang="bash"
+              code={toolsCode}
+            />
+            <HighlightedSnippet
+              title="cURL · Legacy /v1/completions & /metrics"
+              lang="bash"
+              code={legacyCode}
+            />
+          </div>
+        </div>
       </div>
     </div>
   );

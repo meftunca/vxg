@@ -13,7 +13,8 @@ use crate::forge::{
     discover_local_files, inspect_tensor_file, ConvertReport, InspectReport,
 };
 use crate::hf_hub::{
-    default_hf_vxt_output_path, delete_vxt_model_file, download_hf_repo, ForgeProgressPayload,
+    default_hf_vxt_output_path, delete_vxt_model_file, download_hf_repo, search_hf_models,
+    ForgeProgressPayload, HfSearchModel,
 };
 
 struct AppState {
@@ -190,6 +191,18 @@ async fn download_hf_and_pack_cmd(
 }
 
 #[tauri::command]
+async fn search_hf_models_cmd(
+    query: String,
+    hf_token: Option<String>,
+) -> Result<Vec<HfSearchModel>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        search_hf_models(&query, hf_token.as_deref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn create_demo_tensor_cmd() -> Result<InspectReport, String> {
     tauri::async_runtime::spawn_blocking(|| {
         create_demo_safetensors().map_err(|e| e.to_string())
@@ -231,6 +244,7 @@ pub fn run() {
             inspect_file_cmd,
             convert_vxt_cmd,
             download_hf_and_pack_cmd,
+            search_hf_models_cmd,
             create_demo_tensor_cmd,
         ])
         .run(tauri::generate_context!())
