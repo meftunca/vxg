@@ -21,6 +21,7 @@ import {
   listenForgeProgress,
   loadModel,
   resetChatCache,
+  setDraftModel,
   unloadModel,
   type ForgeProgressPayload,
   type StudioState,
@@ -222,6 +223,19 @@ export default function App() {
     setLoadingModel(true);
     try {
       const st = await unloadModel();
+      setStudio(st);
+    } catch (e) {
+      setLoadErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingModel(false);
+    }
+  };
+
+  const handleSetDraftModel = async (path: string | null) => {
+    setLoadErr(null);
+    setLoadingModel(true);
+    try {
+      const st = await setDraftModel(path, true);
       setStudio(st);
     } catch (e) {
       setLoadErr(e instanceof Error ? e.message : String(e));
@@ -462,6 +476,7 @@ export default function App() {
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={() => setSidebarCollapsed(false)}
             onLoadModelPath={handleLoadModelPath}
+            onSetDraftModel={handleSetDraftModel}
             onUnloadModel={handleUnloadModel}
             onPickModelDialog={handlePickModelDialog}
             onRefresh={refresh}

@@ -3,10 +3,11 @@
 //! `qwen3` / `qwen2` / `llama` GQA Transformers) executing directly on `.vxt` compressed weights.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::cuda::{upload_model_cuda, CudaEngine};
 use crate::cuda_llm::{CudaTurboRunner, CudaTurboState};
-use crate::format::{read_vxt_model, PackedTensor};
+use crate::format::{read_vxt_model, read_vxt_model_filtered, PackedTensor};
 use crate::gguf::GgufView;
 use crate::gguf_meta::{parse_gguf_kv, ModelConfig};
 use crate::llm_cpu::{
@@ -120,7 +121,8 @@ pub struct LlmModel {
     pub(crate) output_norm: Vec<f32>,
     pub(crate) output_head: Option<MatWeight>,
     pub(crate) layers: Vec<DecoderLayer>,
-    vision: Option<VisionEncoder>,
+    vision_cfg: Option<VisionConfig>,
+    vision: Mutex<Option<VisionEncoder>>,
 }
 
 impl LlmModel {
@@ -128,7 +130,7 @@ impl LlmModel {
         let mapped = TensorBytes::open(path)?;
         let bytes = mapped.as_slice();
         let mut model = if bytes.starts_with(b"VXT1") {
-            Self::from_vxt_bytes(bytes, use_gpu, cpu_threads)?
+            Self::from_vxt_bytes_inner(bytes, true, use_gpu, cpu_threads)?
         } else if bytes.starts_with(b"GGUF") {
             Self::from_gguf_bytes(bytes, use_gpu, cpu_threads)?
         } else {
@@ -147,7 +149,20 @@ impl LlmModel {
     }
 
     pub fn from_vxt_bytes(bytes: &[u8], use_gpu: bool, cpu_threads: usize) -> Result<Self> {
-        let (meta_kv, entries) = read_vxt_model(bytes)?;
+        Self::from_vxt_bytes_inner(bytes, false, use_gpu, cpu_threads)
+    }
+
+    fn from_vxt_bytes_inner(
+        bytes: &[u8],
+        lazy_vision: bool,
+        use_gpu: bool,
+        cpu_threads: usize,
+    ) -> Result<Self> {
+        let (meta_kv, entries) = if lazy_vision {
+            read_vxt_model_filtered(bytes, |name| !name.starts_with("vis."))?
+        } else {
+            read_vxt_model(bytes)?
+        };
         if meta_kv.iter().any(|(k, _)| k == crate::native_qwen35::MANIFEST) {
             let (cfg, tokenizer, map) = crate::native_qwen35::load_archive(&meta_kv, entries)?;
             return Self::assemble(cfg, tokenizer, None, map, bytes.len(), use_gpu, cpu_threads);
@@ -244,9 +259,9 @@ impl LlmModel {
         use_gpu: bool,
         cpu_threads: usize,
     ) -> Result<Self> {
-        let mut vision = match vision_cfg {
+        let mut vision = match vision_cfg.as_ref() {
             Some(vc) if map.contains_key("vis.patch_embed.proj.weight") => {
-                Some(VisionEncoder::from_tensors(vc, &mut map)?)
+                Some(VisionEncoder::from_tensors(vc.clone(), &mut map)?)
             }
             _ => None,
         };
@@ -317,7 +332,7 @@ impl LlmModel {
             layers.clear();
             layers.shrink_to_fit();
             output_head = None;
-            if vision.is_none() {
+            if vision_cfg.is_none() {
                 token_embd = MatWeight::cpu_only(PackedTensor::RawF32 {
                     rows: 0,
                     cols: 0,
@@ -330,7 +345,7 @@ impl LlmModel {
             cfg, tokenizer, total_compressed_bytes: archive_bytes, source_path: None, metal, cuda,
             cuda_turbo, metal_turbo, metal_cb4_fast, metal_llm, cpu_threads: threads,
             cb4_greedy_enabled: false, cb4_embed_is_4bit, token_embd, output_norm, output_head,
-            layers, vision,
+            layers, vision_cfg, vision: Mutex::new(vision),
         })
     }
 
@@ -346,26 +361,55 @@ impl LlmModel {
                 (None, None) => format!("CPU ({} threads)", self.cpu_threads),
             },
         };
-        match self.vision.as_ref() {
-            Some(vis) if vis.has_gpu() => format!("{base} + Vision (Metal GPU)"),
-            Some(_) => format!("{base} + Vision"),
-            None => base,
+        let loaded_vis_gpu = self
+            .vision
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|v| v.has_gpu()));
+        match (loaded_vis_gpu, self.vision_cfg.is_some()) {
+            (Some(true), _) => format!("{base} + Vision (Metal GPU)"),
+            (Some(false), _) => format!("{base} + Vision"),
+            (None, true) => format!("{base} + Vision (On-Demand)"),
+            (None, false) => base,
         }
     }
 
     pub fn has_vision(&self) -> bool {
-        self.vision.is_some()
+        self.vision_cfg.is_some()
+            || self.vision.lock().map(|g| g.is_some()).unwrap_or(false)
     }
 
     pub fn vision_config(&self) -> Option<&VisionConfig> {
-        self.vision.as_ref().map(|v| &v.cfg)
+        self.vision_cfg.as_ref()
     }
 
     pub fn encode_image_source(&self, src: &str) -> Result<EncodedVisionImage> {
-        let v = self.vision.as_ref().ok_or_else(|| {
-            Error::Unsupported("loaded VXT model does not contain a vision encoder".into())
-        })?;
-        v.encode_source(src, self.cpu_threads)
+        let mut guard = self
+            .vision
+            .lock()
+            .map_err(|_| Error::Backend("vision mutex poisoned".into()))?;
+        if guard.is_none() {
+            let vcfg = self.vision_cfg.clone().ok_or_else(|| {
+                Error::Unsupported("loaded VXT model does not contain a vision encoder".into())
+            })?;
+            let path = self.source_path.as_deref().ok_or_else(|| {
+                Error::Unsupported("lazy vision loading requires a file-backed .vxt model".into())
+            })?;
+            let mapped = TensorBytes::open(path)?;
+            let (_meta, entries) =
+                read_vxt_model_filtered(mapped.as_slice(), |n| n.starts_with("vis."))?;
+            let mut map: HashMap<String, PackedTensor> =
+                entries.into_iter().map(|e| (e.name, e.tensor)).collect();
+            let mut vis = VisionEncoder::from_tensors(vcfg, &mut map)?;
+            if let Some(eng) = self.metal.as_ref() {
+                let _ = vis.upload_gpu(eng, self.cpu_threads);
+            }
+            *guard = Some(vis);
+        }
+        guard
+            .as_ref()
+            .unwrap()
+            .encode_source(src, self.cpu_threads)
     }
 
     pub fn has_turbo_fast_decode(&self) -> bool {
@@ -497,11 +541,9 @@ impl LlmModel {
             self.ensure_cpu_weights_hydrated()?;
         }
         let vcfg = self
-            .vision
-            .as_ref()
-            .ok_or_else(|| Error::Unsupported("model has no vision encoder".into()))?
-            .cfg
-            .clone();
+            .vision_cfg
+            .clone()
+            .ok_or_else(|| Error::Unsupported("model has no vision encoder".into()))?;
         let start_rope = ((state.pos as isize) + state.rope_delta).max(0) as usize;
         let (mrope_pos, new_delta) =
             compute_mrope_positions(tok_ids, images, &vcfg, state.pos, start_rope)?;

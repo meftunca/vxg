@@ -299,6 +299,16 @@ pub fn read_vxt_archive(bytes: &[u8]) -> Result<Vec<VxtEntry>> {
 
 /// Parses both the metadata KV table and all compressed tensors from a `.vxt` (`VXT1`) archive.
 pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEntry>)> {
+    read_vxt_model_filtered(bytes, |_| true)
+}
+
+/// Parses metadata KV and only the compressed tensors whose name matches `keep(name)`,
+/// skipping unselected tensors (such as `vis.*` Vision weights during text-only load) with
+/// zero heap allocation and zero Huffman decoding while preserving full CRC verification.
+pub fn read_vxt_model_filtered<F: Fn(&str) -> bool>(
+    bytes: &[u8],
+    keep: F,
+) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEntry>)> {
     if bytes.len() < 24 {
         return Err(Error::Format("truncated VXT archive".into()));
     }
@@ -315,11 +325,11 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
         if fnv1a64(body) != expected_archive_crc {
             return Err(Error::Checksum("VXT archive checksum mismatch".into()));
         }
-        return read_vxt_body(bytes, body);
+        return read_vxt_body(bytes, body, &keep);
     }
     std::thread::scope(|s| {
         let arc_job = s.spawn(|| fnv1a64(body) == expected_archive_crc);
-        let parsed = read_vxt_body(bytes, body);
+        let parsed = read_vxt_body(bytes, body, &keep);
         if !arc_job.join().unwrap_or(false) {
             return Err(Error::Checksum("VXT archive checksum mismatch".into()));
         }
@@ -327,7 +337,47 @@ pub fn read_vxt_model(bytes: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEn
     })
 }
 
-fn read_vxt_body(bytes: &[u8], body: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEntry>)> {
+fn skip_tensor_payload(kind: u8, sub: u8, r: &mut Cur<'_>) -> Result<()> {
+    match kind {
+        KIND_LOSSLESS => {
+            let _ = r.take(8)?;
+            r.skip_vec(1)?;
+            r.skip_vec(4)?;
+            r.skip_vec(4)?;
+            r.skip_vec(1)?;
+        }
+        KIND_CODEBOOK | KIND_WHT2 => {
+            let _ = r.take(64)?;
+            r.skip_vec(2)?;
+            r.skip_vec(4)?;
+            r.skip_vec(4)?;
+            r.skip_vec(4)?;
+        }
+        KIND_Q4_0 => {
+            r.skip_vec(2)?;
+            r.skip_vec(4)?;
+        }
+        KIND_RAW_F32 => {
+            r.skip_vec(4)?;
+        }
+        KIND_TURBO_WHT => {
+            r.skip_vec(2)?;
+            r.skip_vec(4)?;
+        }
+        KIND_TURBO_WHT_EC => {
+            // Advance past compressed EC streams without decoding.
+            let _ = scan_turbo_ec(0, sub, 4, 256, 256, r)?;
+        }
+        _ => return Err(Error::Format(format!("unknown VXT tensor kind {kind}"))),
+    }
+    Ok(())
+}
+
+fn read_vxt_body<F: Fn(&str) -> bool>(
+    bytes: &[u8],
+    body: &[u8],
+    keep: &F,
+) -> Result<(Vec<(String, Vec<u8>)>, Vec<VxtEntry>)> {
     let mut r = Cur { b: body, pos: 8 };
     let count = r.u32()? as usize;
     let mcount = r.u32()? as usize;
@@ -373,6 +423,16 @@ fn read_vxt_body(bytes: &[u8], body: &[u8]) -> Result<(Vec<(String, Vec<u8>)>, V
                 .is_none_or(|n| n > isize::MAX as usize / 4)
         {
             return Err(Error::Format("VXT matrix dimensions overflow".into()));
+        }
+
+        if !keep(&name) {
+            if kind == KIND_TURBO_WHT_EC {
+                let _ = scan_turbo_ec(0, sub, rows, cols, padded_cols, &mut r)?;
+            } else {
+                skip_tensor_payload(kind, sub, &mut r)?;
+            }
+            let _expected_crc = r.u64()?;
+            continue;
         }
 
         let tensor = match kind {

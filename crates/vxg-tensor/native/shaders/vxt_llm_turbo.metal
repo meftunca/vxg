@@ -334,25 +334,26 @@ inline float vxt_e8_hq_elem_f32(uint w0, uint w1, uint k) {
     return float(u) + bias;
 }
 
-inline float vxt_dot_e8_hq_row_h4(uint w0, uint w1, float4 x0, float4 x1) {
-    uchar4 b0 = as_type<uchar4>(w0);
-    uchar4 b1 = as_type<uchar4>(w1);
-    uint par = (uint(b0.x) ^ uint(b0.y) ^ uint(b0.z) ^ uint(b0.w) ^ uint(b1.x) ^ uint(b1.y) ^ uint(b1.z)) & 1u;
-    uint u7 = ((uint(b1.w) & 0x7fu) << 1u) | par;
-    float bias = (b1.w & 0x80u) ? -127.5f : -128.0f;
-    float4 v0 = float4(float(b0.x), float(b0.y), float(b0.z), float(b0.w)) + bias;
-    float4 v1 = float4(float(b1.x), float(b1.y), float(b1.z), float(u7)) + bias;
-    float4 p4 = fma(v0, x0, v1 * x1);
-    return (p4.x + p4.y) + (p4.z + p4.w);
+inline half vxt_dot_e8_hq_row_h4(uint w0, uint w1, half4 x0, half4 x1, half half_sum_x) {
+    char4 s0 = as_type<char4>(w0 ^ 0x80808080u);
+    char4 s1 = as_type<char4>(w1 ^ 0x80808080u);
+    uint xp = w0 ^ (w1 & 0x00ffffffu);
+    xp ^= xp >> 16u;
+    uint u7 = ((w1 >> 23u) & 0xfeu) | ((xp ^ (xp >> 8u)) & 1u);
+    half4 v0 = half4(s0);
+    half4 v1 = half4(half(s1.x), half(s1.y), half(s1.z), half(int(u7) - 128));
+    half4 p4 = fma(v0, x0, v1 * x1);
+    half dot8 = (p4.x + p4.y) + (p4.z + p4.w);
+    return (w1 & 0x80000000u) ? (dot8 + half_sum_x) : dot8;
 }
 
 inline float4 vxt_eval_e8_hq_h4(uint4 wa, uint4 wb, half4 sh, half4 xh0, half4 xh1, float4 acc) {
-    float4 x0 = float4(xh0), x1 = float4(xh1);
-    float d0 = vxt_dot_e8_hq_row_h4(wa.x, wa.y, x0, x1);
-    float d1 = vxt_dot_e8_hq_row_h4(wa.z, wa.w, x0, x1);
-    float d2 = vxt_dot_e8_hq_row_h4(wb.x, wb.y, x0, x1);
-    float d3 = vxt_dot_e8_hq_row_h4(wb.z, wb.w, x0, x1);
-    return fma(float4(sh), float4(d0, d1, d2, d3), acc);
+    half half_sum_x = half(0.5h) * (((xh0.x + xh0.y) + (xh0.z + xh0.w)) + ((xh1.x + xh1.y) + (xh1.z + xh1.w)));
+    half d0 = vxt_dot_e8_hq_row_h4(wa.x, wa.y, xh0, xh1, half_sum_x);
+    half d1 = vxt_dot_e8_hq_row_h4(wa.z, wa.w, xh0, xh1, half_sum_x);
+    half d2 = vxt_dot_e8_hq_row_h4(wb.x, wb.y, xh0, xh1, half_sum_x);
+    half d3 = vxt_dot_e8_hq_row_h4(wb.z, wb.w, xh0, xh1, half_sum_x);
+    return fma(float4(sh), float4(half4(d0, d1, d2, d3)), acc);
 }
 
 inline float4 vxt_eval_t25_lut(

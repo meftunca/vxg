@@ -198,6 +198,7 @@ export interface ChatWorkspaceProps {
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
   onLoadModelPath: (path: string) => Promise<void>;
+  onSetDraftModel: (path: string | null) => Promise<void>;
   onUnloadModel: () => Promise<void>;
   onPickModelDialog: () => Promise<void>;
   onRefresh: () => Promise<void>;
@@ -213,6 +214,7 @@ export function ChatWorkspace({
   sidebarCollapsed,
   onToggleSidebar,
   onLoadModelPath,
+  onSetDraftModel,
   onUnloadModel,
   onPickModelDialog,
   onRefresh,
@@ -498,6 +500,12 @@ export function ChatWorkspace({
                   {shortBackendLabel(loaded.backend)}
                 </span>
               )}
+              {studio?.draft_model && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-mono text-emerald-300">
+                  <Zap className="h-2.5 w-2.5" />
+                  Spec
+                </span>
+              )}
               {visionSupported && (
                 <span className="inline-flex items-center gap-1 rounded-md bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-300">
                   <Eye className="h-2.5 w-2.5" />
@@ -508,13 +516,13 @@ export function ChatWorkspace({
             </button>
 
             {modelMenuOpen && (
-              <div className="absolute left-0 top-full z-50 mt-1.5 w-[340px] overflow-hidden rounded-xl border border-white/[0.1] bg-[#1e1e22] shadow-2xl">
+              <div className="absolute left-0 top-full z-50 mt-1.5 w-[360px] overflow-hidden rounded-xl border border-white/[0.1] bg-[#1e1e22] shadow-2xl">
                 <div className="border-b border-white/[0.07] px-3 py-2">
                   <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
                     Yerel Modeller (.vxt / .gguf)
                   </div>
                 </div>
-                <div className="max-h-[260px] overflow-y-auto p-1.5 space-y-0.5">
+                <div className="max-h-[220px] overflow-y-auto p-1.5 space-y-0.5">
                   {runnableModels.length === 0 ? (
                     <div className="px-3 py-4 text-center text-xs text-zinc-500">
                       Henüz yerel .vxt modeli bulunamadı.
@@ -549,6 +557,37 @@ export function ChatWorkspace({
                     })
                   )}
                 </div>
+
+                {/* Speculative Decoding Draft Model Selector */}
+                {loaded && runnableModels.length > 1 && (
+                  <div className="border-t border-white/[0.07] px-3 py-2.5 bg-[#1b1b1f] space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="flex items-center gap-1.5 font-medium text-emerald-300">
+                        <Zap className="h-3 w-3" />
+                        Speculative Draft Model (2× Hız)
+                      </span>
+                      <span className="font-mono text-[10px] text-zinc-500">M=4 GPU</span>
+                    </div>
+                    <select
+                      value={studio?.draft_model?.path || ""}
+                      disabled={loadingModel}
+                      onChange={(e) => {
+                        setModelMenuOpen(false);
+                        void onSetDraftModel(e.target.value ? e.target.value : null);
+                      }}
+                      className="h-8 w-full rounded-lg border border-white/[0.1] bg-[#141417] px-2 text-xs font-mono text-zinc-200 focus:outline-none"
+                    >
+                      <option value="">Kapalı (Yalnızca Hedef Model)</option>
+                      {runnableModels
+                        .filter((m) => m.path !== loaded.path)
+                        .map((m) => (
+                          <option key={m.path} value={m.path}>
+                            {m.name} ({m.size_mib} MiB)
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
                 <div className="border-t border-white/[0.07] p-1.5 space-y-0.5 bg-[#19191d]">
                   <button
                     type="button"

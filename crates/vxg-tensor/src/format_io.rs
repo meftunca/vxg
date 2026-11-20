@@ -122,6 +122,15 @@ impl<'a> Cur<'a> {
         Ok(out)
     }
 
+    pub fn skip_vec(&mut self, elem_bytes: usize) -> Result<()> {
+        let n = self.usize64()?;
+        let total = n
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| Error::Format("VXT slice byte length overflow".into()))?;
+        let _ = self.take(total)?;
+        Ok(())
+    }
+
     pub fn u8_vec(&mut self) -> Result<Vec<u8>> {
         let n = self.usize64()?;
         Ok(self.take(n)?.to_vec())

@@ -1461,8 +1461,8 @@ int vxt_metal_turbo_arena_finalize(
         r->q_gate_buf = alloc_shared_bytes(dev, size_t(MAX_BATCH_M) * q_dim * sizeof(float));
         r->logits_buf = alloc_shared_bytes(dev, size_t(MAX_BATCH_M) * cfg->n_vocab * sizeof(float));
 
-        r->sketch_signs_buf = alloc_shared_bytes(dev, size_t(lm_pcols) * size_t(r->stride_tiles8) * sizeof(uint16_t));
-        r->sketch_l1_buf = alloc_shared_bytes(dev, size_t(lm_steps) * size_t(r->stride_tiles8) * 16u);
+        // Allocate sketch buffers lazily on first `compute_mode == 2` (`--sketch-head`) request,
+        // saving ~300 MiB unified memory when using the default exact LM head.
         r->x_planes_buf = alloc_shared_bytes(dev, size_t(MAX_BATCH_M) * std::max<size_t>(size_t(lm_steps) * 256u * 8u, 4096u));
         r->x_qscale_buf = alloc_shared_bytes(dev, size_t(MAX_BATCH_M) * std::max<size_t>((1u + size_t(lm_steps)) * sizeof(uint32_t), 1024u));
         r->blk_sketch_max_buf = alloc_shared_bytes(dev, size_t(MAX_BATCH_M) * size_t(n_blocks64) * sizeof(float));
@@ -1477,8 +1477,7 @@ int vxt_metal_turbo_arena_finalize(
 
         if (!r->cur_buf || !r->x_rot_buf || !r->x_rot_tmp_buf || !r->x_rot_h_buf ||
             !r->x_rot_tmp_h_buf || !r->lut_bank_buf || !r->caps_buf || !r->kv_gqa_buf ||
-            !r->sync_cnt_buf || !r->logits_buf || !r->sketch_signs_buf || !r->sketch_l1_buf ||
-            !r->surv_blk_buf || !r->tok_ring_buf) {
+            !r->sync_cnt_buf || !r->logits_buf || !r->surv_blk_buf || !r->tok_ring_buf) {
             vxt_write_err(err_out, err_cap, "failed to allocate Metal Turbo buffers");
             return -2;
         }
@@ -1490,23 +1489,11 @@ int vxt_metal_turbo_arena_finalize(
         [enc setBuffer:r->caps_buf offset:0 atIndex:1];
         [enc dispatchThreadgroups:MTLSizeMake(8, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-
-        TurboSketchBuildParamsC bp{
-            r->output_head_mat.rows, r->output_head_mat.padded_cols, r->output_head_mat.bits, r->stride_tiles8
-        };
-        [enc setComputePipelineState:r->pso_build_sketch];
-        [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.scales_off atIndex:0];
-        [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.packed_off atIndex:1];
-        [enc setBuffer:r->sketch_signs_buf offset:0 atIndex:2];
-        [enc setBuffer:r->sketch_l1_buf offset:0 atIndex:3];
-        [enc setBytes:&bp length:sizeof(bp) atIndex:4];
-        [enc dispatchThreadgroups:MTLSizeMake(r->stride_tiles8, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
         if ([cmd status] != MTLCommandBufferStatusCompleted) {
-            vxt_write_err(err_out, err_cap, "vxt_build_lm_sketch failed on GPU");
+            vxt_write_err(err_out, err_cap, "vxt_build_lut_bank failed on GPU");
             return -3;
         }
         r->has_coherent_dev = (static_cast<const uint32_t*>([r->caps_buf contents])[0] != 0u);
@@ -1536,7 +1523,43 @@ void* vxt_metal_turbo_state_create(void* raw_runner, char* err_out, size_t err_c
 void vxt_metal_turbo_state_reset(void* raw_state);
 void vxt_metal_turbo_state_destroy(void* raw_state);
 
+static bool ensure_lm_sketch_built(MetalTurboRunner* r, char* err_out, size_t err_cap) {
+    if (r->sketch_signs_buf && r->sketch_l1_buf) return true;
+    id<MTLDevice> dev = r->gemv.device;
+    uint32_t lm_pcols = std::max<uint32_t>(r->output_head_mat.padded_cols, 256u);
+    uint32_t lm_steps = std::max<uint32_t>(lm_pcols >> 8u, 1u);
+    r->sketch_signs_buf = alloc_shared_bytes(dev, size_t(lm_pcols) * size_t(r->stride_tiles8) * sizeof(uint16_t));
+    r->sketch_l1_buf = alloc_shared_bytes(dev, size_t(lm_steps) * size_t(r->stride_tiles8) * 16u);
+    if (!r->sketch_signs_buf || !r->sketch_l1_buf) {
+        vxt_write_err(err_out, err_cap, "failed to allocate lazy Metal LM sketch buffers");
+        return false;
+    }
+    id<MTLCommandBuffer> cmd = [r->gemv.queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    TurboSketchBuildParamsC bp{
+        r->output_head_mat.rows, r->output_head_mat.padded_cols, r->output_head_mat.bits, r->stride_tiles8
+    };
+    [enc setComputePipelineState:r->pso_build_sketch];
+    [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.scales_off atIndex:0];
+    [enc setBuffer:r->weight_arena_buf offset:r->output_head_mat.packed_off atIndex:1];
+    [enc setBuffer:r->sketch_signs_buf offset:0 atIndex:2];
+    [enc setBuffer:r->sketch_l1_buf offset:0 atIndex:3];
+    [enc setBytes:&bp length:sizeof(bp) atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake(r->stride_tiles8, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    if ([cmd status] != MTLCommandBufferStatusCompleted) {
+        vxt_write_err(err_out, err_cap, "lazy vxt_build_lm_sketch failed on GPU");
+        return false;
+    }
+    return true;
+}
+
 static void run_vxt_timing_probe(MetalTurboRunner* r) {
+    char tmp_err[128] = {0};
+    if (!ensure_lm_sketch_built(r, tmp_err, sizeof(tmp_err))) return;
     const VxtLlmConfig& c = r->cfg;
     uint32_t cnt_b2 = 0, cnt_b34 = 0, cnt_b5 = 0, cnt_b6 = 0, cnt_split = 0;
     auto add_mat = [&](const ArenaMat& m) {
@@ -2170,6 +2193,9 @@ int vxt_metal_turbo_step_batch(
             vxt_write_err(err_out, err_cap, "failed to grow Turbo KV cache");
             return -2;
         }
+        if (compute_mode == 2u && !ensure_lm_sketch_built(r, err_out, err_cap)) {
+            return -2;
+        }
         std::memcpy([r->tok_in_buf contents], tok_ids, size_t(batch_m) * sizeof(uint32_t));
 
         id<MTLCommandBuffer> cmd = [r->gemv.queue commandBuffer];
@@ -2445,6 +2471,9 @@ void* vxt_metal_turbo_step_async_enqueue(
         }
         if (!s->ensure_kv_cap(pos_base + step_count + 200u)) {
             vxt_write_err(err_out, err_cap, "failed to grow Turbo KV cache in async enqueue");
+            return nullptr;
+        }
+        if (use_sketch != 0u && !ensure_lm_sketch_built(r, err_out, err_cap)) {
             return nullptr;
         }
         bool use_conc_wait = false;

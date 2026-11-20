@@ -13,6 +13,7 @@ use crate::llm::{sample_logits, LlmModel, LlmState};
 use crate::llm_ops::{
     has_severe_loop, sample_logits_top_k_p, strip_think_block, TokenPenaltyTracker,
 };
+use crate::speculative::{generate_speculative, SpeculativeConfig};
 use crate::tokenizer::BpeTokenizer;
 use crate::vision::EncodedVisionImage;
 use crate::{Error, Result};
@@ -192,10 +193,18 @@ fn flush_chunk<F: FnMut(&str) -> bool>(
     true
 }
 
+struct DraftSession {
+    model: LlmModel,
+    state: LlmState,
+    summary: ModelSummary,
+    logits: Vec<f32>,
+}
+
 pub struct ChatSession {
     pub model: LlmModel,
     pub state: LlmState,
     pub summary: ModelSummary,
+    draft: Option<DraftSession>,
     consumed_tokens: Vec<u32>,
     asst_cache: HashMap<String, (bool, Vec<u32>)>,
     img_cache: HashMap<u64, Arc<EncodedVisionImage>>,
@@ -231,6 +240,7 @@ impl ChatSession {
             model,
             state,
             summary,
+            draft: None,
             consumed_tokens: Vec::with_capacity(4096),
             asst_cache: HashMap::new(),
             img_cache: HashMap::new(),
@@ -240,8 +250,61 @@ impl ChatSession {
         })
     }
 
+    pub fn set_draft(
+        &mut self,
+        path: Option<&str>,
+        use_gpu: bool,
+        threads: usize,
+    ) -> Result<Option<ModelSummary>> {
+        let Some(p) = path.map(str::trim).filter(|s| !s.is_empty()) else {
+            self.draft = None;
+            return Ok(None);
+        };
+        let t0 = Instant::now();
+        let model = LlmModel::load_file(p, use_gpu, threads)?;
+        if model.cfg.n_vocab != self.model.cfg.n_vocab {
+            return Err(Error::Format(format!(
+                "Draft model vocabulary ({}) does not match target model ({})",
+                model.cfg.n_vocab, self.model.cfg.n_vocab
+            )));
+        }
+        let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let state = model.new_state();
+        let n_vocab = model.cfg.n_vocab;
+        let summary = ModelSummary {
+            model_path: p.to_owned(),
+            model_name: model.cfg.model_name.clone(),
+            arch: model.cfg.arch.clone(),
+            n_layer: model.cfg.n_layer,
+            n_embd: model.cfg.n_embd,
+            n_vocab,
+            compressed_bytes: model.total_compressed_bytes,
+            backend: model.backend_label(),
+            cb4_fast: model.has_cb4_fast_decode(),
+            turbo_fast: model.has_turbo_fast_decode(),
+            vision: model.has_vision(),
+            load_ms,
+        };
+        self.draft = Some(DraftSession {
+            model,
+            state,
+            summary: summary.clone(),
+            logits: vec![0.0f32; n_vocab],
+        });
+        // Reset prefix caches so target and draft stay 100% synchronized.
+        self.reset();
+        Ok(Some(summary))
+    }
+
+    pub fn draft_summary(&self) -> Option<ModelSummary> {
+        self.draft.as_ref().map(|d| d.summary.clone())
+    }
+
     pub fn reset(&mut self) {
         self.state = self.model.new_state();
+        if let Some(d) = self.draft.as_mut() {
+            d.state = d.model.new_state();
+        }
         self.consumed_tokens.clear();
         self.asst_cache.clear();
         if self.img_cache.len() > 16 {
@@ -282,7 +345,12 @@ impl ChatSession {
             return Err(Error::Format("chat prompt tokenized to 0 tokens".into()));
         }
 
+        let draft_desync = self
+            .draft
+            .as_ref()
+            .is_some_and(|d| d.state.pos != self.state.pos);
         if self.consumed_tokens.len() != self.state.pos
+            || draft_desync
             || !full_ids.starts_with(&self.consumed_tokens)
             || full_ids.len() <= self.consumed_tokens.len()
         {
@@ -306,7 +374,13 @@ impl ChatSession {
 
         let t_pre = Instant::now();
         let pre_res = if delta_imgs.is_empty() {
-            self.model.prefill(&mut self.state, delta_ids, &mut self.logits)
+            self.model.prefill(&mut self.state, delta_ids, &mut self.logits)?;
+            if let Some(d) = self.draft.as_mut() {
+                if self.state.rope_delta == 0 {
+                    d.model.prefill(&mut d.state, delta_ids, &mut d.logits)?;
+                }
+            }
+            Ok(())
         } else {
             self.model
                 .prefill_multimodal(&mut self.state, delta_ids, &delta_imgs, &mut self.logits)
@@ -316,6 +390,9 @@ impl ChatSession {
             let all_refs: Vec<&EncodedVisionImage> = all_images.iter().map(Arc::as_ref).collect();
             if all_refs.is_empty() {
                 self.model.prefill(&mut self.state, &full_ids, &mut self.logits)?;
+                if let Some(d) = self.draft.as_mut() {
+                    d.model.prefill(&mut d.state, &full_ids, &mut d.logits)?;
+                }
             } else {
                 self.model
                     .prefill_multimodal(&mut self.state, &full_ids, &all_refs, &mut self.logits)?;
@@ -378,7 +455,57 @@ impl ChatSession {
         let mut t_last: Option<Instant> = None;
         let decode_path: String;
 
-        let gen_ids = if use_cb4_greedy {
+        let use_speculative = self.draft.is_some()
+            && all_images.is_empty()
+            && self.state.rope_delta == 0
+            && temp <= 1e-6
+            && explicit_zero_pen
+            && self.draft.as_ref().is_some_and(|d| d.state.pos == self.state.pos);
+
+        let gen_ids = if use_speculative {
+            let first_id = sample_logits(&self.logits, 0.0, &mut self.rng);
+            t_dec = Instant::now();
+            let mut streamed = Vec::with_capacity(max_tokens);
+            let d = self.draft.as_mut().unwrap();
+            let (ids, st) = generate_speculative(
+                &mut self.model,
+                &mut self.state,
+                &mut d.model,
+                &mut d.state,
+                first_id,
+                max_tokens,
+                &stop_ids,
+                SpeculativeConfig {
+                    draft_tokens: 3,
+                    use_sketch: false,
+                    temperature: 0.0,
+                    presence_penalty: presence_pen,
+                    seed: self.rng,
+                },
+                |tok, tokenizer| {
+                    if cancel.load(Ordering::Relaxed) {
+                        aborted = true;
+                        return false;
+                    }
+                    streamed.push(tok);
+                    flush_chunk(
+                        tokenizer,
+                        &streamed,
+                        &mut dec_start_tok,
+                        &mut full_text,
+                        &mut aborted,
+                        &mut on_text,
+                    ) && !has_severe_loop(&streamed)
+                },
+            )?;
+            decode_path = format!(
+                "speculative-m4 ({:.0}% acc · {:.2} tok/step)",
+                st.acceptance_rate() * 100.0,
+                st.mean_tokens_per_step()
+            );
+            hit_stop = ids.len() < max_tokens && !aborted;
+            ids
+        } else if use_cb4_greedy {
             decode_path = "cb4-fast-greedy".into();
             let first_id = sample_logits(&self.logits, 0.0, &mut self.rng);
             t_dec = Instant::now();

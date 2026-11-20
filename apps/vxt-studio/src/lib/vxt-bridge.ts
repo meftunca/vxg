@@ -46,6 +46,7 @@ export interface StudioState {
   busy: boolean;
   cached_tokens: number;
   model: LoadedModelInfo | null;
+  draft_model?: LoadedModelInfo | null;
   last_metrics: TurnMetricsInfo | null;
   last_error: string | null;
   discovered_files?: DiscoveredFile[];
@@ -135,6 +136,13 @@ export async function loadModel(path: string, useGpu = true): Promise<StudioStat
 export async function unloadModel(): Promise<StudioState> {
   if (isTauriRuntime()) {
     return invoke<StudioState>("unload_model_cmd");
+  }
+  return fetchStudioState();
+}
+
+export async function setDraftModel(path: string | null, useGpu = true): Promise<StudioState> {
+  if (isTauriRuntime()) {
+    return invoke<StudioState>("set_draft_model_cmd", { path, useGpu });
   }
   return fetchStudioState();
 }

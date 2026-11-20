@@ -30,6 +30,7 @@ pub struct ServerSnapshot {
     pub busy: bool,
     pub cached_tokens: usize,
     pub model: Option<ModelSummary>,
+    pub draft_model: Option<ModelSummary>,
     pub last_metrics: Option<TurnMetrics>,
     pub last_error: Option<String>,
 }
@@ -46,6 +47,12 @@ pub(crate) enum WorkerJob {
         use_gpu: bool,
         threads: usize,
         reply: mpsc::Sender<Result<ModelSummary>>,
+    },
+    SetDraft {
+        path: Option<String>,
+        use_gpu: bool,
+        threads: usize,
+        reply: mpsc::Sender<Result<Option<ModelSummary>>>,
     },
     Unload {
         reply: mpsc::Sender<()>,
@@ -98,6 +105,18 @@ impl EmbeddedServerHandle {
         self.abort();
         let (rtx, rrx) = mpsc::channel();
         self.send_job(WorkerJob::Load { path, use_gpu, threads, reply: rtx })?;
+        rrx.recv().map_err(|_| Error::Io("inference worker disconnected".into()))?
+    }
+
+    pub fn set_draft_model(
+        &self,
+        path: Option<String>,
+        use_gpu: bool,
+        threads: usize,
+    ) -> Result<Option<ModelSummary>> {
+        self.abort();
+        let (rtx, rrx) = mpsc::channel();
+        self.send_job(WorkerJob::SetDraft { path, use_gpu, threads, reply: rtx })?;
         rrx.recv().map_err(|_| Error::Io("inference worker disconnected".into()))?
     }
 
@@ -251,6 +270,7 @@ fn run_worker_loop(
                             s.busy = false;
                             s.cached_tokens = 0;
                             s.model = Some(sum.clone());
+                            s.draft_model = None;
                             s.last_metrics = None;
                         }
                         session = Some(sess);
@@ -260,6 +280,37 @@ fn run_worker_loop(
                         if let Ok(mut s) = snap.lock() {
                             s.busy = false;
                             s.model = None;
+                            s.draft_model = None;
+                            s.last_error = Some(e.to_string());
+                        }
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            WorkerJob::SetDraft { path, use_gpu, threads, reply } => {
+                let Some(sess) = session.as_mut() else {
+                    let _ = reply.send(Err(Error::Unsupported(
+                        "Önce bir hedef model yükleyin".into(),
+                    )));
+                    continue;
+                };
+                if let Ok(mut s) = snap.lock() {
+                    s.busy = true;
+                    s.last_error = None;
+                }
+                match sess.set_draft(path.as_deref(), use_gpu, threads) {
+                    Ok(dsum) => {
+                        if let Ok(mut s) = snap.lock() {
+                            s.busy = false;
+                            s.cached_tokens = 0;
+                            s.draft_model = dsum.clone();
+                        }
+                        let _ = reply.send(Ok(dsum));
+                    }
+                    Err(e) => {
+                        if let Ok(mut s) = snap.lock() {
+                            s.busy = false;
+                            s.draft_model = sess.draft_summary();
                             s.last_error = Some(e.to_string());
                         }
                         let _ = reply.send(Err(e));
@@ -272,6 +323,7 @@ fn run_worker_loop(
                     s.busy = false;
                     s.cached_tokens = 0;
                     s.model = None;
+                    s.draft_model = None;
                     s.last_metrics = None;
                 }
                 // Reply BEFORE dropping the multi-GB GPU session so UI/API never stalls while
@@ -331,24 +383,27 @@ fn run_worker_loop(
     }
 }
 
+fn summary_to_json(m: &ModelSummary) -> Value {
+    json!({
+        "path": m.model_path,
+        "name": m.model_name,
+        "arch": m.arch,
+        "n_layer": m.n_layer,
+        "n_embd": m.n_embd,
+        "n_vocab": m.n_vocab,
+        "compressed_bytes": m.compressed_bytes,
+        "compressed_mib": ((m.compressed_bytes as f64) / (1024.0 * 1024.0) * 100.0).round() / 100.0,
+        "backend": m.backend,
+        "cb4_fast": m.cb4_fast,
+        "turbo_fast": m.turbo_fast,
+        "vision": m.vision,
+        "load_ms": (m.load_ms * 10.0).round() / 10.0,
+    })
+}
+
 pub fn snapshot_to_json(s: &ServerSnapshot) -> Value {
-    let model = s.model.as_ref().map(|m| {
-        json!({
-            "path": m.model_path,
-            "name": m.model_name,
-            "arch": m.arch,
-            "n_layer": m.n_layer,
-            "n_embd": m.n_embd,
-            "n_vocab": m.n_vocab,
-            "compressed_bytes": m.compressed_bytes,
-            "compressed_mib": ((m.compressed_bytes as f64) / (1024.0 * 1024.0) * 100.0).round() / 100.0,
-            "backend": m.backend,
-            "cb4_fast": m.cb4_fast,
-            "turbo_fast": m.turbo_fast,
-            "vision": m.vision,
-            "load_ms": (m.load_ms * 10.0).round() / 10.0,
-        })
-    });
+    let model = s.model.as_ref().map(summary_to_json);
+    let draft_model = s.draft_model.as_ref().map(summary_to_json);
     let metrics = s.last_metrics.as_ref().map(|t| {
         json!({
             "prefill_ms": (t.prefill_ms * 100.0).round() / 100.0,
@@ -371,6 +426,7 @@ pub fn snapshot_to_json(s: &ServerSnapshot) -> Value {
         "busy": s.busy,
         "cached_tokens": s.cached_tokens,
         "model": model,
+        "draft_model": draft_model,
         "last_metrics": metrics,
         "last_error": s.last_error,
     })
@@ -378,6 +434,7 @@ pub fn snapshot_to_json(s: &ServerSnapshot) -> Value {
 
 pub fn cmd_serve_llm(args: &[String]) -> Result<()> {
     let mut model_path: Option<String> = None;
+    let mut draft_path: Option<String> = None;
     let mut host = String::from("127.0.0.1");
     let mut port = 11435u16;
     let mut use_gpu = true;
@@ -400,6 +457,14 @@ pub fn cmd_serve_llm(args: &[String]) -> Result<()> {
                     .cloned()
                     .ok_or_else(|| Error::Format("missing --host".into()))?;
             }
+            "--draft" => {
+                i += 1;
+                draft_path = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or_else(|| Error::Format("missing --draft path".into()))?,
+                );
+            }
             "--cpu" => use_gpu = false,
             s if !s.starts_with('-') && model_path.is_none() => model_path = Some(s.to_owned()),
             other => return Err(Error::Format(format!("unexpected flag '{other}'"))),
@@ -418,6 +483,16 @@ pub fn cmd_serve_llm(args: &[String]) -> Result<()> {
             sum.backend,
             sum.load_ms
         );
+        if let Some(dp) = draft_path {
+            if let Some(dsum) = srv.handle().set_draft_model(Some(dp), use_gpu, threads)? {
+                println!(
+                    "Loaded Speculative Draft '{}' ({:.2} MiB) in {:.0} ms",
+                    dsum.model_name,
+                    dsum.compressed_bytes as f64 / (1024.0 * 1024.0),
+                    dsum.load_ms
+                );
+            }
+        }
     }
     println!(
         "VXT OpenAI-compatible API listening on http://{host}:{}/v1\n  POST /v1/chat/completions  (SSE stream & JSON)\n  GET  /v1/models",

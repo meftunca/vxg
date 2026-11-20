@@ -58,6 +58,24 @@ async fn load_model_cmd(
 }
 
 #[tauri::command]
+async fn set_draft_model_cmd(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    use_gpu: Option<bool>,
+) -> Result<Value, String> {
+    let h = state.handle.clone();
+    let gpu = use_gpu.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || {
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        h.set_draft_model(path, gpu, threads)
+            .map_err(|e| e.to_string())?;
+        Ok(studio_snapshot_with_files(&h))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn unload_model_cmd(state: State<'_, AppState>) -> Result<Value, String> {
     let h = state.handle.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -254,6 +272,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_studio_state,
             load_model_cmd,
+            set_draft_model_cmd,
             unload_model_cmd,
             reset_chat_cmd,
             abort_chat_cmd,
