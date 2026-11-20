@@ -281,6 +281,142 @@ impl MetalTurboRunner {
         }
     }
 
+    pub(crate) fn step_greedy_single(
+        &self,
+        state: &mut MetalTurboState,
+        pos: u32,
+        tok_id: u32,
+        use_sketch: bool,
+    ) -> Result<u32> {
+        #[cfg(vxt_has_metal)]
+        {
+            let head_mode = if use_sketch { 2u32 } else { 3u32 };
+            let mut out = [0u32; 1];
+            self.inner.step_batch(
+                &mut state.inner,
+                &[tok_id],
+                pos,
+                false,
+                head_mode,
+                None,
+                Some(&mut out),
+            )?;
+            Ok(out[0])
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (state, pos, tok_id, use_sketch);
+            Err(Error::Unsupported("Metal unavailable".into()))
+        }
+    }
+
+    pub(crate) fn verify_batch_greedy(
+        &self,
+        state: &mut MetalTurboState,
+        pos_base: u32,
+        tok_ids: &[u32],
+        use_sketch: bool,
+        argmax_out: &mut [u32],
+    ) -> Result<()> {
+        #[cfg(vxt_has_metal)]
+        {
+            debug_assert!(!tok_ids.is_empty() && tok_ids.len() <= 4);
+            debug_assert!(argmax_out.len() >= tok_ids.len());
+            let head_mode = if use_sketch { 2u32 } else { 3u32 };
+            self.inner.step_batch(
+                &mut state.inner,
+                tok_ids,
+                pos_base,
+                true,
+                head_mode,
+                None,
+                Some(&mut argmax_out[..tok_ids.len()]),
+            )
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (state, pos_base, tok_ids, use_sketch, argmax_out);
+            Err(Error::Unsupported("Metal unavailable".into()))
+        }
+    }
+
+    pub(crate) fn rollback_deltanet(
+        &self,
+        state: &mut MetalTurboState,
+        accepted_m: u32,
+        batch_m: u32,
+    ) -> Result<()> {
+        #[cfg(vxt_has_metal)]
+        {
+            self.inner
+                .rollback_deltanet(&mut state.inner, accepted_m, batch_m)
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (state, accepted_m, batch_m);
+            Err(Error::Unsupported("Metal unavailable".into()))
+        }
+    }
+
+    pub(crate) fn checkpoint(&self, state: &mut MetalTurboState, restore: bool) -> Result<()> {
+        #[cfg(vxt_has_metal)]
+        {
+            self.inner
+                .generation_checkpoint(&mut state.inner, restore)
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (state, restore);
+            Err(Error::Unsupported("Metal unavailable".into()))
+        }
+    }
+
+    pub(crate) fn replay_trunk(
+        &self,
+        state: &mut MetalTurboState,
+        tok_ids: &[u32],
+        pos_base: u32,
+    ) -> Result<()> {
+        #[cfg(vxt_has_metal)]
+        {
+            self.inner
+                .replay_trunk(&mut state.inner, tok_ids, pos_base)
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (state, tok_ids, pos_base);
+            Err(Error::Unsupported("Metal unavailable".into()))
+        }
+    }
+
+    pub(crate) fn init_seen(
+        &self,
+        state: &mut MetalTurboState,
+        seen_ids: &[u32],
+        presence_pen: f32,
+    ) {
+        #[cfg(vxt_has_metal)]
+        {
+            self.inner
+                .init_seen(&mut state.inner, seen_ids, presence_pen);
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (state, seen_ids, presence_pen);
+        }
+    }
+
+    pub(crate) fn mark_seen(&self, state: &mut MetalTurboState, tok_id: u32) {
+        #[cfg(vxt_has_metal)]
+        {
+            self.inner.mark_seen(&mut state.inner, tok_id);
+        }
+        #[cfg(not(vxt_has_metal))]
+        {
+            let _ = (state, tok_id);
+        }
+    }
+
     pub fn prefill_tokens(
         &self,
         state: &mut MetalTurboState,

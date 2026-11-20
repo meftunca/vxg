@@ -26,7 +26,8 @@ Instead of inflating compressed weights back to `BF16`/`FP16` in RAM or VRAM, `v
 - **Zero-OOM Streaming `.vxt` Disk Writer & `3.13×` Faster Packing**:
   - `VxtStreamWriter` (`format_stream.rs`, `llm_pack_stream.rs`) flushes each calibrated layer batch directly to disk so `27B`/`70B+` models pack in bounded RAM (`~4–8 GB` peak RSS).
   - Hoisted thread pools, L1 `Block32Chol`, lock-free `sgemm_nt_k32_4x4`, and parallel archive encoding cut `Qwen3.5-9B` packing from **`30m58s -> 9m53s` (`3.13×`)** on Linux and `Qwen3.5-0.8B` from **`52.8s -> 21.7s`** (`turbo-hq`) on M2 Max.
-- **Mixture-of-Experts (`MoE`) & Production OpenAI Serving**:
+- **Mixture-of-Experts (`MoE`), Lossless Speculative Decoding & Production OpenAI Serving**:
+  - **Lossless Speculative Decoding (`speculative.rs`, `--draft <draft.vxt> --draft-tokens K`, `--spec-ngram`)**: Dual-model draft+target speculative decoding with `M <= 4` batched Apple Metal GPU GEMM verification + microsecond GPU `DeltaNet` state rollback (`rollback_deltanet`), NVIDIA CUDA Resident checkpoint/replay, universal CPU `DeltaNet`+`KV` rollback, and exact greedy (`temp = 0`) + Leviathan et al. probabilistic rejection sampling (`temp > 0`), plus zero-extra-VRAM L1 Prompt-Lookup 3-gram drafting.
   - Full `MoE` routing (`llm_moe.rs`) supporting `Qwen3-MoE`, `Mixtral`, and `DeepSeek-MoE` (Top-K softmax router, per-expert SwiGLU/GeGLU, optional gated shared expert `shexp`).
   - OpenAI-compatible HTTP/SSE server (`vxg-tensor serve`): `/v1/chat/completions` (SSE streaming, `tools`/`tool_calls`, `response_format` `json_object`/`json_schema`, `stop` sequences, Vision `image_url`), `/v1/completions`, `/v1/models`, `/health`, and **Prometheus `/metrics`**.
   - Standalone **`VXT Studio`** desktop app (`apps/vxt-studio`, `Tauri v2` + `React 19` + `shadcn/ui` + Vercel AI SDK) with HuggingFace Hub direct download + streaming preset packing, multimodal Vision Chat, JSON mode/stop controls, and live `/metrics` API Hub.
@@ -57,6 +58,8 @@ Evaluated across `22` archives on the exact same `Qwen/Qwen3.5-9B` base weights 
 | `GGUF Q8_0` *(reference)* | `8.503` | `9.517` | `8.1951` | `0.0005` | `98.27%` | `0.0009` | `98.80%` |
 | **`VXT-Turbo-HQ (Q6, s=0.75)`** | **`6.269`** | **`7.017`** | **`8.1883`** | **`0.0011`** | **`97.55%`** | **`0.0015`** | **`98.31%`** |
 | `GGUF Q6_K` *(reference)* | `6.654` | `7.447` | `8.2195` | `0.0014` | `97.45%` | `0.0022` | `97.75%` |
+
+*All sizes above compare identical `427` language-backbone tensors (`8,953,803,264` params, apples-to-apples); full multimodal `.vxt` archives additionally embed Vision (`ViT` + `PatchMerger`) and BPE tokenizer in one single file without a separate `mmproj`.*
 
 ---
 
@@ -112,6 +115,10 @@ VXG_CUDA=1 VXG_OPENBLAS=1 VXG_CUDA_ARCH=native \
 # 2. Run directly on Metal or NVIDIA CUDA Resident GPU (zero PCIe per layer)
 ./target/release/vxg-tensor run Qwen3.5-9B-q6.vxt --temp 0 -n 256 \
   -p "Explain why memory bandwidth limits LLM inference in 3 bullet points."
+
+# 2a. Lossless Dual-Model Speculative Decoding (Metal M=4 Batched GPU Verify / CUDA / CPU)
+./target/release/vxg-tensor run Qwen3.5-9B-q6.vxt --draft Qwen3.5-0.8B-q3.vxt --draft-tokens 3 \
+  --temp 0 -n 256 -p "Write a Rust lock-free ring buffer with atomic head/tail."
 
 # 2b. Multimodal Vision (path, file://, or data:image/... URI)
 ./target/release/vxg-tensor run Qwen3.5-9B-cb4-v2.vxt \

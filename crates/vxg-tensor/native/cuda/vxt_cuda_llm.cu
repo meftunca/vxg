@@ -168,6 +168,9 @@ struct CudaLlmState {
     // Persistent per-layer states
     std::vector<float*> d_conv_states;
     std::vector<float*> d_ssm_states;
+    std::vector<float*> d_conv_ckpt;
+    std::vector<float*> d_ssm_ckpt;
+    uint8_t* d_seen_ckpt = nullptr;
     std::vector<float*> d_k_caches;
     std::vector<float*> d_v_caches;
     uint32_t kv_cap = 0;
@@ -177,10 +180,12 @@ struct CudaLlmState {
         ff(d_cur); ff(d_normed); ff(d_xrot); ff(d_tmp);
         ff(d_qkv); ff(d_z); ff(d_alpha); ff(d_beta); ff(d_conv_out); ff(d_q_l2); ff(d_k_l2); ff(d_o_buf);
         ff(d_qraw); ff(d_q); ff(d_qgate); ff(d_k); ff(d_v);
-        ff(d_gate); ff(d_up); ff(d_logits); ff(d_seen); ff(d_arg_val); ff(d_arg_idx); ff(d_next_tok);
+        ff(d_gate); ff(d_up); ff(d_logits); ff(d_seen); ff(d_seen_ckpt); ff(d_arg_val); ff(d_arg_idx); ff(d_next_tok);
         if (h_next_tok) cudaFreeHost(h_next_tok);
         for (auto* p : d_conv_states) ff(p);
         for (auto* p : d_ssm_states) ff(p);
+        for (auto* p : d_conv_ckpt) ff(p);
+        for (auto* p : d_ssm_ckpt) ff(p);
         for (auto* p : d_k_caches) ff(p);
         for (auto* p : d_v_caches) ff(p);
         if (stream) cudaStreamDestroy(stream);
@@ -1873,6 +1878,84 @@ int vxt_cuda_llm_step_greedy(
     }
     if (cudaStreamSynchronize(st->stream) != cudaSuccess) return -4;
     *out_next_token = *st->h_next_tok;
+    return 0;
+}
+
+int vxt_cuda_llm_mark_seen(
+    const void* runner_ptr,
+    void* st_ptr,
+    uint32_t tok_id
+) {
+    const auto* r = static_cast<const CudaLlmRunner*>(runner_ptr);
+    auto* st = static_cast<CudaLlmState*>(st_ptr);
+    if (!r || !st) return -1;
+    if (tok_id < r->n_vocab) {
+        if (cudaMemsetAsync(st->d_seen + tok_id, 1, 1, st->stream) != cudaSuccess) return -2;
+    }
+    return 0;
+}
+
+int vxt_cuda_llm_checkpoint(
+    const void* runner_ptr,
+    void* st_ptr,
+    uint32_t restore
+) {
+    const auto* r = static_cast<const CudaLlmRunner*>(runner_ptr);
+    auto* st = static_cast<CudaLlmState*>(st_ptr);
+    if (!r || !st) return -1;
+    size_t conv_bytes = (r->ssm_conv_kernel > 0u)
+        ? static_cast<size_t>(r->ssm_conv_kernel - 1u) * r->conv_ch * sizeof(float)
+        : 0;
+    size_t ssm_bytes = static_cast<size_t>(r->ssm_dt_rank) * r->dv * r->ssm_state_size * sizeof(float);
+    if (st->d_conv_ckpt.empty()) {
+        st->d_conv_ckpt.assign(r->n_layer, nullptr);
+        st->d_ssm_ckpt.assign(r->n_layer, nullptr);
+        for (uint32_t il = 0; il < r->n_layer; ++il) {
+            if (!r->layers[il].is_deltanet) continue;
+            if (conv_bytes > 0 && cudaMalloc(&st->d_conv_ckpt[il], conv_bytes) != cudaSuccess) return -2;
+            if (ssm_bytes > 0 && cudaMalloc(&st->d_ssm_ckpt[il], ssm_bytes) != cudaSuccess) return -2;
+        }
+        if (cudaMalloc(&st->d_seen_ckpt, r->n_vocab) != cudaSuccess) return -2;
+    }
+    for (uint32_t il = 0; il < r->n_layer; ++il) {
+        if (!r->layers[il].is_deltanet) continue;
+        if (conv_bytes > 0) {
+            float* dst = restore ? st->d_conv_states[il] : st->d_conv_ckpt[il];
+            float* src = restore ? st->d_conv_ckpt[il] : st->d_conv_states[il];
+            if (cudaMemcpyAsync(dst, src, conv_bytes, cudaMemcpyDeviceToDevice, st->stream) != cudaSuccess) return -3;
+        }
+        if (ssm_bytes > 0) {
+            float* dst = restore ? st->d_ssm_states[il] : st->d_ssm_ckpt[il];
+            float* src = restore ? st->d_ssm_ckpt[il] : st->d_ssm_states[il];
+            if (cudaMemcpyAsync(dst, src, ssm_bytes, cudaMemcpyDeviceToDevice, st->stream) != cudaSuccess) return -3;
+        }
+    }
+    if (st->d_seen_ckpt && r->n_vocab > 0) {
+        uint8_t* dst = restore ? st->d_seen : st->d_seen_ckpt;
+        uint8_t* src = restore ? st->d_seen_ckpt : st->d_seen;
+        if (cudaMemcpyAsync(dst, src, r->n_vocab, cudaMemcpyDeviceToDevice, st->stream) != cudaSuccess) return -3;
+    }
+    return 0;
+}
+
+int vxt_cuda_llm_replay_trunk(
+    const void* runner_ptr,
+    void* st_ptr,
+    const uint32_t* tokens,
+    size_t n_tokens,
+    uint32_t start_pos
+) {
+    const auto* r = static_cast<const CudaLlmRunner*>(runner_ptr);
+    auto* st = static_cast<CudaLlmState*>(st_ptr);
+    if (!r || !st) return -1;
+    if (n_tokens == 0) return 0;
+    if (!tokens) return -1;
+    if (!ensure_kv_cap(st, start_pos + static_cast<uint32_t>(n_tokens))) return -2;
+    for (size_t i = 0; i < n_tokens; ++i) {
+        if (!enqueue_forward_token(r, st, tokens[i], start_pos + static_cast<uint32_t>(i), false)) {
+            return -3;
+        }
+    }
     return 0;
 }
 

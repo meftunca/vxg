@@ -32,8 +32,8 @@ pub struct LlmState {
     pub rope_delta: isize,
     pub kv_mode: KvCacheMode,
     cb4_failed: bool,
-    turbo_gpu: Option<MetalTurboState>,
-    cuda_turbo_gpu: Option<CudaTurboState>,
+    pub(crate) turbo_gpu: Option<MetalTurboState>,
+    pub(crate) cuda_turbo_gpu: Option<CudaTurboState>,
     cb4_fast_gpu: Option<MetalCb4FastState>,
     gpu: Option<MetalLlmState>,
     pub(crate) k_caches: Vec<Vec<f32>>,
@@ -44,14 +44,72 @@ pub struct LlmState {
     pub(crate) ssm_states: Vec<Vec<f32>>,
 }
 
+/// Snapshot of CPU recurrent (`Gated-DeltaNet`) + KV cursor state for exact speculative rollback.
+pub(crate) struct CpuStateCheckpoint {
+    pub pos: usize,
+    pub rope_delta: isize,
+    pub conv_states: Vec<Vec<f32>>,
+    pub ssm_states: Vec<Vec<f32>>,
+}
+
+impl LlmState {
+    pub(crate) fn is_cpu_state(&self) -> bool {
+        self.turbo_gpu.is_none()
+            && self.cuda_turbo_gpu.is_none()
+            && self.cb4_fast_gpu.is_none()
+            && self.gpu.is_none()
+    }
+
+    pub(crate) fn save_cpu_checkpoint(&self) -> CpuStateCheckpoint {
+        CpuStateCheckpoint {
+            pos: self.pos,
+            rope_delta: self.rope_delta,
+            conv_states: self.conv_states.clone(),
+            ssm_states: self.ssm_states.clone(),
+        }
+    }
+
+    pub(crate) fn restore_cpu_checkpoint(&mut self, ckpt: &CpuStateCheckpoint, cfg: &ModelConfig) {
+        self.pos = ckpt.pos;
+        self.rope_delta = ckpt.rope_delta;
+        self.conv_states.clone_from(&ckpt.conv_states);
+        self.ssm_states.clone_from(&ckpt.ssm_states);
+        let kv_dim = cfg.n_head_kv * cfg.head_dim;
+        let f32_len = ckpt.pos * kv_dim;
+        for c in &mut self.k_caches {
+            if c.len() > f32_len {
+                c.truncate(f32_len);
+            }
+        }
+        for c in &mut self.v_caches {
+            if c.len() > f32_len {
+                c.truncate(f32_len);
+            }
+        }
+        if cfg.head_dim % 32 == 0 {
+            let q8_len = ckpt.pos * cfg.n_head_kv * (cfg.head_dim / 32);
+            for c in &mut self.k_q8 {
+                if c.len() > q8_len {
+                    c.truncate(q8_len);
+                }
+            }
+            for c in &mut self.v_q8 {
+                if c.len() > q8_len {
+                    c.truncate(q8_len);
+                }
+            }
+        }
+    }
+}
+
 pub struct LlmModel {
     pub cfg: ModelConfig,
     pub tokenizer: BpeTokenizer,
     pub total_compressed_bytes: usize,
     pub(crate) metal: Option<MetalEngine>,
     pub(crate) cuda: Option<CudaEngine>,
-    cuda_turbo: Option<CudaTurboRunner>,
-    metal_turbo: Option<MetalTurboRunner>,
+    pub(crate) cuda_turbo: Option<CudaTurboRunner>,
+    pub(crate) metal_turbo: Option<MetalTurboRunner>,
     metal_cb4_fast: Option<MetalCb4FastRunner>,
     metal_llm: Option<MetalLlmRunner>,
     pub(crate) cpu_threads: usize,

@@ -13,6 +13,7 @@ use crate::llm_pack::LlmPackMode;
 use crate::llm_pack_stream::{pack_gguf_model_to_vxt_file, pack_hf_model_to_vxt_file, PackPreset};
 use crate::turbo_linalg::effective_cpu_threads;
 use crate::mmap::TensorBytes;
+use crate::speculative::{generate_speculative, SpeculativeConfig, SpeculativeStats};
 use crate::vision::EncodedVisionImage;
 use crate::{Error, Result};
 
@@ -131,13 +132,16 @@ pub fn cmd_pack_model(args: &[String]) -> Result<()> {
 pub fn cmd_run_llm(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(Error::Format(
-            "usage: vxg-tensor run <model.vxt | model.gguf | model.safetensors> --prompt \"...\" [--image <path_or_data_uri>] [--max-tokens N] [--temp T] [--cpu] [--raw] [--think] [--reference-decode] [--cb4-greedy --temp 0 --presence-penalty 0]".into(),
+            "usage: vxg-tensor run <model.vxt | model.gguf | model.safetensors> --prompt \"...\" [--draft <draft.vxt>] [--draft-tokens K] [--spec-ngram | --no-spec-ngram] [--image <path_or_data_uri>] [--max-tokens N] [--temp T] [--cpu] [--raw] [--think] [--reference-decode] [--cb4-greedy --temp 0 --presence-penalty 0]".into(),
         ));
     }
     let model_path = &args[0];
     let mut prompt =
         String::from("Explain why memory bandwidth limits LLM inference in 3 short bullet points.");
     let mut images: Vec<String> = Vec::new();
+    let mut draft_path: Option<String> = None;
+    let mut draft_tokens = 3usize;
+    let mut ngram_flag: Option<bool> = None;
     let mut max_tokens = 64usize;
     let mut temp = 0.0f32;
     let mut presence_penalty: Option<f32> = None;
@@ -162,6 +166,24 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
                     .cloned()
                     .ok_or_else(|| Error::Format("missing --prompt string".into()))?;
             }
+            "--draft" => {
+                i += 1;
+                draft_path = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or_else(|| Error::Format("missing --draft model path".into()))?,
+                );
+            }
+            "--draft-tokens" => {
+                i += 1;
+                draft_tokens = args
+                    .get(i)
+                    .and_then(|s| s.parse().ok())
+                    .filter(|&k| (1..=8).contains(&k))
+                    .ok_or_else(|| Error::Format("invalid --draft-tokens (expected 1..=8)".into()))?;
+            }
+            "--spec-ngram" => ngram_flag = Some(true),
+            "--no-spec-ngram" => ngram_flag = Some(false),
             "--image" | "-i" => {
                 i += 1;
                 images.push(
@@ -211,13 +233,21 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
         i += 1;
     }
 
-    if cb4_greedy && (!use_gpu || temp != 0.0 || presence_penalty != Some(0.0) || reference_decode || exact_head_flag) {
+    if cb4_greedy && (!use_gpu || temp != 0.0 || presence_penalty != Some(0.0) || reference_decode || exact_head_flag || draft_path.is_some()) {
         return Err(Error::Unsupported("--cb4-greedy requires GPU, --temp 0, explicit --presence-penalty 0, and no alternate decode flags".into()));
+    }
+    if draft_path.is_some() && !images.is_empty() {
+        return Err(Error::Unsupported("--draft speculative decoding currently supports text-only prompts".into()));
     }
     let t_load = Instant::now();
     let mut model = LlmModel::load_file(model_path, use_gpu, threads)?;
-    model.set_turbo_ngram(std::env::var_os("VXT_NO_NGRAM").is_none());
+    let enable_ngram = ngram_flag.unwrap_or_else(|| std::env::var_os("VXT_NO_NGRAM").is_none());
+    model.set_turbo_ngram(enable_ngram);
     if cb4_greedy { model.enable_cb4_greedy()?; }
+    let mut draft_model = match draft_path.as_deref() {
+        Some(dp) => Some(LlmModel::load_file(dp, use_gpu, threads)?),
+        None => None,
+    };
     let load_s = t_load.elapsed().as_secs_f64();
 
     let t_vis = Instant::now();
@@ -290,10 +320,15 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
 
     let mut state = model.new_state();
     let mut logits = vec![0.0f32; model.cfg.n_vocab];
+    let mut draft_state = draft_model.as_ref().map(|dm| dm.new_state());
 
     let t_prefill = Instant::now();
     if encoded_imgs.is_empty() {
         model.prefill(&mut state, &prompt_ids, &mut logits)?;
+        if let (Some(dm), Some(dst)) = (draft_model.as_mut(), draft_state.as_mut()) {
+            let mut d_logits = vec![0.0f32; dm.cfg.n_vocab];
+            dm.prefill(dst, &prompt_ids, &mut d_logits)?;
+        }
     } else {
         let refs: Vec<&EncodedVisionImage> = encoded_imgs.iter().collect();
         model.prefill_multimodal(&mut state, &prompt_ids, &refs, &mut logits)?;
@@ -327,9 +362,16 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
 
     let mut rng = 0x2026_11_03_5eed_u64;
     let mut dec_start_tok = 0usize;
+    let mut spec_stats: Option<SpeculativeStats> = None;
     let t_decode: Instant;
     println!("Decode path: {} | presence_penalty={presence_pen} max_tokens={max_tokens}",
-        if cb4_greedy { "cb4-greedy-full-head" } else if temp <= 1e-6 && state.rope_delta == 0 && model.has_turbo_fast_decode() && !reference_decode {
+        if draft_model.is_some() {
+            if model.has_turbo_fast_decode() && temp <= 1e-6 {
+                "speculative-draft-target (GPU M=4)"
+            } else {
+                "speculative-draft-target"
+            }
+        } else if cb4_greedy { "cb4-greedy-full-head" } else if temp <= 1e-6 && state.rope_delta == 0 && model.has_turbo_fast_decode() && !reference_decode {
             if exact_head { "turbo-fast-exact-head" } else { "turbo-fast-sketch-head" }
         } else { "forward-step" });
     if enable_thinking && !raw_prompt && is_qwen3 {
@@ -337,7 +379,39 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
         let _ = io::stdout().flush();
     }
 
-    let gen_ids = if cb4_greedy {
+    let gen_ids = if let (Some(dm), Some(dst)) = (draft_model.as_mut(), draft_state.as_mut()) {
+        let first_id = sample_logits(&logits, temp, &mut rng);
+        t_decode = Instant::now();
+        let mut streamed_ids = Vec::with_capacity(max_tokens);
+        let (ids, st) = generate_speculative(
+            &mut model,
+            &mut state,
+            dm,
+            dst,
+            first_id,
+            max_tokens,
+            &[eos_id, im_end_id, eot_id],
+            SpeculativeConfig {
+                draft_tokens,
+                use_sketch: !exact_head,
+                temperature: temp,
+                presence_penalty: presence_pen,
+                seed: rng,
+            },
+            |tok, tokenizer| {
+                streamed_ids.push(tok);
+                let chunk = tokenizer.decode(&streamed_ids[dec_start_tok..]);
+                if !chunk.is_empty() && !chunk.ends_with('\u{FFFD}') {
+                    print!("{chunk}");
+                    let _ = io::stdout().flush();
+                    dec_start_tok = streamed_ids.len();
+                }
+                true
+            },
+        )?;
+        spec_stats = Some(st);
+        ids
+    } else if cb4_greedy {
         let first_id = sample_logits(&logits, 0.0, &mut rng);
         t_decode = Instant::now();
         let mut streamed_ids = Vec::with_capacity(max_tokens);
@@ -458,6 +532,19 @@ pub fn cmd_run_llm(args: &[String]) -> Result<()> {
         gen_ids.len(),
         eq_bw_gbs
     );
+    if let Some(st) = spec_stats {
+        println!(
+            "Speculative: {} verify steps | accepted {}/{} draft tokens ({:.1}%) | {:.2} tok/step | draft={:.1}ms verify={:.1}ms | metal_m4={}",
+            st.verify_steps,
+            st.total_accepted_draft,
+            st.total_drafted,
+            st.acceptance_rate() * 100.0,
+            st.mean_tokens_per_step(),
+            st.draft_ms,
+            st.verify_ms,
+            st.used_metal_batch,
+        );
+    }
     println!("Timing: load_s={load_s:.6} prefill_s={prefill_s:.6} decode_s={decode_s:.6} generated={} state_pos={}", gen_ids.len(), state.pos);
     Ok(())
 }

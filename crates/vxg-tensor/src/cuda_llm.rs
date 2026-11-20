@@ -96,6 +96,11 @@ unsafe extern "C" {
         runner: *const c_void, st: *mut c_void, token_id: u32, pos: u32,
         presence_pen: f32, out_next_token: *mut u32,
     ) -> i32;
+    fn vxt_cuda_llm_mark_seen(runner: *const c_void, st: *mut c_void, tok_id: u32) -> i32;
+    fn vxt_cuda_llm_checkpoint(runner: *const c_void, st: *mut c_void, restore: u32) -> i32;
+    fn vxt_cuda_llm_replay_trunk(
+        runner: *const c_void, st: *mut c_void, tokens: *const u32, n_tokens: usize, start_pos: u32,
+    ) -> i32;
     fn vxt_cuda_llm_kv_bytes(st: *const c_void) -> usize;
 }
 
@@ -417,6 +422,89 @@ impl CudaTurboRunner {
         {
             let _ = (state, pos, token_id, logits_out);
             Err(Error::Unsupported("CUDA unavailable".into()))
+        }
+    }
+
+    pub(crate) fn step_greedy_single(
+        &self, state: &mut CudaTurboState, pos: u32, token_id: u32, presence_pen: f32,
+    ) -> Result<u32> {
+        #[cfg(vxt_has_cuda)]
+        {
+            let mut next = 0u32;
+            let rc = unsafe {
+                vxt_cuda_llm_step_greedy(self.ptr, state.ptr, token_id, pos, presence_pen, &mut next)
+            };
+            if rc != 0 {
+                return Err(crate::Error::Backend(format!("vxt_cuda_llm_step_greedy failed (rc={rc})")));
+            }
+            Ok(next)
+        }
+        #[cfg(not(vxt_has_cuda))]
+        {
+            let _ = (state, pos, token_id, presence_pen);
+            Err(Error::Unsupported("CUDA unavailable".into()))
+        }
+    }
+
+    pub(crate) fn checkpoint(&self, state: &mut CudaTurboState, restore: bool) -> Result<()> {
+        #[cfg(vxt_has_cuda)]
+        {
+            let rc = unsafe { vxt_cuda_llm_checkpoint(self.ptr, state.ptr, u32::from(restore)) };
+            if rc != 0 {
+                return Err(crate::Error::Backend(format!("vxt_cuda_llm_checkpoint failed (rc={rc})")));
+            }
+            Ok(())
+        }
+        #[cfg(not(vxt_has_cuda))]
+        {
+            let _ = (state, restore);
+            Err(Error::Unsupported("CUDA unavailable".into()))
+        }
+    }
+
+    pub(crate) fn replay_trunk(
+        &self, state: &mut CudaTurboState, tok_ids: &[u32], pos_base: u32,
+    ) -> Result<()> {
+        #[cfg(vxt_has_cuda)]
+        {
+            if tok_ids.is_empty() {
+                return Ok(());
+            }
+            let rc = unsafe {
+                vxt_cuda_llm_replay_trunk(self.ptr, state.ptr, tok_ids.as_ptr(), tok_ids.len(), pos_base)
+            };
+            if rc != 0 {
+                return Err(crate::Error::Backend(format!("vxt_cuda_llm_replay_trunk failed (rc={rc})")));
+            }
+            Ok(())
+        }
+        #[cfg(not(vxt_has_cuda))]
+        {
+            let _ = (state, tok_ids, pos_base);
+            Err(Error::Unsupported("CUDA unavailable".into()))
+        }
+    }
+
+    pub(crate) fn init_seen(&self, state: &mut CudaTurboState, seen_ids: &[u32]) {
+        #[cfg(vxt_has_cuda)]
+        {
+            let _ = unsafe { vxt_cuda_llm_init_seen(self.ptr, state.ptr, seen_ids.as_ptr(), seen_ids.len()) };
+        }
+        #[cfg(not(vxt_has_cuda))]
+        {
+            let _ = (state, seen_ids);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn mark_seen(&self, state: &mut CudaTurboState, tok_id: u32) {
+        #[cfg(vxt_has_cuda)]
+        {
+            let _ = unsafe { vxt_cuda_llm_mark_seen(self.ptr, state.ptr, tok_id) };
+        }
+        #[cfg(not(vxt_has_cuda))]
+        {
+            let _ = (state, tok_id);
         }
     }
 

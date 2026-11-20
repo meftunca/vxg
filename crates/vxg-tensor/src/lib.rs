@@ -58,6 +58,7 @@ pub mod mmap;
 pub mod native_qwen35;
 pub mod q4_0;
 pub mod safetensors;
+pub mod speculative;
 pub mod server;
 mod server_http;
 mod server_openai;
