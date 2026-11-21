@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>VIMG — HTTP-Range Compressed-Domain Playground</title>
+<style>
+  :root {
+    --bg: #0a0d12; --panel: #111621; --panel2: #171e2c; --border: #253047;
+    --text: #e6edf7; --muted: #8b9bb4; --accent: #10b981; --cyan: #38bdf8; --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+    flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .badge {
+    background: linear-gradient(135deg, #10b981, #06b6d4); color: #041312;
+    font-weight: 800; font-size: 12px; padding: 4px 8px; border-radius: 6px; letter-spacing: .06em;
+  }
+  .brand h1 { font-size: 16px; margin: 0; font-weight: 700; }
+  .brand small { color: var(--muted); font-size: 12px; }
+  .mode-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  select, button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 11px; font-size: 13px; cursor: pointer;
+  }
+  button:hover { border-color: var(--cyan); }
+  button.active { background: #0f2e26; border-color: var(--accent); color: #6ee7b7; font-weight: 600; }
+  .layout {
+    display: grid; grid-template-columns: 330px 1fr; gap: 16px; padding: 16px; flex: 1;
+  }
+  @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
+  .sidebar { display: flex; flex-direction: column; gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px;
+  }
+  .card h2 {
+    margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .nav-wrap {
+    position: relative; width: 100%; background: #06080c; border-radius: 8px; overflow: hidden;
+    border: 1px solid var(--border); user-select: none; cursor: crosshair;
+  }
+  .nav-wrap img { display: block; width: 100%; height: auto; opacity: 0.9; pointer-events: none; }
+  .nav-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .presets button { font-size: 11px; padding: 5px 8px; }
+  .ctrl { margin-bottom: 10px; }
+  .ctrl label {
+    display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 4px;
+  }
+  .ctrl label b { color: var(--text); font-family: ui-monospace, monospace; }
+  input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+  .toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .toggle {
+    display: flex; align-items: center; gap: 6px; font-size: 12px; background: var(--panel2);
+    padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border); cursor: pointer;
+  }
+  .main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .hud {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 10px;
+  }
+  .metric {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  }
+  .metric .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .metric .v { font-size: 20px; font-weight: 700; font-family: ui-monospace, monospace; margin-top: 3px; }
+  .metric .s { font-size: 11px; color: var(--muted); margin-top: 2px; font-family: ui-monospace, monospace; }
+  .v.good { color: #34d399; }
+  .v.cyan { color: var(--cyan); }
+  .bar-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 11px 14px;
+  }
+  .bar-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; }
+  .bar-track { height: 10px; background: #1e293b; border-radius: 99px; overflow: hidden; }
+  .bar-fill {
+    height: 100%; background: linear-gradient(90deg, #10b981, #38bdf8); width: 0%;
+    transition: width 180ms ease;
+  }
+  .stage {
+    flex: 1; background: repeating-conic-gradient(#101520 0% 25%, #0c1018 0% 50%) 50% / 18px 18px;
+    border: 1px solid var(--border); border-radius: 12px; display: flex; align-items: center;
+    justify-content: center; padding: 16px; min-height: 420px; overflow: auto; position: relative;
+  }
+  .stage canvas, .stage img {
+    max-width: 100%; max-height: 70vh; border-radius: 6px; box-shadow: 0 12px 40px rgba(0,0,0,.55);
+  }
+  .url-bar {
+    font-family: ui-monospace, monospace; font-size: 12px; color: #93c5fd;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 9px 12px; overflow-x: auto; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="badge">VIMG1</span>
+    <div>
+      <h1>HTTP-Range Compressed-Domain Playground</h1>
+      <small>YCoCg-R + CDF 5/3 Wavelet Pyramid · tANS/FSE · CRC32C</small>
+    </div>
+  </div>
+  <div class="mode-bar">
+    <select id="fileSel"></select>
+    <button id="btnWasm" title="Browser fetches HTTP 206 Partial Content and decodes in 133 KiB vimg.wasm">WASM Client Range</button>
+    <button id="btnEdge" class="active" title="Server decodes compressed-domain ranges on disk and serves PNG">Edge Proxy</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="card">
+      <h2>Tile Navigator <span id="navHint" style="color:var(--accent);font-weight:600">Drag to Crop</span></h2>
+      <div class="nav-wrap" id="navWrap">
+        <img id="navImg" alt="L0 preview" />
+        <canvas id="navGrid"></canvas>
+      </div>
+      <div class="presets">
+        <button data-preset="full">Full Image</button>
+        <button data-preset="quarter">1/4 Pyramid</button>
+        <button data-preset="crop256">256² Center</button>
+        <button data-preset="crop512">512² Center</button>
+        <button data-preset="grayblur">1/2 Gray+Blur</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Compressed-Domain Ops</h2>
+      <div class="ctrl">
+        <label>Target Width <b id="vW">Auto</b></label>
+        <input type="range" id="rW" min="0" max="3840" step="64" value="0" />
+      </div>
+      <div class="ctrl">
+        <label>Subband Blur <b id="vBlur">0.00</b></label>
+        <input type="range" id="rBlur" min="0" max="1" step="0.05" value="0" />
+      </div>
+      <div class="ctrl">
+        <label>Subband Sharpen <b id="vSharp">0.00</b></label>
+        <input type="range" id="rSharp" min="0" max="2" step="0.1" value="0" />
+      </div>
+      <div class="ctrl">
+        <label>LL Brightness <b id="vBright">0</b></label>
+        <input type="range" id="rBright" min="-80" max="80" step="4" value="0" />
+      </div>
+      <div class="ctrl">
+        <label>Contrast <b id="vCont">1.00</b></label>
+        <input type="range" id="rCont" min="0.4" max="2.0" step="0.05" value="1.0" />
+      </div>
+      <div class="toggles">
+        <label class="toggle"><input type="checkbox" id="cGray" /> Grayscale (0 chroma)</label>
+        <label class="toggle"><input type="checkbox" id="cSepia" /> Sepia (0 chroma)</label>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+        <span style="font-size:12px;color:var(--muted)">Rotate:</span>
+        <button class="rot-btn active" data-rot="0">0°</button>
+        <button class="rot-btn" data-rot="90">90°</button>
+        <button class="rot-btn" data-rot="180">180°</button>
+        <button class="rot-btn" data-rot="270">270°</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="hud">
+      <div class="metric"><div class="k">Wire Fetched</div><div class="v good" id="mPct">—</div><div class="s" id="mBytes">0 / 0 KiB</div></div>
+      <div class="metric"><div class="k">Bandwidth Saved</div><div class="v cyan" id="mSave">—</div><div class="s" id="mReqs">0 Range reqs</div></div>
+      <div class="metric"><div class="k">Pyramid Level</div><div class="v" id="mLvl">—</div><div class="s" id="mDims">—</div></div>
+      <div class="metric"><div class="k">Tiles Fetched</div><div class="v" id="mTiles">—</div><div class="s" id="mMode">Edge Proxy</div></div>
+      <div class="metric"><div class="k">Total Latency</div><div class="v" id="mMs">—</div><div class="s" id="mDecMs">—</div></div>
+    </div>
+
+    <div class="bar-card">
+      <div class="bar-row">
+        <span>Transferred vs Classic 100% Full-Image Download</span>
+        <span id="barLabel" style="font-family:ui-monospace,monospace;color:#34d399">—</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill" id="barFill"></div></div>
+    </div>
+
+    <div class="stage" id="stage">
+      <img id="outImg" alt="VIMG output" />
+      <canvas id="outCanvas" style="display:none"></canvas>
+    </div>
+
+    <div class="url-bar" id="urlBar">Loading...</div>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let files = [], cur = null, mode = "edge", wasm = null, wasmPrefixCache = new Map();
+let state = { crop: null, w: 0, blur: 0, sharpen: 0, bright: 0, contrast: 1.0, gray: false, sepia: false, rot: 0 };
+let drag = null, timer = null;
+
+async function initWasm() {
+  try {
+    const res = await fetch("/vimg.wasm");
+    if (!res.ok) return;
+    const { instance } = await WebAssembly.instantiateStreaming(res, {});
+    wasm = instance.exports;
+    $("btnWasm").textContent = "WASM Client Range (Ready)";
+    setMode("wasm");
+  } catch (e) {
+    $("btnWasm").disabled = true;
+    $("btnWasm").title = "Build crates/vimg with --target wasm32-unknown-unknown to enable WASM mode";
+  }
+}
+
+function setMode(m) {
+  if (m === "wasm" && !wasm) return;
+  mode = m;
+  $("btnWasm").classList.toggle("active", m === "wasm");
+  $("btnEdge").classList.toggle("active", m === "edge");
+  $("outCanvas").style.display = m === "wasm" ? "block" : "none";
+  $("outImg").style.display = m === "edge" ? "block" : "none";
+  $("mMode").textContent = m === "wasm" ? "Browser vimg.wasm" : "Edge Proxy";
+  scheduleRender();
+}
+
+function drawNavGrid() {
+  if (!cur) return;
+  const img = $("navImg"), c = $("navGrid");
+  if (!img.clientWidth || !img.clientHeight) return;
+  c.width = img.clientWidth; c.height = img.clientHeight;
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  const sx = c.width / cur.width, sy = c.height / cur.height;
+  const ts = cur.tile_size;
+  const crop = state.crop || [0, 0, cur.width, cur.height];
+  const tx0 = Math.floor(crop[0] / ts), ty0 = Math.floor(crop[1] / ts);
+  const tx1 = Math.min(cur.tiles_x - 1, Math.floor((crop[0] + crop[2] - 1) / ts));
+  const ty1 = Math.min(cur.tiles_y - 1, Math.floor((crop[1] + crop[3] - 1) / ts));
+
+  for (let ty = 0; ty < cur.tiles_y; ty++) {
+    for (let tx = 0; tx < cur.tiles_x; tx++) {
+      const x = tx * ts * sx, y = ty * ts * sy;
+      const w = Math.min(ts, cur.width - tx * ts) * sx;
+      const h = Math.min(ts, cur.height - ty * ts) * sy;
+      const active = tx >= tx0 && tx <= tx1 && ty >= ty0 && ty <= ty1;
+      ctx.fillStyle = active ? "rgba(16,185,129,0.16)" : "rgba(5,8,14,0.58)";
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = active ? "rgba(52,211,153,0.75)" : "rgba(148,163,184,0.18)";
+      ctx.lineWidth = active ? 1.2 : 0.6;
+      ctx.strokeRect(x, y, w, h);
+    }
+  }
+  if (state.crop) {
+    ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 2;
+    ctx.strokeRect(crop[0] * sx, crop[1] * sy, crop[2] * sx, crop[3] * sy);
+  }
+}
+
+function queryParams() {
+  const p = new URLSearchParams();
+  if (state.w > 0) p.set("w", state.w);
+  if (state.crop) p.set("crop", state.crop.join(","));
+  if (state.gray) p.set("gray", "1");
+  if (state.sepia) p.set("sepia", "1");
+  if (state.blur > 0) p.set("blur", state.blur.toFixed(2));
+  if (state.sharpen > 0) p.set("sharpen", state.sharpen.toFixed(2));
+  if (state.bright !== 0) p.set("bright", state.bright);
+  if (Math.abs(state.contrast - 1.0) > 0.01) p.set("contrast", state.contrast.toFixed(2));
+  if (state.rot > 0) p.set("rot", state.rot);
+  if (![...p.keys()].length) p.set("w", Math.min(cur.width, 1024));
+  return p.toString();
+}
+
+function updateHud({ pct, fetchedBytes, totalBytes, reqs, lvl, tilesFetched, tilesTotal, outW, outH, totalMs, decMs }) {
+  $("mPct").textContent = pct.toFixed(1) + "%";
+  $("mBytes").textContent = `${(fetchedBytes/1024).toFixed(1)} / ${(totalBytes/1024).toFixed(1)} KiB`;
+  const saved = Math.max(0, 100 - pct);
+  const mult = pct > 0.1 ? (100 / pct).toFixed(1) + "× less" : "∞";
+  $("mSave").textContent = saved.toFixed(1) + "%";
+  $("mReqs").textContent = `${reqs} reqs (${mult})`;
+  $("mLvl").textContent = `L${lvl} / L${cur.dwt_levels}`;
+  $("mDims").textContent = `${outW}×${outH}`;
+  $("mTiles").textContent = `${tilesFetched} / ${tilesTotal}`;
+  $("mMs").textContent = `${totalMs.toFixed(1)} ms`;
+  $("mDecMs").textContent = decMs != null ? `decode ${decMs.toFixed(1)} ms` : "";
+  $("barFill").style.width = Math.min(100, pct) + "%";
+  $("barLabel").textContent = `${pct.toFixed(1)}% transferred (${mult} traffic)`;
+}
+
+async function fetchRange(url, s, e) {
+  const r = await fetch(url, { headers: { Range: `bytes=${s}-${e - 1}` } });
+  return new Uint8Array(await r.arrayBuffer());
+}
+
+async function renderWasm() {
+  const t0 = performance.now();
+  const url = "/" + encodeURIComponent(cur.name);
+  let reqs = 0, fetchedBytes = 0;
+  let prefix = wasmPrefixCache.get(cur.name);
+  if (!prefix) {
+    const initLen = Math.min(cur.total_bytes, 4096);
+    let p0 = await fetchRange(url, 0, initLen);
+    reqs++; fetchedBytes += p0.length;
+    const pPtr = wasm.vimg_wasm_alloc(p0.length);
+    new Uint8Array(wasm.memory.buffer, pPtr, p0.length).set(p0);
+    wasm.vimg_wasm_parse_header(pPtr, p0.length);
+    const meta = new Uint32Array(wasm.memory.buffer, wasm.vimg_wasm_meta_ptr(), 12);
+    const need = meta[8];
+    wasm.vimg_wasm_free(pPtr, p0.length);
+    if (need > initLen) {
+      const rem = await fetchRange(url, initLen, need);
+      reqs++; fetchedBytes += rem.length;
+      prefix = new Uint8Array(need);
+      prefix.set(p0, 0); prefix.set(rem, initLen);
+    } else {
+      prefix = p0;
+    }
+    wasmPrefixCache.set(cur.name, prefix);
+  } else {
+    fetchedBytes += prefix.length;
+  }
+
+  const pPtr = wasm.vimg_wasm_alloc(prefix.length);
+  new Uint8Array(wasm.memory.buffer, pPtr, prefix.length).set(prefix);
+  const c = state.crop || [0, 0, 0, 0];
+  const tw = state.w || (state.crop ? 0 : Math.min(cur.width, 1024));
+  const stPlan = wasm.vimg_wasm_plan(pPtr, prefix.length, c[0], c[1], c[2], c[3], tw, 0, state.gray ? 1 : 0, state.sepia ? 1 : 0);
+  if (stPlan !== 0) { wasm.vimg_wasm_free(pPtr, prefix.length); return; }
+  let meta = new Uint32Array(wasm.memory.buffer, wasm.vimg_wasm_meta_ptr(), 12);
+  const rPtr = meta[6], rCap = meta[7];
+  const nRanges = rCap / 8;
+  const rFlat = new Uint32Array(wasm.memory.buffer.slice(rPtr, rPtr + rCap));
+  wasm.vimg_wasm_free(rPtr, rCap);
+
+  const pairs = [];
+  for (let i = 0; i < nRanges; i++) pairs.push([rFlat[i * 2], rFlat[i * 2 + 1]]);
+  const spans = await Promise.all(pairs.map(([s, e]) => fetchRange(url, s, e)));
+  reqs += spans.length;
+  const totalSpanBytes = spans.reduce((a, b) => a + b.length, 0);
+  fetchedBytes += totalSpanBytes;
+
+  const tDec0 = performance.now();
+  const offsPtr = wasm.vimg_wasm_alloc(Math.max(4, nRanges * 4));
+  const lensPtr = wasm.vimg_wasm_alloc(Math.max(4, nRanges * 4));
+  const dataPtr = wasm.vimg_wasm_alloc(Math.max(1, totalSpanBytes));
+  const offsArr = new Uint32Array(wasm.memory.buffer, offsPtr, nRanges);
+  const lensArr = new Uint32Array(wasm.memory.buffer, lensPtr, nRanges);
+  const dataArr = new Uint8Array(wasm.memory.buffer, dataPtr, totalSpanBytes);
+  let curOff = 0;
+  for (let i = 0; i < nRanges; i++) {
+    offsArr[i] = pairs[i][0]; lensArr[i] = spans[i].length;
+    dataArr.set(spans[i], curOff); curOff += spans[i].length;
+  }
+
+  const stDec = wasm.vimg_wasm_decode_sparse(
+    pPtr, prefix.length, offsPtr, lensPtr, nRanges, dataPtr, totalSpanBytes,
+    c[0], c[1], c[2], c[3], tw, 0, state.gray ? 1 : 0, state.sepia ? 1 : 0,
+    state.blur, state.sharpen, state.bright, state.contrast, (state.rot / 90) & 3
+  );
+  wasm.vimg_wasm_free(pPtr, prefix.length);
+  wasm.vimg_wasm_free(offsPtr, Math.max(4, nRanges * 4));
+  wasm.vimg_wasm_free(lensPtr, Math.max(4, nRanges * 4));
+  wasm.vimg_wasm_free(dataPtr, Math.max(1, totalSpanBytes));
+  if (stDec !== 0) return;
+
+  meta = new Uint32Array(wasm.memory.buffer, wasm.vimg_wasm_meta_ptr(), 12);
+  const ow = meta[1], oh = meta[2], lvl = meta[3], tf = meta[4], tt = meta[5], outPtr = meta[6], outCap = meta[7];
+  const rgba = new Uint8ClampedArray(wasm.memory.buffer.slice(outPtr, outPtr + ow * oh * 4));
+  wasm.vimg_wasm_free(outPtr, outCap);
+  const decMs = performance.now() - tDec0;
+
+  const cv = $("outCanvas");
+  cv.width = ow; cv.height = oh;
+  cv.getContext("2d").putImageData(new ImageData(rgba, ow, oh), 0, 0);
+
+  const totalMs = performance.now() - t0;
+  updateHud({
+    pct: (fetchedBytes * 100) / cur.total_bytes, fetchedBytes, totalBytes: cur.total_bytes,
+    reqs, lvl, tilesFetched: tf, tilesTotal: tt, outW: ow, outH: oh, totalMs, decMs
+  });
+  $("urlBar").textContent = `WASM HTTP/1.1 Range -> GET ${url} (${reqs} × 206 Partial Content, ${(fetchedBytes/1024).toFixed(1)} KiB)`;
+}
+
+async function renderEdge() {
+  const t0 = performance.now();
+  const qs = queryParams();
+  const url = `/${encodeURIComponent(cur.name)}?${qs}`;
+  $("urlBar").textContent = `curl -i "${location.origin}${url}" -o out.png`;
+  const res = await fetch(url);
+  if (!res.ok) return;
+  const blob = await res.blob();
+  const objUrl = URL.createObjectURL(blob);
+  const img = $("outImg");
+  if (img.dataset.prev) URL.revokeObjectURL(img.dataset.prev);
+  img.src = objUrl; img.dataset.prev = objUrl;
+  const totalMs = performance.now() - t0;
+  const pct = parseFloat(res.headers.get("X-VIMG-Fetched-Pct") || "0");
+  const fb = parseInt(res.headers.get("X-VIMG-Fetched-Bytes") || "0", 10);
+  const tb = parseInt(res.headers.get("X-VIMG-Total-Bytes") || String(cur.total_bytes), 10);
+  const lvl = parseInt(res.headers.get("X-VIMG-Level") || "0", 10);
+  const tf = parseInt(res.headers.get("X-VIMG-Tiles-Fetched") || "0", 10);
+  const tt = parseInt(res.headers.get("X-VIMG-Tiles-Total") || String(cur.tiles_x * cur.tiles_y), 10);
+  const reqs = parseInt(res.headers.get("X-VIMG-Reqs") || "0", 10);
+  const decMs = parseFloat(res.headers.get("X-VIMG-Decode-Ms") || "0");
+  const dims = (res.headers.get("X-VIMG-Out-Dims") || "?x?").split("x");
+  updateHud({ pct, fetchedBytes: fb, totalBytes: tb, reqs, lvl, tilesFetched: tf, tilesTotal: tt, outW: dims[0], outH: dims[1], totalMs, decMs });
+}
+
+function scheduleRender() {
+  drawNavGrid();
+  clearTimeout(timer);
+  timer = setTimeout(() => { if (cur) (mode === "wasm" ? renderWasm() : renderEdge()); }, 35);
+}
+
+function selectFile(idx) {
+  cur = files[idx];
+  if (!cur) return;
+  state.crop = null; state.w = Math.min(cur.width, Math.round(cur.width / 4));
+  $("rW").max = cur.width; $("rW").value = state.w; $("vW").textContent = state.w + "px";
+  const nav = $("navImg");
+  nav.onload = () => { drawNavGrid(); scheduleRender(); };
+  nav.src = `/${encodeURIComponent(cur.name)}?w=360`;
+}
+
+// Drag-to-crop on Tile Navigator
+$("navWrap").addEventListener("pointerdown", e => {
+  if (!cur) return;
+  const r = $("navWrap").getBoundingClientRect();
+  drag = { x0: (e.clientX - r.left) / r.width, y0: (e.clientY - r.top) / r.height };
+  $("navWrap").setPointerCapture(e.pointerId);
+});
+$("navWrap").addEventListener("pointermove", e => {
+  if (!drag || !cur) return;
+  const r = $("navWrap").getBoundingClientRect();
+  const x1 = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const y1 = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height));
+  const x = Math.round(Math.min(drag.x0, x1) * cur.width);
+  const y = Math.round(Math.min(drag.y0, y1) * cur.height);
+  const w = Math.max(32, Math.round(Math.abs(x1 - drag.x0) * cur.width));
+  const h = Math.max(32, Math.round(Math.abs(y1 - drag.y0) * cur.height));
+  state.crop = [x, y, Math.min(w, cur.width - x), Math.min(h, cur.height - y)];
+  state.w = 0; $("rW").value = 0; $("vW").textContent = "Auto (1:1)";
+  drawNavGrid();
+});
+$("navWrap").addEventListener("pointerup", () => { if (drag) { drag = null; scheduleRender(); } });
+
+// Controls
+$("btnWasm").onclick = () => setMode("wasm");
+$("btnEdge").onclick = () => setMode("edge");
+$("fileSel").onchange = e => selectFile(parseInt(e.target.value, 10));
+$("rW").oninput = e => { state.w = +e.target.value; $("vW").textContent = state.w ? state.w + "px" : "Auto"; scheduleRender(); };
+$("rBlur").oninput = e => { state.blur = +e.target.value; $("vBlur").textContent = state.blur.toFixed(2); scheduleRender(); };
+$("rSharp").oninput = e => { state.sharpen = +e.target.value; $("vSharp").textContent = state.sharpen.toFixed(2); scheduleRender(); };
+$("rBright").oninput = e => { state.bright = +e.target.value; $("vBright").textContent = state.bright; scheduleRender(); };
+$("rCont").oninput = e => { state.contrast = +e.target.value; $("vCont").textContent = state.contrast.toFixed(2); scheduleRender(); };
+$("cGray").onchange = e => { state.gray = e.target.checked; scheduleRender(); };
+$("cSepia").onchange = e => { state.sepia = e.target.checked; scheduleRender(); };
+document.querySelectorAll(".rot-btn").forEach(b => b.onclick = () => {
+  state.rot = +b.dataset.rot;
+  document.querySelectorAll(".rot-btn").forEach(x => x.classList.toggle("active", x === b));
+  scheduleRender();
+});
+document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
+  if (!cur) return;
+  const k = b.dataset.preset;
+  state.gray = false; state.sepia = false; state.blur = 0; $("cGray").checked = false; $("cSepia").checked = false; $("rBlur").value = 0; $("vBlur").textContent = "0.00";
+  if (k === "full") { state.crop = null; state.w = Math.min(cur.width, 1280); }
+  else if (k === "quarter") { state.crop = null; state.w = Math.max(64, Math.round(cur.width / 4)); }
+  else if (k === "crop256") { const s = Math.min(256, cur.width, cur.height); state.crop = [Math.round((cur.width-s)/2), Math.round((cur.height-s)/2), s, s]; state.w = 0; }
+  else if (k === "crop512") { const s = Math.min(512, cur.width, cur.height); state.crop = [Math.round((cur.width-s)/2), Math.round((cur.height-s)/2), s, s]; state.w = 0; }
+  else if (k === "grayblur") { state.crop = null; state.w = Math.max(64, Math.round(cur.width / 2)); state.gray = true; state.blur = 0.6; $("cGray").checked = true; $("rBlur").value = 0.6; $("vBlur").textContent = "0.60"; }
+  $("rW").value = state.w; $("vW").textContent = state.w ? state.w + "px" : "Auto (1:1)";
+  scheduleRender();
+});
+
+(async () => {
+  const res = await fetch("/api/files");
+  files = await res.json();
+  $("fileSel").innerHTML = files.map((f, i) =>
+    `<option value="${i}">${f.name} (${f.width}×${f.height}, ${(f.total_bytes/1024).toFixed(0)} KiB)</option>`
+  ).join("");
+  if (files.length) selectFile(0);
+  else $("urlBar").textContent = "No .vimg files found in served directory. Run: vimg encode photo.png dir/photo.vimg";
+  await initWasm();
+})();
+</script>
+</body>
+</html>

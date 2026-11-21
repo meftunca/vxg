@@ -1,0 +1,89 @@
+# VIMG (`VIMG1`) — HTTP-Range-Native Hierarchical Wavelet Image Codec
+
+`vimg` is a standalone, pure-Rust, **zero-dependency** (`[lib]`) image codec and compressed-domain query engine engineered to VXG standards:
+
+- **HTTP/1.1 Range-Native Wire Layout (`(level, plane, tile_id)`)**: Fetch only the prefix directory plus the exact pyramid levels, color planes, and spatial tiles needed for your query.
+- **Reversible `YCoCg-R` + Multi-Level Integer `CDF 5/3` Wavelet Pyramid**:
+  - `q = 100`: **100% bit-exact lossless** (`4:4:4`, RGB & RGBA), smaller than PNG.
+  - `q = 1..99`: **Perceptual dead-zone lossy** (`4:2:0`), multi-resolution pyramid (`1/8`, `1/4`, `1/2`, `1/1`).
+- **Direct Compressed-Domain Operations**:
+  - **Resize** — stop decoding at the coarsest wavelet level `>= target` (skip L2/L3 over the wire).
+  - **Spatial Crop** — fetch only intersecting tiles; `vimg crop` performs **zero-decode `vimg -> vimg`** tile cropping without running IDWT or color conversion.
+  - **Grayscale / Sepia** — skip `Co`/`Cg` chroma planes completely (`0` chroma bytes fetched).
+  - **Subband Blur / Sharpen / Brightness / Contrast** — scale wavelet detail gains and `LL` coefficients directly before IDWT.
+  - **Rotate / Flip** + **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) with `recover_corrupt` tile salvaging.
+- **Zero-Dependency Core + C ABI + Zero-WASI `wasm32`**:
+  - Core `[lib]` has **0 external crates**.
+  - Deterministic `1T == NT` bit-exact encoding and parallel multi-core tile decoding.
+  - `wasm32-unknown-unknown` release build: **143 KiB** `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
+  - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h).
+
+---
+
+## Real Benchmarks (Apple M2 Max, Release Build)
+
+### 4K UHD Photograph (`3840×2160` RGB, 24.3 MiB raw — macOS Sonoma aerial crop)
+
+| Codec / Operation | Size / Transferred | bpp | PSNR (dB) | Enc (ms) | Dec / Query (ms) | Notes |
+|---|---:|---:|---:|---:|---:|---|
+| PNG (lossless) | 9,431.4 KiB | 9.31 | ∞ | 44.78 | 38.68 | 100% full stream |
+| **VIMG Lossless (`q=100`)** | **6,835.0 KiB** | **6.75** | **∞** | **48.39** | **57.67** | **27.5% smaller than PNG**, bit-exact |
+| JPEG (`q=75`) | 270.7 KiB | 0.27 | 44.06 | 57.63 | 13.86 | 100% full decode required |
+| **VIMG Lossy (`q=85`)** | **226.3 KiB** | **0.22** | **43.19** | **14.59** | **39.67** | **16.4% smaller & 3.95× faster encode than JPEG** |
+| **1/4 Resize (`960×540`)** | **140.9 KiB (62.3%)** | — | — | — | **2.59 ms** | **15.5× faster** than JPEG full+resize (`40.19 ms`) |
+| **256×256 Center Crop** | **26.1 KiB (11.5%)** | — | — | — | **0.64 ms** | **17.5× faster**, **10.4× less traffic** (`2/135` tiles) |
+| **1/2 Gray + Blur (`1920×1080`)** | **152.8 KiB (67.5%)** | — | — | — | **2.36 ms** | `0` chroma bytes fetched |
+
+### 6K Photograph (`6016×6016` RGB, 36.2 MP / 106 MiB raw — macOS Sonoma full)
+
+| Codec / Operation | Size / Transferred | bpp | PSNR (dB) | Enc (ms) | Dec / Query (ms) | Notes |
+|---|---:|---:|---:|---:|---:|---|
+| PNG (lossless) | 40,927.4 KiB | 9.26 | ∞ | 193.41 | 165.49 | 100% full stream |
+| **VIMG Lossless (`q=100`)** | **29,334.5 KiB** | **6.64** | **∞** | **182.65** | **237.87** | **28.3% smaller than PNG** |
+| JPEG (`q=75`) | 1,144.8 KiB | 0.26 | 44.38 | 245.30 | 55.34 | 100% full decode required |
+| **VIMG Lossy (`q=85`)** | **880.5 KiB** | **0.20** | **43.30** | **55.79** | **172.36** | **23.1% smaller & 4.4× faster encode than JPEG** |
+| **1/4 Resize (`1504×1504`)** | **574.5 KiB (65.2%)** | — | — | — | **12.09 ms** | **14.0× faster** than JPEG full+resize (`168.96 ms`) |
+| **256×256 Center Crop** | **65.8 KiB (7.5%)** | — | — | — | **0.80 ms** | **57.4× faster**, **17.4× less traffic** (`4/576` tiles) |
+
+### Live HTTP/1.1 Range Origin + Edge Proxy (`6016×6016`, 880.5 KiB `.vimg`)
+- Remote `512×512` crop + subband blur + sepia: fetched **68.5 KiB (`7.8%`, `9/576` tiles)** in **8.62 ms**.
+- Remote zero-decode `vimg -> vimg` crop (`2×2` tiles): fetched **10.4%** in **4.89 ms**.
+- Edge proxy `GET /sonoma_6k.vimg?w=752&gray=1&blur=0.5`: `X-VIMG-Fetched-Pct: 26.8`, `X-VIMG-Level: 0`.
+
+---
+
+## Build & Usage
+
+```bash
+# Core library tests (zero external dependencies)
+cargo test --manifest-path crates/vimg/Cargo.toml --release
+
+# Zero-WASI WebAssembly build (143 KiB .wasm)
+cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
+
+# Build CLI with PNG/JPEG/WebP/BMP I/O
+cargo build --manifest-path crates/vimg/Cargo.toml --release --features io --bin vimg
+
+# Encode, inspect, benchmark
+vimg encode photo.png photo.vimg -q 85
+vimg info photo.vimg
+vimg bench photo.png
+
+# Start HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy + Interactive Web Playground
+vimg serve ./images --port 8090
+# Open http://127.0.0.1:8090/ in your browser for interactive drag-to-crop,
+# tile-grid heatmap, live X-VIMG-* wire telemetry, and Browser vimg.wasm HTTP 206 Range mode!
+
+# Fetch remote crop + effects directly via HTTP Range
+vimg decode http://127.0.0.1:8090/photo.vimg out.png --crop 2500,2500,512,512 --blur 0.4 --sepia
+
+# Or call the Edge Proxy directly from a browser / curl
+curl "http://127.0.0.1:8090/photo.vimg?w=752&gray=1&blur=0.5" -o thumb.png
+```
+
+---
+
+## Honest Engineering Trade-Offs
+
+- **Where `vimg` shines**: Remote HTTP Range CDN/edge pipelines, high-res deep-zoom/crop/thumbnail workloads, fast parallel encoding, lossless archiving (beats PNG), and sub-millisecond compressed-domain crops/effects.
+- **Where `AVIF` / `JPEG XL` / `WebP` still win**: Full-image static downloads at extreme low bitrates (`< 0.15 bpp`) where intra-prediction + heavy RDO beat a fast non-RDO `CDF 5/3` lifting wavelet, and native browser `<img>` tag support without a JS/WASM decoder or Edge Proxy.
