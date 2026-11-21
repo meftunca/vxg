@@ -98,6 +98,21 @@
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 9px 12px; overflow-x: auto; white-space: nowrap;
   }
+  .dropzone {
+    border: 1.5px dashed #334155; border-radius: 10px; padding: 11px; text-align: center;
+    background: var(--panel2); cursor: pointer; transition: border-color 140ms, background 140ms;
+    font-size: 12px; color: var(--muted);
+  }
+  .dropzone:hover, .dropzone.over { border-color: var(--accent); background: #0f2420; color: var(--text); }
+  .dropzone b { color: #6ee7b7; display: block; margin-bottom: 3px; font-size: 13px; }
+  .enc-row { display: flex; gap: 6px; margin-top: 8px; }
+  .enc-row select { flex: 1; font-size: 11px; padding: 5px 7px; }
+  .enc-log {
+    margin-top: 8px; font-family: ui-monospace, monospace; font-size: 11px; color: #34d399;
+    background: #0a1714; border: 1px solid #164e3f; border-radius: 8px; padding: 7px 9px;
+    display: none; line-height: 1.45;
+  }
+  .enc-log.err { color: #fca5a5; background: #260d11; border-color: #7f1d1d; }
 </style>
 </head>
 <body>
@@ -111,13 +126,36 @@
   </div>
   <div class="mode-bar">
     <select id="fileSel"></select>
-    <button id="btnWasm" title="Browser fetches HTTP 206 Partial Content and decodes in 133 KiB vimg.wasm">WASM Client Range</button>
+    <a id="btnDl" download style="text-decoration:none"><button type="button" title="Download current .vimg file">⬇ .vimg</button></a>
+    <button id="btnWasm" title="Browser fetches HTTP 206 Partial Content and decodes in 143 KiB vimg.wasm">WASM Client Range</button>
     <button id="btnEdge" class="active" title="Server decodes compressed-domain ranges on disk and serves PNG">Edge Proxy</button>
   </div>
 </header>
 
 <div class="layout">
   <aside class="sidebar">
+    <div class="card">
+      <h2>Upload &amp; Convert <span style="color:var(--cyan)">PNG · JPEG · WebP · BMP</span></h2>
+      <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/bmp,.vimg" style="display:none" />
+      <div class="dropzone" id="dropzone">
+        <b>+ Drop Image or Click to Convert</b>
+        Encodes live to .vimg &amp; opens in Playground
+      </div>
+      <div class="enc-row">
+        <select id="encQ" title="VIMG quality">
+          <option value="75">Lossy q=75 (Smallest)</option>
+          <option value="85" selected>Lossy q=85 (Balanced)</option>
+          <option value="92">Lossy q=92 (High)</option>
+          <option value="100">Lossless q=100 (Bit-Exact)</option>
+        </select>
+        <select id="encTile" title="Tile size">
+          <option value="128">Tile 128</option>
+          <option value="256" selected>Tile 256</option>
+        </select>
+      </div>
+      <div class="enc-log" id="encLog"></div>
+    </div>
+
     <div class="card">
       <h2>Tile Navigator <span id="navHint" style="color:var(--accent);font-weight:600">Drag to Crop</span></h2>
       <div class="nav-wrap" id="navWrap">
@@ -418,11 +456,53 @@ function scheduleRender() {
 function selectFile(idx) {
   cur = files[idx];
   if (!cur) return;
+  $("fileSel").value = String(idx);
+  $("btnDl").href = "/" + encodeURIComponent(cur.name);
+  $("btnDl").download = cur.name;
   state.crop = null; state.w = Math.min(cur.width, Math.round(cur.width / 4));
   $("rW").max = cur.width; $("rW").value = state.w; $("vW").textContent = state.w + "px";
   const nav = $("navImg");
   nav.onload = () => { drawNavGrid(); scheduleRender(); };
   nav.src = `/${encodeURIComponent(cur.name)}?w=360`;
+}
+
+async function refreshFiles(selectName) {
+  const res = await fetch("/api/files");
+  files = await res.json();
+  $("fileSel").innerHTML = files.map((f, i) =>
+    `<option value="${i}">${f.name} (${f.width}×${f.height}, ${(f.total_bytes/1024).toFixed(0)} KiB)</option>`
+  ).join("");
+  if (!files.length) {
+    $("urlBar").textContent = "No .vimg files yet — drop a PNG / JPEG / WebP / BMP image on the left!";
+    return;
+  }
+  const idx = selectName ? Math.max(0, files.findIndex(f => f.name === selectName)) : 0;
+  selectFile(idx);
+}
+
+async function uploadAndConvert(file) {
+  if (!file) return;
+  const log = $("encLog");
+  log.className = "enc-log"; log.style.display = "block";
+  log.textContent = `Encoding ${file.name} (${(file.size/1024).toFixed(1)} KiB)...`;
+  const q = $("encQ").value, tile = $("encTile").value;
+  const qs = new URLSearchParams({ name: file.name, q, tile });
+  try {
+    const res = await fetch(`/api/encode?${qs}`, { method: "POST", body: file });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "encode failed");
+    wasmPrefixCache.delete(data.name);
+    const diffPct = ((1 - data.vimg_bytes / Math.max(1, data.orig_bytes)) * 100);
+    const diffTxt = diffPct >= 0 ? `-${diffPct.toFixed(1)}% vs upload` : `+${(-diffPct).toFixed(1)}% vs upload`;
+    log.innerHTML =
+      `✓ <b>${data.name}</b> (${data.width}×${data.height}×${data.channels})<br>` +
+      `${(data.orig_bytes/1024).toFixed(1)} KiB → <b>${(data.vimg_bytes/1024).toFixed(1)} KiB</b> (${diffTxt}, ${data.bpp} bpp)<br>` +
+      `Encoded in <b>${data.enc_ms} ms</b> (${data.mpix_s} MPix/s)`;
+    await refreshFiles(data.name);
+  } catch (err) {
+    log.className = "enc-log err";
+    log.textContent = `✗ ${err.message}`;
+  }
 }
 
 // Drag-to-crop on Tile Navigator
@@ -476,14 +556,16 @@ document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
   scheduleRender();
 });
 
+// Upload & Drag/Drop
+const dz = $("dropzone"), fi = $("fileInput");
+dz.onclick = () => fi.click();
+fi.onchange = () => { if (fi.files[0]) uploadAndConvert(fi.files[0]); fi.value = ""; };
+dz.ondragover = e => { e.preventDefault(); dz.classList.add("over"); };
+dz.ondragleave = () => dz.classList.remove("over");
+dz.ondrop = e => { e.preventDefault(); dz.classList.remove("over"); if (e.dataTransfer.files[0]) uploadAndConvert(e.dataTransfer.files[0]); };
+
 (async () => {
-  const res = await fetch("/api/files");
-  files = await res.json();
-  $("fileSel").innerHTML = files.map((f, i) =>
-    `<option value="${i}">${f.name} (${f.width}×${f.height}, ${(f.total_bytes/1024).toFixed(0)} KiB)</option>`
-  ).join("");
-  if (files.length) selectFile(0);
-  else $("urlBar").textContent = "No .vimg files found in served directory. Run: vimg encode photo.png dir/photo.vimg";
+  await refreshFiles();
   await initWasm();
 })();
 </script>

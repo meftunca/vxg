@@ -395,6 +395,129 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
 
 const PLAYGROUND_HTML: &str = include_str!("../../web/playground.html");
 
+fn handle_http_encode(
+    reader: &mut BufReader<TcpStream>,
+    stream: &mut TcpStream,
+    root: &Path,
+    query_str: &str,
+    content_len: usize,
+) {
+    let send_err = |stream: &mut TcpStream, msg: &str| {
+        let body = format!("{{\"error\":\"{}\"}}", msg.replace('"', "'"));
+        let hdr = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(hdr.as_bytes());
+        let _ = stream.write_all(body.as_bytes());
+    };
+    if content_len == 0 || content_len > 128 * 1024 * 1024 {
+        send_err(stream, "invalid upload size (must be 1B..128MiB)");
+        return;
+    }
+    let mut raw_name = String::from("upload");
+    let mut opts = EncodeOptions::default();
+    for pair in query_str.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        match k {
+            "name" if !v.is_empty() => raw_name = v.to_owned(),
+            "q" => {
+                if let Ok(q) = v.parse::<u8>() {
+                    opts.quality = q.clamp(1, 100);
+                    opts.chroma_420 = opts.quality < 100;
+                }
+            }
+            "tile" => {
+                if let Ok(t) = v.parse::<u32>() {
+                    if matches!(t, 64 | 128 | 256) {
+                        opts.tile_size = t;
+                    }
+                }
+            }
+            "levels" => {
+                if let Ok(l) = v.parse::<u8>() {
+                    opts.dwt_levels = l.clamp(1, 4);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut body = vec![0u8; content_len];
+    if std::io::Read::read_exact(reader, &mut body).is_err() {
+        send_err(stream, "failed reading upload body");
+        return;
+    }
+    let stem: String = raw_name
+        .rsplit('/').next().unwrap_or("upload")
+        .split('.').next().unwrap_or("upload")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(48)
+        .collect();
+    let stem = if stem.is_empty() { "upload".to_owned() } else { stem };
+
+    // If user uploaded an existing .vimg file, validate and store directly!
+    if body.len() >= 48 && &body[..5] == b"VIMG1" {
+        match vimg::VimgHeader::parse(&body) {
+            Ok(h) => {
+                let out_name = format!("{stem}.vimg");
+                if fs::write(root.join(&out_name), &body).is_err() {
+                    send_err(stream, "failed writing .vimg");
+                    return;
+                }
+                let bpp = (body.len() as f64 * 8.0) / (h.width as f64 * h.height as f64).max(1.0);
+                let resp = format!(
+                    "{{\"name\":\"{out_name}\",\"width\":{},\"height\":{},\"channels\":{},\"orig_bytes\":{},\"vimg_bytes\":{},\"bpp\":{bpp:.2},\"enc_ms\":0.0,\"mpix_s\":0.0,\"quality\":{},\"tile_size\":{}}}",
+                    h.width, h.height, h.channels, body.len(), body.len(), h.quality, h.tile_size
+                );
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    resp.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(resp.as_bytes());
+                return;
+            }
+            Err(e) => { send_err(stream, &e.to_string()); return; }
+        }
+    }
+
+    let img = match image::load_from_memory(&body) {
+        Ok(i) => i,
+        Err(e) => { send_err(stream, &format!("unsupported image: {e}")); return; }
+    };
+    let (w, h) = img.dimensions();
+    let (pixels, ch) = if img.color().has_alpha() {
+        (img.to_rgba8().into_raw(), 4u8)
+    } else {
+        (img.to_rgb8().into_raw(), 3u8)
+    };
+    let t0 = Instant::now();
+    let encoded = match encode(&pixels, w, h, ch, &opts) {
+        Ok(b) => b,
+        Err(e) => { send_err(stream, &e.to_string()); return; }
+    };
+    let enc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let mpix_s = ((w as f64 * h as f64) / 1e6) / (enc_ms / 1000.0).max(1e-6);
+    let suffix = if opts.quality >= 100 { "lossless".to_owned() } else { format!("q{}", opts.quality) };
+    let out_name = format!("{stem}_{suffix}.vimg");
+    if fs::write(root.join(&out_name), &encoded).is_err() {
+        send_err(stream, "failed writing encoded .vimg");
+        return;
+    }
+    let bpp = (encoded.len() as f64 * 8.0) / (w as f64 * h as f64).max(1.0);
+    let resp = format!(
+        "{{\"name\":\"{out_name}\",\"width\":{w},\"height\":{h},\"channels\":{ch},\"orig_bytes\":{},\"vimg_bytes\":{},\"bpp\":{bpp:.2},\"enc_ms\":{enc_ms:.2},\"mpix_s\":{mpix_s:.1},\"quality\":{},\"tile_size\":{}}}",
+        body.len(), encoded.len(), opts.quality, opts.tile_size
+    );
+    let hdr = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        resp.len()
+    );
+    let _ = stream.write_all(hdr.as_bytes());
+    let _ = stream.write_all(resp.as_bytes());
+}
+
 fn handle_http_client(mut stream: TcpStream, root: &Path) {
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
@@ -411,6 +534,7 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
     let method = parts[0];
     let target = parts[1];
     let mut range_hdr: Option<String> = None;
+    let mut content_len: usize = 0;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
@@ -419,12 +543,18 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
         if let Some((k, v)) = line.split_once(':') {
             if k.eq_ignore_ascii_case("range") {
                 range_hdr = Some(v.trim().to_owned());
+            } else if k.eq_ignore_ascii_case("content-length") {
+                content_len = v.trim().parse().unwrap_or(0);
             }
         }
     }
 
     let (raw_path, query_str) = target.split_once('?').unwrap_or((target, ""));
     let rel = raw_path.trim_start_matches('/');
+    if method == "POST" && rel == "api/encode" {
+        handle_http_encode(&mut reader, &mut stream, root, query_str, content_len);
+        return;
+    }
     if rel.is_empty() {
         let hdr = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
