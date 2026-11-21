@@ -15,6 +15,7 @@ pub const HEADER_BYTES: usize = 48;
 pub const FLAG_CRC32C: u16 = 0x0001;
 pub const FLAG_CHROMA_420: u16 = 0x0002;
 pub const FLAG_LOSSLESS: u16 = 0x0004;
+pub const FLAG_DWT_97: u16 = 0x0008;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VimgHeader {
@@ -75,6 +76,11 @@ impl VimgHeader {
     #[inline]
     pub fn is_lossless(&self) -> bool {
         (self.flags & FLAG_LOSSLESS) != 0 || self.quality >= 100
+    }
+
+    #[inline]
+    pub fn is_dwt_97(&self) -> bool {
+        (self.flags & FLAG_DWT_97) != 0 && !self.is_lossless()
     }
 
     #[inline]
@@ -393,6 +399,8 @@ pub fn encode_vimg(
     }
     if is_lossless {
         flags |= FLAG_LOSSLESS;
+    } else {
+        flags |= FLAG_DWT_97;
     }
     let header = VimgHeader {
         version: VERSION_V1,
@@ -458,7 +466,7 @@ fn encode_one_tile(
         } else {
             (sub, tw, th)
         };
-        let wt = WaveletTile::forward(&work, pw, ph, dwt_levels);
+        let wt = WaveletTile::forward_mode(&work, pw, ph, dwt_levels, quality < 100);
         out_planes.push(encode_wavelet_tile_levels(&wt, quality, p_idx));
     }
     out_planes

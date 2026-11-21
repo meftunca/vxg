@@ -1,8 +1,155 @@
-//! Reversible integer Le Gall `CDF 5/3` wavelet lifting (1D & multi-level 2D pyramid).
+//! Wavelet lifting transforms (`CDF 5/3` reversible integer for lossless, `CDF 9/7`
+//! biorthogonal lifting for high-efficiency lossy) + multi-level 2D pyramid.
 //!
-//! Works for any tile dimension `w >= 1, h >= 1` (both even and odd sizes) with symmetric
-//! boundary extension, guaranteeing exact bit-for-bit lossless reconstruction (`step = 1`)
-//! and native zero-overhead resolution pyramids (`L0 = 1/8, L1 = 1/4, L2 = 1/2, L3 = 1/1`).
+//! Both transforms work for any tile dimension `w >= 1, h >= 1` (even and odd sizes) with
+//! symmetric boundary extension and exact unity DC gain so every pyramid level
+//! (`L0 = 1/8, L1 = 1/4, L2 = 1/2, L3 = 1/1`) has 1:1 pixel brightness without rescaling.
+
+const A97: f32 = -1.586_134_3;
+const B97: f32 = -0.052_980_12;
+const G97: f32 = 0.882_911_1;
+const D97: f32 = 0.443_506_87;
+const K97: f32 = 1.230_174_1;
+const INV_K97: f32 = 1.0 / K97;
+
+/// 1D forward DC-unity `CDF 9/7` lifting: splits `data[0..n]` in-place into `[low(0..nl), high(0..nh)]`.
+#[inline]
+pub fn dwt97_1d_forward(data: &mut [f32], scratch: &mut [f32]) {
+    let n = data.len();
+    if n <= 1 {
+        return;
+    }
+    let nl = n.div_ceil(2);
+    let nh = n / 2;
+    let (low, high) = scratch[..n].split_at_mut(nl);
+
+    for i in 0..nl {
+        low[i] = data[i * 2];
+    }
+    for i in 0..nh {
+        high[i] = data[i * 2 + 1];
+    }
+
+    for i in 0..nh {
+        let l = low[i];
+        let r = low[(i + 1).min(nl - 1)];
+        high[i] += A97 * (l + r);
+    }
+    for i in 0..nl {
+        let dl = if i == 0 { high[0] } else { high[i - 1] };
+        let dr = if i < nh { high[i] } else { high[nh - 1] };
+        low[i] += B97 * (dl + dr);
+    }
+    for i in 0..nh {
+        let l = low[i];
+        let r = low[(i + 1).min(nl - 1)];
+        high[i] += G97 * (l + r);
+    }
+    for i in 0..nl {
+        let dl = if i == 0 { high[0] } else { high[i - 1] };
+        let dr = if i < nh { high[i] } else { high[nh - 1] };
+        low[i] += D97 * (dl + dr);
+    }
+    // Exact unity DC gain: low /= K97, high *= K97 (det = 1, flat regions stay unchanged!)
+    for v in low.iter_mut() {
+        *v *= INV_K97;
+    }
+    for v in high.iter_mut() {
+        *v *= K97;
+    }
+
+    data[..nl].copy_from_slice(low);
+    data[nl..n].copy_from_slice(high);
+}
+
+/// 1D inverse DC-unity `CDF 9/7` lifting: reconstructs `[low(0..nl), high(0..nh)]` in-place.
+#[inline]
+pub fn dwt97_1d_inverse(data: &mut [f32], scratch: &mut [f32]) {
+    let n = data.len();
+    if n <= 1 {
+        return;
+    }
+    let nl = n.div_ceil(2);
+    let nh = n / 2;
+    let (low, high) = scratch[..n].split_at_mut(nl);
+
+    for i in 0..nl {
+        low[i] = data[i] * K97;
+    }
+    for i in 0..nh {
+        high[i] = data[nl + i] * INV_K97;
+    }
+
+    for i in 0..nl {
+        let dl = if i == 0 { high[0] } else { high[i - 1] };
+        let dr = if i < nh { high[i] } else { high[nh - 1] };
+        low[i] -= D97 * (dl + dr);
+    }
+    for i in 0..nh {
+        let l = low[i];
+        let r = low[(i + 1).min(nl - 1)];
+        high[i] -= G97 * (l + r);
+    }
+    for i in 0..nl {
+        let dl = if i == 0 { high[0] } else { high[i - 1] };
+        let dr = if i < nh { high[i] } else { high[nh - 1] };
+        low[i] -= B97 * (dl + dr);
+    }
+    for i in 0..nh {
+        let l = low[i];
+        let r = low[(i + 1).min(nl - 1)];
+        high[i] -= A97 * (l + r);
+    }
+
+    for i in 0..nl {
+        data[i * 2] = low[i];
+    }
+    for i in 0..nh {
+        data[i * 2 + 1] = high[i];
+    }
+}
+
+pub fn dwt97_2d_forward_step(buf: &mut [f32], stride: usize, w: usize, h: usize) {
+    let mut scratch = vec![0.0f32; w.max(h)];
+    if w > 1 {
+        for y in 0..h {
+            dwt97_1d_forward(&mut buf[y * stride..y * stride + w], &mut scratch);
+        }
+    }
+    if h > 1 {
+        let mut col = vec![0.0f32; h];
+        for x in 0..w {
+            for y in 0..h {
+                col[y] = buf[y * stride + x];
+            }
+            dwt97_1d_forward(&mut col, &mut scratch);
+            for y in 0..h {
+                buf[y * stride + x] = col[y];
+            }
+        }
+    }
+}
+
+pub fn dwt97_2d_inverse_step(buf: &mut [f32], stride: usize, w: usize, h: usize) {
+    let mut scratch = vec![0.0f32; w.max(h)];
+    if h > 1 {
+        let mut col = vec![0.0f32; h];
+        for x in 0..w {
+            for y in 0..h {
+                col[y] = buf[y * stride + x];
+            }
+            dwt97_1d_inverse(&mut col, &mut scratch);
+            for y in 0..h {
+                buf[y * stride + x] = col[y];
+            }
+        }
+    }
+    if w > 1 {
+        for y in 0..h {
+            dwt97_1d_inverse(&mut buf[y * stride..y * stride + w], &mut scratch);
+        }
+    }
+}
 
 /// 1D forward integer `CDF 5/3` lifting: splits `data[0..n]` in-place into `[low(0..nl), high(0..nh)]`.
 #[inline]
@@ -157,17 +304,37 @@ pub struct DetailBands {
 }
 
 impl WaveletTile {
-    /// Forward `n_dwt` levels of 2D `CDF 5/3` decomposition.
+    /// Forward `n_dwt` levels of 2D `CDF 5/3` decomposition (bit-exact lossless).
     pub fn forward(plane: &[i16], w: usize, h: usize, n_dwt: usize) -> Self {
-        let mut buf: Vec<i32> = plane.iter().map(|&v| v as i32).collect();
+        Self::forward_mode(plane, w, h, n_dwt, false)
+    }
+
+    /// Forward `n_dwt` levels of 2D wavelet decomposition (`use_97 = true` for lossy `CDF 9/7`,
+    /// `false` for bit-exact integer `CDF 5/3`).
+    pub fn forward_mode(plane: &[i16], w: usize, h: usize, n_dwt: usize, use_97: bool) -> Self {
         let mut dims = Vec::with_capacity(n_dwt);
         let (mut cw, mut ch) = (w, h);
-        for _ in 0..n_dwt {
-            dims.push((cw, ch));
-            dwt53_2d_forward_step(&mut buf, w, cw, ch);
-            cw = cw.div_ceil(2);
-            ch = ch.div_ceil(2);
-        }
+        let buf: Vec<i32> = if use_97 {
+            let mut fbuf: Vec<f32> = plane.iter().map(|&v| v as f32).collect();
+            for _ in 0..n_dwt {
+                dims.push((cw, ch));
+                dwt97_2d_forward_step(&mut fbuf, w, cw, ch);
+                cw = cw.div_ceil(2);
+                ch = ch.div_ceil(2);
+            }
+            // Store coefficients in Q2 fixed-point (`* 4`) for 9/7? Keep 1:1 rounded integers
+            // so LL stays native pixel range and detail quantization steps stay clean & exact!
+            fbuf.into_iter().map(|v| v.round() as i32).collect()
+        } else {
+            let mut ibuf: Vec<i32> = plane.iter().map(|&v| v as i32).collect();
+            for _ in 0..n_dwt {
+                dims.push((cw, ch));
+                dwt53_2d_forward_step(&mut ibuf, w, cw, ch);
+                cw = cw.div_ceil(2);
+                ch = ch.div_ceil(2);
+            }
+            ibuf
+        };
         let (ll_w, ll_h) = (cw, ch);
         let mut ll = Vec::with_capacity(ll_w * ll_h);
         for y in 0..ll_h {
@@ -200,13 +367,23 @@ impl WaveletTile {
         Self { full_w: w, full_h: h, ll_w, ll_h, ll, details }
     }
 
-    /// Reconstructs the tile up to `target_level` (`0` = coarsest `LL`, `n_dwt` = full resolution).
-    /// `detail_gains[k]` (`k = 0..target_level`) scales `(lh, hl, hh)` directly in subband domain
-    /// (`1.0` = identity, `< 1.0` = blur, `> 1.0` = sharpen).
+    /// Reconstructs the tile using `CDF 5/3` up to `target_level`.
     pub fn reconstruct(
         &self,
         target_level: usize,
         detail_gains: &[f32],
+    ) -> (Vec<i16>, usize, usize) {
+        self.reconstruct_mode(target_level, detail_gains, false)
+    }
+
+    /// Reconstructs the tile up to `target_level` (`0` = coarsest `LL`, `n_dwt` = full resolution).
+    /// `detail_gains[k]` (`k = 0..target_level`) scales `(lh, hl, hh)` directly in subband domain
+    /// (`1.0` = identity, `< 1.0` = blur, `> 1.0` = sharpen).
+    pub fn reconstruct_mode(
+        &self,
+        target_level: usize,
+        detail_gains: &[f32],
+        use_97: bool,
     ) -> (Vec<i16>, usize, usize) {
         let lvl = target_level.min(self.details.len());
         if lvl == 0 {
@@ -214,6 +391,46 @@ impl WaveletTile {
             return (out, self.ll_w, self.ll_h);
         }
         let (final_w, final_h) = (self.details[lvl - 1].out_w, self.details[lvl - 1].out_h);
+        if use_97 {
+            let mut fbuf = vec![0.0f32; final_w * final_h];
+            for y in 0..self.ll_h {
+                for x in 0..self.ll_w {
+                    fbuf[y * final_w + x] = self.ll[y * self.ll_w + x] as f32;
+                }
+            }
+            for k in 0..lvl {
+                let d = &self.details[k];
+                let gain = detail_gains.get(k).copied().unwrap_or(1.0);
+                let lw = d.out_w.div_ceil(2);
+                let hw = d.out_w / 2;
+                let lh_rows = d.out_h.div_ceil(2);
+                let hh_rows = d.out_h / 2;
+                for y in 0..hh_rows {
+                    let dst = &mut fbuf[(lh_rows + y) * final_w..(lh_rows + y) * final_w + lw];
+                    for (dv, &sv) in dst.iter_mut().zip(&d.lh[y * lw..(y + 1) * lw]) {
+                        *dv = sv as f32 * gain;
+                    }
+                }
+                for y in 0..lh_rows {
+                    let dst = &mut fbuf[y * final_w + lw..y * final_w + d.out_w];
+                    for (dv, &sv) in dst.iter_mut().zip(&d.hl[y * hw..(y + 1) * hw]) {
+                        *dv = sv as f32 * gain;
+                    }
+                }
+                for y in 0..hh_rows {
+                    let dst = &mut fbuf[(lh_rows + y) * final_w + lw..(lh_rows + y) * final_w + d.out_w];
+                    for (dv, &sv) in dst.iter_mut().zip(&d.hh[y * hw..(y + 1) * hw]) {
+                        *dv = sv as f32 * gain;
+                    }
+                }
+                dwt97_2d_inverse_step(&mut fbuf, final_w, d.out_w, d.out_h);
+            }
+            let out: Vec<i16> = fbuf
+                .into_iter()
+                .map(|v| v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16)
+                .collect();
+            return (out, final_w, final_h);
+        }
         let mut buf = vec![0i32; final_w * final_h];
         for y in 0..self.ll_h {
             buf[y * final_w..y * final_w + self.ll_w]
@@ -298,6 +515,27 @@ mod tests {
             let (rec, rw, rh) = wt.reconstruct(lvls, &[]);
             assert_eq!((rw, rh), (w, h));
             assert_eq!(rec, src, "mismatch on {w}x{h} lvls={lvls}");
+        }
+    }
+
+    #[test]
+    fn cdf97_2d_has_unity_dc_and_high_accuracy() {
+        for (w, h, lvls) in [(128, 128, 3), (37, 53, 3)] {
+            // Flat constant tile must stay exact across all levels (unity DC gain)!
+            let flat = vec![128i16; w * h];
+            let wt_f = WaveletTile::forward_mode(&flat, w, h, lvls, true);
+            for &v in &wt_f.ll {
+                assert!((v - 128).abs() <= 1, "DC drift in LL: {v}");
+            }
+            let (rec_f, _, _) = wt_f.reconstruct_mode(lvls, &[], true);
+            assert!(rec_f.iter().all(|&v| (v - 128).abs() <= 1));
+
+            let src: Vec<i16> = (0..w * h).map(|i| (((i * 19 + 7) % 256) as i16) - 128).collect();
+            let wt = WaveletTile::forward_mode(&src, w, h, lvls, true);
+            let (rec, rw, rh) = wt.reconstruct_mode(lvls, &[], true);
+            assert_eq!((rw, rh), (w, h));
+            let max_err = src.iter().zip(rec.iter()).map(|(&a, &b)| (a - b).abs()).max().unwrap_or(0);
+            assert!(max_err <= 2, "CDF 9/7 roundtrip max_err={max_err} on {w}x{h}");
         }
     }
 }

@@ -375,7 +375,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
 
         let wt = WaveletTile { full_w: pw_full, full_h: ph_full, ll_w, ll_h, ll, details };
         let gains_slice = if plane == 0 { &detail_gains[..] } else { &[] };
-        let (mut tile_px, tw_dec, th_dec) = wt.reconstruct(target_lvl, gains_slice);
+        let (mut tile_px, tw_dec, th_dec) = wt.reconstruct_mode(target_lvl, gains_slice, hdr.is_dwt_97());
 
         let dst_tw = col_x[ltx + 1] - col_x[ltx];
         let dst_th = row_y[lty + 1] - row_y[lty];
