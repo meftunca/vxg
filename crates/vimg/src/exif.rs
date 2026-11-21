@@ -88,6 +88,71 @@ fn parse_tiff_orientation(tiff: &[u8]) -> Option<u8> {
     None
 }
 
+/// Extracts an embedded ICC color profile from JPEG `APP2` (`ICC_PROFILE\0`) segments.
+/// Supports multi-chunk ICC profiles reassembled in sequence order (`1..=total`).
+pub fn parse_jpeg_icc_profile(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut chunks: Vec<(u8, &[u8])> = Vec::new();
+    let mut expected_total: Option<u8> = None;
+    let mut pos = 2usize;
+    while pos + 4 <= data.len() {
+        if data[pos] != 0xFF {
+            break;
+        }
+        while pos < data.len() && data[pos] == 0xFF {
+            pos += 1;
+        }
+        if pos >= data.len() {
+            break;
+        }
+        let marker = data[pos];
+        pos += 1;
+        if marker == 0xD9 || marker == 0xDA {
+            break;
+        }
+        if (0xD0..=0xD8).contains(&marker) || marker == 0x01 {
+            continue;
+        }
+        if pos + 2 > data.len() {
+            break;
+        }
+        let seg_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        if seg_len < 2 || pos + seg_len > data.len() {
+            break;
+        }
+        if marker == 0xE2 && seg_len >= 16 {
+            let seg = &data[pos + 2..pos + seg_len];
+            if seg.starts_with(b"ICC_PROFILE\0") && seg.len() >= 14 {
+                let seq = seg[12];
+                let total = seg[13];
+                if seq >= 1 && total >= seq && total <= 64 {
+                    expected_total = Some(total);
+                    chunks.push((seq, &seg[14..]));
+                }
+            }
+        }
+        pos += seg_len;
+    }
+    let total = expected_total? as usize;
+    if chunks.len() != total {
+        return None;
+    }
+    chunks.sort_by_key(|&(seq, _)| seq);
+    let mut out = Vec::new();
+    for (i, (seq, slice)) in chunks.into_iter().enumerate() {
+        if seq as usize != i + 1 {
+            return None;
+        }
+        if out.len().saturating_add(slice.len()) > crate::format::MAX_ICC_BYTES as usize {
+            return None;
+        }
+        out.extend_from_slice(slice);
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 /// Applies EXIF orientation `1..=8` to packed RGB/RGBA pixels, returning `(pixels, new_w, new_h)`.
 pub fn apply_exif_orientation(
     pixels: Vec<u8>,
@@ -146,5 +211,21 @@ mod tests {
         let (rot, nw, nh) = apply_exif_orientation(vec![1, 2, 3, 4, 5, 6], 2, 1, 3, 6);
         assert_eq!((nw, nh), (1, 2));
         assert_eq!(rot, vec![1, 2, 3, 4, 5, 6]);
+
+        // Multi-chunk JPEG APP2 ICC_PROFILE extraction (out-of-order chunks)
+        let mut icc_jpg = vec![0xFF, 0xD8];
+        let mut add_app2 = |seq: u8, total: u8, payload: &[u8]| {
+            let seg_len = (2 + 12 + 2 + payload.len()) as u16;
+            icc_jpg.extend_from_slice(&[0xFF, 0xE2]);
+            icc_jpg.extend_from_slice(&seg_len.to_be_bytes());
+            icc_jpg.extend_from_slice(b"ICC_PROFILE\0");
+            icc_jpg.push(seq);
+            icc_jpg.push(total);
+            icc_jpg.extend_from_slice(payload);
+        };
+        add_app2(2, 2, b"P3_TAIL");
+        add_app2(1, 2, b"DISPLAY_");
+        icc_jpg.extend_from_slice(&[0xFF, 0xD9]);
+        assert_eq!(parse_jpeg_icc_profile(&icc_jpg).as_deref(), Some(b"DISPLAY_P3_TAIL".as_slice()));
     }
 }

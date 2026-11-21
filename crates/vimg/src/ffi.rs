@@ -7,7 +7,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use crate::{
     decode_from_source, decode_query, encode,
     format::{HEADER_BYTES, MAX_IMAGE_DIM, MAX_IMAGE_PIXELS},
-    plan_query_ranges, EncodeOptions, SparseRangeSource, TransformQuery, VimgHeader, VimgIndex,
+    plan_query_ranges, EncodeOptions, RangeStats, SliceRangeSource, SparseRangeSource,
+    TransformQuery, VimgHeader, VimgIndex,
 };
 
 const VERSION_CSTR: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
@@ -81,6 +82,7 @@ pub unsafe extern "C" fn vimg_encode_alloc(
         chroma_420: quality < 100,
         checksum: true,
         threads: 0,
+        ..EncodeOptions::default()
     };
     match catch_unwind(AssertUnwindSafe(|| encode(slice, width, height, channels, &opts))) {
         Ok(Ok(bytes)) => VimgBuf::from_vec(bytes, width, height, channels, dwt_levels),
@@ -184,6 +186,31 @@ pub unsafe extern "C" fn vimg_decode_query_alloc(
     };
     match catch_unwind(AssertUnwindSafe(|| decode_query(slice, &query))) {
         Ok(Ok(img)) => VimgBuf::from_vec(img.pixels, img.width, img.height, img.channels, img.decoded_level),
+        Ok(Err(_)) => VimgBuf::err(-2),
+        Err(_) => VimgBuf::err(-7),
+    }
+}
+
+/// Extracts the embedded ICC color profile (if present) from a `.vimg` buffer.
+/// Returns `status = 0` with `ptr != NULL` if an ICC profile exists, `status = 1` if none exists,
+/// or a negative error code on invalid/corrupt input.
+#[no_mangle]
+pub unsafe extern "C" fn vimg_extract_icc_alloc(
+    vimg_ptr: *const u8,
+    vimg_len: usize,
+) -> VimgBuf {
+    if vimg_ptr.is_null() {
+        return VimgBuf::err(-1);
+    }
+    let slice = core::slice::from_raw_parts(vimg_ptr, vimg_len);
+    match catch_unwind(AssertUnwindSafe(|| {
+        let idx = VimgIndex::parse_prefix(slice)?;
+        let src = SliceRangeSource(slice);
+        let mut stats = RangeStats::default();
+        idx.read_icc_from_source(&src, slice, true, &mut stats)
+    })) {
+        Ok(Ok(Some(icc))) => VimgBuf::from_vec(icc, 0, 0, 0, 0),
+        Ok(Ok(None)) => VimgBuf::err(1),
         Ok(Err(_)) => VimgBuf::err(-2),
         Err(_) => VimgBuf::err(-7),
     }
@@ -475,6 +502,7 @@ pub unsafe extern "C" fn vimg_wasm_encode_rgba(
         chroma_420: quality < 100,
         checksum: true,
         threads: 1,
+        ..EncodeOptions::default()
     };
     match encode(&pixels, width, height, ch, &opts) {
         Ok(mut encoded) => {

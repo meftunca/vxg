@@ -42,7 +42,7 @@ fn frozen_golden_wire_vectors_lossless_and_lossy_1t_equals_4t() {
         w,
         h,
         3,
-        &EncodeOptions { quality: 100, tile_size: 128, dwt_levels: 3, chroma_420: false, checksum: true, threads: 1 },
+        &EncodeOptions { quality: 100, tile_size: 128, dwt_levels: 3, chroma_420: false, checksum: true, threads: 1, ..EncodeOptions::default() },
     )
     .unwrap();
     let ll_4t = encode(
@@ -50,7 +50,7 @@ fn frozen_golden_wire_vectors_lossless_and_lossy_1t_equals_4t() {
         w,
         h,
         3,
-        &EncodeOptions { quality: 100, tile_size: 128, dwt_levels: 3, chroma_420: false, checksum: true, threads: 4 },
+        &EncodeOptions { quality: 100, tile_size: 128, dwt_levels: 3, chroma_420: false, checksum: true, threads: 4, ..EncodeOptions::default() },
     )
     .unwrap();
     assert_eq!(ll_1t, ll_4t, "lossless 1T vs 4T determinism violation!");
@@ -60,7 +60,7 @@ fn frozen_golden_wire_vectors_lossless_and_lossy_1t_equals_4t() {
         w,
         h,
         3,
-        &EncodeOptions { quality: 80, tile_size: 128, dwt_levels: 3, chroma_420: true, checksum: true, threads: 1 },
+        &EncodeOptions { quality: 80, tile_size: 128, dwt_levels: 3, chroma_420: true, checksum: true, threads: 1, ..EncodeOptions::default() },
     )
     .unwrap();
     let ly_4t = encode(
@@ -68,7 +68,7 @@ fn frozen_golden_wire_vectors_lossless_and_lossy_1t_equals_4t() {
         w,
         h,
         3,
-        &EncodeOptions { quality: 80, tile_size: 128, dwt_levels: 3, chroma_420: true, checksum: true, threads: 4 },
+        &EncodeOptions { quality: 80, tile_size: 128, dwt_levels: 3, chroma_420: true, checksum: true, threads: 4, ..EncodeOptions::default() },
     )
     .unwrap();
     assert_eq!(ly_1t, ly_4t, "lossy 1T vs 4T determinism violation!");

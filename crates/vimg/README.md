@@ -14,15 +14,17 @@
   - **Rotate / Flip** + **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) with `recover_corrupt` tile salvaging.
 - **Hardware SIMD Acceleration (`ARMv8 NEON` + `x86_64 AVX2`)**:
   - Vectorized `RGB <-> YCoCg-R`, `4:2:0` box downsample & `2×2` bilinear upsample, horizontal & transpose-free row-major vertical `CDF 9/7` + `CDF 5/3` lifting, `FCVTAS` rounding, L1-hot tile-local color merge, and dynamic `AtomicUsize` work-stealing (**3.1×–4.8× faster decode**, **2.2×–2.3× faster full decode than JPEG**, and **faster lossless decode than PNG**!).
-- **Production Security, Network & EXIF Hardening**:
-  - Hard OOM-bomb limits (`MAX_IMAGE_DIM`, `MAX_IMAGE_PIXELS`, `MAX_DIR_BYTES`, `MAX_CHUNK_BYTES`, `wasm32`-safe checked arithmetic) verified by a 12,000-case adversarial fuzz suite (`tests/vimg_fuzz.rs`) and cross-arch deterministic golden wire vectors (`tests/golden_vimg.rs`).
-  - `HttpRangeSource`: persistent `Connection: keep-alive` pooling, `301/302/307/308` redirect following, parallel multi-range fetching (up to 4 streams), and socket timeouts.
-  - `vimg serve`: zero-full-read `pread` `206 Partial Content`, `ETag` / `304 Not Modified` / `Cache-Control`, bounded 64-worker pool (`503` overload protection), and pure-Rust JPEG EXIF Orientation (`1..=8`) auto-correction.
+- **Production Security, Network, HDR & Color Management (`v0.2`)**:
+  - **Direct `https://` TLS 1.3 Range Streaming (`--features tls` / `io`)**: Pure-Rust `rustls` + `webpki-roots` (zero OpenSSL) with `http:// -> https://` redirects, `Connection: keep-alive` pooling, parallel 4-stream multi-range fetch, and socket timeouts (core default `[lib]` stays **0 external dependencies**).
+  - **10-bit & 12-bit HDR (`encode_u16` / `DecodedImage.pixels_u16`)**: Bit-exact lossless `CDF 5/3` and lossy `CDF 9/7` HDR across `RGB`, `RGBA`, and `Gray`, including compressed-domain crop/resize/rotate/effects and 16-bit PNG CLI I/O (`--bit-depth 10|12`).
+  - **Embedded ICC Color Profiles (Display P3 / AdobeRGB / sRGB)**: Hardware `CRC32C`-protected ICC blob in the prefix (zero extra HTTP Range requests for standard profiles), preserved verbatim through zero-decode `vimg crop`, auto-extracted from JPEG `APP2 ICC_PROFILE`, and exposed via `vimg_extract_icc_alloc` in C99 ABI.
+  - **Hardened Bounds & Fuzzing**: `MAX_IMAGE_DIM`, `MAX_IMAGE_PIXELS`, `MAX_DIR_BYTES`, `MAX_ICC_BYTES`, `MAX_CHUNK_BYTES`, `wasm32`-safe checked arithmetic, 12,000-case adversarial fuzz suite (`tests/vimg_fuzz.rs`), ready-to-run `cargo-fuzz` / `libFuzzer` harness (`crates/vimg/fuzz/`), and cross-arch golden wire vectors (`tests/golden_vimg.rs`).
+  - **`vimg serve` Hardening**: Zero-full-read `pread` `206 Partial Content`, `ETag` / `304 Not Modified` / `Cache-Control`, bounded 64-worker pool (`503` overload protection), and pure-Rust JPEG EXIF Orientation (`1..=8`) auto-correction.
 - **Zero-Dependency Core + C99 ABI + Zero-WASI `wasm32`**:
   - Core `[lib]` has **0 external crates**.
   - Deterministic `1T == NT` bit-exact encoding (IEEE-754 identical across `aarch64`, `x86_64 AVX2`, and `wasm32`) and parallel multi-core tile decoding.
-  - `wasm32-unknown-unknown` release build: **187 KiB** stripped `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
-  - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h) (`VimgQueryC` / `vimg_decode_query_v2_alloc` + `vimg_wasm_*` exports, CI-verified with `cc -std=c99 -Wall -Wextra -Werror`).
+  - `wasm32-unknown-unknown` release build: **226 KiB** stripped `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
+  - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h) (`VimgQueryC` / `vimg_decode_query_v2_alloc`, `vimg_extract_icc_alloc`, and `vimg_wasm_*` exports, CI-verified with `cc -std=c99 -Wall -Wextra -Werror`).
 
 ---
 

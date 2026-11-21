@@ -1,6 +1,6 @@
 [package]
 name = "vimg"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 description = "HTTP-Range-native hierarchical wavelet image codec & compressed-domain transform engine (pure Rust, zero-dep lib, wasm32)"
@@ -8,10 +8,13 @@ license = "MIT"
 
 [features]
 default = []
-io = ["dep:image"]
+tls = ["dep:rustls", "dep:webpki-roots"]
+io = ["dep:image", "tls"]
 
 [dependencies]
 image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = { version = "0.26", optional = true }
 
 [lib]
 name = "vimg"

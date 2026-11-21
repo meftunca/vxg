@@ -136,7 +136,7 @@ fn fuzz_12000_adversarial_mutations_never_panic_or_oom() {
         96,
         80,
         3,
-        &EncodeOptions { quality: 80, tile_size: 64, dwt_levels: 3, chroma_420: true, checksum: true, threads: 1 },
+        &EncodeOptions { quality: 80, tile_size: 64, dwt_levels: 3, chroma_420: true, checksum: true, threads: 1, ..EncodeOptions::default() },
     )
     .unwrap();
     let lossless = encode(
@@ -144,7 +144,7 @@ fn fuzz_12000_adversarial_mutations_never_panic_or_oom() {
         96,
         80,
         3,
-        &EncodeOptions { quality: 100, tile_size: 64, dwt_levels: 2, chroma_420: false, checksum: true, threads: 1 },
+        &EncodeOptions { quality: 100, tile_size: 64, dwt_levels: 2, chroma_420: false, checksum: true, threads: 1, ..EncodeOptions::default() },
     )
     .unwrap();
 
@@ -244,7 +244,7 @@ fn http_range_source_keep_alive_redirect_and_parallel_fetch() {
             192,
             160,
             3,
-            &EncodeOptions { quality: 82, tile_size: 64, dwt_levels: 3, chroma_420: true, checksum: true, threads: 1 },
+            &EncodeOptions { quality: 82, tile_size: 64, dwt_levels: 3, chroma_420: true, checksum: true, threads: 1, ..EncodeOptions::default() },
         )
         .unwrap(),
     );

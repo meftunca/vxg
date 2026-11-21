@@ -20,7 +20,7 @@ pub mod wavelet;
 
 use core::fmt;
 
-pub use format::{crop_vimg_zero_decode, encode_vimg, VimgHeader, VimgIndex};
+pub use format::{crop_vimg_zero_decode, encode_vimg, encode_vimg_u16, VimgHeader, VimgIndex};
 pub use ops::{decode_from_source, plan_query_ranges, DecodedImage, TransformQuery};
 pub use range::{coalesce_ranges, RangeSource, RangeStats, SliceRangeSource, SparseRangeSource};
 #[cfg(not(target_arch = "wasm32"))]
@@ -70,6 +70,10 @@ pub struct EncodeOptions {
     pub checksum: bool,
     /// Worker thread count (`0` = auto). Output is 100% deterministic (`1T == NT`).
     pub threads: usize,
+    /// Bits per channel (`8` default; `10` or `12` for HDR `encode_u16`).
+    pub bit_depth: u8,
+    /// Optional embedded ICC color profile (e.g., Display P3, AdobeRGB, sRGB; capped at 16 MiB).
+    pub icc_profile: Option<Vec<u8>>,
 }
 
 impl Default for EncodeOptions {
@@ -81,6 +85,8 @@ impl Default for EncodeOptions {
             chroma_420: true,
             checksum: true,
             threads: 0,
+            bit_depth: 8,
+            icc_profile: None,
         }
     }
 }
@@ -104,6 +110,17 @@ pub fn encode(
     opts: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     encode_vimg(pixels, width, height, channels, opts)
+}
+
+/// Convenience helper: encode 10-bit or 12-bit HDR `u16` pixels (`RGB`, `RGBA`, or `Gray`) into `.vimg` bytes.
+pub fn encode_u16(
+    pixels: &[u16],
+    width: u32,
+    height: u32,
+    channels: u8,
+    opts: &EncodeOptions,
+) -> Result<Vec<u8>> {
+    encode_vimg_u16(pixels, width, height, channels, opts)
 }
 
 /// Convenience helper: decode a full `.vimg` slice at full resolution.

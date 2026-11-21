@@ -16,6 +16,24 @@ fn base_quant_scale(quality: u8) -> f32 {
 }
 
 /// Perceptual quantization step (`1` when `quality == 100`, i.e., 100% bit-exact lossless).
+/// Scales cleanly with `bit_depth` (`8`, `10`, or `12`).
+#[inline]
+pub fn quant_step_bd(
+    quality: u8,
+    plane: usize,
+    detail_idx: usize,
+    dwt_levels: usize,
+    is_hh: bool,
+    bit_depth: u8,
+) -> i32 {
+    if quality >= 100 {
+        return 1;
+    }
+    let scale = 1i32 << bit_depth.saturating_sub(8);
+    quant_step(quality, plane, detail_idx, dwt_levels, is_hh) * scale
+}
+
+/// Perceptual quantization step (`1` when `quality == 100`, i.e., 100% bit-exact lossless).
 /// Uses true 2D wavelet synthesis-norm scaling across pyramid levels so every level spends
 /// equal marginal bits per dB of MSE reduction.
 #[inline]
@@ -38,6 +56,16 @@ pub fn quant_step(quality: u8, plane: usize, detail_idx: usize, dwt_levels: usiz
         _ => 1.65, // YCoCg-R Co / Cg chroma
     };
     (base * level_mul * diag_mul * plane_mul).round().max(1.0) as i32
+}
+
+/// Quantization step for `LL` (Level 0) residuals aligned with `bit_depth` (`8`, `10`, `12`).
+#[inline]
+pub fn ll_quant_step_bd(quality: u8, plane: usize, bit_depth: u8) -> i32 {
+    if quality >= 90 || plane == 3 {
+        return 1;
+    }
+    let scale = 1i32 << bit_depth.saturating_sub(8);
+    ll_quant_step(quality, plane) * scale
 }
 
 /// Quantization step for `LL` (Level 0) residuals aligned with the 2D synthesis-norm curve.
@@ -85,16 +113,28 @@ fn med_predict(left: i32, top: i32, top_left: i32) -> i32 {
     }
 }
 
-/// Encodes Level 0 (`LL`) subband using MED 2D DPCM + 4-context 2D causal activity FSE.
+/// Encodes Level 0 (`LL`) subband using MED 2D DPCM + 2D adaptive binary range coding.
 pub fn encode_ll_band(ll: &[i32], w: usize, h: usize, quality: u8, plane: usize) -> Vec<u8> {
-    let step = ll_quant_step(quality, plane);
+    encode_ll_band_bd(ll, w, h, quality, plane, 8)
+}
+
+pub fn encode_ll_band_bd(
+    ll: &[i32],
+    w: usize,
+    h: usize,
+    quality: u8,
+    plane: usize,
+    bit_depth: u8,
+) -> Vec<u8> {
+    let step = ll_quant_step_bd(quality, plane, bit_depth);
+    let mid = 1i32 << (bit_depth.clamp(8, 12) - 1);
     let mut residuals = vec![0i32; w * h];
     let mut rec = vec![0i32; w * h];
     for y in 0..h {
         for x in 0..w {
             let idx = y * w + x;
             let pred = match (x, y) {
-                (0, 0) => if plane == 0 { 128 } else { 0 },
+                (0, 0) => if plane == 0 { mid } else { 0 },
                 (x, 0) => rec[x - 1],
                 (0, y) => rec[(y - 1) * w],
                 (_, _) => med_predict(rec[idx - 1], rec[idx - w], rec[idx - w - 1]),
@@ -112,7 +152,19 @@ pub fn encode_ll_band(ll: &[i32], w: usize, h: usize, quality: u8, plane: usize)
 
 /// Decodes Level 0 (`LL`) subband back into `(w * h)` coefficients.
 pub fn decode_ll_band(payload: &[u8], w: usize, h: usize, quality: u8, plane: usize) -> Result<Vec<i32>> {
-    let step = ll_quant_step(quality, plane);
+    decode_ll_band_bd(payload, w, h, quality, plane, 8)
+}
+
+pub fn decode_ll_band_bd(
+    payload: &[u8],
+    w: usize,
+    h: usize,
+    quality: u8,
+    plane: usize,
+    bit_depth: u8,
+) -> Result<Vec<i32>> {
+    let step = ll_quant_step_bd(quality, plane, bit_depth);
+    let mid = 1i32 << (bit_depth.clamp(8, 12) - 1);
     let mut residuals = vec![0i32; w * h];
     decode_2d_bands(payload, &mut [(&mut residuals, w, h)], &[])?;
     let mut ll = vec![0i32; w * h];
@@ -120,7 +172,7 @@ pub fn decode_ll_band(payload: &[u8], w: usize, h: usize, quality: u8, plane: us
         for x in 0..w {
             let idx = y * w + x;
             let pred = match (x, y) {
-                (0, 0) => if plane == 0 { 128 } else { 0 },
+                (0, 0) => if plane == 0 { mid } else { 0 },
                 (x, 0) => ll[x - 1],
                 (0, y) => ll[(y - 1) * w],
                 (_, _) => med_predict(ll[idx - 1], ll[idx - w], ll[idx - w - 1]),
@@ -132,15 +184,24 @@ pub fn decode_ll_band(payload: &[u8], w: usize, h: usize, quality: u8, plane: us
     Ok(ll)
 }
 
-/// Encodes one pyramid detail level (`LH + HL + HH`) into a single compressed chunk:
-/// - Lossless (`q=100`): direct 4-context 2D causal activity FSE (`CODEC_2D_CTX4`).
-/// - Lossy (`q<100`): `8×8` super-block significance map + 3-context 2D FSE on active `4×4` blocks (`CODEC_BLK4_CTX3`).
+/// Encodes one pyramid detail level (`LH + HL + HH`) into a single compressed chunk.
 pub fn encode_detail_level(
     d: &DetailBands,
     quality: u8,
     plane: usize,
     detail_idx: usize,
     dwt_levels: usize,
+) -> Vec<u8> {
+    encode_detail_level_bd(d, quality, plane, detail_idx, dwt_levels, 8)
+}
+
+pub fn encode_detail_level_bd(
+    d: &DetailBands,
+    quality: u8,
+    plane: usize,
+    detail_idx: usize,
+    dwt_levels: usize,
+    bit_depth: u8,
 ) -> Vec<u8> {
     let lw = d.out_w.div_ceil(2);
     let hw = d.out_w / 2;
@@ -153,8 +214,8 @@ pub fn encode_detail_level(
         return out;
     }
 
-    let step_lh = quant_step(quality, plane, detail_idx, dwt_levels, false);
-    let step_hh = quant_step(quality, plane, detail_idx, dwt_levels, true);
+    let step_lh = quant_step_bd(quality, plane, detail_idx, dwt_levels, false, bit_depth);
+    let step_hh = quant_step_bd(quality, plane, detail_idx, dwt_levels, true, bit_depth);
     let qlh: Vec<i32> = d.lh.iter().map(|&c| quant_deadzone(c, step_lh)).collect();
     let qhl: Vec<i32> = d.hl.iter().map(|&c| quant_deadzone(c, step_lh)).collect();
     let qhh: Vec<i32> = d.hh.iter().map(|&c| quant_deadzone(c, step_hh)).collect();
@@ -173,6 +234,20 @@ pub fn decode_detail_level(
     detail_idx: usize,
     dwt_levels: usize,
 ) -> Result<DetailBands> {
+    decode_detail_level_bd(payload, out_w, out_h, quality, plane, detail_idx, dwt_levels, 8)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decode_detail_level_bd(
+    payload: &[u8],
+    out_w: usize,
+    out_h: usize,
+    quality: u8,
+    plane: usize,
+    detail_idx: usize,
+    dwt_levels: usize,
+    bit_depth: u8,
+) -> Result<DetailBands> {
     let lw = out_w.div_ceil(2);
     let hw = out_w / 2;
     let lh_rows = out_h.div_ceil(2);
@@ -182,8 +257,8 @@ pub fn decode_detail_level(
     let mut hl = vec![0i32; hw * lh_rows];
     let mut hh = vec![0i32; hw * hh_rows];
 
-    let step_lh = quant_step(quality, plane, detail_idx, dwt_levels, false);
-    let step_hh = quant_step(quality, plane, detail_idx, dwt_levels, true);
+    let step_lh = quant_step_bd(quality, plane, detail_idx, dwt_levels, false, bit_depth);
+    let step_hh = quant_step_bd(quality, plane, detail_idx, dwt_levels, true, bit_depth);
     let steps = if quality < 100 { [step_lh, step_lh, step_hh] } else { [1, 1, 1] };
 
     decode_2d_bands(
@@ -197,11 +272,20 @@ pub fn decode_detail_level(
 
 /// Encodes all pyramid levels (`0..=dwt_levels`) of a single `WaveletTile`.
 pub fn encode_wavelet_tile_levels(wt: &WaveletTile, quality: u8, plane: usize) -> Vec<Vec<u8>> {
+    encode_wavelet_tile_levels_bd(wt, quality, plane, 8)
+}
+
+pub fn encode_wavelet_tile_levels_bd(
+    wt: &WaveletTile,
+    quality: u8,
+    plane: usize,
+    bit_depth: u8,
+) -> Vec<Vec<u8>> {
     let dwt_levels = wt.details.len();
     let mut out = Vec::with_capacity(dwt_levels + 1);
-    out.push(encode_ll_band(&wt.ll, wt.ll_w, wt.ll_h, quality, plane));
+    out.push(encode_ll_band_bd(&wt.ll, wt.ll_w, wt.ll_h, quality, plane, bit_depth));
     for (k, d) in wt.details.iter().enumerate() {
-        out.push(encode_detail_level(d, quality, plane, k, dwt_levels));
+        out.push(encode_detail_level_bd(d, quality, plane, k, dwt_levels, bit_depth));
     }
     out
 }

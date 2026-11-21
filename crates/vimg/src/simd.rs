@@ -172,9 +172,18 @@ pub fn upsample_2x2_bilinear_row(r0: &[i16], r1: &[i16], out_row: &mut [i16]) {
             let r1_l = vld1q_s16(r1.as_ptr().add(cx - 1));
             let r1_r = vld1q_s16(r1.as_ptr().add(cx + 1));
 
-            let base = vmlaq_n_s16(vmulq_n_s16(r0_c, 9), r1_c, 3);
-            let even = vrshrq_n_s16::<4>(vaddq_s16(vmlaq_n_s16(base, r0_l, 3), r1_l));
-            let odd = vrshrq_n_s16::<4>(vaddq_s16(vmlaq_n_s16(base, r0_r, 3), r1_r));
+            // Exact 32-bit widening accumulation — overflow-free for 8-bit, 10-bit & 12-bit HDR!
+            let base_lo = vmlal_n_s16(vmull_n_s16(vget_low_s16(r0_c), 9), vget_low_s16(r1_c), 3);
+            let base_hi = vmlal_high_n_s16(vmull_high_n_s16(r0_c, 9), r1_c, 3);
+
+            let ev_lo = vaddq_s32(vmlal_n_s16(base_lo, vget_low_s16(r0_l), 3), vmovl_s16(vget_low_s16(r1_l)));
+            let ev_hi = vaddq_s32(vmlal_high_n_s16(base_hi, r0_l, 3), vmovl_high_s16(r1_l));
+            let even = vcombine_s16(vrshrn_n_s32::<4>(ev_lo), vrshrn_n_s32::<4>(ev_hi));
+
+            let od_lo = vaddq_s32(vmlal_n_s16(base_lo, vget_low_s16(r0_r), 3), vmovl_s16(vget_low_s16(r1_r)));
+            let od_hi = vaddq_s32(vmlal_high_n_s16(base_hi, r0_r, 3), vmovl_high_s16(r1_r));
+            let odd = vcombine_s16(vrshrn_n_s32::<4>(od_lo), vrshrn_n_s32::<4>(od_hi));
+
             vst2q_s16(out_row.as_mut_ptr().add(cx * 2), int16x8x2_t(even, odd));
             cx += 8;
         }
@@ -211,34 +220,34 @@ unsafe fn upsample_2x2_bilinear_row_avx2(
     safe_end_cx: usize,
 ) -> usize {
     use core::arch::x86_64::*;
-    let v9 = _mm256_set1_epi16(9);
-    let v3 = _mm256_set1_epi16(3);
-    let v8 = _mm256_set1_epi16(8);
-    while cx + 16 <= safe_end_cx {
-        let r0_c = _mm256_loadu_si256(r0.as_ptr().add(cx).cast());
-        let r0_l = _mm256_loadu_si256(r0.as_ptr().add(cx - 1).cast());
-        let r0_r = _mm256_loadu_si256(r0.as_ptr().add(cx + 1).cast());
-        let r1_c = _mm256_loadu_si256(r1.as_ptr().add(cx).cast());
-        let r1_l = _mm256_loadu_si256(r1.as_ptr().add(cx - 1).cast());
-        let r1_r = _mm256_loadu_si256(r1.as_ptr().add(cx + 1).cast());
+    let v9 = _mm256_set1_epi32(9);
+    let v3 = _mm256_set1_epi32(3);
+    let v8 = _mm256_set1_epi32(8);
+    // Exact 32-bit widening accumulation — overflow-free for 8-bit, 10-bit & 12-bit HDR!
+    while cx + 8 <= safe_end_cx {
+        let r0_c = _mm256_cvtepi16_epi32(_mm_loadu_si128(r0.as_ptr().add(cx).cast()));
+        let r0_l = _mm256_cvtepi16_epi32(_mm_loadu_si128(r0.as_ptr().add(cx - 1).cast()));
+        let r0_r = _mm256_cvtepi16_epi32(_mm_loadu_si128(r0.as_ptr().add(cx + 1).cast()));
+        let r1_c = _mm256_cvtepi16_epi32(_mm_loadu_si128(r1.as_ptr().add(cx).cast()));
+        let r1_l = _mm256_cvtepi16_epi32(_mm_loadu_si128(r1.as_ptr().add(cx - 1).cast()));
+        let r1_r = _mm256_cvtepi16_epi32(_mm_loadu_si128(r1.as_ptr().add(cx + 1).cast()));
 
-        let base = _mm256_add_epi16(_mm256_mullo_epi16(r0_c, v9), _mm256_mullo_epi16(r1_c, v3));
-        let even = _mm256_srai_epi16(
-            _mm256_add_epi16(_mm256_add_epi16(base, _mm256_mullo_epi16(r0_l, v3)), _mm256_add_epi16(r1_l, v8)),
+        let base = _mm256_add_epi32(_mm256_mullo_epi32(r0_c, v9), _mm256_mullo_epi32(r1_c, v3));
+        let even32 = _mm256_srai_epi32(
+            _mm256_add_epi32(_mm256_add_epi32(base, _mm256_mullo_epi32(r0_l, v3)), _mm256_add_epi32(r1_l, v8)),
             4,
         );
-        let odd = _mm256_srai_epi16(
-            _mm256_add_epi16(_mm256_add_epi16(base, _mm256_mullo_epi16(r0_r, v3)), _mm256_add_epi16(r1_r, v8)),
+        let odd32 = _mm256_srai_epi32(
+            _mm256_add_epi32(_mm256_add_epi32(base, _mm256_mullo_epi32(r0_r, v3)), _mm256_add_epi32(r1_r, v8)),
             4,
         );
-        // Interleave even/odd across both 128-bit lanes cleanly
-        let lo = _mm256_unpacklo_epi16(even, odd);
-        let hi = _mm256_unpackhi_epi16(even, odd);
-        let out0 = _mm256_permute2x128_si256::<0x20>(lo, hi);
-        let out1 = _mm256_permute2x128_si256::<0x31>(lo, hi);
-        _mm256_storeu_si256(out_row.as_mut_ptr().add(cx * 2).cast(), out0);
-        _mm256_storeu_si256(out_row.as_mut_ptr().add(cx * 2 + 16).cast(), out1);
-        cx += 16;
+        // packs_epi32 operates per 128-bit lane:
+        // lane0 = [e0,o0,e1,o1, e2,o2,e3,o3], lane1 = [e4,o4,e5,o5, e6,o6,e7,o7] — already exact!
+        let lo32 = _mm256_unpacklo_epi32(even32, odd32);
+        let hi32 = _mm256_unpackhi_epi32(even32, odd32);
+        let packed = _mm256_packs_epi32(lo32, hi32);
+        _mm256_storeu_si256(out_row.as_mut_ptr().add(cx * 2).cast(), packed);
+        cx += 8;
     }
     cx
 }
@@ -280,6 +289,17 @@ mod tests {
             let cx1 = if (x & 1) == 0 { cx0.saturating_sub(1) } else { (cx0 + 1).min(32) };
             let exp = ((ds[cx0] as i32 * 9 + ds[cx1] as i32 * 3 + ds2[cx0] as i32 * 3 + ds2[cx1] as i32 + 8) >> 4) as i16;
             assert_eq!(got, exp, "upsample mismatch at x={x}");
+        }
+        // 12-bit HDR extreme range (±4095) must never overflow 16-bit intermediates
+        let hdr_r0: Vec<i16> = (0..33).map(|i| if i % 2 == 0 { 4095 } else { -4095 }).collect();
+        let hdr_r1: Vec<i16> = (0..33).map(|i| 4095 - (i as i16) * 200).collect();
+        let mut hdr_up = vec![0i16; 65];
+        upsample_2x2_bilinear_row(&hdr_r0, &hdr_r1, &mut hdr_up);
+        for (x, &got) in hdr_up.iter().enumerate() {
+            let cx0 = (x / 2).min(32);
+            let cx1 = if (x & 1) == 0 { cx0.saturating_sub(1) } else { (cx0 + 1).min(32) };
+            let exp = ((hdr_r0[cx0] as i32 * 9 + hdr_r0[cx1] as i32 * 3 + hdr_r1[cx0] as i32 * 3 + hdr_r1[cx1] as i32 + 8) >> 4) as i16;
+            assert_eq!(got, exp, "12-bit HDR upsample mismatch at x={x}");
         }
         let (ey, eco, ecg) = (vec![300i16; 19], vec![250i16; 19], vec![-250i16; 19]);
         let mut out_e = vec![0u8; 19 * 3];

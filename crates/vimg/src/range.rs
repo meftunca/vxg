@@ -176,20 +176,59 @@ impl RangeSource for FileRangeSource {
     }
 }
 
-/// Pure-`std` production-hardened HTTP/1.1 `Range: bytes=start-end` client (zero dependencies!):
+#[cfg(not(target_arch = "wasm32"))]
+enum HttpStream {
+    Plain(std::net::TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::io::Read for HttpStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(s) => s.read(buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::io::Write for HttpStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(s) => s.write(buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => s.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(s) => s.flush(),
+            #[cfg(feature = "tls")]
+            Self::Tls(s) => s.flush(),
+        }
+    }
+}
+
+/// Pure-Rust production-hardened HTTP/HTTPS `Range: bytes=start-end` client:
+/// - Zero external dependencies for `http://`; optional pure-Rust `rustls` (`tls` feature) for `https://`
 /// - Connect/read/write timeouts (never hangs on dead origins)
-/// - Automatic `301/302/307/308` redirect following (up to 5 hops)
+/// - Automatic `301/302/307/308` redirect following including `http:// -> https://` (up to 5 hops)
 /// - `Connection: keep-alive` persistent socket reuse with transparent reconnect
 /// - Parallel multi-range fetching (up to 4 concurrent streams) for multi-tile queries
 /// - Strict response size & header count caps against malicious origins.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct HttpRangeSource {
+    use_tls: bool,
+    host_name: String,
     host_port: String,
     host_hdr: String,
     path: String,
     len: u64,
     timeout: std::time::Duration,
-    pool: std::sync::Mutex<Option<std::io::BufReader<std::net::TcpStream>>>,
+    pool: std::sync::Mutex<Option<std::io::BufReader<HttpStream>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -197,12 +236,36 @@ const MAX_HTTP_BODY_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_HTTP_HEADERS: usize = 128;
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "tls"))]
+fn tls_client_config() -> std::sync::Arc<rustls::ClientConfig> {
+    static CFG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
+    std::sync::Arc::clone(CFG.get_or_init(|| {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        std::sync::Arc::new(cfg)
+    }))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl HttpRangeSource {
-    fn parse_http_url(url: &str) -> Result<(String, String, String)> {
-        let rest = url
-            .strip_prefix("http://")
-            .ok_or(Error::Unsupported("HttpRangeSource supports http:// URLs"))?;
+    #[allow(clippy::type_complexity)]
+    fn parse_http_url(url: &str) -> Result<(bool, String, String, String, String)> {
+        let (use_tls, rest, default_port) = if let Some(r) = url.strip_prefix("https://") {
+            #[cfg(not(feature = "tls"))]
+            {
+                let _ = r;
+                return Err(Error::Unsupported("https:// requires the `tls` cargo feature"));
+            }
+            #[cfg(feature = "tls")]
+            (true, r, 443u16)
+        } else if let Some(r) = url.strip_prefix("http://") {
+            (false, r, 80u16)
+        } else {
+            return Err(Error::Unsupported("HttpRangeSource supports http:// and https:// URLs"));
+        };
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
@@ -210,12 +273,20 @@ impl HttpRangeSource {
         if authority.is_empty() {
             return Err(Error::InvalidInput("empty HTTP authority"));
         }
-        let host_port = if authority.contains(':') {
-            authority.to_owned()
+        let (host_name, host_port) = if let Some(bracket_end) = authority.rfind(']') {
+            let h = authority[1..bracket_end].to_owned();
+            let hp = if authority[bracket_end + 1..].starts_with(':') {
+                authority.to_owned()
+            } else {
+                format!("{authority}:{default_port}")
+            };
+            (h, hp)
+        } else if let Some((h, _)) = authority.rsplit_once(':') {
+            (h.to_owned(), authority.to_owned())
         } else {
-            format!("{authority}:80")
+            (authority.to_owned(), format!("{authority}:{default_port}"))
         };
-        Ok((host_port, authority.to_owned(), path.to_owned()))
+        Ok((use_tls, host_name, host_port, authority.to_owned(), path.to_owned()))
     }
 
     pub fn connect(url: &str) -> Result<Self> {
@@ -225,22 +296,32 @@ impl HttpRangeSource {
     pub fn connect_with_timeout(url: &str, timeout: std::time::Duration) -> Result<Self> {
         let mut cur_url = url.to_owned();
         for _ in 0..=5 {
-            let (host_port, host_hdr, path) = Self::parse_http_url(&cur_url)?;
-            let mut conn: Option<std::io::BufReader<std::net::TcpStream>> = None;
-            let (status, hdrs, _) =
-                Self::exchange_on(&mut conn, &host_port, &host_hdr, "HEAD", &path, None, timeout)?;
+            let (use_tls, host_name, host_port, host_hdr, path) = Self::parse_http_url(&cur_url)?;
+            let mut conn: Option<std::io::BufReader<HttpStream>> = None;
+            let (status, hdrs, _) = Self::exchange_on(
+                &mut conn,
+                use_tls,
+                &host_name,
+                &host_port,
+                &host_hdr,
+                "HEAD",
+                &path,
+                None,
+                timeout,
+            )?;
             if matches!(status, 301 | 302 | 307 | 308) {
                 let loc = hdrs
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                     .map(|(_, v)| v.trim().to_owned())
                     .ok_or_else(|| Error::Io(format!("HTTP {status} redirect missing Location")))?;
-                cur_url = if loc.starts_with("http://") {
+                let scheme = if use_tls { "https" } else { "http" };
+                cur_url = if loc.starts_with("http://") || loc.starts_with("https://") {
                     loc
                 } else if loc.starts_with('/') {
-                    format!("http://{host_hdr}{loc}")
+                    format!("{scheme}://{host_hdr}{loc}")
                 } else {
-                    return Err(Error::Unsupported("unsupported redirect target (non-http)"));
+                    return Err(Error::Unsupported("unsupported redirect target scheme"));
                 };
                 continue;
             }
@@ -253,6 +334,8 @@ impl HttpRangeSource {
                 .and_then(|(_, v)| v.trim().parse::<u64>().ok())
                 .ok_or_else(|| Error::Io("HTTP HEAD missing Content-Length".into()))?;
             return Ok(Self {
+                use_tls,
+                host_name,
                 host_port,
                 host_hdr,
                 path,
@@ -264,7 +347,12 @@ impl HttpRangeSource {
         Err(Error::Io("too many HTTP redirects".into()))
     }
 
-    fn open_stream(host_port: &str, timeout: std::time::Duration) -> Result<std::io::BufReader<std::net::TcpStream>> {
+    fn open_stream(
+        use_tls: bool,
+        host_name: &str,
+        host_port: &str,
+        timeout: std::time::Duration,
+    ) -> Result<std::io::BufReader<HttpStream>> {
         use std::net::{TcpStream, ToSocketAddrs};
         let addrs: Vec<_> = host_port
             .to_socket_addrs()
@@ -276,12 +364,31 @@ impl HttpRangeSource {
         let _ = stream.set_nodelay(true);
         let _ = stream.set_read_timeout(Some(timeout));
         let _ = stream.set_write_timeout(Some(timeout));
-        Ok(std::io::BufReader::new(stream))
+        if use_tls {
+            #[cfg(feature = "tls")]
+            {
+                let server_name = rustls::pki_types::ServerName::try_from(host_name.to_owned())
+                    .map_err(|_| Error::InvalidInput("invalid TLS server name"))?;
+                let conn = rustls::ClientConnection::new(tls_client_config(), server_name)
+                    .map_err(|e| Error::Io(format!("TLS init failed: {e}")))?;
+                return Ok(std::io::BufReader::new(HttpStream::Tls(Box::new(
+                    rustls::StreamOwned::new(conn, stream),
+                ))));
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                let _ = host_name;
+                return Err(Error::Unsupported("https:// requires the `tls` cargo feature"));
+            }
+        }
+        Ok(std::io::BufReader::new(HttpStream::Plain(stream)))
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn exchange_on(
-        slot: &mut Option<std::io::BufReader<std::net::TcpStream>>,
+        slot: &mut Option<std::io::BufReader<HttpStream>>,
+        use_tls: bool,
+        host_name: &str,
         host_port: &str,
         host_hdr: &str,
         method: &str,
@@ -291,7 +398,7 @@ impl HttpRangeSource {
     ) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
         use std::io::{BufRead, Read, Write};
 
-        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host_hdr}\r\nConnection: keep-alive\r\n");
+        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: vimg/0.2\r\nConnection: keep-alive\r\n");
         if let Some((s, e)) = range {
             if e > s {
                 req.push_str(&format!("Range: bytes={s}-{}\r\n", e - 1));
@@ -302,10 +409,12 @@ impl HttpRangeSource {
         for attempt in 0..2 {
             let reused = slot.is_some();
             if slot.is_none() {
-                *slot = Some(Self::open_stream(host_port, timeout)?);
+                *slot = Some(Self::open_stream(use_tls, host_name, host_port, timeout)?);
             }
             let reader = slot.as_mut().unwrap();
-            if reader.get_mut().write_all(req.as_bytes()).is_err() {
+            if reader.get_mut().write_all(req.as_bytes()).is_err()
+                || reader.get_mut().flush().is_err()
+            {
                 *slot = None;
                 if reused && attempt == 0 {
                     continue;
@@ -376,8 +485,11 @@ impl HttpRangeSource {
         Err(Error::Io("HTTP exchange failed after retry".into()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fetch_one_range(
-        slot: &mut Option<std::io::BufReader<std::net::TcpStream>>,
+        slot: &mut Option<std::io::BufReader<HttpStream>>,
+        use_tls: bool,
+        host_name: &str,
         host_port: &str,
         host_hdr: &str,
         path: &str,
@@ -388,8 +500,17 @@ impl HttpRangeSource {
         if s == e {
             return Ok(Vec::new());
         }
-        let (status, _, body) =
-            Self::exchange_on(slot, host_port, host_hdr, "GET", path, Some((s, e)), timeout)?;
+        let (status, _, body) = Self::exchange_on(
+            slot,
+            use_tls,
+            host_name,
+            host_port,
+            host_hdr,
+            "GET",
+            path,
+            Some((s, e)),
+            timeout,
+        )?;
         if status == 206 {
             if body.len() != (e - s) as usize {
                 return Err(Error::Io(format!(
@@ -424,6 +545,8 @@ impl RangeSource for HttpRangeSource {
             for &(s, e) in ranges {
                 out.push(Self::fetch_one_range(
                     &mut slot,
+                    self.use_tls,
+                    &self.host_name,
                     &self.host_port,
                     &self.host_hdr,
                     &self.path,
@@ -449,6 +572,8 @@ impl RangeSource for HttpRangeSource {
                         for &(s, e) in sub {
                             local.push(Self::fetch_one_range(
                                 &mut slot,
+                                self.use_tls,
+                                &self.host_name,
                                 &self.host_port,
                                 &self.host_hdr,
                                 &self.path,

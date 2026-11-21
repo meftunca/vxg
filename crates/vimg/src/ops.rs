@@ -2,10 +2,10 @@
 //! grayscale (chroma-skip), subband blur/sharpen, brightness/contrast, sepia, rotate & flip.
 
 use crate::checksum::crc32c;
-use crate::color::{merge_planes_rgb, upsample_2x2_bilinear};
+use crate::color::{merge_planes_rgb, merge_planes_u16, upsample_2x2_bilinear};
 use crate::format::{VimgIndex, MAX_IMAGE_PIXELS, MAX_RESIZE_DIM, MAX_RESIZE_PIXELS};
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
-use crate::subband::{decode_detail_level, decode_ll_band};
+use crate::subband::{decode_detail_level_bd, decode_ll_band_bd};
 use crate::wavelet::{level_dims, WaveletTile};
 use crate::{Error, Result};
 
@@ -69,14 +69,20 @@ impl Default for TransformQuery {
 
 #[derive(Clone, Debug)]
 pub struct DecodedImage {
+    /// Packed 8-bit pixels (for 10-bit/12-bit HDR, contains an 8-bit shifted preview; see `pixels_u16`).
     pub pixels: Vec<u8>,
+    /// Full-precision 10-bit (`0..=1023`) or 12-bit (`0..=4095`) pixels when `bit_depth > 8`.
+    pub pixels_u16: Option<Vec<u16>>,
     pub width: u32,
     pub height: u32,
     pub channels: u8,
+    pub bit_depth: u8,
     pub decoded_level: u8,
     pub tiles_fetched: usize,
     pub tiles_total: usize,
     pub stats: RangeStats,
+    /// Embedded ICC color profile (if present in the archive).
+    pub icc_profile: Option<Vec<u8>>,
 }
 
 /// Computes target `(out_w, out_h)` and optimal minimum pyramid level `0..=dwt_levels`.
@@ -180,6 +186,11 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     let mut stats = RangeStats::default();
     let (idx, prefix) = VimgIndex::read_from_source_with_prefix(source, &mut stats)?;
     let hdr = &idx.header;
+    let bit_depth = hdr.bit_depth();
+    let max_sample = hdr.max_sample() as i16;
+    let bd_shift = bit_depth.saturating_sub(8);
+    let mid_luma = 1i32 << (bit_depth - 1);
+    let icc_profile = idx.read_icc_from_source(source, &prefix, query.verify_crc, &mut stats)?;
 
     let (cx, cy, cw, ch) = match query.crop {
         Some((x, y, w, h)) => {
@@ -327,9 +338,14 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     let stride_plane = sel_ty * stride_ty;
     let stride_lvl = planes_to_fetch.len() * stride_plane;
 
+    enum TilePixels {
+        U8(Vec<u8>),
+        U16(Vec<u16>),
+    }
+
     // Decode all planes of one spatial tile `(ltx, lty)` in L1 cache and merge straight to packed RGB/RGBA!
     // Eliminates full-frame intermediate i16 canvases and scales merge_planes_rgb linearly across cores.
-    let decode_tile = |tile_idx: usize| -> Result<(usize, usize, Vec<u8>)> {
+    let decode_tile = |tile_idx: usize| -> Result<(usize, usize, TilePixels)> {
         let lty = tile_idx / sel_tx;
         let ltx = tile_idx % sel_tx;
         let dst_tw = col_x[ltx + 1] - col_x[ltx];
@@ -349,16 +365,17 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
             let (ci0, off0) = mapping[k0];
             let blob0 = &fetched[ci0][off0..off0 + e0.len as usize];
             let mut ll = match verify_chunk(blob0, e0.crc32c, hdr.has_crc() && query.verify_crc) {
-                Ok(()) => decode_ll_band(blob0, ll_w, ll_h, hdr.quality, plane)?,
-                Err(_) if query.recover_corrupt => vec![if plane == 0 { 128 } else { 0 }; ll_w * ll_h],
+                Ok(()) => decode_ll_band_bd(blob0, ll_w, ll_h, hdr.quality, plane, bit_depth)?,
+                Err(_) if query.recover_corrupt => vec![if plane == 0 { mid_luma } else { 0 }; ll_w * ll_h],
                 Err(err) => return Err(err),
             };
 
             if plane == 0 && (query.brightness != 0 || (query.contrast - 1.0).abs() > 1e-4) {
                 let c = query.contrast.clamp(0.1, 4.0);
-                let b = query.brightness as f32;
+                let b = (query.brightness as f32) * ((1u32 << bd_shift) as f32);
+                let mid_f = mid_luma as f32;
                 for v in &mut ll {
-                    *v = (((*v as f32 - 128.0) * c) + 128.0 + b).round() as i32;
+                    *v = (((*v as f32 - mid_f) * c) + mid_f + b).round() as i32;
                 }
             }
 
@@ -379,7 +396,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
                 let blob = &fetched[ci][off..off + e.len as usize];
                 let (ow, oh) = out_dims[lvl - 1];
                 let d = match verify_chunk(blob, e.crc32c, hdr.has_crc() && query.verify_crc) {
-                    Ok(()) => decode_detail_level(blob, ow, oh, hdr.quality, plane, lvl - 1, max_lvl)?,
+                    Ok(()) => decode_detail_level_bd(blob, ow, oh, hdr.quality, plane, lvl - 1, max_lvl, bit_depth)?,
                     Err(_) if query.recover_corrupt => {
                         let lw = ow.div_ceil(2);
                         let hw = ow / 2;
@@ -413,24 +430,39 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
         }
 
         if query.sepia {
-            co_tile = Some(vec![34i16; dst_tw * dst_th]);
-            cg_tile = Some(vec![6i16; dst_tw * dst_th]);
+            let co_sep = 34i16 << bd_shift;
+            let cg_sep = 6i16 << bd_shift;
+            co_tile = Some(vec![co_sep; dst_tw * dst_th]);
+            cg_tile = Some(vec![cg_sep; dst_tw * dst_th]);
         }
 
-        let rgb = merge_planes_rgb(
-            y_tile.as_deref().unwrap(),
-            co_tile.as_deref(),
-            cg_tile.as_deref(),
-            a_tile.as_deref(),
-            dst_tw,
-            dst_th,
-            out_ch,
-        );
-        Ok((ltx, lty, rgb))
+        let px = if bit_depth == 8 {
+            TilePixels::U8(merge_planes_rgb(
+                y_tile.as_deref().unwrap(),
+                co_tile.as_deref(),
+                cg_tile.as_deref(),
+                a_tile.as_deref(),
+                dst_tw,
+                dst_th,
+                out_ch,
+            ))
+        } else {
+            TilePixels::U16(merge_planes_u16(
+                y_tile.as_deref().unwrap(),
+                co_tile.as_deref(),
+                cg_tile.as_deref(),
+                a_tile.as_deref(),
+                dst_tw,
+                dst_th,
+                out_ch,
+                max_sample,
+            ))
+        };
+        Ok((ltx, lty, px))
     };
 
     #[cfg(not(target_arch = "wasm32"))]
-    let decoded_tiles: Vec<(usize, usize, Vec<u8>)> = {
+    let decoded_tiles: Vec<(usize, usize, TilePixels)> = {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let n_threads = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -440,7 +472,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
             (0..tiles_fetched).map(decode_tile).collect::<Result<Vec<_>>>()?
         } else {
             let next_idx = AtomicUsize::new(0);
-            type TileBatch = Result<Vec<(usize, usize, Vec<u8>)>>;
+            type TileBatch = Result<Vec<(usize, usize, TilePixels)>>;
             let mut results: Vec<TileBatch> = Vec::with_capacity(n_threads);
             std::thread::scope(|s| {
                 let handles: Vec<_> = (0..n_threads)
@@ -473,64 +505,118 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     };
 
     #[cfg(target_arch = "wasm32")]
-    let decoded_tiles: Vec<(usize, usize, Vec<u8>)> =
+    let decoded_tiles: Vec<(usize, usize, TilePixels)> =
         (0..tiles_fetched).map(decode_tile).collect::<Result<Vec<_>>>()?;
 
     let mut cur_w = sub_w;
     let mut cur_h = sub_h;
-    let mut pixels = vec![0u8; sub_w * sub_h * out_ch];
     let sub_x1 = sub_x0 + sub_w;
     let sub_y1 = sub_y0 + sub_h;
-    for (ltx, lty, tile_rgb) in decoded_tiles {
-        let tx_px0 = col_x[ltx];
-        let ty_px0 = row_y[lty];
-        let dst_tw = col_x[ltx + 1] - tx_px0;
-        let dst_th = row_y[lty + 1] - ty_px0;
-        let ix0 = tx_px0.max(sub_x0);
-        let iy0 = ty_px0.max(sub_y0);
-        let ix1 = (tx_px0 + dst_tw).min(sub_x1);
-        let iy1 = (ty_px0 + dst_th).min(sub_y1);
-        if ix0 >= ix1 || iy0 >= iy1 {
-            continue;
-        }
-        let copy_cols = (ix1 - ix0) * out_ch;
-        let sx_off = (ix0 - tx_px0) * out_ch;
-        let dx_off = (ix0 - sub_x0) * out_ch;
-        for y in iy0..iy1 {
-            let src_row = (y - ty_px0) * dst_tw * out_ch + sx_off;
-            let dst_row = (y - sub_y0) * sub_w * out_ch + dx_off;
-            pixels[dst_row..dst_row + copy_cols]
-                .copy_from_slice(&tile_rgb[src_row..src_row + copy_cols]);
-        }
-    }
 
-    // Final exact resize (only operates on the already-shrunk smallest pyramid level!).
-    if let Some((tw, th)) = target_resize {
-        if tw as usize != cur_w || th as usize != cur_h {
-            pixels = resize_bilinear_u8(&pixels, cur_w, cur_h, tw as usize, th as usize, out_ch);
-            cur_w = tw as usize;
-            cur_h = th as usize;
+    if bit_depth == 8 {
+        let mut pixels = vec![0u8; sub_w * sub_h * out_ch];
+        for (ltx, lty, tile_px) in decoded_tiles {
+            let TilePixels::U8(tile_rgb) = tile_px else { unreachable!() };
+            let tx_px0 = col_x[ltx];
+            let ty_px0 = row_y[lty];
+            let dst_tw = col_x[ltx + 1] - tx_px0;
+            let dst_th = row_y[lty + 1] - ty_px0;
+            let ix0 = tx_px0.max(sub_x0);
+            let iy0 = ty_px0.max(sub_y0);
+            let ix1 = (tx_px0 + dst_tw).min(sub_x1);
+            let iy1 = (ty_px0 + dst_th).min(sub_y1);
+            if ix0 >= ix1 || iy0 >= iy1 {
+                continue;
+            }
+            let copy_cols = (ix1 - ix0) * out_ch;
+            let sx_off = (ix0 - tx_px0) * out_ch;
+            let dx_off = (ix0 - sub_x0) * out_ch;
+            for y in iy0..iy1 {
+                let src_row = (y - ty_px0) * dst_tw * out_ch + sx_off;
+                let dst_row = (y - sub_y0) * sub_w * out_ch + dx_off;
+                pixels[dst_row..dst_row + copy_cols]
+                    .copy_from_slice(&tile_rgb[src_row..src_row + copy_cols]);
+            }
         }
+        if let Some((tw, th)) = target_resize {
+            if tw as usize != cur_w || th as usize != cur_h {
+                pixels = resize_bilinear_u8(&pixels, cur_w, cur_h, tw as usize, th as usize, out_ch);
+                cur_w = tw as usize;
+                cur_h = th as usize;
+            }
+        }
+        if query.flip_h || query.flip_v || (query.rotate_cw & 3) != 0 {
+            let (np, nw, nh) = apply_geom(&pixels, cur_w, cur_h, out_ch, query.rotate_cw & 3, query.flip_h, query.flip_v);
+            pixels = np;
+            cur_w = nw;
+            cur_h = nh;
+        }
+        Ok(DecodedImage {
+            pixels,
+            pixels_u16: None,
+            width: cur_w as u32,
+            height: cur_h as u32,
+            channels: out_ch as u8,
+            bit_depth,
+            decoded_level: target_lvl as u8,
+            tiles_fetched,
+            tiles_total: hdr.n_tiles(),
+            stats,
+            icc_profile,
+        })
+    } else {
+        let mut pixels16 = vec![0u16; sub_w * sub_h * out_ch];
+        for (ltx, lty, tile_px) in decoded_tiles {
+            let TilePixels::U16(tile_rgb) = tile_px else { unreachable!() };
+            let tx_px0 = col_x[ltx];
+            let ty_px0 = row_y[lty];
+            let dst_tw = col_x[ltx + 1] - tx_px0;
+            let dst_th = row_y[lty + 1] - ty_px0;
+            let ix0 = tx_px0.max(sub_x0);
+            let iy0 = ty_px0.max(sub_y0);
+            let ix1 = (tx_px0 + dst_tw).min(sub_x1);
+            let iy1 = (ty_px0 + dst_th).min(sub_y1);
+            if ix0 >= ix1 || iy0 >= iy1 {
+                continue;
+            }
+            let copy_cols = (ix1 - ix0) * out_ch;
+            let sx_off = (ix0 - tx_px0) * out_ch;
+            let dx_off = (ix0 - sub_x0) * out_ch;
+            for y in iy0..iy1 {
+                let src_row = (y - ty_px0) * dst_tw * out_ch + sx_off;
+                let dst_row = (y - sub_y0) * sub_w * out_ch + dx_off;
+                pixels16[dst_row..dst_row + copy_cols]
+                    .copy_from_slice(&tile_rgb[src_row..src_row + copy_cols]);
+            }
+        }
+        if let Some((tw, th)) = target_resize {
+            if tw as usize != cur_w || th as usize != cur_h {
+                pixels16 = resize_bilinear_u16(&pixels16, cur_w, cur_h, tw as usize, th as usize, out_ch, max_sample as f32);
+                cur_w = tw as usize;
+                cur_h = th as usize;
+            }
+        }
+        if query.flip_h || query.flip_v || (query.rotate_cw & 3) != 0 {
+            let (np, nw, nh) = apply_geom(&pixels16, cur_w, cur_h, out_ch, query.rotate_cw & 3, query.flip_h, query.flip_v);
+            pixels16 = np;
+            cur_w = nw;
+            cur_h = nh;
+        }
+        let preview_u8: Vec<u8> = pixels16.iter().map(|&v| (v >> bd_shift).min(255) as u8).collect();
+        Ok(DecodedImage {
+            pixels: preview_u8,
+            pixels_u16: Some(pixels16),
+            width: cur_w as u32,
+            height: cur_h as u32,
+            channels: out_ch as u8,
+            bit_depth,
+            decoded_level: target_lvl as u8,
+            tiles_fetched,
+            tiles_total: hdr.n_tiles(),
+            stats,
+            icc_profile,
+        })
     }
-
-    // Geometric orientation (flip / 90°/180°/270° rotate).
-    if query.flip_h || query.flip_v || (query.rotate_cw & 3) != 0 {
-        let (np, nw, nh) = apply_geom(&pixels, cur_w, cur_h, out_ch, query.rotate_cw & 3, query.flip_h, query.flip_v);
-        pixels = np;
-        cur_w = nw;
-        cur_h = nh;
-    }
-
-    Ok(DecodedImage {
-        pixels,
-        width: cur_w as u32,
-        height: cur_h as u32,
-        channels: out_ch as u8,
-        decoded_level: target_lvl as u8,
-        tiles_fetched,
-        tiles_total: hdr.n_tiles(),
-        stats,
-    })
 }
 
 fn verify_chunk(blob: &[u8], expected_crc: u32, check: bool) -> Result<()> {
@@ -578,17 +664,60 @@ fn resize_bilinear_u8(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, ch
     dst
 }
 
-fn apply_geom(
-    src: &[u8],
+fn resize_bilinear_u16(
+    src: &[u16],
+    sw: usize,
+    sh: usize,
+    dw: usize,
+    dh: usize,
+    ch: usize,
+    max_val: f32,
+) -> Vec<u16> {
+    let mut dst = vec![0u16; dw * dh * ch];
+    let sx_scale = sw as f32 / dw as f32;
+    let sy_scale = sh as f32 / dh as f32;
+    for y in 0..dh {
+        let fy = ((y as f32 + 0.5) * sy_scale - 0.5).clamp(0.0, (sh - 1) as f32);
+        let y0 = fy.floor() as usize;
+        let y1 = (y0 + 1).min(sh - 1);
+        let wy = fy - y0 as f32;
+        for x in 0..dw {
+            let fx = ((x as f32 + 0.5) * sx_scale - 0.5).clamp(0.0, (sw - 1) as f32);
+            let x0 = fx.floor() as usize;
+            let x1 = (x0 + 1).min(sw - 1);
+            let wx = fx - x0 as f32;
+            let w00 = (1.0 - wx) * (1.0 - wy);
+            let w10 = wx * (1.0 - wy);
+            let w01 = (1.0 - wx) * wy;
+            let w11 = wx * wy;
+            let o00 = (y0 * sw + x0) * ch;
+            let o10 = (y0 * sw + x1) * ch;
+            let o01 = (y1 * sw + x0) * ch;
+            let o11 = (y1 * sw + x1) * ch;
+            let od = (y * dw + x) * ch;
+            for c in 0..ch {
+                let v = src[o00 + c] as f32 * w00
+                    + src[o10 + c] as f32 * w10
+                    + src[o01 + c] as f32 * w01
+                    + src[o11 + c] as f32 * w11;
+                dst[od + c] = v.round().clamp(0.0, max_val) as u16;
+            }
+        }
+    }
+    dst
+}
+
+fn apply_geom<T: Copy + Default>(
+    src: &[T],
     w: usize,
     h: usize,
     ch: usize,
     rot_cw: u8,
     flip_h: bool,
     flip_v: bool,
-) -> (Vec<u8>, usize, usize) {
+) -> (Vec<T>, usize, usize) {
     let (dw, dh) = if (rot_cw & 1) == 1 { (h, w) } else { (w, h) };
-    let mut dst = vec![0u8; dw * dh * ch];
+    let mut dst = vec![T::default(); dw * dh * ch];
     for y in 0..h {
         let sy = if flip_v { h - 1 - y } else { y };
         for x in 0..w {

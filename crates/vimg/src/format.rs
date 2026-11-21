@@ -2,9 +2,9 @@
 //! parallel encoder (`1T == NT` deterministic), and zero-decode tile crop (`vimg -> vimg`).
 
 use crate::checksum::crc32c;
-use crate::color::{downsample_2x2, split_planes_444};
+use crate::color::{downsample_2x2, split_planes_444, split_planes_444_u16};
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
-use crate::subband::encode_wavelet_tile_levels;
+use crate::subband::encode_wavelet_tile_levels_bd;
 use crate::wavelet::{level_dims, WaveletTile};
 use crate::{EncodeOptions, Error, Result};
 
@@ -16,6 +16,7 @@ pub const HEADER_BYTES: usize = 48;
 pub const MAX_IMAGE_DIM: u32 = 65_536;
 pub const MAX_IMAGE_PIXELS: u64 = 268_435_456; // 256 megapixels
 pub const MAX_DIR_BYTES: u32 = 16 * 1024 * 1024; // 16 MiB directory cap
+pub const MAX_ICC_BYTES: u32 = 16 * 1024 * 1024; // 16 MiB ICC profile cap
 pub const MAX_CHUNK_BYTES: u32 = 64 * 1024 * 1024; // 64 MiB single-chunk cap
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB archive cap
 pub const MAX_RESIZE_DIM: u32 = 32_768;
@@ -25,6 +26,9 @@ pub const FLAG_CRC32C: u16 = 0x0001;
 pub const FLAG_CHROMA_420: u16 = 0x0002;
 pub const FLAG_LOSSLESS: u16 = 0x0004;
 pub const FLAG_DWT_97: u16 = 0x0008;
+pub const FLAG_BIT_DEPTH_10: u16 = 0x0010;
+pub const FLAG_BIT_DEPTH_12: u16 = 0x0020;
+pub const FLAG_HAS_ICC: u16 = 0x0040;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VimgHeader {
@@ -39,6 +43,7 @@ pub struct VimgHeader {
     pub tiles_x: u32,
     pub tiles_y: u32,
     pub dir_bytes: u32,
+    pub icc_bytes: u32,
     pub total_bytes: u64,
 }
 
@@ -90,6 +95,42 @@ impl VimgHeader {
     #[inline]
     pub fn is_dwt_97(&self) -> bool {
         (self.flags & FLAG_DWT_97) != 0 && !self.is_lossless()
+    }
+
+    #[inline]
+    pub fn bit_depth(&self) -> u8 {
+        if (self.flags & FLAG_BIT_DEPTH_12) != 0 {
+            12
+        } else if (self.flags & FLAG_BIT_DEPTH_10) != 0 {
+            10
+        } else {
+            8
+        }
+    }
+
+    #[inline]
+    pub fn max_sample(&self) -> u16 {
+        (1u16 << self.bit_depth()) - 1
+    }
+
+    #[inline]
+    pub fn has_icc(&self) -> bool {
+        (self.flags & FLAG_HAS_ICC) != 0 && self.icc_bytes > 0
+    }
+
+    #[inline]
+    pub fn icc_offset(&self) -> u64 {
+        (HEADER_BYTES as u64) + (self.dir_bytes as u64)
+    }
+
+    /// Bytes occupied on disk by the embedded ICC profile (+ 4-byte CRC32C when `has_crc()`).
+    #[inline]
+    pub fn icc_wire_len(&self) -> u64 {
+        if !self.has_icc() {
+            0
+        } else {
+            (self.icc_bytes as u64) + if self.has_crc() { 4 } else { 0 }
+        }
     }
 
     #[inline]
@@ -154,6 +195,18 @@ impl VimgHeader {
         let tiles_y = u32::from_le_bytes(buf[24..28].try_into().unwrap());
         let dir_bytes = u32::from_le_bytes(buf[28..32].try_into().unwrap());
         let total_bytes = u64::from_le_bytes(buf[32..40].try_into().unwrap());
+        let icc_bytes = u32::from_le_bytes(buf[44..48].try_into().unwrap());
+
+        if (flags & (FLAG_BIT_DEPTH_10 | FLAG_BIT_DEPTH_12)) == (FLAG_BIT_DEPTH_10 | FLAG_BIT_DEPTH_12) {
+            return Err(Error::InvalidFormat("conflicting bit depth flags"));
+        }
+        if (flags & FLAG_HAS_ICC) != 0 {
+            if icc_bytes == 0 || icc_bytes > MAX_ICC_BYTES {
+                return Err(Error::InvalidFormat("invalid ICC profile length"));
+            }
+        } else if icc_bytes != 0 {
+            return Err(Error::InvalidFormat("non-zero reserved bytes without FLAG_HAS_ICC"));
+        }
 
         if width == 0
             || height == 0
@@ -200,6 +253,7 @@ impl VimgHeader {
             tiles_x,
             tiles_y,
             dir_bytes,
+            icc_bytes,
             total_bytes,
         })
     }
@@ -221,7 +275,7 @@ impl VimgHeader {
         out[32..40].copy_from_slice(&self.total_bytes.to_le_bytes());
         let hcrc = crc32c(&out[0..40]);
         out[40..44].copy_from_slice(&hcrc.to_le_bytes());
-        out[44..48].fill(0);
+        out[44..48].copy_from_slice(&self.icc_bytes.to_le_bytes());
     }
 }
 
@@ -235,7 +289,9 @@ impl VimgIndex {
         }
         let n_entries = header.dir_bytes as usize / 8;
         let mut entries = Vec::with_capacity(n_entries);
-        let mut cur_off = need as u64;
+        let mut cur_off = (need as u64)
+            .checked_add(header.icc_wire_len())
+            .ok_or(Error::InvalidFormat("icc offset overflow"))?;
         for i in 0..n_entries {
             let b = HEADER_BYTES + i * 8;
             let len = u32::from_le_bytes(prefix[b..b + 4].try_into().unwrap());
@@ -250,6 +306,49 @@ impl VimgIndex {
             return Err(Error::InvalidFormat("total_bytes mismatch with directory"));
         }
         Ok(Self { header, entries })
+    }
+
+    /// Reads and CRC-verifies the embedded ICC color profile (if present), reusing `prefix` bytes
+    /// with zero extra HTTP Range requests whenever possible.
+    pub fn read_icc_from_source(
+        &self,
+        source: &dyn RangeSource,
+        prefix: &[u8],
+        verify_crc: bool,
+        stats: &mut RangeStats,
+    ) -> Result<Option<Vec<u8>>> {
+        if !self.header.has_icc() {
+            return Ok(None);
+        }
+        let off = self.header.icc_offset();
+        let wire_len = self.header.icc_wire_len();
+        let end = off.checked_add(wire_len).ok_or(Error::InvalidFormat("icc range overflow"))?;
+        if end > self.header.total_bytes {
+            return Err(Error::Truncated);
+        }
+        let raw_buf: Vec<u8>;
+        let slice: &[u8] = if (end as usize) <= prefix.len() {
+            &prefix[off as usize..end as usize]
+        } else {
+            let mut got = source.read_ranges(&[(off, end)])?;
+            stats.requests += 1;
+            stats.bytes_fetched += wire_len;
+            raw_buf = got.pop().unwrap_or_default();
+            &raw_buf
+        };
+        if slice.len() != wire_len as usize {
+            return Err(Error::Truncated);
+        }
+        let icc_len = self.header.icc_bytes as usize;
+        let icc = &slice[..icc_len];
+        if self.header.has_crc() && verify_crc {
+            let expected = u32::from_le_bytes(slice[icc_len..icc_len + 4].try_into().unwrap());
+            let actual = crc32c(icc);
+            if actual != expected {
+                return Err(Error::ChecksumMismatch { expected, actual });
+            }
+        }
+        Ok(Some(icc.to_vec()))
     }
 
     /// Fetches header + directory from any `RangeSource` (in 1–2 Range requests),
@@ -328,7 +427,7 @@ fn extract_tile_subplane(
     out
 }
 
-/// Encodes packed RGB / RGBA / Grayscale pixels into a self-contained `VIMG1` byte buffer.
+/// Encodes packed 8-bit RGB / RGBA / Grayscale pixels into a self-contained `VIMG1` byte buffer.
 /// Parallelized cleanly across tiles with `1T == NT` bit-identical deterministic output.
 pub fn encode_vimg(
     pixels: &[u8],
@@ -348,6 +447,56 @@ pub fn encode_vimg(
     {
         return Err(Error::InvalidInput("invalid dimensions, channels, or pixel buffer length"));
     }
+    let (y_full, co_full, cg_full, a_full) = split_planes_444(pixels, w, h, ch);
+    encode_planes_vimg(&y_full, &co_full, &cg_full, a_full.as_deref(), width, height, channels, 8, opts)
+}
+
+/// Encodes packed 10-bit or 12-bit HDR `u16` RGB / RGBA / Grayscale pixels into a `VIMG1` buffer.
+/// Set `opts.bit_depth` to `10` (`0..=1023`) or `12` (`0..=4095`).
+pub fn encode_vimg_u16(
+    pixels: &[u16],
+    width: u32,
+    height: u32,
+    channels: u8,
+    opts: &EncodeOptions,
+) -> Result<Vec<u8>> {
+    let bit_depth = if opts.bit_depth == 8 { 10 } else { opts.bit_depth };
+    if !matches!(bit_depth, 8 | 10 | 12) {
+        return Err(Error::InvalidInput("bit_depth must be 8, 10, or 12"));
+    }
+    let (w, h, ch) = (width as usize, height as usize, channels as usize);
+    if width == 0
+        || height == 0
+        || width > MAX_IMAGE_DIM
+        || height > MAX_IMAGE_DIM
+        || (width as u64) * (height as u64) > MAX_IMAGE_PIXELS
+        || !matches!(channels, 1 | 3 | 4)
+        || w.checked_mul(h).and_then(|n| n.checked_mul(ch)) != Some(pixels.len())
+    {
+        return Err(Error::InvalidInput("invalid dimensions, channels, or u16 pixel buffer length"));
+    }
+    let max_val = (1u16 << bit_depth) - 1;
+    let (y_full, co_full, cg_full, a_full) = split_planes_444_u16(pixels, w, h, ch, max_val);
+    encode_planes_vimg(&y_full, &co_full, &cg_full, a_full.as_deref(), width, height, channels, bit_depth, opts)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_planes_vimg(
+    y_full: &[i16],
+    co_full: &[i16],
+    cg_full: &[i16],
+    a_full: Option<&[i16]>,
+    width: u32,
+    height: u32,
+    channels: u8,
+    bit_depth: u8,
+    opts: &EncodeOptions,
+) -> Result<Vec<u8>> {
+    let (w, h, ch) = (width as usize, height as usize, channels as usize);
+    let icc_slice: &[u8] = opts.icc_profile.as_deref().unwrap_or(&[]);
+    if icc_slice.len() > MAX_ICC_BYTES as usize {
+        return Err(Error::InvalidInput("ICC profile exceeds MAX_ICC_BYTES"));
+    }
     let tile_size = opts.tile_size.clamp(64, 256).next_power_of_two() as usize;
     let dwt_levels = opts.dwt_levels.min(4) as usize;
     let quality = opts.quality.clamp(1, 100);
@@ -359,14 +508,13 @@ pub fn encode_vimg(
     let n_tiles = tiles_x * tiles_y;
     let n_levels = dwt_levels + 1;
 
-    let (y_full, co_full, cg_full, a_full) = split_planes_444(pixels, w, h, ch);
     let mut planes_data: Vec<&[i16]> = Vec::with_capacity(ch);
-    planes_data.push(&y_full);
+    planes_data.push(y_full);
     if ch >= 3 {
-        planes_data.push(&co_full);
-        planes_data.push(&cg_full);
+        planes_data.push(co_full);
+        planes_data.push(cg_full);
     }
-    if let Some(ref a) = a_full {
+    if let Some(a) = a_full {
         planes_data.push(a);
     }
 
@@ -381,7 +529,7 @@ pub fn encode_vimg(
     // Encode every tile in parallel; each tile produces `planes × levels` compressed blobs.
     let tile_results: Vec<Vec<Vec<Vec<u8>>>> = if n_threads <= 1 {
         (0..n_tiles)
-            .map(|tid| encode_one_tile(tid, tiles_x, tile_size, w, h, &planes_data, chroma_420, quality, dwt_levels))
+            .map(|tid| encode_one_tile(tid, tiles_x, tile_size, w, h, &planes_data, chroma_420, quality, dwt_levels, bit_depth))
             .collect()
     } else {
         let mut results: Vec<Option<Vec<Vec<Vec<u8>>>>> = (0..n_tiles).map(|_| None).collect();
@@ -401,7 +549,7 @@ pub fn encode_vimg(
                     for (local_i, slot) in dst.iter_mut().enumerate() {
                         let tid = start + local_i;
                         *slot = Some(encode_one_tile(
-                            tid, tiles_x, tile_size, w, h, planes_ref, chroma_420, quality, dwt_levels,
+                            tid, tiles_x, tile_size, w, h, planes_ref, chroma_420, quality, dwt_levels, bit_depth,
                         ));
                     }
                 });
@@ -412,6 +560,11 @@ pub fn encode_vimg(
 
     let n_entries = n_levels * ch * n_tiles;
     let dir_bytes = n_entries * 8;
+    let icc_wire_len = if icc_slice.is_empty() {
+        0usize
+    } else {
+        icc_slice.len() + if opts.checksum { 4 } else { 0 }
+    };
     let mut payload_bytes = 0usize;
     for tr in &tile_results {
         for p_vec in tr {
@@ -421,7 +574,7 @@ pub fn encode_vimg(
         }
     }
 
-    let total_bytes = HEADER_BYTES + dir_bytes + payload_bytes;
+    let total_bytes = HEADER_BYTES + dir_bytes + icc_wire_len + payload_bytes;
     let mut out = vec![0u8; total_bytes];
 
     let mut flags = 0u16;
@@ -436,6 +589,14 @@ pub fn encode_vimg(
     } else {
         flags |= FLAG_DWT_97;
     }
+    if bit_depth == 10 {
+        flags |= FLAG_BIT_DEPTH_10;
+    } else if bit_depth == 12 {
+        flags |= FLAG_BIT_DEPTH_12;
+    }
+    if !icc_slice.is_empty() {
+        flags |= FLAG_HAS_ICC;
+    }
     let header = VimgHeader {
         version: VERSION_V1,
         flags,
@@ -448,13 +609,24 @@ pub fn encode_vimg(
         tiles_x: tiles_x as u32,
         tiles_y: tiles_y as u32,
         dir_bytes: dir_bytes as u32,
+        icc_bytes: icc_slice.len() as u32,
         total_bytes: total_bytes as u64,
     };
     header.write_to(&mut out[..HEADER_BYTES]);
 
+    // Write optional ICC color profile (+ CRC32C) right after the directory.
+    let mut data_pos = HEADER_BYTES + dir_bytes;
+    if !icc_slice.is_empty() {
+        out[data_pos..data_pos + icc_slice.len()].copy_from_slice(icc_slice);
+        data_pos += icc_slice.len();
+        if opts.checksum {
+            out[data_pos..data_pos + 4].copy_from_slice(&crc32c(icc_slice).to_le_bytes());
+            data_pos += 4;
+        }
+    }
+
     // Write directory and payloads strictly ordered by `(level, plane, tile_id)`.
     let mut dir_pos = HEADER_BYTES;
-    let mut data_pos = HEADER_BYTES + dir_bytes;
     #[allow(clippy::needless_range_loop)]
     for lvl in 0..n_levels {
         for plane in 0..ch {
@@ -485,6 +657,7 @@ fn encode_one_tile(
     chroma_420: bool,
     quality: u8,
     dwt_levels: usize,
+    bit_depth: u8,
 ) -> Vec<Vec<Vec<u8>>> {
     let tx = tid % tiles_x;
     let ty = tid / tiles_x;
@@ -502,7 +675,7 @@ fn encode_one_tile(
             (sub, tw, th)
         };
         let wt = WaveletTile::forward_mode(&work, pw, ph, dwt_levels, quality < 100);
-        out_planes.push(encode_wavelet_tile_levels(&wt, quality, p_idx));
+        out_planes.push(encode_wavelet_tile_levels_bd(&wt, quality, p_idx, bit_depth));
     }
     out_planes
 }
@@ -520,7 +693,7 @@ pub fn crop_vimg_zero_decode(
     grayscale: bool,
 ) -> Result<(Vec<u8>, RangeStats)> {
     let mut stats = RangeStats::default();
-    let idx = VimgIndex::read_from_source(source, &mut stats)?;
+    let (idx, prefix) = VimgIndex::read_from_source_with_prefix(source, &mut stats)?;
     let h = &idx.header;
     if ntx == 0
         || nty == 0
@@ -529,6 +702,14 @@ pub fn crop_vimg_zero_decode(
     {
         return Err(Error::InvalidInput("tile crop range out of bounds"));
     }
+
+    let icc_opt = idx.read_icc_from_source(source, &prefix, h.has_crc(), &mut stats)?;
+    let icc_slice: &[u8] = icc_opt.as_deref().unwrap_or(&[]);
+    let icc_wire_len = if icc_slice.is_empty() {
+        0usize
+    } else {
+        icc_slice.len() + if h.has_crc() { 4 } else { 0 }
+    };
 
     let out_ch: u8 = if grayscale { 1 } else { h.channels };
     let n_levels = h.n_levels();
@@ -558,7 +739,7 @@ pub fn crop_vimg_zero_decode(
     let new_h = ((h.height - ty0 * h.tile_size).min(nty * h.tile_size)).max(1);
     let dir_bytes = req_meta.len() * 8;
     let payload_bytes: usize = req_meta.iter().map(|e| e.len as usize).sum();
-    let total_bytes = HEADER_BYTES + dir_bytes + payload_bytes;
+    let total_bytes = HEADER_BYTES + dir_bytes + icc_wire_len + payload_bytes;
 
     let mut flags = h.flags;
     if grayscale {
@@ -576,6 +757,7 @@ pub fn crop_vimg_zero_decode(
         tiles_x: ntx,
         tiles_y: nty,
         dir_bytes: dir_bytes as u32,
+        icc_bytes: icc_slice.len() as u32,
         total_bytes: total_bytes as u64,
     };
 
@@ -583,6 +765,14 @@ pub fn crop_vimg_zero_decode(
     out_hdr.write_to(&mut out[..HEADER_BYTES]);
     let mut dir_pos = HEADER_BYTES;
     let mut data_pos = HEADER_BYTES + dir_bytes;
+    if !icc_slice.is_empty() {
+        out[data_pos..data_pos + icc_slice.len()].copy_from_slice(icc_slice);
+        data_pos += icc_slice.len();
+        if h.has_crc() {
+            out[data_pos..data_pos + 4].copy_from_slice(&crc32c(icc_slice).to_le_bytes());
+            data_pos += 4;
+        }
+    }
 
     for (i, e) in req_meta.iter().enumerate() {
         let (ci, rel_off) = mapping[i];

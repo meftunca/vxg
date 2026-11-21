@@ -163,6 +163,134 @@ pub fn merge_planes_rgb(
     out
 }
 
+/// Forward reversible `YCoCg-R` lifting for 10-bit / 12-bit HDR (`0..=4095`, fits safely in `i16`).
+#[inline(always)]
+pub fn rgb_to_ycocg_r_u16(r: u16, g: u16, b: u16) -> (i16, i16, i16) {
+    let r = r as i16;
+    let g = g as i16;
+    let b = b as i16;
+    let co = r - b;
+    let t = b + (co >> 1);
+    let cg = g - t;
+    let y = t + (cg >> 1);
+    (y, co, cg)
+}
+
+/// Exact inverse of `rgb_to_ycocg_r_u16` clamped to `0..=max_val`.
+#[inline(always)]
+pub fn ycocg_r_to_rgb_u16(y: i16, co: i16, cg: i16, max_val: i16) -> (u16, u16, u16) {
+    let t = y - (cg >> 1);
+    let g = cg + t;
+    let b = t - (co >> 1);
+    let r = b + co;
+    (r.clamp(0, max_val) as u16, g.clamp(0, max_val) as u16, b.clamp(0, max_val) as u16)
+}
+
+/// Converts packed 10-bit or 12-bit `u16` RGB / RGBA / Gray pixels into planar `(Y, Co, Cg, Option<A>)`.
+pub fn split_planes_444_u16(
+    pixels: &[u16],
+    width: usize,
+    height: usize,
+    channels: usize,
+    max_val: u16,
+) -> (Vec<i16>, Vec<i16>, Vec<i16>, Option<Vec<i16>>) {
+    let n = width * height;
+    let mut y_p = vec![0i16; n];
+    let mut co_p = vec![0i16; n];
+    let mut cg_p = vec![0i16; n];
+    if channels == 1 {
+        for i in 0..n {
+            y_p[i] = pixels[i].min(max_val) as i16;
+        }
+        return (y_p, co_p, cg_p, None);
+    }
+    let mut a_p = if channels == 4 { Some(vec![max_val as i16; n]) } else { None };
+    for i in 0..n {
+        let o = i * channels;
+        let (y, co, cg) = rgb_to_ycocg_r_u16(
+            pixels[o].min(max_val),
+            pixels[o + 1].min(max_val),
+            pixels[o + 2].min(max_val),
+        );
+        y_p[i] = y;
+        co_p[i] = co;
+        cg_p[i] = cg;
+        if let Some(a_vec) = a_p.as_mut() {
+            a_vec[i] = pixels[o + 3].min(max_val) as i16;
+        }
+    }
+    (y_p, co_p, cg_p, a_p)
+}
+
+/// Merges decoded `YCoCg-R` (or grayscale `Y`-only) planes back into packed 10-bit/12-bit `u16` RGB/RGBA.
+#[allow(clippy::too_many_arguments)]
+pub fn merge_planes_u16(
+    y_p: &[i16],
+    co_p: Option<&[i16]>,
+    cg_p: Option<&[i16]>,
+    a_p: Option<&[i16]>,
+    width: usize,
+    height: usize,
+    out_channels: usize,
+    max_val: i16,
+) -> Vec<u16> {
+    let n = width * height;
+    let mut out = vec![0u16; n * out_channels];
+    match (co_p, cg_p, out_channels) {
+        (None, _, 1) => {
+            for i in 0..n {
+                out[i] = y_p[i].clamp(0, max_val) as u16;
+            }
+        }
+        (None, _, 3) => {
+            for (i, &yv) in y_p.iter().enumerate().take(n) {
+                let g = yv.clamp(0, max_val) as u16;
+                let o = i * 3;
+                out[o] = g;
+                out[o + 1] = g;
+                out[o + 2] = g;
+            }
+        }
+        (None, _, 4) => {
+            for i in 0..n {
+                let g = y_p[i].clamp(0, max_val) as u16;
+                let a = a_p.map_or(max_val as u16, |ap| ap[i].clamp(0, max_val) as u16);
+                let o = i * 4;
+                out[o] = g;
+                out[o + 1] = g;
+                out[o + 2] = g;
+                out[o + 3] = a;
+            }
+        }
+        (Some(co), Some(cg), 3) => {
+            for i in 0..n {
+                let (r, g, b) = ycocg_r_to_rgb_u16(y_p[i], co[i], cg[i], max_val);
+                let o = i * 3;
+                out[o] = r;
+                out[o + 1] = g;
+                out[o + 2] = b;
+            }
+        }
+        (Some(co), Some(cg), 4) => {
+            for i in 0..n {
+                let (r, g, b) = ycocg_r_to_rgb_u16(y_p[i], co[i], cg[i], max_val);
+                let a = a_p.map_or(max_val as u16, |ap| ap[i].clamp(0, max_val) as u16);
+                let o = i * 4;
+                out[o] = r;
+                out[o + 1] = g;
+                out[o + 2] = b;
+                out[o + 3] = a;
+            }
+        }
+        _ => {
+            for i in 0..n {
+                out[i] = y_p[i].clamp(0, max_val) as u16;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +302,18 @@ mod tests {
                 for b in (0..=255).step_by(5) {
                     let (y, co, cg) = rgb_to_ycocg_r(r as u8, g as u8, b as u8);
                     assert_eq!(ycocg_r_to_rgb(y, co, cg), (r as u8, g as u8, b as u8));
+                }
+            }
+        }
+        // Verify 10-bit & 12-bit HDR YCoCg-R exactness
+        for max_v in [1023u16, 4095u16] {
+            let step = (max_v / 31).max(1) as usize;
+            for r in (0..=max_v).step_by(step) {
+                for g in (0..=max_v).step_by(step) {
+                    for b in (0..=max_v).step_by(step) {
+                        let (y, co, cg) = rgb_to_ycocg_r_u16(r, g, b);
+                        assert_eq!(ycocg_r_to_rgb_u16(y, co, cg, max_v as i16), (r, g, b));
+                    }
                 }
             }
         }

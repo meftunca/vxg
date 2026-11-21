@@ -69,7 +69,7 @@ fn lossy_photo_quality_pyramid_effects_and_zero_decode_crop() {
         w as u32,
         h as u32,
         3,
-        &EncodeOptions { quality: 85, tile_size: 128, dwt_levels: 3, chroma_420: true, checksum: true, threads: 4 },
+        &EncodeOptions { quality: 85, tile_size: 128, dwt_levels: 3, chroma_420: true, checksum: true, threads: 4, ..EncodeOptions::default() },
     )
     .unwrap();
 
@@ -128,7 +128,7 @@ fn real_http_range_partial_fetch_transfers_tiny_fraction_of_image() {
             w as u32,
             h as u32,
             3,
-            &EncodeOptions { quality: 85, tile_size: 128, dwt_levels: 3, chroma_420: true, checksum: true, threads: 4 },
+            &EncodeOptions { quality: 85, tile_size: 128, dwt_levels: 3, chroma_420: true, checksum: true, threads: 4, ..EncodeOptions::default() },
         )
         .unwrap(),
     );
@@ -246,4 +246,120 @@ fn sparse_wasm_range_pipeline_matches_full_decode_bit_for_bit() {
     let dec_direct = decode_query(&bytes, &q).unwrap();
     assert_eq!(dec_sparse.pixels, dec_direct.pixels);
     assert_eq!((dec_sparse.width, dec_sparse.height), (320, 240));
+}
+
+#[test]
+fn hdr_10bit_12bit_and_icc_profile_roundtrip_and_zero_decode_crop() {
+    use vimg::ffi::{vimg_extract_icc_alloc, vimg_free};
+    use vimg::{encode_u16, Error, VimgHeader};
+
+    // Synthetic Display P3 ICC profile fixture (536 bytes)
+    let mut fake_p3 = vec![0u8; 536];
+    fake_p3[0..12].copy_from_slice(b"DISPLAY_P3_0");
+    for (i, b) in fake_p3.iter_mut().enumerate().skip(12) {
+        *b = ((i * 29 + 7) & 0xFF) as u8;
+    }
+
+    for bit_depth in [10u8, 12u8] {
+        let max_v = (1u16 << bit_depth) - 1;
+        let (w, h) = (192u32, 160u32);
+        let mut px16 = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let r = (((x * (max_v as usize)) / w as usize) as u16).min(max_v);
+                let g = (((y * (max_v as usize)) / h as usize) as u16).min(max_v);
+                let b = ((((x + y) * (max_v as usize)) / (w as usize + h as usize)) as u16).min(max_v);
+                px16.extend_from_slice(&[r, g, b]);
+            }
+        }
+
+        // 1) 100% bit-exact lossless HDR + ICC profile roundtrip
+        let ll_bytes = encode_u16(
+            &px16,
+            w,
+            h,
+            3,
+            &EncodeOptions {
+                bit_depth,
+                tile_size: 64,
+                icc_profile: Some(fake_p3.clone()),
+                ..EncodeOptions::lossless()
+            },
+        )
+        .unwrap();
+        let hdr = VimgHeader::parse(&ll_bytes).unwrap();
+        assert_eq!(hdr.bit_depth(), bit_depth);
+        assert!(hdr.has_icc());
+        assert_eq!(hdr.icc_bytes as usize, fake_p3.len());
+
+        let dec_ll = decode(&ll_bytes).unwrap();
+        assert_eq!(dec_ll.bit_depth, bit_depth);
+        assert_eq!(dec_ll.icc_profile.as_deref(), Some(fake_p3.as_slice()));
+        assert_eq!(dec_ll.pixels_u16.as_deref(), Some(px16.as_slice()));
+
+        // Verify C ABI ICC extraction
+        unsafe {
+            let icc_buf = vimg_extract_icc_alloc(ll_bytes.as_ptr(), ll_bytes.len());
+            assert_eq!(icc_buf.status, 0);
+            let extracted = core::slice::from_raw_parts(icc_buf.ptr, icc_buf.len);
+            assert_eq!(extracted, fake_p3.as_slice());
+            vimg_free(icc_buf);
+        }
+
+        // Verify ICC CRC32C tamper detection!
+        let mut tampered = ll_bytes.clone();
+        let icc_pos = hdr.icc_offset() as usize + 16;
+        tampered[icc_pos] ^= 0x55;
+        assert!(matches!(decode(&tampered), Err(Error::ChecksumMismatch { .. })));
+
+        // Verify zero-decode tile crop preserves both bit_depth and ICC profile verbatim!
+        let (cropped_vimg, _) =
+            crop_vimg_zero_decode(&SliceRangeSource(&ll_bytes), 1, 1, 2, 1, false).unwrap();
+        let dec_crop = decode(&cropped_vimg).unwrap();
+        assert_eq!(dec_crop.bit_depth, bit_depth);
+        assert_eq!((dec_crop.width, dec_crop.height), (128, 64));
+        assert_eq!(dec_crop.icc_profile.as_deref(), Some(fake_p3.as_slice()));
+
+        // 2) Lossy HDR (CDF 9/7 + 4:2:0) + compressed-domain crop/resize/rotate
+        let ly_bytes = encode_u16(
+            &px16,
+            w,
+            h,
+            3,
+            &EncodeOptions {
+                quality: 85,
+                bit_depth,
+                tile_size: 64,
+                icc_profile: Some(fake_p3.clone()),
+                ..EncodeOptions::default()
+            },
+        )
+        .unwrap();
+        let dec_ly = decode(&ly_bytes).unwrap();
+        let rec16 = dec_ly.pixels_u16.as_ref().unwrap();
+        let mse: f64 = px16
+            .iter()
+            .zip(rec16.iter())
+            .map(|(&a, &b)| {
+                let d = a as f64 - b as f64;
+                d * d
+            })
+            .sum::<f64>()
+            / (px16.len() as f64);
+        let psnr = 10.0 * ((max_v as f64 * max_v as f64) / mse.max(1e-12)).log10();
+        assert!(psnr > 34.0, "{bit_depth}-bit lossy HDR PSNR too low: {psnr:.2} dB");
+
+        let q = TransformQuery {
+            crop: Some((16, 16, 128, 96)),
+            target_width: Some(64),
+            rotate_cw: 1,
+            sepia: true,
+            ..TransformQuery::default()
+        };
+        let dec_q = decode_query(&ly_bytes, &q).unwrap();
+        assert_eq!(dec_q.bit_depth, bit_depth);
+        assert_eq!((dec_q.width, dec_q.height), (48, 64));
+        assert_eq!(dec_q.pixels_u16.as_ref().unwrap().len(), 48 * 64 * 3);
+        assert_eq!(dec_q.icc_profile.as_deref(), Some(fake_p3.as_slice()));
+    }
 }

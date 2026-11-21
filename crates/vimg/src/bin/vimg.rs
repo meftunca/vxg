@@ -10,18 +10,19 @@ use std::time::Instant;
 
 use image::{DynamicImage, GenericImageView, ImageFormat, RgbImage, RgbaImage};
 use vimg::{
-    crop_vimg_zero_decode, decode_from_source, encode, psnr_db, EncodeOptions, FileRangeSource,
-    HttpRangeSource, RangeSource, RangeStats, SliceRangeSource, TransformQuery, VimgIndex,
+    crop_vimg_zero_decode, decode_from_source, encode, encode_u16, psnr_db, EncodeOptions,
+    FileRangeSource, HttpRangeSource, RangeSource, RangeStats, SliceRangeSource, TransformQuery,
+    VimgIndex,
 };
 
 fn usage() {
     eprintln!(
-        "vimg {} — HTTP-Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Engine\n\n\
+        "vimg {} — HTTP/HTTPS Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Engine\n\n\
          Usage:\n  \
-           vimg encode <in.png|jpg|webp|bmp> <out.vimg> [--quality 1..100] [--tile 64|128|256] [--levels 1..4] [--no-420]\n  \
-           vimg decode <in.vimg | http://.../img.vimg> <out.png|jpg|webp> [--w W] [--h H] [--crop x,y,w,h] [--gray] [--blur 0..1] [--sharpen 0..2] [--bright N] [--contrast F] [--sepia] [--rot 90|180|270]\n  \
-           vimg crop   <in.vimg | http://.../img.vimg> <out.vimg> --tiles tx0,ty0,ntx,nty [--gray]\n  \
-           vimg info   <in.vimg | http://.../img.vimg>\n  \
+           vimg encode <in.png|jpg|webp|bmp> <out.vimg> [--quality 1..100] [--tile 64|128|256] [--levels 1..4] [--bit-depth 8|10|12] [--icc <profile.icc>] [--no-420]\n  \
+           vimg decode <in.vimg | http(s)://.../img.vimg> <out.png|jpg|webp> [--w W] [--h H] [--crop x,y,w,h] [--gray] [--blur 0..1] [--sharpen 0..2] [--bright N] [--contrast F] [--sepia] [--rot 90|180|270] [--extract-icc <out.icc>]\n  \
+           vimg crop   <in.vimg | http(s)://.../img.vimg> <out.vimg> --tiles tx0,ty0,ntx,nty [--gray]\n  \
+           vimg info   <in.vimg | http(s)://.../img.vimg>\n  \
            vimg serve  <dir> [--port 8090]    (HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy)\n  \
            vimg bench  <in.png|jpg|bmp> [--quality 85] [--tile 256]",
         env!("CARGO_PKG_VERSION")
@@ -29,7 +30,7 @@ fn usage() {
 }
 
 fn open_source(path_or_url: &str) -> Result<Box<dyn RangeSource>, String> {
-    if path_or_url.starts_with("http://") {
+    if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
         HttpRangeSource::connect(path_or_url)
             .map(|s| Box::new(s) as Box<dyn RangeSource>)
             .map_err(|e| e.to_string())
@@ -119,22 +120,51 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
                 opts.dwt_levels = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --levels")?;
             }
             "--no-420" => opts.chroma_420 = false,
+            "--bit-depth" => {
+                i += 1;
+                opts.bit_depth = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --bit-depth")?;
+            }
+            "--icc" => {
+                i += 1;
+                let icc_path = args.get(i).ok_or("missing --icc path")?;
+                opts.icc_profile = Some(fs::read(icc_path).map_err(|e| format!("read {icc_path}: {e}"))?);
+            }
             other => return Err(format!("unknown flag {other}")),
         }
         i += 1;
     }
-    let (pixels, w, h, ch) = load_pixels(&args[0])?;
+    let raw = fs::read(&args[0]).map_err(|e| format!("read {}: {e}", args[0]))?;
+    if opts.icc_profile.is_none() {
+        opts.icc_profile = vimg::exif::parse_jpeg_icc_profile(&raw);
+    }
     let t0 = Instant::now();
-    let vimg_bytes = encode(&pixels, w, h, ch, &opts).map_err(|e| e.to_string())?;
+    let (vimg_bytes, w, h, ch) = if opts.bit_depth > 8 {
+        let img = image::load_from_memory(&raw).map_err(|e| format!("decode {}: {e}", args[0]))?;
+        let (w, h) = img.dimensions();
+        let shift = 16u8.saturating_sub(opts.bit_depth);
+        let (px16, ch): (Vec<u16>, u8) = if img.color().has_alpha() {
+            (img.to_rgba16().into_raw().into_iter().map(|v| v >> shift).collect(), 4)
+        } else {
+            (img.to_rgb16().into_raw().into_iter().map(|v| v >> shift).collect(), 3)
+        };
+        let bytes = encode_u16(&px16, w, h, ch, &opts).map_err(|e| e.to_string())?;
+        (bytes, w, h, ch)
+    } else {
+        let (pixels, w, h, ch) = load_pixels(&args[0])?;
+        let bytes = encode(&pixels, w, h, ch, &opts).map_err(|e| e.to_string())?;
+        (bytes, w, h, ch)
+    };
     let dt = t0.elapsed().as_secs_f64();
     fs::write(&args[1], &vimg_bytes).map_err(|e| e.to_string())?;
     let bpp = (vimg_bytes.len() as f64 * 8.0) / ((w as f64) * (h as f64));
     let mpix_s = ((w as f64) * (h as f64) / 1e6) / dt.max(1e-6);
     println!(
-        "Encoded {}x{}x{} -> {} ({:.1} KiB, {:.2} bpp, q={}, tile={}, lvls={}) in {:.1} ms ({:.1} MPix/s)",
+        "Encoded {}x{}x{} ({}-bit{}) -> {} ({:.1} KiB, {:.2} bpp, q={}, tile={}, lvls={}) in {:.1} ms ({:.1} MPix/s)",
         w,
         h,
         ch,
+        opts.bit_depth,
+        opts.icc_profile.as_ref().map_or(String::new(), |icc| format!(", icc={}B", icc.len())),
         args[1],
         vimg_bytes.len() as f64 / 1024.0,
         bpp,
@@ -152,6 +182,7 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         return Err("decode requires <in.vimg|url> <out.png|jpg>".into());
     }
     let mut q = TransformQuery::default();
+    let mut extract_icc: Option<String> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -171,6 +202,10 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
             }
             "--flip-h" => q.flip_h = true,
             "--flip-v" => q.flip_v = true,
+            "--extract-icc" => {
+                i += 1;
+                extract_icc = Some(args.get(i).ok_or("missing --extract-icc path")?.clone());
+            }
             other => return Err(format!("unknown flag {other}")),
         }
         i += 1;
@@ -179,7 +214,28 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     let t0 = Instant::now();
     let img = decode_from_source(src.as_ref(), &q).map_err(|e| e.to_string())?;
     let dt = t0.elapsed().as_secs_f64() * 1000.0;
-    save_pixels(&args[1], &img.pixels, img.width, img.height, img.channels)?;
+    if let (Some(icc_path), Some(icc)) = (extract_icc, img.icc_profile.as_deref()) {
+        fs::write(&icc_path, icc).map_err(|e| format!("write {icc_path}: {e}"))?;
+    }
+    if let Some(ref px16) = img.pixels_u16 {
+        let shift = 16u8.saturating_sub(img.bit_depth);
+        let scaled: Vec<u16> = px16.iter().map(|&v| v << shift).collect();
+        let dyn16 = match img.channels {
+            1 => DynamicImage::ImageLuma16(
+                image::ImageBuffer::from_raw(img.width, img.height, scaled).ok_or("bad luma16")?,
+            ),
+            3 => DynamicImage::ImageRgb16(
+                image::ImageBuffer::from_raw(img.width, img.height, scaled).ok_or("bad rgb16")?,
+            ),
+            4 => DynamicImage::ImageRgba16(
+                image::ImageBuffer::from_raw(img.width, img.height, scaled).ok_or("bad rgba16")?,
+            ),
+            c => return Err(format!("unsupported channels {c}")),
+        };
+        dyn16.save(&args[1]).map_err(|e| format!("save {}: {e}", args[1]))?;
+    } else {
+        save_pixels(&args[1], &img.pixels, img.width, img.height, img.channels)?;
+    }
     println!(
         "Decoded {}x{}x{} (level={}, tiles={}/{}, fetched {:.1} KiB / {:.1} KiB = {:.1}% in {} reqs) in {:.2} ms -> {}",
         img.width,
@@ -206,11 +262,13 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
     let h = &idx.header;
     let bpp = (h.total_bytes as f64 * 8.0) / ((h.width as f64) * (h.height as f64));
     println!(
-        "VIMG v{} | {}x{}x{} | quality={} ({}) | chroma={} | tile={} ({}x{}={}) | size={:.1} KiB ({:.2} bpp) | dir={:.1} KiB",
+        "VIMG v{} | {}x{}x{} ({}-bit{}) | quality={} ({}) | chroma={} | tile={} ({}x{}={}) | size={:.1} KiB ({:.2} bpp) | dir={:.1} KiB",
         h.version,
         h.width,
         h.height,
         h.channels,
+        h.bit_depth(),
+        if h.has_icc() { format!(", icc={}B", h.icc_bytes) } else { String::new() },
         h.quality,
         if h.is_lossless() { "lossless" } else { "lossy" },
         if h.is_chroma_420() { "4:2:0" } else { "4:4:4" },
@@ -223,7 +281,7 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
         h.dir_bytes as f64 / 1024.0
     );
     let lvls = idx.level_byte_sizes();
-    let mut cum = (48 + h.dir_bytes) as u64;
+    let mut cum = (48 + h.dir_bytes as u64) + h.icc_wire_len();
     for (l, &sz) in lvls.iter().enumerate() {
         cum += sz;
         let (lw, lh) = h.image_level_dims(l);
@@ -325,7 +383,7 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
     assert_eq!(vl_dec.pixels, pixels, "VIMG lossless must be 100% bit-exact!");
 
     // VIMG Lossy (q=quality)
-    let opts = EncodeOptions { quality, tile_size, dwt_levels: 3, chroma_420: true, checksum: true, threads: 0 };
+    let opts = EncodeOptions { quality, tile_size, dwt_levels: 3, chroma_420: true, checksum: true, threads: 0, ..EncodeOptions::default() };
     let t_vq_e = Instant::now();
     let vq_bytes = encode(&pixels, w, h, ch, &opts).map_err(|e| e.to_string())?;
     let vq_enc_ms = t_vq_e.elapsed().as_secs_f64() * 1000.0;

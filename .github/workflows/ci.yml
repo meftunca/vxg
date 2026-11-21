@@ -83,7 +83,9 @@ jobs:
         with:
           components: clippy
           targets: wasm32-unknown-unknown
+      - run: cargo test --manifest-path crates/vimg/Cargo.toml --release
       - run: cargo test --manifest-path crates/vimg/Cargo.toml --release --features io
+      - run: cargo clippy --manifest-path crates/vimg/Cargo.toml --all-targets -- -D warnings
       - run: cargo clippy --manifest-path crates/vimg/Cargo.toml --all-targets --features io -- -D warnings
       - run: cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
       - run: cargo build --manifest-path crates/vimg/Cargo.toml --release --features io --bin vimg
@@ -107,7 +109,9 @@ jobs:
               assert(dec.status == 0 && dec.width == 64 && dec.height == 64);
               VimgBuf full = vimg_decode_query_v2_alloc(enc.ptr, enc.len, NULL);
               assert(full.status == 0 && full.len == sizeof(px) && memcmp(full.ptr, px, sizeof(px)) == 0);
-              vimg_free(full); vimg_free(dec); vimg_free(enc);
+              VimgBuf no_icc = vimg_extract_icc_alloc(enc.ptr, enc.len);
+              assert(no_icc.status == 1 && no_icc.ptr == NULL);
+              vimg_free(no_icc); vimg_free(full); vimg_free(dec); vimg_free(enc);
               return 0;
           }
           EOF

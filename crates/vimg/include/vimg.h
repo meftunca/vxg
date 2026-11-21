@@ -1,5 +1,5 @@
 /*
- * VIMG v0.1.0 — HTTP-Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Transform Engine
+ * VIMG v0.2.0 — HTTP/HTTPS Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Transform Engine
  * SPDX-License-Identifier: MIT
  */
 
@@ -81,6 +81,12 @@ VimgBuf vimg_decode_query_v2_alloc(
     const uint8_t *vimg_ptr,
     size_t vimg_len,
     const VimgQueryC *query
+);
+
+/* Extract embedded ICC color profile (returns status=0 + bytes, status=1 if absent, <0 on error). */
+VimgBuf vimg_extract_icc_alloc(
+    const uint8_t *vimg_ptr,
+    size_t vimg_len
 );
 
 /* Zero-WASI WebAssembly / sparse HTTP-Range exports */

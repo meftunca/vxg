@@ -1,0 +1,29 @@
+[package]
+name = "vimg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vimg = { path = ".." }
+
+[[bin]]
+name = "decode_vimg"
+path = "fuzz_targets/decode_vimg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_exif"
+path = "fuzz_targets/parse_exif.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
