@@ -299,7 +299,7 @@ fn choose_e8_arena_bits(m: &TurboWhtMatrix) -> u8 {
         }
         (t6, t7)
     });
-    if over6 <= max_over {
+    if over6 == 0 {
         10
     } else if over7 <= max_over {
         9
