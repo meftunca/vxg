@@ -1,11 +1,30 @@
 [package]
 name = "vxg"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.89"
-description = "Experimental bounded-work block codec with CPU SIMD and native GPU backends"
+description = "Adaptive block-independent lossless codec & compressed-domain SQL/Arrow engine with CPU SIMD, wasm32, and native GPU backends"
 license = "MIT"
+authors = ["meftunca"]
+repository = "https://github.com/meftunca/vxg"
+homepage = "https://meftunca.github.io/vxg/"
+documentation = "https://docs.rs/vxg"
+readme = "README.md"
+keywords = ["compression", "sql", "columnar", "arrow", "wasm"]
+categories = ["compression", "database-implementations", "encoding", "wasm"]
 build = "build.rs"
+include = [
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+    "/build.rs",
+    "/src/**/*.rs",
+    "/include/vxg.h",
+    "/native/**/*",
+    "/examples/**/*.rs",
+    "/tests/**/*.rs",
+    "/tests/vectors/**/*",
+]
 
 [features]
 default = []

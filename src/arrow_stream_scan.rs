@@ -201,7 +201,12 @@ pub(crate) fn try_scan_sql_query_arrow(
     query: &SqlQuery,
     dec_options: &DecodeOptions,
 ) -> Option<Result<ArrowBatch>> {
-    if !query.group_by.is_empty() || !query.order_by.is_empty() {
+    if query.distinct
+        || query.offset > 0
+        || query.having.is_some()
+        || !query.group_by.is_empty()
+        || !query.order_by.is_empty()
+    {
         return None;
     }
     let explicit = match &query.projection {
@@ -539,7 +544,7 @@ impl ArrowWindowStream {
         let Some(q) = query else {
             return Self::open(frame_bytes, None, None, None, DEFAULT_ARROW_BATCH_ROWS, dec_options);
         };
-        if q.group_by.is_empty() && q.order_by.is_empty() {
+        if !q.distinct && q.offset == 0 && q.having.is_none() && q.group_by.is_empty() && q.order_by.is_empty() {
             match &q.projection {
                 SelectProjection::Star => {
                     return Self::open(frame_bytes, None, q.where_clause.clone().map(ArrowWhere::from_sql_where), q.limit, DEFAULT_ARROW_BATCH_ROWS, dec_options);

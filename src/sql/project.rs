@@ -13,6 +13,7 @@ use crate::{
 
 use super::exec::{parse_projected_lines_to_rows, resolve_order_expr};
 use super::format::{self, cmp_sql_val, SqlFormat, SqlTable, SqlVal};
+use super::having::{apply_offset_limit, fetch_window};
 use super::{OrderItem, OrderKey, OwnedCol, SelectExpr, SelectItem, SqlQuery};
 
 pub(super) fn exec_star(
@@ -26,7 +27,7 @@ pub(super) fn exec_star(
             "SELECT * cannot be combined with GROUP BY",
         ));
     }
-    let lim = query.limit.unwrap_or(usize::MAX);
+    let lim = fetch_window(query.offset, query.limit);
     if let Some(hdr) = peek_delim_header(frame_bytes, dec_options)? {
         let headers = hdr.columns.clone();
         if lim == 0 {
@@ -84,7 +85,7 @@ pub(super) fn exec_star(
         if query.order_by.len() >= 2 {
             sort_star_rows(&headers, &query.order_by, &mut rows)?;
         }
-        rows.truncate(lim);
+        apply_offset_limit(&mut rows, query.offset, query.limit);
         return Ok(SqlTable { headers, rows });
     }
 
@@ -95,7 +96,7 @@ pub(super) fn exec_star(
             rows: Vec::new(),
         });
     }
-    let matches = if query.order_by.len() == 1 {
+    let mut matches = if query.order_by.len() == 1 {
         let oi = &query.order_by[0];
         let OrderKey::Expr(SelectExpr::Col(ref c)) = oi.key else {
             return Err(Error::InvalidOption("invalid ORDER BY on SELECT *"));
@@ -118,10 +119,10 @@ pub(super) fn exec_star(
         let mut ms = crate::filter_where(frame_bytes, expr, fetch_lim, dec_options)?;
         if !query.order_by.is_empty() {
             sort_raw_matches_multi(&query.order_by, &mut ms)?;
-            ms.truncate(lim);
         }
         ms
     };
+    apply_offset_limit(&mut matches, query.offset, query.limit);
     let rows = matches
         .into_iter()
         .map(|m| {
@@ -193,7 +194,7 @@ pub(super) fn exec_projection(
     dec_options: &DecodeOptions,
 ) -> Result<SqlTable> {
     let headers: Vec<String> = items.iter().map(SelectItem::header_name).collect();
-    let lim = query.limit.unwrap_or(usize::MAX);
+    let lim = fetch_window(query.offset, query.limit);
     if lim == 0 {
         return Ok(SqlTable {
             headers,
@@ -242,7 +243,8 @@ pub(super) fn exec_projection(
     if query.order_by.is_empty() {
         let proj_targets: Vec<ColTarget<'_>> = proj_cols.iter().map(OwnedCol::as_target).collect();
         let bytes = crate::select_columns(frame_bytes, where_expr, &proj_targets, lim, dec_options)?;
-        let rows = parse_projected_lines_to_rows(&bytes, &proj_cols, delim_opt);
+        let mut rows = parse_projected_lines_to_rows(&bytes, &proj_cols, delim_opt);
+        apply_offset_limit(&mut rows, query.offset, query.limit);
         return Ok(SqlTable { headers, rows });
     }
     if query.order_by.len() == 1 {
@@ -258,7 +260,8 @@ pub(super) fn exec_projection(
             lim,
             dec_options,
         )?;
-        let rows = parse_projected_lines_to_rows(&bytes, &proj_cols, delim_opt);
+        let mut rows = parse_projected_lines_to_rows(&bytes, &proj_cols, delim_opt);
+        apply_offset_limit(&mut rows, query.offset, query.limit);
         return Ok(SqlTable { headers, rows });
     }
 
@@ -279,7 +282,7 @@ pub(super) fn exec_projection(
         }
         Ordering::Equal
     });
-    full_rows.truncate(lim);
+    apply_offset_limit(&mut full_rows, query.offset, query.limit);
     for r in &mut full_rows {
         r.truncate(proj_cols.len());
     }
@@ -301,7 +304,7 @@ pub(super) fn stream_projection<R: Read, W: Write>(
     dec_options: &DecodeOptions,
 ) -> Result<()> {
     let headers: Vec<String> = items.iter().map(SelectItem::header_name).collect();
-    let lim = query.limit.unwrap_or(usize::MAX);
+    let lim = fetch_window(query.offset, query.limit);
     if lim == 0 {
         return SqlTable {
             headers,
@@ -340,7 +343,8 @@ pub(super) fn stream_projection<R: Read, W: Write>(
         let targets: Vec<ColTarget<'_>> = proj_cols.iter().map(OwnedCol::as_target).collect();
         crate::select_columns_stream(reader, &mut raw_proj, where_expr, &targets, lim, dec_options)?;
         let delim_opt = detect_proj_delim(&raw_proj, &targets);
-        let rows = parse_projected_lines_to_rows(&raw_proj, &proj_cols, delim_opt);
+        let mut rows = parse_projected_lines_to_rows(&raw_proj, &proj_cols, delim_opt);
+        apply_offset_limit(&mut rows, query.offset, query.limit);
         return SqlTable { headers, rows }.write_formatted(writer, format, no_header);
     }
     if query.order_by.len() == 1 {
@@ -358,7 +362,8 @@ pub(super) fn stream_projection<R: Read, W: Write>(
             dec_options,
         )?;
         let delim_opt = detect_proj_delim(&raw_proj, &targets);
-        let rows = parse_projected_lines_to_rows(&raw_proj, &proj_cols, delim_opt);
+        let mut rows = parse_projected_lines_to_rows(&raw_proj, &proj_cols, delim_opt);
+        apply_offset_limit(&mut rows, query.offset, query.limit);
         return SqlTable { headers, rows }.write_formatted(writer, format, no_header);
     }
 
@@ -382,7 +387,7 @@ pub(super) fn stream_projection<R: Read, W: Write>(
         }
         Ordering::Equal
     });
-    full_rows.truncate(lim);
+    apply_offset_limit(&mut full_rows, query.offset, query.limit);
     for r in &mut full_rows {
         r.truncate(proj_cols.len());
     }

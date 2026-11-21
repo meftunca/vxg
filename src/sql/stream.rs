@@ -19,10 +19,11 @@ use crate::{
     DecodeOptions, Error, Result,
 };
 
-use super::exec::{
-    execute_sql, finish_group_table, resolve_group_cols, resolve_order_expr, with_opt_sql_where,
-};
+use super::exec::{execute_sql, finish_group_table, with_opt_sql_where};
 use super::format::{self, SqlFormat, SqlTable, SqlVal};
+use super::having::{
+    collect_group_query_cols, collect_having_cols, eval_having, maps_to_distinct_counts,
+};
 use super::project::stream_projection;
 use super::{OrderKey, OwnedCol, SelectExpr, SelectItem, SelectProjection, SqlQuery};
 
@@ -38,23 +39,28 @@ pub fn execute_sql_stream<R: Read, W: Write>(
 ) -> Result<()> {
     dec_options.validate()?;
     with_opt_sql_where(query.where_clause.as_ref(), |where_expr| match &query.projection {
-        SelectProjection::Items(items) if !query.group_by.is_empty() => stream_group_by(
-            reader,
-            &mut writer,
-            items,
-            where_expr,
-            query,
-            format,
-            no_header,
-            dec_options,
-        ),
+        SelectProjection::Items(items)
+            if !query.group_by.is_empty()
+                || (query.distinct && !items.iter().any(|it| it.expr.is_agg())) =>
+        {
+            stream_group_by(
+                reader,
+                &mut writer,
+                items,
+                where_expr,
+                query,
+                format,
+                no_header,
+                dec_options,
+            )
+        }
         SelectProjection::Items(items) if items.iter().any(|it| it.expr.is_agg()) => {
             stream_scalar_agg(
                 reader,
                 &mut writer,
                 items,
                 where_expr,
-                query.limit,
+                query,
                 format,
                 no_header,
                 dec_options,
@@ -126,7 +132,7 @@ fn stream_scalar_agg<R: Read, W: Write>(
     writer: &mut W,
     items: &[SelectItem],
     where_expr: Option<&PredExpr<'_>>,
-    limit: Option<usize>,
+    query: &SqlQuery,
     format: SqlFormat,
     no_header: bool,
     dec_options: &DecodeOptions,
@@ -137,7 +143,7 @@ fn stream_scalar_agg<R: Read, W: Write>(
         ));
     }
     let headers: Vec<String> = items.iter().map(SelectItem::header_name).collect();
-    if limit == Some(0) {
+    if query.limit == Some(0) || query.offset > 0 {
         return SqlTable {
             headers,
             rows: Vec::new(),
@@ -145,14 +151,24 @@ fn stream_scalar_agg<R: Read, W: Write>(
         .write_formatted(writer, format, no_header);
     }
     let mut agg_cols: Vec<OwnedCol> = Vec::new();
+    let mut distinct_cols: Vec<OwnedCol> = Vec::new();
     for it in items {
-        if let SelectExpr::Agg { col, .. } = &it.expr {
-            if !agg_cols.contains(col) {
-                agg_cols.push(col.clone());
+        match &it.expr {
+            SelectExpr::Agg { col, .. } if !agg_cols.contains(col) => agg_cols.push(col.clone()),
+            SelectExpr::CountDistinct(col) if !distinct_cols.contains(col) => {
+                distinct_cols.push(col.clone())
             }
+            _ => {}
         }
     }
+    if let Some(ref h) = query.having {
+        collect_having_cols(h, items, &mut agg_cols, &mut distinct_cols);
+    }
     let targets: Vec<ColTarget<'_>> = agg_cols.iter().map(OwnedCol::as_target).collect();
+    let d_targets: Vec<Vec<ColTarget<'_>>> = distinct_cols
+        .iter()
+        .map(|c| vec![c.as_target()])
+        .collect();
 
     let mut fr = FrameReader::new(reader, dec_options.max_output);
     let mut peeler = FramePeeler::new();
@@ -161,40 +177,72 @@ fn stream_scalar_agg<R: Read, W: Write>(
     let mut total = MultiAggAcc::with_cols(targets.len());
     let mut first_seen = false;
     let mut mapped_state = None;
+    let mut d_maps: Vec<MultiGroupMap> = (0..distinct_cols.len()).map(|_| MultiGroupMap::default()).collect();
+    let mut d_first: Vec<bool> = vec![false; distinct_cols.len()];
+    let mut d_state: Vec<Option<GrpState<'_>>> = (0..distinct_cols.len()).map(|_| None).collect();
 
-    while let Some(f_bytes) = fr.next_frame()? {
-        if let Some(eff) = peeler.peel_frame(f_bytes, &sub_dec)? {
-            total.merge(&scalar_agg_step(
-                eff,
-                where_expr,
-                &targets,
-                &sub_dec,
-                &mut first_seen,
-                &mut mapped_state,
-            )?);
-        }
-    }
-    if let Some(tail_eff) = peeler.finish_tail()? {
+    let mut feed = |eff: &[u8]| -> Result<()> {
         total.merge(&scalar_agg_step(
-            tail_eff,
+            eff,
             where_expr,
             &targets,
             &sub_dec,
             &mut first_seen,
             &mut mapped_state,
         )?);
+        for di in 0..distinct_cols.len() {
+            for r in group_by_step(
+                eff,
+                where_expr,
+                &d_targets[di],
+                &[],
+                &sub_dec,
+                &mut d_first[di],
+                &mut d_state[di],
+            )? {
+                d_maps[di].add_entry(r.keys, r.row_count, &r.aggs);
+            }
+        }
+        Ok(())
+    };
+    while let Some(f_bytes) = fr.next_frame()? {
+        if let Some(eff) = peeler.peel_frame(f_bytes, &sub_dec)? {
+            feed(eff)?;
+        }
+    }
+    if let Some(tail_eff) = peeler.finish_tail()? {
+        feed(tail_eff)?;
+    }
+    let d_counts: Vec<u64> = d_maps.into_iter().map(|m| m.into_rows().len() as u64).collect();
+    let eval_scalar = |ex: &SelectExpr| -> Result<SqlVal> {
+        match ex {
+            SelectExpr::CountStar => Ok(SqlVal::Int(total.row_count)),
+            SelectExpr::CountDistinct(col) => {
+                let pos = distinct_cols.iter().position(|c| c == col).unwrap();
+                Ok(SqlVal::Int(d_counts[pos]))
+            }
+            SelectExpr::Agg { func, col } => {
+                let pos = agg_cols.iter().position(|c| c == col).unwrap();
+                Ok(SqlVal::from_agg(*func, &total.cols[pos]))
+            }
+            SelectExpr::Col(_) => Err(Error::InvalidOption(
+                "non-aggregate column in HAVING without GROUP BY",
+            )),
+        }
+    };
+    if let Some(ref h) = query.having {
+        if !eval_having(h, items, &eval_scalar)? {
+            return SqlTable {
+                headers,
+                rows: Vec::new(),
+            }
+            .write_formatted(writer, format, no_header);
+        }
     }
 
     let mut row = Vec::with_capacity(items.len());
     for it in items {
-        match &it.expr {
-            SelectExpr::CountStar => row.push(SqlVal::Int(total.row_count)),
-            SelectExpr::Agg { func, col } => {
-                let pos = agg_cols.iter().position(|c| c == col).unwrap();
-                row.push(SqlVal::from_agg(*func, &total.cols[pos]));
-            }
-            SelectExpr::Col(_) => unreachable!(),
-        }
+        row.push(eval_scalar(&it.expr)?);
     }
     SqlTable {
         headers,
@@ -261,34 +309,17 @@ fn stream_group_by<R: Read, W: Write>(
     no_header: bool,
     dec_options: &DecodeOptions,
 ) -> Result<()> {
-    let group_cols = resolve_group_cols(items, &query.group_by)?;
-    for it in items {
-        if let SelectExpr::Col(c) = &it.expr {
-            if !group_cols.contains(c) {
-                return Err(Error::InvalidOption(
-                    "SELECT column must appear in GROUP BY or aggregate",
-                ));
-            }
-        }
-    }
-    let mut agg_cols: Vec<OwnedCol> = Vec::new();
-    for it in items {
-        if let SelectExpr::Agg { col, .. } = &it.expr {
-            if !agg_cols.contains(col) {
-                agg_cols.push(col.clone());
-            }
-        }
-    }
-    for oi in &query.order_by {
-        let (_, ex_opt) = resolve_order_expr(items, &oi.key)?;
-        if let Some(SelectExpr::Agg { col, .. }) = ex_opt {
-            if !agg_cols.contains(col) {
-                agg_cols.push(col.clone());
-            }
-        }
-    }
+    let (group_cols, agg_cols, distinct_cols) = collect_group_query_cols(items, query)?;
     let g_targets: Vec<ColTarget<'_>> = group_cols.iter().map(OwnedCol::as_target).collect();
     let a_targets: Vec<ColTarget<'_>> = agg_cols.iter().map(OwnedCol::as_target).collect();
+    let d_targets: Vec<Vec<ColTarget<'_>>> = distinct_cols
+        .iter()
+        .map(|dc| {
+            let mut v = g_targets.clone();
+            v.push(dc.as_target());
+            v
+        })
+        .collect();
 
     let mut fr = FrameReader::new(reader, dec_options.max_output);
     let mut peeler = FramePeeler::new();
@@ -297,42 +328,42 @@ fn stream_group_by<R: Read, W: Write>(
     let mut merged = MultiGroupMap::default();
     let mut first_seen = false;
     let mut mapped_state = None;
+    let mut d_maps: Vec<MultiGroupMap> = (0..distinct_cols.len()).map(|_| MultiGroupMap::default()).collect();
+    let mut d_first = vec![false; distinct_cols.len()];
+    let mut d_state: Vec<Option<GrpState<'_>>> = (0..distinct_cols.len()).map(|_| None).collect();
 
+    let mut feed = |eff: &[u8]| -> Result<()> {
+        for r in group_by_step(eff, where_expr, &g_targets, &a_targets, &sub_dec, &mut first_seen, &mut mapped_state)? {
+            merged.add_entry(r.keys, r.row_count, &r.aggs);
+        }
+        for di in 0..distinct_cols.len() {
+            for r in group_by_step(eff, where_expr, &d_targets[di], &[], &sub_dec, &mut d_first[di], &mut d_state[di])? {
+                d_maps[di].add_entry(r.keys, r.row_count, &r.aggs);
+            }
+        }
+        Ok(())
+    };
     while let Some(f_bytes) = fr.next_frame()? {
         if let Some(eff) = peeler.peel_frame(f_bytes, &sub_dec)? {
-            for r in group_by_step(
-                eff,
-                where_expr,
-                &g_targets,
-                &a_targets,
-                &sub_dec,
-                &mut first_seen,
-                &mut mapped_state,
-            )? {
-                merged.add_entry(r.keys, r.row_count, &r.aggs);
-            }
+            feed(eff)?;
         }
     }
     if let Some(tail_eff) = peeler.finish_tail()? {
-        for r in group_by_step(
-            tail_eff,
-            where_expr,
-            &g_targets,
-            &a_targets,
-            &sub_dec,
-            &mut first_seen,
-            &mut mapped_state,
-        )? {
-            merged.add_entry(r.keys, r.row_count, &r.aggs);
-        }
+        feed(tail_eff)?;
     }
+
+    let distinct_maps = maps_to_distinct_counts(d_maps, group_cols.len());
 
     let tbl = finish_group_table(
         items,
+        query.having.as_ref(),
         &query.order_by,
         query.limit,
+        query.offset,
         &group_cols,
         &agg_cols,
+        &distinct_cols,
+        &distinct_maps,
         merged.into_rows(),
     )?;
     tbl.write_formatted(writer, format, no_header)
@@ -425,7 +456,7 @@ fn stream_star<R: Read, W: Write>(
     let mut sub_dec = dec_options.clone();
     sub_dec.max_output = usize::MAX;
 
-    if query.order_by.is_empty() {
+    if query.order_by.is_empty() && query.offset == 0 {
         let mut rem = lim;
         let mut first_seen = false;
         let mut hdr_state = None;
@@ -466,7 +497,7 @@ fn stream_star<R: Read, W: Write>(
         return writer.flush().map_err(|e| Error::Backend(e.to_string()));
     }
 
-    if query.order_by.len() == 1 {
+    if query.order_by.len() == 1 && query.offset == 0 {
         let oi = &query.order_by[0];
         if let OrderKey::Expr(SelectExpr::Col(ref c)) = oi.key {
             let mut combined = Vec::new();

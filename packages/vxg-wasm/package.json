@@ -1,0 +1,45 @@
+{
+  "name": "@vxg/wasm",
+  "version": "0.6.1",
+  "description": "Zero-WASI WebAssembly VXG adaptive block codec & compressed-domain SQL engine (NDJSON/CSV/Logs)",
+  "type": "module",
+  "main": "./index.mjs",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs"
+    },
+    "./vxg.wasm": "./vxg.wasm"
+  },
+  "files": [
+    "index.mjs",
+    "index.d.ts",
+    "vxg.wasm",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "keywords": [
+    "vxg",
+    "compression",
+    "sql",
+    "ndjson",
+    "csv",
+    "wasm",
+    "columnar"
+  ],
+  "author": "meftunca",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/meftunca/vxg.git",
+    "directory": "packages/vxg-wasm"
+  },
+  "homepage": "https://meftunca.github.io/vxg/playground",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

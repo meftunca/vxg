@@ -44,7 +44,7 @@ impl<'a> SqlParser<'a> {
         self.src.as_bytes().get(self.pos).copied()
     }
 
-    fn eat_char(&mut self, ch: u8) -> bool {
+    pub(super) fn eat_char(&mut self, ch: u8) -> bool {
         self.skip_ws();
         if self.src.as_bytes().get(self.pos) == Some(&ch) {
             self.pos += 1;
@@ -67,7 +67,7 @@ impl<'a> SqlParser<'a> {
         !(next.is_ascii_alphanumeric() || matches!(next, b'_' | b'.' | b':'))
     }
 
-    fn eat_kw(&mut self, kw: &str) -> bool {
+    pub(super) fn eat_kw(&mut self, kw: &str) -> bool {
         if self.peek_kw(kw) {
             self.pos += kw.len();
             true
@@ -132,7 +132,7 @@ impl<'a> SqlParser<'a> {
         Ok(self.src[start..self.pos].to_owned())
     }
 
-    fn parse_select_expr(&mut self) -> Result<SelectExpr> {
+    pub(super) fn parse_select_expr(&mut self) -> Result<SelectExpr> {
         for (kw, func) in [
             ("COUNT", AggFunc::Count),
             ("SUM", AggFunc::Sum),
@@ -148,13 +148,16 @@ impl<'a> SqlParser<'a> {
                     }
                     return Ok(SelectExpr::CountStar);
                 }
+                let is_distinct = func == AggFunc::Count && self.eat_kw("DISTINCT");
                 let col_name = self.read_ident()?;
                 if !self.eat_char(b')') {
                     return Err(Error::InvalidOption("expected ')' after aggregate column"));
                 }
-                return Ok(SelectExpr::Agg {
-                    func,
-                    col: OwnedCol::parse(&col_name)?,
+                let col = OwnedCol::parse(&col_name)?;
+                return Ok(if is_distinct {
+                    SelectExpr::CountDistinct(col)
+                } else {
+                    SelectExpr::Agg { func, col }
                 });
             }
             self.pos = save;
@@ -198,7 +201,7 @@ impl<'a> SqlParser<'a> {
         Ok(SelectProjection::Items(items))
     }
 
-    fn parse_literal_val(&mut self) -> Result<(bool, String)> {
+    pub(super) fn parse_literal_val(&mut self) -> Result<(bool, String)> {
         self.skip_ws();
         let Some(b0) = self.peek_byte() else {
             return Err(Error::InvalidOption("expected literal value in SQL WHERE"));
@@ -284,7 +287,7 @@ impl<'a> SqlParser<'a> {
         })
     }
 
-    fn eat_sym(&mut self, sym: &str) -> bool {
+    pub(super) fn eat_sym(&mut self, sym: &str) -> bool {
         self.skip_ws();
         if self.src[self.pos..].starts_with(sym) {
             self.pos += sym.len();
@@ -467,6 +470,7 @@ impl<'a> SqlParser<'a> {
         if !self.eat_kw("SELECT") {
             return Err(Error::InvalidOption("SQL query must begin with SELECT"));
         }
+        let distinct = self.eat_kw("DISTINCT");
         let projection = self.parse_select_list()?;
 
         let from_table = if self.eat_kw("FROM") {
@@ -512,6 +516,12 @@ impl<'a> SqlParser<'a> {
             }
         }
 
+        let having = if self.eat_kw("HAVING") {
+            Some(super::having::parse_having_or(self)?)
+        } else {
+            None
+        };
+
         let mut order_by = Vec::new();
         if self.eat_kw("ORDER") {
             if !self.eat_kw("BY") {
@@ -546,15 +556,24 @@ impl<'a> SqlParser<'a> {
             }
         }
 
-        let limit = if self.eat_kw("LIMIT") {
-            let (_, tok) = self.parse_literal_val()?;
-            Some(
-                tok.parse::<usize>()
-                    .map_err(|_| Error::InvalidOption("invalid integer in SQL LIMIT"))?,
-            )
-        } else {
-            None
-        };
+        let mut limit = None;
+        let mut offset = 0usize;
+        for _ in 0..2 {
+            if limit.is_none() && self.eat_kw("LIMIT") {
+                let (_, tok) = self.parse_literal_val()?;
+                limit = Some(
+                    tok.parse::<usize>()
+                        .map_err(|_| Error::InvalidOption("invalid integer in SQL LIMIT"))?,
+                );
+            } else if offset == 0 && self.eat_kw("OFFSET") {
+                let (_, tok) = self.parse_literal_val()?;
+                offset = tok
+                    .parse::<usize>()
+                    .map_err(|_| Error::InvalidOption("invalid integer in SQL OFFSET"))?;
+            } else {
+                break;
+            }
+        }
 
         let _ = self.eat_char(b';');
         self.skip_ws();
@@ -563,12 +582,15 @@ impl<'a> SqlParser<'a> {
         }
 
         Ok(SqlQuery {
+            distinct,
             projection,
             from_table,
             where_clause,
             group_by,
+            having,
             order_by,
             limit,
+            offset,
         })
     }
 }

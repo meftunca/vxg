@@ -1,6 +1,7 @@
 //! Compressed-domain in-memory / `mmap` SQL execution engine.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use crate::{
     ops::{
@@ -13,6 +14,10 @@ use crate::{
 };
 
 use super::format::{self, cmp_sql_val, SqlFormat, SqlTable, SqlVal};
+use super::having::{
+    apply_offset_limit, collect_group_query_cols, collect_having_cols, count_distinct_grouped,
+    count_distinct_scalar, eval_having, SqlHaving,
+};
 use super::project::{exec_projection, exec_star};
 use super::{
     GroupItem, OrderItem, OrderKey, OwnedCol, SelectExpr, SelectItem, SelectProjection, SqlQuery,
@@ -99,16 +104,26 @@ pub(crate) fn resolve_order_expr<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn eval_group_expr(
     expr: &SelectExpr,
     group_cols: &[OwnedCol],
     agg_cols: &[OwnedCol],
+    distinct_cols: &[OwnedCol],
     keys: &[GroupKey],
     row_count: u64,
     aggs: &[AggStats],
+    distinct_counts: &[u64],
 ) -> Result<SqlVal> {
     match expr {
         SelectExpr::CountStar => Ok(SqlVal::Int(row_count)),
+        SelectExpr::CountDistinct(c) => {
+            let pos = distinct_cols
+                .iter()
+                .position(|dc| dc == c)
+                .expect("distinct_col registered");
+            Ok(SqlVal::Int(distinct_counts[pos]))
+        }
         SelectExpr::Col(c) => {
             let Some(pos) = group_cols.iter().position(|gc| gc == c) else {
                 return Err(Error::InvalidOption(
@@ -127,12 +142,17 @@ pub(crate) fn eval_group_expr(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn finish_group_table(
     items: &[SelectItem],
+    having: Option<&SqlHaving>,
     order_by: &[OrderItem],
     limit: Option<usize>,
+    offset: usize,
     group_cols: &[OwnedCol],
     agg_cols: &[OwnedCol],
+    distinct_cols: &[OwnedCol],
+    distinct_maps: &[HashMap<Vec<GroupKey>, u64>],
     mrows: Vec<MultiGroupRow>,
 ) -> Result<SqlTable> {
     let headers: Vec<String> = items.iter().map(SelectItem::header_name).collect();
@@ -150,16 +170,39 @@ pub(crate) fn finish_group_table(
     }
 
     let mut decorated: Vec<(Vec<SqlVal>, Vec<SqlVal>)> = Vec::with_capacity(mrows.len());
+    let mut dcounts = vec![0u64; distinct_cols.len()];
     for mr in &mrows {
+        for (di, dm) in distinct_maps.iter().enumerate() {
+            dcounts[di] = dm.get(&mr.keys).copied().unwrap_or(0);
+        }
+        if let Some(h) = having {
+            let pass = eval_having(h, items, &|ex| {
+                eval_group_expr(
+                    ex,
+                    group_cols,
+                    agg_cols,
+                    distinct_cols,
+                    &mr.keys,
+                    mr.row_count,
+                    &mr.aggs,
+                    &dcounts,
+                )
+            })?;
+            if !pass {
+                continue;
+            }
+        }
         let mut row = Vec::with_capacity(items.len());
         for it in items {
             row.push(eval_group_expr(
                 &it.expr,
                 group_cols,
                 agg_cols,
+                distinct_cols,
                 &mr.keys,
                 mr.row_count,
                 &mr.aggs,
+                &dcounts,
             )?);
         }
         let mut extra = Vec::new();
@@ -170,9 +213,11 @@ pub(crate) fn finish_group_table(
                         ex,
                         group_cols,
                         agg_cols,
+                        distinct_cols,
                         &mr.keys,
                         mr.row_count,
                         &mr.aggs,
+                        &dcounts,
                     )?);
                 }
             }
@@ -200,9 +245,7 @@ pub(crate) fn finish_group_table(
         });
     }
 
-    if let Some(lim) = limit {
-        decorated.truncate(lim);
-    }
+    apply_offset_limit(&mut decorated, offset, limit);
     Ok(SqlTable {
         headers,
         rows: decorated.into_iter().map(|(r, _)| r).collect(),
@@ -247,11 +290,11 @@ pub fn execute_sql_table(
         SelectProjection::Star => exec_star(frame_bytes, where_expr, query, dec_options),
         SelectProjection::Items(items) => {
             let has_agg = items.iter().any(|it| it.expr.is_agg());
-            if !query.group_by.is_empty() {
+            if !query.group_by.is_empty() || (query.distinct && !has_agg) {
                 return exec_group_by(frame_bytes, items, where_expr, query, dec_options);
             }
             if has_agg {
-                return exec_scalar_agg(frame_bytes, items, where_expr, query.limit, dec_options);
+                return exec_scalar_agg(frame_bytes, items, where_expr, query, dec_options);
             }
             exec_projection(frame_bytes, items, where_expr, query, dec_options)
         }
@@ -262,7 +305,7 @@ fn exec_scalar_agg(
     frame_bytes: &[u8],
     items: &[SelectItem],
     where_expr: Option<&PredExpr<'_>>,
-    limit: Option<usize>,
+    query: &SqlQuery,
     dec_options: &DecodeOptions,
 ) -> Result<SqlTable> {
     if items.iter().any(|it| matches!(it.expr, SelectExpr::Col(_))) {
@@ -271,40 +314,52 @@ fn exec_scalar_agg(
         ));
     }
     let headers: Vec<String> = items.iter().map(SelectItem::header_name).collect();
-    if limit == Some(0) {
+    if query.limit == Some(0) || query.offset > 0 {
         return Ok(SqlTable {
             headers,
             rows: Vec::new(),
         });
     }
     let mut agg_cols: Vec<OwnedCol> = Vec::new();
+    let mut distinct_cols: Vec<OwnedCol> = Vec::new();
     for it in items {
-        if let SelectExpr::Agg { col, .. } = &it.expr {
-            if !agg_cols.contains(col) {
-                agg_cols.push(col.clone());
+        match &it.expr {
+            SelectExpr::Agg { col, .. } if !agg_cols.contains(col) => agg_cols.push(col.clone()),
+            SelectExpr::CountDistinct(col) if !distinct_cols.contains(col) => {
+                distinct_cols.push(col.clone())
             }
+            _ => {}
         }
     }
+    if let Some(ref h) = query.having {
+        collect_having_cols(h, items, &mut agg_cols, &mut distinct_cols);
+    }
 
+    let needs_count_star = items.iter().any(|it| matches!(it.expr, SelectExpr::CountStar))
+        || query.having.is_some();
     let (row_count, col_stats) = if agg_cols.is_empty() {
-        let cnt = match where_expr {
-            None => {
-                let mut n = crate::frame_row_count(frame_bytes)? as u64;
-                if peek_delim_header_fast(frame_bytes, dec_options)?.is_some() {
-                    n = n.saturating_sub(1);
+        let cnt = if !needs_count_star && !distinct_cols.is_empty() {
+            0
+        } else {
+            match where_expr {
+                None => {
+                    let mut n = crate::frame_row_count(frame_bytes)? as u64;
+                    if peek_delim_header_fast(frame_bytes, dec_options)?.is_some() {
+                        n = n.saturating_sub(1);
+                    }
+                    n
                 }
-                n
-            }
-            Some(w) => {
-                let mut n = crate::count_where(frame_bytes, w, dec_options)?;
-                if !crate::ops::csv_header::expr_contains_json_key(w) {
-                    if let Some(hdr) = peek_delim_header_fast(frame_bytes, dec_options)? {
-                        if line_matches_expr(&hdr.header_line, w) {
-                            n = n.saturating_sub(1);
+                Some(w) => {
+                    let mut n = crate::count_where(frame_bytes, w, dec_options)?;
+                    if !crate::ops::csv_header::expr_contains_json_key(w) {
+                        if let Some(hdr) = peek_delim_header_fast(frame_bytes, dec_options)? {
+                            if line_matches_expr(&hdr.header_line, w) {
+                                n = n.saturating_sub(1);
+                            }
                         }
                     }
+                    n
                 }
-                n
             }
         };
         (cnt, Vec::new())
@@ -325,16 +380,39 @@ fn exec_scalar_agg(
         (acc.row_count, acc.cols)
     };
 
-    let mut row = Vec::with_capacity(items.len());
-    for it in items {
-        match &it.expr {
-            SelectExpr::CountStar => row.push(SqlVal::Int(row_count)),
+    let mut distinct_vals = Vec::with_capacity(distinct_cols.len());
+    for dc in &distinct_cols {
+        distinct_vals.push(count_distinct_scalar(frame_bytes, where_expr, dc, dec_options)?);
+    }
+
+    let eval_scalar = |ex: &SelectExpr| -> Result<SqlVal> {
+        match ex {
+            SelectExpr::CountStar => Ok(SqlVal::Int(row_count)),
+            SelectExpr::CountDistinct(col) => {
+                let pos = distinct_cols.iter().position(|c| c == col).unwrap();
+                Ok(SqlVal::Int(distinct_vals[pos]))
+            }
             SelectExpr::Agg { func, col } => {
                 let pos = agg_cols.iter().position(|c| c == col).unwrap();
-                row.push(SqlVal::from_agg(*func, &col_stats[pos]));
+                Ok(SqlVal::from_agg(*func, &col_stats[pos]))
             }
-            SelectExpr::Col(_) => unreachable!(),
+            SelectExpr::Col(_) => Err(Error::InvalidOption(
+                "non-aggregate column in HAVING without GROUP BY",
+            )),
         }
+    };
+    if let Some(ref h) = query.having {
+        if !eval_having(h, items, &eval_scalar)? {
+            return Ok(SqlTable {
+                headers,
+                rows: Vec::new(),
+            });
+        }
+    }
+
+    let mut row = Vec::with_capacity(items.len());
+    for it in items {
+        row.push(eval_scalar(&it.expr)?);
     }
     Ok(SqlTable {
         headers,
@@ -349,32 +427,7 @@ fn exec_group_by(
     query: &SqlQuery,
     dec_options: &DecodeOptions,
 ) -> Result<SqlTable> {
-    let group_cols = resolve_group_cols(items, &query.group_by)?;
-    for it in items {
-        if let SelectExpr::Col(c) = &it.expr {
-            if !group_cols.contains(c) {
-                return Err(Error::InvalidOption(
-                    "SELECT column must appear in GROUP BY or aggregate",
-                ));
-            }
-        }
-    }
-    let mut agg_cols: Vec<OwnedCol> = Vec::new();
-    for it in items {
-        if let SelectExpr::Agg { col, .. } = &it.expr {
-            if !agg_cols.contains(col) {
-                agg_cols.push(col.clone());
-            }
-        }
-    }
-    for oi in &query.order_by {
-        let (_, ex_opt) = resolve_order_expr(items, &oi.key)?;
-        if let Some(SelectExpr::Agg { col, .. }) = ex_opt {
-            if !agg_cols.contains(col) {
-                agg_cols.push(col.clone());
-            }
-        }
-    }
+    let (group_cols, agg_cols, distinct_cols) = collect_group_query_cols(items, query)?;
 
     let mrows = if group_cols.len() == 1 && agg_cols.len() <= 1 {
         let gcol = group_cols[0].as_target();
@@ -397,13 +450,22 @@ fn exec_group_by(
         let a_targets: Vec<ColTarget<'_>> = agg_cols.iter().map(OwnedCol::as_target).collect();
         multi_group_by(frame_bytes, where_expr, &g_targets, &a_targets, dec_options)?
     };
+    let distinct_maps = if distinct_cols.is_empty() {
+        Vec::new()
+    } else {
+        count_distinct_grouped(frame_bytes, where_expr, &group_cols, &distinct_cols, dec_options)?
+    };
 
     finish_group_table(
         items,
+        query.having.as_ref(),
         &query.order_by,
         query.limit,
+        query.offset,
         &group_cols,
         &agg_cols,
+        &distinct_cols,
+        &distinct_maps,
         mrows,
     )
 }
@@ -417,6 +479,8 @@ pub fn execute_sql(
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
     if matches!(query.projection, SelectProjection::Star)
+        && !query.distinct
+        && query.offset == 0
         && query.group_by.is_empty()
         && format != SqlFormat::Csv
         && peek_delim_header(frame_bytes, dec_options)?.is_none()

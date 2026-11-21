@@ -8,12 +8,14 @@ use crate::{
 
 pub(crate) mod exec;
 pub(crate) mod format;
+pub(crate) mod having;
 mod parser;
 pub(crate) mod project;
 pub(crate) mod stream;
 
 pub use exec::{execute_sql, execute_sql_table};
 pub use format::{SqlFormat, SqlTable, SqlVal};
+pub use having::{HavingCmp, SqlHaving};
 pub use stream::execute_sql_stream;
 
 /// SQL aggregate function.
@@ -84,6 +86,7 @@ impl OwnedCol {
 pub enum SelectExpr {
     Col(OwnedCol),
     CountStar,
+    CountDistinct(OwnedCol),
     Agg { func: AggFunc, col: OwnedCol },
 }
 
@@ -92,13 +95,17 @@ impl SelectExpr {
         match self {
             Self::Col(c) => c.display_name(),
             Self::CountStar => "count(*)".to_owned(),
+            Self::CountDistinct(c) => format!("count(distinct {})", c.display_name()),
             Self::Agg { func, col } => format!("{}({})", func.name(), col.display_name()),
         }
     }
 
     #[inline]
     pub fn is_agg(&self) -> bool {
-        matches!(self, Self::CountStar | Self::Agg { .. })
+        matches!(
+            self,
+            Self::CountStar | Self::CountDistinct(_) | Self::Agg { .. }
+        )
     }
 }
 
@@ -251,12 +258,15 @@ impl SqlWhere {
 /// Parsed compressed-domain SQL query.
 #[derive(Clone, Debug)]
 pub struct SqlQuery {
+    pub distinct: bool,
     pub projection: SelectProjection,
     pub from_table: Option<String>,
     pub where_clause: Option<SqlWhere>,
     pub group_by: Vec<GroupItem>,
+    pub having: Option<SqlHaving>,
     pub order_by: Vec<OrderItem>,
     pub limit: Option<usize>,
+    pub offset: usize,
 }
 
 impl SqlQuery {

@@ -338,12 +338,15 @@ pub fn export_arrow_batch(
     dec_options: &DecodeOptions,
 ) -> Result<ArrowBatch> {
     let default_star = SqlQuery {
+        distinct: false,
         projection: SelectProjection::Star,
         from_table: None,
         where_clause: None,
         group_by: Vec::new(),
+        having: None,
         order_by: Vec::new(),
         limit: None,
+        offset: 0,
     };
     let q = query.unwrap_or(&default_star);
     if let Some(res) = crate::arrow_stream_scan::try_scan_sql_query_arrow(frame_bytes, q, dec_options)
@@ -365,12 +368,15 @@ pub fn export_arrow_batch(
                 })
                 .collect();
             let expanded = SqlQuery {
+                distinct: q.distinct,
                 projection: SelectProjection::Items(items),
                 from_table: q.from_table.clone(),
                 where_clause: q.where_clause.clone(),
                 group_by: Vec::new(),
+                having: q.having.clone(),
                 order_by: q.order_by.clone(),
                 limit: q.limit,
+                offset: q.offset,
             };
             let table = execute_sql_table(frame_bytes, &expanded, dec_options)?;
             return Ok(ArrowBatch::from_sql_table(&table));

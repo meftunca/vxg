@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1 — Compressed-Domain SQL `HAVING`, `SELECT DISTINCT`, `COUNT(DISTINCT col)` & `OFFSET`, `@vxg/wasm` Package, `crates.io` / Homebrew Packaging & Automated 4-Platform Releases
+
+- **Expanded Compressed-Domain SQL Engine (`src/sql/having.rs`, `src/sql/parser.rs`, `src/sql/exec.rs`, `src/sql/project.rs`, `src/sql/stream.rs`, `tests/sql_having_distinct_offset.rs`):**
+  - Added full boolean **`HAVING`** (`AND`/`OR`/`NOT`/parentheses + aggregate/alias comparisons) across both `GROUP BY` and scalar aggregate queries.
+  - Added compressed-domain **`SELECT DISTINCT col1, col2`** (lowered directly onto VXG's dictionary/bit-packed `group_by` / `multi_group_by` engine without row reconstruction) and **`COUNT(DISTINCT col)`** (both scalar and per-group).
+  - Added **`OFFSET N`** pagination across `SELECT *`, column projections, `ORDER BY`, `GROUP BY`, and `SELECT DISTINCT` with 100% parity between in-memory `execute_sql` and multi-frame streaming `execute_sql_stream`.
+- **Ecosystem, Distribution & Unified Vitrin (`Cargo.toml`, `README.md`, `packages/vxg-wasm/`, `packaging/homebrew/vxg.rb`, `.github/workflows/vxg-release.yml`):**
+  - Added complete `crates.io` packaging metadata & `include` allowlist (`cargo package` verified), zero-dep ESM + TypeScript **`@vxg/wasm`** wrapper (`compress`, `decompress`, and compressed-domain `sql()` inside WebAssembly), Homebrew formula (`packaging/homebrew/vxg.rb`), and automated 4-platform GitHub Release workflow (Linux x86_64/ARM64, macOS ARM64, Windows x86_64, `vxg.wasm`, `@vxg/wasm`).
+  - Updated top-level `README.md` to showcase the unified 3-pillar compressed-domain ecosystem (`VXG`, `VXT-Turbo`, `VIMG`).
+
 ## 0.6.0 — Production `VXT-Turbo` (`E8` / `E8-HQ` / `E8-HQ7`), Apple Metal (`40.7 tok/s`), NVIDIA CUDA Resident (`963 tok/s`), Lossless Speculative Decoding, `MoE` & `VXT Studio` Desktop
 
 - **Apple Metal Resident LLM/VLM Engine (`crates/vxg-tensor/native/metal_llm_turbo.mm`, `native/shaders/vxt_llm_turbo.metal`, `src/metal_turbo_ffi.rs`, `src/llm.rs`):**
