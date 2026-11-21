@@ -1,7 +1,13 @@
 # Changelog
 
-## 0.6.1 (`vxg-tensor` & `VXT Studio`) — `VXT-Turbo-HQ` (`E8-HQ`), 100% VRAM-Resident NVIDIA CUDA Runner (`963 tok/s` RTX 5090), Zero-OOM Streaming Packer, `MoE`, Production OpenAI API & `VXT Studio` Upgrade
+## 0.6.0 — Production `VXT-Turbo` (`E8` / `E8-HQ` / `E8-HQ7`), Apple Metal (`40.7 tok/s`), NVIDIA CUDA Resident (`963 tok/s`), Lossless Speculative Decoding, `MoE` & `VXT Studio` Desktop
 
+- **Apple Metal Resident LLM/VLM Engine (`crates/vxg-tensor/native/metal_llm_turbo.mm`, `native/shaders/vxt_llm_turbo.metal`, `src/metal_turbo_ffi.rs`, `src/llm.rs`):**
+  - Implemented `VXT-Turbo` (`bits = 2..10`) unified `weight_arena_buf` streaming weights layer-by-layer from CPU into GPU memory (**`-11.0 GB`** peak RAM drop on `Qwen3.5-9B`, `68.4s -> 22.0s` load).
+  - Rewrote the `E8-HQ` (`8-bit`) Metal kernel around `half4` XOR-centered native SIMD decode and added adaptive load-time `E8-HQ7` (`7-bit`, `-12.5%` GPU RAM) & `E8-HQ6` (`6-bit`, `-25%`) GPU arena compaction (**`9,081 MiB -> 8,294 MiB`** arena on `Qwen3.5-9B-q6.vxt`, **`29 -> 40.7 tok/s`** solo decode on Apple M2 Max with 100% token-for-token parity).
+  - Added zero-byte lazy Vision (`vis.*` filtered out on text-only loads until an image is attached) and lazy LM-Sketch buffer allocation (`-306 MiB` RAM), plus raised `max_tokens` limits to **`65,536`** across engine and server.
+- **Lossless Dual-Model Speculative Decoding (`crates/vxg-tensor/src/speculative.rs`):**
+  - Added `--draft <draft.vxt>` / Studio draft selection with Metal `M <= 4` batched verification + GPU DeltaNet rollback/replay, CUDA resident checkpoint/replay, and CPU exact greedy & Leviathan stochastic rejection sampling.
 - **`VXT-Turbo-HQ` (`E8-HQ`, `bits = 8`) Gosset Lattice Quantizer (`crates/vxg-tensor/src/turbo_e8_hq.rs`, `reports/qwen35-9b-compression-eval.json`):**
   - Added 8-bit even-parity 8D Gosset lattice (`E8-HQ`) with exact `f16` 32-column scales, full-width `SuperBlockHessian` `act_order` `LDL-GPTQ`, and Schur-complement Lagrangian water-filling (`Lagr(alpha)`).
   - Across a 22-model `Qwen3.5-9B` evaluation against `GGUF`, **`VXT-Turbo-HQ (s=0.25)` (`7.713 bpw`, `8.632 GB`)** is **`0.89 GB` smaller than `GGUF Q8_0` (`9.517 GB`)** while beating `Q8_0` on Wiki 580ch PPL (`8.1826` vs `8.1951`), Wiki Med KLD (`0.0004` vs `0.0005`), and TR Mean KLD (`0.0004` vs `0.0009`, `-55.6%`); **`VXT-Turbo-HQ (s=0.75)` (`6.269 bpw`, `7.017 GB`)** is **`0.43 GB` smaller than `GGUF Q6_K` (`7.447 GB`)** while beating `Q6_K` on Wiki PPL (`8.1883` vs `8.2195`), Wiki Top-1 (`97.55%` vs `97.45%`), TR Mean KLD (`0.0015` vs `0.0022`, `-31.8%`), and TR Top-1 (`98.31%` vs `97.75%`).
@@ -13,8 +19,9 @@
 - **Mixture-of-Experts (`MoE`) & Production OpenAI Serving (`src/llm_moe.rs`, `src/server_openai.rs`, `src/server_http.rs`):**
   - Added Top-K softmax MoE routing + gated shared expert (`shexp`) for `Qwen3-MoE`, `Mixtral`, and `DeepSeek-MoE`.
   - Extended `vxg-tensor serve` with `tools` / `<tool_call>` -> OpenAI `tool_calls`, `response_format` (`json_object` / `json_schema`), `stop` sequences, `POST /v1/completions`, and **Prometheus `GET /metrics`**.
-- **Production `VXT Studio` Upgrade (`apps/vxt-studio`):**
-  - Integrated HuggingFace Hub direct downloader + cancelable live progress, zero-OOM streaming `q4`/`q6`/`q8`/`q3`/`cb4`/`lossless` Pareto presets, dynamic Metal/CUDA backend status + model unload, Chat JSON Mode & stop sequences, and live `/v1/models` + `/health` + Prometheus `/metrics` API Hub.
+- **Production `VXT Studio` Desktop App (`apps/vxt-studio`):**
+  - Redesigned in modern Claude/Codex layout with full GFM Markdown + KaTeX math + syntax-highlighted code renderer (`MarkdownRenderer.tsx`), live HuggingFace Hub model search (`search_hf_models_cmd`), cancelable download + `.vxt` conversion forge, dual-model Speculative Draft selector, async non-blocking model unload, `64K` `max_tokens` presets, and 1-click long-chat context compaction (`Sıkıştır`).
+  - Also includes all `0.6.0-rc.1` `vxg` core gains (`mincore(2)` + `1 MiB` coalesced `pread(2)` hybrid cold/partial-cache engine, hardware `CRC32C` on `ARMv8`/`SSE4.2`, lock-free `LIMIT` projection, `StreamEncoder` reuse, and frozen `Format v4/v5` wire emission).
 
 ## 0.6.0-rc.1 — Hybrid `mincore + pread` Cold/Partial-Cache Engine, Hardware `CRC32C`, Lock-Free `LIMIT` Projection, `StreamEncoder` Reuse & Wire Format Freeze (`Format v4/v5`)
 

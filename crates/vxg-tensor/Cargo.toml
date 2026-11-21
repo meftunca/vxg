@@ -1,6 +1,6 @@
 [package]
 name = "vxg-tensor"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.89"
 description = "VXG compressed-domain AI model weight codec (.vxt) with VXT-Turbo E8/E8-HQ, Apple Metal & NVIDIA CUDA resident LLM/VLM/MoE runners, and OpenAI SSE server"

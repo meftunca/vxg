@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "vxg"
-version = "0.6.0-rc.1"
+version = "0.6.0"
 dependencies = [
  "mimalloc",
  "tikv-jemallocator",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "vxg-tensor"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "fancy-regex",
  "image",

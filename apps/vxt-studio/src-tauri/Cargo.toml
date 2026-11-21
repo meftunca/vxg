@@ -1,6 +1,6 @@
 [package]
 name = "vxt-studio"
-version = "0.1.0"
+version = "0.6.0"
 description = "VXT Studio — Production Compressed-Domain AI Chat, Multimodal Vision, OpenAI Server & Streaming .vxt Tensor Forge (Metal & CUDA)"
 edition = "2021"
 
