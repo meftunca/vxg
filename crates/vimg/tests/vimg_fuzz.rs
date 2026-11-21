@@ -120,6 +120,8 @@ fn oom_bombs_and_invalid_headers_are_rejected_without_allocation() {
             blur: 0.0,
             sharpen: 0.0,
             contrast: 1.0,
+            saturation: 1.0,
+            temperature: 0.0,
         };
         let ok_res = vimg_decode_query_v2_alloc(valid.as_ptr(), valid.len(), &q);
         assert_eq!(ok_res.status, 0);

@@ -110,6 +110,8 @@ pub struct VimgQueryC {
     pub blur: f32,
     pub sharpen: f32,
     pub contrast: f32,
+    pub saturation: f32,
+    pub temperature: f32,
 }
 
 #[no_mangle]
@@ -136,6 +138,8 @@ pub unsafe extern "C" fn vimg_decode_query_v2_alloc(
             sharpen: q.sharpen,
             brightness: q.brightness,
             contrast: if q.contrast <= 0.0 { 1.0 } else { q.contrast },
+            saturation: if q.saturation <= 0.0 { 1.0 } else { q.saturation },
+            temperature: q.temperature,
             rotate_cw: q.rotate_cw,
             flip_h: q.flip_h != 0,
             flip_v: q.flip_v != 0,
@@ -364,8 +368,8 @@ pub unsafe extern "C" fn vimg_wasm_parse_header(ptr: *const u8, len: usize) -> i
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn vimg_wasm_plan(
+#[allow(clippy::too_many_arguments)]
+unsafe fn wasm_plan_impl(
     prefix_ptr: *const u8,
     prefix_len: usize,
     crop_x: u32,
@@ -376,6 +380,7 @@ pub unsafe extern "C" fn vimg_wasm_plan(
     target_h: u32,
     grayscale: u8,
     sepia: u8,
+    force_level: i32,
 ) -> i32 {
     let meta = &mut *core::ptr::addr_of_mut!(WASM_META);
     meta.fill(0);
@@ -392,6 +397,7 @@ pub unsafe extern "C" fn vimg_wasm_plan(
         crop: if crop_w > 0 && crop_h > 0 { Some((crop_x, crop_y, crop_w, crop_h)) } else { None },
         target_width: (target_w > 0).then_some(target_w),
         target_height: (target_h > 0).then_some(target_h),
+        force_level: (force_level >= 0).then_some(force_level.min(255) as u8),
         grayscale: grayscale != 0,
         sepia: sepia != 0,
         ..TransformQuery::default()
@@ -433,7 +439,42 @@ pub unsafe extern "C" fn vimg_wasm_plan(
 
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn vimg_wasm_decode_sparse(
+pub unsafe extern "C" fn vimg_wasm_plan(
+    prefix_ptr: *const u8,
+    prefix_len: usize,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+    target_w: u32,
+    target_h: u32,
+    grayscale: u8,
+    sepia: u8,
+) -> i32 {
+    wasm_plan_impl(prefix_ptr, prefix_len, crop_x, crop_y, crop_w, crop_h, target_w, target_h, grayscale, sepia, -1)
+}
+
+/// v0.3.0 range planner adding explicit `force_level` (`-1` = auto, `0..=dwt_levels` = progressive tier).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn vimg_wasm_plan_v3(
+    prefix_ptr: *const u8,
+    prefix_len: usize,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+    target_w: u32,
+    target_h: u32,
+    grayscale: u8,
+    sepia: u8,
+    force_level: i32,
+) -> i32 {
+    wasm_plan_impl(prefix_ptr, prefix_len, crop_x, crop_y, crop_w, crop_h, target_w, target_h, grayscale, sepia, force_level)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn wasm_decode_sparse_impl(
     prefix_ptr: *const u8,
     prefix_len: usize,
     span_offsets_ptr: *const u32,
@@ -453,7 +494,10 @@ pub unsafe extern "C" fn vimg_wasm_decode_sparse(
     sharpen: f32,
     brightness: i16,
     contrast: f32,
+    saturation: f32,
+    temperature: f32,
     rotate_cw: u8,
+    force_level: i32,
 ) -> i32 {
     let meta = &mut *core::ptr::addr_of_mut!(WASM_META);
     meta.fill(0);
@@ -492,12 +536,15 @@ pub unsafe extern "C" fn vimg_wasm_decode_sparse(
         crop: if crop_w > 0 && crop_h > 0 { Some((crop_x, crop_y, crop_w, crop_h)) } else { None },
         target_width: (target_w > 0).then_some(target_w),
         target_height: (target_h > 0).then_some(target_h),
+        force_level: (force_level >= 0).then_some(force_level.min(255) as u8),
         grayscale: grayscale != 0,
         sepia: sepia != 0,
         blur,
         sharpen,
         brightness,
         contrast: if contrast <= 0.0 { 1.0 } else { contrast },
+        saturation: if saturation < 0.0 { 1.0 } else { saturation },
+        temperature,
         rotate_cw,
         ..TransformQuery::default()
     };
@@ -544,16 +591,79 @@ pub unsafe extern "C" fn vimg_wasm_decode_sparse(
     }
 }
 
-/// Encodes browser `ImageData` (`RGBA8`, `width * height * 4` bytes) into a `.vimg` buffer in WASM.
-/// Auto-detects opaque images and packs them as 3-channel RGB for maximum compression ratio.
-/// On success returns `0` with `WASM_META[6] = ptr`, `WASM_META[7] = len` (`cap == len`).
 #[no_mangle]
-pub unsafe extern "C" fn vimg_wasm_encode_rgba(
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn vimg_wasm_decode_sparse(
+    prefix_ptr: *const u8,
+    prefix_len: usize,
+    span_offsets_ptr: *const u32,
+    span_lens_ptr: *const u32,
+    n_spans: usize,
+    spans_data_ptr: *const u8,
+    spans_data_len: usize,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+    target_w: u32,
+    target_h: u32,
+    grayscale: u8,
+    sepia: u8,
+    blur: f32,
+    sharpen: f32,
+    brightness: i16,
+    contrast: f32,
+    rotate_cw: u8,
+) -> i32 {
+    wasm_decode_sparse_impl(
+        prefix_ptr, prefix_len, span_offsets_ptr, span_lens_ptr, n_spans, spans_data_ptr, spans_data_len,
+        crop_x, crop_y, crop_w, crop_h, target_w, target_h, grayscale, sepia, blur, sharpen, brightness,
+        contrast, 1.0, 0.0, rotate_cw, -1,
+    )
+}
+
+/// v0.3.0 sparse WASM decoder adding compressed-domain `saturation`, `temperature`, and `force_level`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn vimg_wasm_decode_sparse_v3(
+    prefix_ptr: *const u8,
+    prefix_len: usize,
+    span_offsets_ptr: *const u32,
+    span_lens_ptr: *const u32,
+    n_spans: usize,
+    spans_data_ptr: *const u8,
+    spans_data_len: usize,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+    target_w: u32,
+    target_h: u32,
+    grayscale: u8,
+    sepia: u8,
+    blur: f32,
+    sharpen: f32,
+    brightness: i16,
+    contrast: f32,
+    saturation: f32,
+    temperature: f32,
+    rotate_cw: u8,
+    force_level: i32,
+) -> i32 {
+    wasm_decode_sparse_impl(
+        prefix_ptr, prefix_len, span_offsets_ptr, span_lens_ptr, n_spans, spans_data_ptr, spans_data_len,
+        crop_x, crop_y, crop_w, crop_h, target_w, target_h, grayscale, sepia, blur, sharpen, brightness,
+        contrast, saturation, temperature, rotate_cw, force_level,
+    )
+}
+
+unsafe fn wasm_encode_rgba_impl(
     rgba_ptr: *const u8,
     width: u32,
     height: u32,
     quality: u8,
     tile_size: u32,
+    adaptive_quant: bool,
 ) -> i32 {
     let meta = &mut *core::ptr::addr_of_mut!(WASM_META);
     meta.fill(0);
@@ -593,6 +703,7 @@ pub unsafe extern "C" fn vimg_wasm_encode_rgba(
         tile_size: if tile_size == 0 { 256 } else { tile_size },
         dwt_levels: 3,
         chroma_420: quality < 100,
+        adaptive_quant,
         checksum: true,
         threads: 1,
         ..EncodeOptions::default()
@@ -618,4 +729,31 @@ pub unsafe extern "C" fn vimg_wasm_encode_rgba(
             -2
         }
     }
+}
+
+/// Encodes browser `ImageData` (`RGBA8`, `width * height * 4` bytes) into a `.vimg` buffer in WASM.
+/// Auto-detects opaque images and packs them as 3-channel RGB for maximum compression ratio.
+/// On success returns `0` with `WASM_META[6] = ptr`, `WASM_META[7] = len` (`cap == len`).
+#[no_mangle]
+pub unsafe extern "C" fn vimg_wasm_encode_rgba(
+    rgba_ptr: *const u8,
+    width: u32,
+    height: u32,
+    quality: u8,
+    tile_size: u32,
+) -> i32 {
+    wasm_encode_rgba_impl(rgba_ptr, width, height, quality, tile_size, false)
+}
+
+/// v0.3.0 WASM encoder adding Tile-Adaptive Psychovisual Quantization (`adaptive_quant != 0`).
+#[no_mangle]
+pub unsafe extern "C" fn vimg_wasm_encode_rgba_v3(
+    rgba_ptr: *const u8,
+    width: u32,
+    height: u32,
+    quality: u8,
+    tile_size: u32,
+    adaptive_quant: u8,
+) -> i32 {
+    wasm_encode_rgba_impl(rgba_ptr, width, height, quality, tile_size, adaptive_quant != 0)
 }

@@ -32,6 +32,10 @@ pub const FLAG_BIT_DEPTH_10: u16 = 0x0010;
 pub const FLAG_BIT_DEPTH_12: u16 = 0x0020;
 pub const FLAG_HAS_ICC: u16 = 0x0040;
 pub const FLAG_HAS_META: u16 = 0x0080;
+/// 2-bit shift count (`0..=3`) recording how many fine pyramid levels were stripped by
+/// `downscale_vimg_zero_decode`, preserving exact `quant_step` parity without re-quantizing.
+pub const FLAG_QUANT_SHIFT_MASK: u16 = 0x0300;
+pub const FLAG_QUANT_SHIFT_BIT: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VimgHeader {
@@ -128,6 +132,18 @@ impl VimgHeader {
     #[inline]
     pub fn has_meta(&self) -> bool {
         (self.flags & FLAG_HAS_META) != 0
+    }
+
+    /// Number of stripped finest wavelet levels from zero-decode pyramid truncation (`0..=3`).
+    #[inline]
+    pub fn quant_level_shift(&self) -> usize {
+        ((self.flags & FLAG_QUANT_SHIFT_MASK) >> FLAG_QUANT_SHIFT_BIT) as usize
+    }
+
+    /// Effective `dwt_levels` for perceptual `quant_step` lookup (`dwt_levels + quant_level_shift`).
+    #[inline]
+    pub fn quant_dwt_levels(&self) -> usize {
+        self.dwt_levels as usize + self.quant_level_shift()
     }
 
     #[inline]
@@ -958,6 +974,138 @@ pub fn crop_vimg_zero_decode(
         }
     }
 
+    for (i, e) in req_meta.iter().enumerate() {
+        let (ci, rel_off) = mapping[i];
+        let slice = &fetched[ci][rel_off..rel_off + e.len as usize];
+        if h.has_crc() {
+            let actual = crc32c(slice);
+            if actual != e.crc32c {
+                return Err(Error::ChecksumMismatch { expected: e.crc32c, actual });
+            }
+        }
+        out[dir_pos..dir_pos + 4].copy_from_slice(&e.len.to_le_bytes());
+        out[dir_pos + 4..dir_pos + 8].copy_from_slice(&e.crc32c.to_le_bytes());
+        dir_pos += 8;
+        out[data_pos..data_pos + slice.len()].copy_from_slice(slice);
+        data_pos += slice.len();
+    }
+    if !meta_wire.is_empty() {
+        out[data_pos..data_pos + meta_wire.len()].copy_from_slice(&meta_wire);
+    }
+    Ok((out, stats))
+}
+
+/// **Zero-Decode Pyramid Downscale + Optional Grayscale & Metadata Strip (`vimg -> vimg`):**
+/// Truncates an archive to `max_level` (`0 = 1/8`, `1 = 1/4`, `2 = 1/2`, `3 = 1/1`) by copying
+/// compressed chunks verbatim without running IDWT, range decoding, or re-encoding!
+/// When `strip_meta = true`, drops EXIF and XMP privacy metadata while preserving CICP & ICC color accuracy.
+pub fn downscale_vimg_zero_decode(
+    source: &dyn RangeSource,
+    max_level: u8,
+    grayscale: bool,
+    strip_meta: bool,
+) -> Result<(Vec<u8>, RangeStats)> {
+    let mut stats = RangeStats::default();
+    let (idx, prefix) = VimgIndex::read_from_source_with_prefix(source, &mut stats)?;
+    let h = &idx.header;
+    let target_dwt = max_level.min(h.dwt_levels);
+    let steps_skipped = (h.dwt_levels - target_dwt) as u32;
+    let new_tile_size = h.tile_size >> steps_skipped;
+    if new_tile_size < 32 {
+        return Err(Error::InvalidInput(
+            "zero-decode downscale target tile_size < 32 (use a higher max_level or larger tile_size)",
+        ));
+    }
+
+    let icc_opt = idx.read_icc_from_source(source, &prefix, h.has_crc(), &mut stats)?;
+    let icc_slice: &[u8] = icc_opt.as_deref().unwrap_or(&[]);
+    let icc_wire_len = if icc_slice.is_empty() {
+        0usize
+    } else {
+        icc_slice.len() + if h.has_crc() { 4 } else { 0 }
+    };
+
+    let meta_wire = if idx.meta_wire_len > 0 {
+        let mut got = source.read_ranges(&[(idx.meta_offset, idx.meta_offset + idx.meta_wire_len)])?;
+        stats.requests += 1;
+        stats.bytes_fetched += idx.meta_wire_len;
+        let raw = got.pop().unwrap_or_default();
+        let parsed = VimgMetadata::decode_tlv(&raw, h.has_crc(), h.has_crc())?;
+        if strip_meta {
+            let kept = VimgMetadata { cicp: parsed.cicp, exif: None, xmp: None };
+            if kept.is_empty() { Vec::new() } else { kept.encode_tlv(h.has_crc())? }
+        } else {
+            raw
+        }
+    } else {
+        Vec::new()
+    };
+
+    let out_ch: u8 = if grayscale { 1 } else { h.channels };
+    let out_levels = (target_dwt as usize) + 1;
+    let n_tiles = h.n_tiles();
+
+    let mut req_meta = Vec::with_capacity(out_levels * (out_ch as usize) * n_tiles);
+    let mut raw_ranges = Vec::with_capacity(req_meta.capacity());
+    for lvl in 0..out_levels {
+        for plane in 0..out_ch as usize {
+            for tid in 0..n_tiles {
+                let e = idx.entry(lvl, plane, tid);
+                req_meta.push(e);
+                raw_ranges.push((e.offset, e.offset + e.len as u64));
+            }
+        }
+    }
+
+    let (coalesced, mapping) = coalesce_ranges(&raw_ranges, 8192);
+    let fetched = source.read_ranges(&coalesced)?;
+    stats.requests += coalesced.len();
+    stats.bytes_fetched += coalesced.iter().map(|&(a, b)| b - a).sum::<u64>();
+
+    let (new_w, new_h) = h.image_level_dims(target_dwt as usize);
+    let dir_bytes = req_meta.len() * 8;
+    let payload_bytes: usize = req_meta.iter().map(|e| e.len as usize).sum();
+    let total_bytes = HEADER_BYTES + dir_bytes + icc_wire_len + payload_bytes + meta_wire.len();
+
+    let mut flags = h.flags & !FLAG_QUANT_SHIFT_MASK;
+    let new_shift = (h.quant_level_shift() + steps_skipped as usize).min(3);
+    flags |= (new_shift as u16) << FLAG_QUANT_SHIFT_BIT;
+    if grayscale {
+        flags &= !FLAG_CHROMA_420;
+    }
+    if meta_wire.is_empty() {
+        flags &= !FLAG_HAS_META;
+    } else {
+        flags |= FLAG_HAS_META;
+    }
+    let out_hdr = VimgHeader {
+        version: VERSION_V1,
+        flags,
+        width: new_w as u32,
+        height: new_h as u32,
+        channels: out_ch,
+        quality: h.quality,
+        tile_size: new_tile_size,
+        dwt_levels: target_dwt,
+        tiles_x: h.tiles_x,
+        tiles_y: h.tiles_y,
+        dir_bytes: dir_bytes as u32,
+        icc_bytes: icc_slice.len() as u32,
+        total_bytes: total_bytes as u64,
+    };
+
+    let mut out = vec![0u8; total_bytes];
+    out_hdr.write_to(&mut out[..HEADER_BYTES]);
+    let mut dir_pos = HEADER_BYTES;
+    let mut data_pos = HEADER_BYTES + dir_bytes;
+    if !icc_slice.is_empty() {
+        out[data_pos..data_pos + icc_slice.len()].copy_from_slice(icc_slice);
+        data_pos += icc_slice.len();
+        if h.has_crc() {
+            out[data_pos..data_pos + 4].copy_from_slice(&crc32c(icc_slice).to_le_bytes());
+            data_pos += 4;
+        }
+    }
     for (i, e) in req_meta.iter().enumerate() {
         let (ci, rel_off) = mapping[i];
         let slice = &fetched[ci][rel_off..rel_off + e.len as usize];

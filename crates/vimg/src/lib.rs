@@ -13,6 +13,7 @@ pub mod ffi;
 pub mod format;
 pub mod meta;
 pub mod ops;
+pub mod progressive;
 pub mod range;
 pub mod simd;
 pub mod simd_dwt;
@@ -21,9 +22,13 @@ pub mod wavelet;
 
 use core::fmt;
 
-pub use format::{crop_vimg_zero_decode, encode_vimg, encode_vimg_u16, VimgHeader, VimgIndex};
+pub use format::{
+    crop_vimg_zero_decode, downscale_vimg_zero_decode, encode_vimg, encode_vimg_u16, VimgHeader,
+    VimgIndex,
+};
 pub use meta::{Cicp, VimgMetadata};
 pub use ops::{decode_from_source, plan_query_ranges, DecodedImage, TransformQuery};
+pub use progressive::ProgressiveDecoder;
 pub use range::{coalesce_ranges, RangeSource, RangeStats, SliceRangeSource, SparseRangeSource};
 #[cfg(not(target_arch = "wasm32"))]
 pub use range::{FileRangeSource, HttpRangeSource};
@@ -165,4 +170,58 @@ pub fn psnr_db(reference: &[u8], test: &[u8]) -> f64 {
     } else {
         10.0 * ((255.0 * 255.0) / mse).log10()
     }
+}
+
+/// Computes perceptual 8×8 windowed luminance **SSIM** (`0.0..=1.0`, `1.0` = identical) in pure Rust.
+pub fn ssim_score(reference: &[u8], test: &[u8], width: u32, height: u32, channels: u8) -> f64 {
+    let (w, h, ch) = (width as usize, height as usize, channels as usize);
+    if w == 0 || h == 0 || ch == 0 || reference.len() != w * h * ch || test.len() != w * h * ch {
+        return 0.0;
+    }
+    let luma = |buf: &[u8], idx: usize| -> f64 {
+        let o = idx * ch;
+        if ch == 1 {
+            buf[o] as f64
+        } else {
+            0.299 * (buf[o] as f64) + 0.587 * (buf[o + 1] as f64) + 0.114 * (buf[o + 2] as f64)
+        }
+    };
+    const C1: f64 = 6.5025; // (0.01 * 255)^2
+    const C2: f64 = 58.5225; // (0.03 * 255)^2
+    let bw = 8.min(w);
+    let bh = 8.min(h);
+    let mut ssim_sum = 0.0f64;
+    let mut count = 0usize;
+    let mut y = 0usize;
+    while y + bh <= h {
+        let mut x = 0usize;
+        while x + bw <= w {
+            let n = (bw * bh) as f64;
+            let (mut sx, mut sy, mut sx2, mut sy2, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for dy in 0..bh {
+                let row = (y + dy) * w + x;
+                for dx in 0..bw {
+                    let a = luma(reference, row + dx);
+                    let b = luma(test, row + dx);
+                    sx += a;
+                    sy += b;
+                    sx2 += a * a;
+                    sy2 += b * b;
+                    sxy += a * b;
+                }
+            }
+            let mx = sx / n;
+            let my = sy / n;
+            let vx = (sx2 / n - mx * mx).max(0.0);
+            let vy = (sy2 / n - my * my).max(0.0);
+            let cov = sxy / n - mx * my;
+            let num = (2.0 * mx * my + C1) * (2.0 * cov + C2);
+            let den = (mx * mx + my * my + C1) * (vx + vy + C2);
+            ssim_sum += num / den;
+            count += 1;
+            x += bw;
+        }
+        y += bh;
+    }
+    if count == 0 { 1.0 } else { (ssim_sum / count as f64).clamp(0.0, 1.0) }
 }

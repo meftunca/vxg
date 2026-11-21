@@ -537,3 +537,137 @@ fn v03_ui_palette_rle_adaptive_quant_and_cicp_exif_xmp_metadata() {
         vimg_free(xb);
     }
 }
+
+#[test]
+fn v03_zero_decode_downscale_progressive_color_bicubic_and_ssim() {
+    use vimg::{downscale_vimg_zero_decode, ssim_score, Cicp, ProgressiveDecoder};
+
+    let (w, h) = (640usize, 480usize);
+    let px = synth_photo_rgb(w, h);
+    let fake_icc = b"ICC_PROFILE_V03_TEST_PAYLOAD".to_vec();
+    let fake_exif = b"II*\0GPS_SECRET_EXIF".to_vec();
+    let fake_xmp = b"<xmp>PRIVATE_XMP</xmp>".to_vec();
+
+    let vimg_bytes = encode(
+        &px,
+        w as u32,
+        h as u32,
+        3,
+        &EncodeOptions {
+            quality: 85,
+            tile_size: 256,
+            dwt_levels: 3,
+            adaptive_quant: true,
+            icc_profile: Some(fake_icc.clone()),
+            cicp: Some(Cicp::DISPLAY_P3),
+            exif: Some(fake_exif),
+            xmp: Some(fake_xmp),
+            ..EncodeOptions::default()
+        },
+    )
+    .unwrap();
+
+    // 1) Zero-decode pyramid downscale (`vimg -> vimg`) at L0, L1, L2 with pixel parity & privacy strip_meta
+    let src = SliceRangeSource(&vimg_bytes);
+    for (lvl, (ew, eh)) in [(0u8, (80u32, 60u32)), (1, (160, 120)), (2, (320, 240))] {
+        let (down, stats) = downscale_vimg_zero_decode(&src, lvl, false, true).unwrap();
+        assert!(
+            stats.bytes_fetched < vimg_bytes.len() as u64,
+            "L{lvl} zero-decode downscale must fetch strictly less than full file"
+        );
+        let dh = VimgHeader::parse(&down).unwrap();
+        assert_eq!((dh.width, dh.height, dh.dwt_levels), (ew, eh, lvl));
+        let dec_down = decode(&down).unwrap();
+        let dec_ref = decode_query(
+            &vimg_bytes,
+            &TransformQuery { force_level: Some(lvl), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(
+            dec_down.pixels, dec_ref.pixels,
+            "zero-decode downscale L{lvl} must match force_level={lvl} pixel-for-pixel"
+        );
+        // strip_meta = true keeps ICC & CICP color accuracy while stripping private EXIF & XMP!
+        assert_eq!(dec_down.icc_profile.as_deref(), Some(fake_icc.as_slice()));
+        let meta = dec_down.metadata.as_ref().expect("CICP must remain after strip_meta");
+        assert_eq!(meta.cicp, Some(Cicp::DISPLAY_P3));
+        assert!(meta.exif.is_none(), "EXIF must be stripped when strip_meta=true");
+        assert!(meta.xmp.is_none(), "XMP must be stripped when strip_meta=true");
+    }
+
+    // Grayscale zero-decode downscale drops chroma completely
+    let (down_gray, _) = downscale_vimg_zero_decode(&src, 1, true, true).unwrap();
+    let dec_gray = decode(&down_gray).unwrap();
+    assert_eq!((dec_gray.width, dec_gray.height, dec_gray.channels), (160, 120, 1));
+
+    // 2) Stateful ProgressiveDecoder (`L0 -> L1 -> L2 -> L3`) matches direct decode bit-for-bit without re-fetching!
+    let mut prog = ProgressiveDecoder::open(&src, TransformQuery::default()).unwrap();
+    assert_eq!(prog.total_levels(), 4);
+    for expected_lvl in 0..=3u8 {
+        let frame = prog.next_level(&src).unwrap().expect("expected progressive frame");
+        assert_eq!(frame.decoded_level, expected_lvl);
+        let direct = decode_query(
+            &vimg_bytes,
+            &TransformQuery { force_level: Some(expected_lvl), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(
+            frame.pixels, direct.pixels,
+            "ProgressiveDecoder L{expected_lvl} must match direct decode bit-for-bit"
+        );
+    }
+    assert!(prog.next_level(&src).unwrap().is_none(), "exhausted ProgressiveDecoder must return None");
+    // At most one chunk can straddle the initial 4 KiB header prefix boundary; earlier levels are never re-fetched.
+    assert!(
+        prog.stats().bytes_fetched <= vimg_bytes.len() as u64 + 4096,
+        "ProgressiveDecoder must never re-fetch previous levels (fetched {} vs total {})",
+        prog.stats().bytes_fetched,
+        vimg_bytes.len()
+    );
+
+    // 3) Compressed-domain Saturation, Temperature, and Catmull-Rom Bicubic arbitrary resize
+    let dec_desat = decode_query(
+        &vimg_bytes,
+        &TransformQuery { saturation: 0.0, ..Default::default() },
+    )
+    .unwrap();
+    for rgb in dec_desat.pixels.as_chunks::<3>().0 {
+        assert_eq!(rgb[0], rgb[1]);
+        assert_eq!(rgb[1], rgb[2]);
+    }
+    let dec_warm = decode_query(
+        &vimg_bytes,
+        &TransformQuery { temperature: 0.8, ..Default::default() },
+    )
+    .unwrap();
+    let dec_cool = decode_query(
+        &vimg_bytes,
+        &TransformQuery { temperature: -0.8, ..Default::default() },
+    )
+    .unwrap();
+    let avg_rb = |p: &[u8]| -> (f64, f64) {
+        let n = (p.len() / 3) as f64;
+        let r: f64 = p.as_chunks::<3>().0.iter().map(|c| c[0] as f64).sum::<f64>() / n;
+        let b: f64 = p.as_chunks::<3>().0.iter().map(|c| c[2] as f64).sum::<f64>() / n;
+        (r, b)
+    };
+    let (wr, wb) = avg_rb(&dec_warm.pixels);
+    let (cr, cb) = avg_rb(&dec_cool.pixels);
+    assert!(wr > cr + 10.0 && wb < cb - 10.0, "warm vs cool temperature shift expected: warm=({wr:.1},{wb:.1}) cool=({cr:.1},{cb:.1})");
+
+    let dec_bicubic = decode_query(
+        &vimg_bytes,
+        &TransformQuery { target_width: Some(333), ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(dec_bicubic.width, 333);
+    assert_eq!(dec_bicubic.height, 250);
+
+    // 4) Pure-Rust 8x8 windowed SSIM
+    assert!((ssim_score(&px, &px, w as u32, h as u32, 3) - 1.0).abs() < 1e-9);
+    let full = decode(&vimg_bytes).unwrap();
+    let ssim_lossy = ssim_score(&px, &full.pixels, w as u32, h as u32, 3);
+    assert!(ssim_lossy > 0.90, "q=85 SSIM should be >0.90, got {ssim_lossy:.5}");
+    let inv: Vec<u8> = px.iter().map(|&v| 255 - v).collect();
+    assert!(ssim_score(&px, &inv, w as u32, h as u32, 3) < 0.25);
+}

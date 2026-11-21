@@ -32,6 +32,10 @@ pub struct TransformQuery {
     pub brightness: i16,
     /// Contrast multiplier applied directly in wavelet space (`1.0` = identity).
     pub contrast: f32,
+    /// Chroma saturation multiplier applied directly on `Co`/`Cg` planes (`0.0` = gray, `1.0` = identity, `2.0` = vivid).
+    pub saturation: f32,
+    /// Color warmth / white-balance temperature shift on `Co` (`-1.0` = cool blue, `0.0` = neutral, `+1.0` = warm).
+    pub temperature: f32,
     /// Warm sepia tint applied directly on `Co`/`Cg` planes.
     pub sepia: bool,
     /// Clockwise 90-degree rotations (`0`, `1`=90°, `2`=180°, `3`=270°).
@@ -61,6 +65,8 @@ impl Default for TransformQuery {
             sharpen: 0.0,
             brightness: 0,
             contrast: 1.0,
+            saturation: 1.0,
+            temperature: 0.0,
             sepia: false,
             rotate_cw: 0,
             flip_h: false,
@@ -296,23 +302,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     }
 
     // Compute per-level detail gains for subband-domain blur / sharpen / contrast!
-    let detail_gains: Vec<f32> = (0..target_lvl)
-        .map(|k| {
-            let mut g = query.contrast.clamp(0.1, 4.0);
-            if query.blur > 0.0 {
-                let b = query.blur.clamp(0.0, 1.0);
-                // Stronger attenuation on finer detail levels simulates true Gaussian low-pass!
-                let frac = ((k + 1) as f32) / (target_lvl.max(1) as f32);
-                g *= (1.0 - b * (0.45 + 0.55 * frac)).max(0.0);
-            }
-            if query.sharpen > 0.0 {
-                let s = query.sharpen.clamp(0.0, 2.0);
-                let frac = ((k + 1) as f32) / (target_lvl.max(1) as f32);
-                g *= 1.0 + s * (0.35 + 0.65 * frac);
-            }
-            g
-        })
-        .collect();
+    let detail_gains = build_detail_gains(target_lvl, query);
 
     // Precompute decoded pixel canvas dimensions for the selected tile bounding box at `target_lvl`.
     let mut col_x = vec![0usize; sel_tx + 1];
@@ -444,7 +434,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
                 let blob = &fetched[ci][off..off + e.len as usize];
                 let (ow, oh) = out_dims[lvl - 1];
                 let d = match verify_chunk(blob, e.crc32c, hdr.has_crc() && query.verify_crc) {
-                    Ok(()) => decode_detail_level_bd(blob, ow, oh, hdr.quality, plane, lvl - 1, max_lvl, bit_depth)?,
+                    Ok(()) => decode_detail_level_bd(blob, ow, oh, hdr.quality, plane, lvl - 1, hdr.quant_dwt_levels(), bit_depth)?,
                     Err(_) if query.recover_corrupt => crate::wavelet::DetailBands::all_zero(ow, oh),
                     Err(err) => return Err(err),
                 };
@@ -466,12 +456,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
             }
         }
 
-        if query.sepia {
-            let co_sep = 34i16 << bd_shift;
-            let cg_sep = 6i16 << bd_shift;
-            co_tile = Some(vec![co_sep; dst_tw * dst_th]);
-            cg_tile = Some(vec![cg_sep; dst_tw * dst_th]);
-        }
+        apply_color_adjust(&mut co_tile, &mut cg_tile, dst_tw * dst_th, bd_shift, query);
 
         let px = if bit_depth == 8 {
             TilePixels::U8(merge_planes_rgb(
@@ -581,7 +566,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
         }
         if let Some((tw, th)) = target_resize {
             if tw as usize != cur_w || th as usize != cur_h {
-                pixels = resize_bilinear_u8(&pixels, cur_w, cur_h, tw as usize, th as usize, out_ch);
+                pixels = resize_bicubic_u8(&pixels, cur_w, cur_h, tw as usize, th as usize, out_ch);
                 cur_w = tw as usize;
                 cur_h = th as usize;
             }
@@ -672,42 +657,148 @@ fn verify_chunk(blob: &[u8], expected_crc: u32, check: bool) -> Result<()> {
     Ok(())
 }
 
-fn resize_bilinear_u8(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, ch: usize) -> Vec<u8> {
-    let mut dst = vec![0u8; dw * dh * ch];
-    let sx_scale = sw as f32 / dw as f32;
-    let sy_scale = sh as f32 / dh as f32;
-    for y in 0..dh {
-        let fy = ((y as f32 + 0.5) * sy_scale - 0.5).clamp(0.0, (sh - 1) as f32);
-        let y0 = fy.floor() as usize;
-        let y1 = (y0 + 1).min(sh - 1);
-        let wy = fy - y0 as f32;
-        for x in 0..dw {
-            let fx = ((x as f32 + 0.5) * sx_scale - 0.5).clamp(0.0, (sw - 1) as f32);
-            let x0 = fx.floor() as usize;
-            let x1 = (x0 + 1).min(sw - 1);
-            let wx = fx - x0 as f32;
-            let w00 = (1.0 - wx) * (1.0 - wy);
-            let w10 = wx * (1.0 - wy);
-            let w01 = (1.0 - wx) * wy;
-            let w11 = wx * wy;
-            let o00 = (y0 * sw + x0) * ch;
-            let o10 = (y0 * sw + x1) * ch;
-            let o01 = (y1 * sw + x0) * ch;
-            let o11 = (y1 * sw + x1) * ch;
-            let od = (y * dw + x) * ch;
-            for c in 0..ch {
-                let v = src[o00 + c] as f32 * w00
-                    + src[o10 + c] as f32 * w10
-                    + src[o01 + c] as f32 * w01
-                    + src[o11 + c] as f32 * w11;
-                dst[od + c] = v.round().clamp(0.0, 255.0) as u8;
+pub(crate) fn build_detail_gains(target_lvl: usize, query: &TransformQuery) -> Vec<f32> {
+    (0..target_lvl)
+        .map(|k| {
+            let mut g = query.contrast.clamp(0.1, 4.0);
+            if query.blur > 0.0 {
+                let b = query.blur.clamp(0.0, 1.0);
+                let dist = (target_lvl - 1 - k) as f32;
+                let atten = (1.0 - b * (0.95 / (1.0 + dist * 0.75))).clamp(0.0, 1.0);
+                g *= atten;
             }
+            if query.sharpen > 0.0 {
+                let sh = query.sharpen.clamp(0.0, 2.5);
+                let boost = if k + 1 == target_lvl { 1.0 + sh * 0.85 } else { 1.0 + sh * 0.35 };
+                g *= boost;
+            }
+            g
+        })
+        .collect()
+}
+
+pub(crate) fn apply_color_adjust(
+    co_tile: &mut Option<Vec<i16>>,
+    cg_tile: &mut Option<Vec<i16>>,
+    len: usize,
+    bd_shift: u8,
+    query: &TransformQuery,
+) {
+    if query.sepia {
+        let co_sep = 34i16 << bd_shift;
+        let cg_sep = 6i16 << bd_shift;
+        *co_tile = Some(vec![co_sep; len]);
+        *cg_tile = Some(vec![cg_sep; len]);
+        return;
+    }
+    let sat = query.saturation.clamp(0.0, 3.0);
+    let temp = query.temperature.clamp(-1.0, 1.0);
+    let do_sat = (sat - 1.0).abs() > 1e-4;
+    let do_temp = temp.abs() > 1e-4;
+    if !do_sat && !do_temp {
+        return;
+    }
+    let sat_q8 = (sat * 256.0).round() as i32;
+    let temp_co = (temp * 48.0 * ((1u32 << bd_shift) as f32)).round() as i32;
+    if let Some(co) = co_tile.as_mut() {
+        for v in co.iter_mut() {
+            let mut val = *v as i32;
+            if do_sat {
+                val = (val * sat_q8 + 128) >> 8;
+            }
+            if do_temp {
+                val += temp_co;
+            }
+            *v = val.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        }
+    }
+    if do_sat {
+        if let Some(cg) = cg_tile.as_mut() {
+            for v in cg.iter_mut() {
+                let val = ((*v as i32) * sat_q8 + 128) >> 8;
+                *v = val.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn catmull_rom_weights(t: f32) -> [f32; 4] {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    [
+        -0.5 * t3 + t2 - 0.5 * t,
+        1.5 * t3 - 2.5 * t2 + 1.0,
+        -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+        0.5 * t3 - 0.5 * t2,
+    ]
+}
+
+/// Crisp separable 2-pass Catmull-Rom bicubic resize for sharp, artifact-free thumbnails.
+pub(crate) fn resize_bicubic_u8(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, ch: usize) -> Vec<u8> {
+    if sw == dw && sh == dh {
+        return src.to_vec();
+    }
+    // Pass 1: horizontal `sw x sh -> dw x sh` into f32 intermediate
+    let mut tmp = vec![0.0f32; dw * sh * ch];
+    let sx_scale = sw as f32 / dw as f32;
+    let sw_max = (sw - 1) as isize;
+    let mut x_taps = Vec::with_capacity(dw);
+    for x in 0..dw {
+        let fx = (x as f32 + 0.5) * sx_scale - 0.5;
+        let ix = fx.floor() as isize;
+        let t = fx - ix as f32;
+        let w = catmull_rom_weights(t);
+        let idx = [
+            (ix - 1).clamp(0, sw_max) as usize,
+            ix.clamp(0, sw_max) as usize,
+            (ix + 1).clamp(0, sw_max) as usize,
+            (ix + 2).clamp(0, sw_max) as usize,
+        ];
+        x_taps.push((idx, w));
+    }
+    for y in 0..sh {
+        let srow = y * sw * ch;
+        let drow = y * dw * ch;
+        for (x, &(idx, w)) in x_taps.iter().enumerate() {
+            let o0 = srow + idx[0] * ch;
+            let o1 = srow + idx[1] * ch;
+            let o2 = srow + idx[2] * ch;
+            let o3 = srow + idx[3] * ch;
+            let od = drow + x * ch;
+            for c in 0..ch {
+                tmp[od + c] = src[o0 + c] as f32 * w[0]
+                    + src[o1 + c] as f32 * w[1]
+                    + src[o2 + c] as f32 * w[2]
+                    + src[o3 + c] as f32 * w[3];
+            }
+        }
+    }
+
+    // Pass 2: vertical `dw x sh -> dw x dh`
+    let mut dst = vec![0u8; dw * dh * ch];
+    let sy_scale = sh as f32 / dh as f32;
+    let sh_max = (sh - 1) as isize;
+    let row_elems = dw * ch;
+    for y in 0..dh {
+        let fy = (y as f32 + 0.5) * sy_scale - 0.5;
+        let iy = fy.floor() as isize;
+        let t = fy - iy as f32;
+        let w = catmull_rom_weights(t);
+        let r0 = ((iy - 1).clamp(0, sh_max) as usize) * row_elems;
+        let r1 = (iy.clamp(0, sh_max) as usize) * row_elems;
+        let r2 = ((iy + 1).clamp(0, sh_max) as usize) * row_elems;
+        let r3 = ((iy + 2).clamp(0, sh_max) as usize) * row_elems;
+        let rd = y * row_elems;
+        for i in 0..row_elems {
+            let v = tmp[r0 + i] * w[0] + tmp[r1 + i] * w[1] + tmp[r2 + i] * w[2] + tmp[r3 + i] * w[3];
+            dst[rd + i] = v.round().clamp(0.0, 255.0) as u8;
         }
     }
     dst
 }
 
-fn resize_bilinear_u16(
+pub(crate) fn resize_bilinear_u16(
     src: &[u16],
     sw: usize,
     sh: usize,
@@ -748,6 +839,18 @@ fn resize_bilinear_u16(
         }
     }
     dst
+}
+
+pub(crate) fn apply_geom_pub<T: Copy + Default>(
+    src: &[T],
+    w: usize,
+    h: usize,
+    ch: usize,
+    rot_cw: u8,
+    flip_h: bool,
+    flip_v: bool,
+) -> (Vec<T>, usize, usize) {
+    apply_geom(src, w, h, ch, rot_cw, flip_h, flip_v)
 }
 
 fn apply_geom<T: Copy + Default>(

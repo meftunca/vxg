@@ -10,21 +10,23 @@ use std::time::Instant;
 
 use image::{DynamicImage, GenericImageView, ImageFormat, RgbImage, RgbaImage};
 use vimg::{
-    crop_vimg_zero_decode, decode_from_source, encode, encode_u16, psnr_db, Cicp, EncodeOptions,
-    FileRangeSource, HttpRangeSource, RangeSource, RangeStats, SliceRangeSource, TransformQuery,
-    VimgIndex,
+    crop_vimg_zero_decode, decode_from_source, downscale_vimg_zero_decode, encode, encode_u16,
+    psnr_db, ssim_score, Cicp, EncodeOptions, FileRangeSource, HttpRangeSource, RangeSource,
+    RangeStats, SliceRangeSource, TransformQuery, VimgIndex,
 };
 
 fn usage() {
     eprintln!(
         "vimg {} — HTTP/HTTPS Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Engine\n\n\
          Usage:\n  \
-           vimg encode <in.png|jpg|webp|bmp> <out.vimg> [--quality 1..100] [--tile 64|128|256] [--levels 1..4] [--bit-depth 8|10|12] [--aq] [--cicp srgb|p3|pq|hlg] [--icc <profile.icc>] [--keep-meta] [--no-420]\n  \
-           vimg decode <in.vimg | http(s)://.../img.vimg> <out.png|jpg|webp> [--w W] [--h H] [--crop x,y,w,h] [--gray] [--blur 0..1] [--sharpen 0..2] [--bright N] [--contrast F] [--sepia] [--rot 90|180|270] [--extract-icc <out.icc>] [--extract-exif <out.exif>] [--extract-xmp <out.xmp>]\n  \
-           vimg crop   <in.vimg | http(s)://.../img.vimg> <out.vimg> --tiles tx0,ty0,ntx,nty [--gray]\n  \
-           vimg info   <in.vimg | http(s)://.../img.vimg>\n  \
-           vimg serve  <dir> [--port 8090]    (HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy)\n  \
-           vimg bench  <in.png|jpg|bmp> [--quality 85] [--tile 256]",
+           vimg encode    <in.png|jpg|webp|bmp> <out.vimg> [--quality 1..100] [--tile 64|128|256] [--levels 1..4] [--bit-depth 8|10|12] [--aq] [--cicp srgb|p3|pq|hlg] [--icc <profile.icc>] [--keep-meta] [--no-420]\n  \
+           vimg decode    <in.vimg | http(s)://.../img.vimg> <out.png|jpg|webp> [--w W] [--h H] [--level 0..3] [--crop x,y,w,h] [--gray] [--blur 0..1] [--sharpen 0..2] [--bright N] [--contrast F] [--sat 0..3] [--temp -1..1] [--sepia] [--rot 90|180|270] [--extract-icc <out.icc>] [--extract-exif <out.exif>] [--extract-xmp <out.xmp>]\n  \
+           vimg crop      <in.vimg | http(s)://.../img.vimg> <out.vimg> --tiles tx0,ty0,ntx,nty [--gray]\n  \
+           vimg downscale <in.vimg | http(s)://.../img.vimg> <out.vimg> --level 0|1|2 [--gray] [--strip-meta]\n  \
+           vimg diff      <ref.png|jpg|webp|vimg> <test.png|jpg|webp|vimg>\n  \
+           vimg info      <in.vimg | http(s)://.../img.vimg>\n  \
+           vimg serve     <dir> [--port 8090]    (HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy ?fmt=png|jpg|webp)\n  \
+           vimg bench     <in.png|jpg|bmp> [--quality 85] [--tile 256]",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -71,7 +73,13 @@ fn save_pixels(path: &str, pixels: &[u8], w: u32, h: u32, ch: u8) -> Result<(), 
     dyn_img.save(path).map_err(|e| format!("save {path}: {e}"))
 }
 
-fn encode_png_bytes(pixels: &[u8], w: u32, h: u32, ch: u8) -> Result<Vec<u8>, String> {
+fn encode_image_bytes(
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    ch: u8,
+    fmt: &str,
+) -> Result<(Vec<u8>, &'static str), String> {
     let dyn_img = match ch {
         1 => DynamicImage::ImageLuma8(
             image::GrayImage::from_raw(w, h, pixels.to_vec()).ok_or("bad gray")?,
@@ -81,8 +89,24 @@ fn encode_png_bytes(pixels: &[u8], w: u32, h: u32, ch: u8) -> Result<Vec<u8>, St
         _ => return Err("bad ch".into()),
     };
     let mut out = Cursor::new(Vec::new());
-    dyn_img.write_to(&mut out, ImageFormat::Png).map_err(|e| e.to_string())?;
-    Ok(out.into_inner())
+    match fmt {
+        "jpg" | "jpeg" => {
+            dyn_img.to_rgb8().write_to(&mut out, ImageFormat::Jpeg).map_err(|e| e.to_string())?;
+            Ok((out.into_inner(), "image/jpeg"))
+        }
+        "webp" => {
+            if ch == 1 {
+                dyn_img.to_rgb8().write_to(&mut out, ImageFormat::WebP).map_err(|e| e.to_string())?;
+            } else {
+                dyn_img.write_to(&mut out, ImageFormat::WebP).map_err(|e| e.to_string())?;
+            }
+            Ok((out.into_inner(), "image/webp"))
+        }
+        _ => {
+            dyn_img.write_to(&mut out, ImageFormat::Png).map_err(|e| e.to_string())?;
+            Ok((out.into_inner(), "image/png"))
+        }
+    }
 }
 
 fn parse_quad(s: &str) -> Result<(u32, u32, u32, u32), String> {
@@ -203,6 +227,7 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         match args[i].as_str() {
             "--w" => { i += 1; q.target_width = Some(args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --w")?); }
             "--h" => { i += 1; q.target_height = Some(args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --h")?); }
+            "--level" => { i += 1; q.force_level = Some(args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --level")?); }
             "--crop" => { i += 1; q.crop = Some(parse_quad(args.get(i).ok_or("missing --crop")?)?); }
             "--gray" => q.grayscale = true,
             "--sepia" => q.sepia = true,
@@ -210,6 +235,8 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
             "--sharpen" => { i += 1; q.sharpen = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --sharpen")?; }
             "--bright" => { i += 1; q.brightness = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --bright")?; }
             "--contrast" => { i += 1; q.contrast = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --contrast")?; }
+            "--sat" => { i += 1; q.saturation = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --sat")?; }
+            "--temp" => { i += 1; q.temperature = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --temp")?; }
             "--rot" => {
                 i += 1;
                 let deg: u32 = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --rot")?;
@@ -372,6 +399,82 @@ fn cmd_crop(args: &[String]) -> Result<(), String> {
         stats.total_file_bytes as f64 / 1024.0,
         stats.requests,
         dt
+    );
+    Ok(())
+}
+
+fn cmd_downscale(args: &[String]) -> Result<(), String> {
+    if args.len() < 4 {
+        return Err("downscale requires <in.vimg|url> <out.vimg> --level 0|1|2 [--gray] [--strip-meta]".into());
+    }
+    let mut level: Option<u8> = None;
+    let mut gray = false;
+    let mut strip_meta = false;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--level" => {
+                i += 1;
+                level = Some(args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --level")?);
+            }
+            "--gray" => gray = true,
+            "--strip-meta" => strip_meta = true,
+            other => return Err(format!("unknown flag {other}")),
+        }
+        i += 1;
+    }
+    let max_level = level.ok_or("missing --level")?;
+    let src = open_source(&args[0])?;
+    let t0 = Instant::now();
+    let (out, stats) = downscale_vimg_zero_decode(src.as_ref(), max_level, gray, strip_meta)
+        .map_err(|e| e.to_string())?;
+    let dt = t0.elapsed().as_secs_f64() * 1000.0;
+    let hdr = vimg::VimgHeader::parse(&out).map_err(|e| e.to_string())?;
+    fs::write(&args[1], &out).map_err(|e| e.to_string())?;
+    println!(
+        "Zero-decode downscale (L{max_level}) -> {} ({}x{}x{}, {:.1} KiB) fetched {:.1}% ({:.1} KiB / {:.1} KiB, {} reqs) in {:.2} ms",
+        args[1],
+        hdr.width,
+        hdr.height,
+        hdr.channels,
+        out.len() as f64 / 1024.0,
+        stats.fetched_pct(),
+        stats.bytes_fetched as f64 / 1024.0,
+        stats.total_file_bytes as f64 / 1024.0,
+        stats.requests,
+        dt
+    );
+    Ok(())
+}
+
+fn load_any_image(path: &str) -> Result<(Vec<u8>, u32, u32, u8), String> {
+    if path.ends_with(".vimg") {
+        let bytes = fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+        let dec = vimg::decode(&bytes).map_err(|e| e.to_string())?;
+        Ok((dec.pixels, dec.width, dec.height, dec.channels))
+    } else {
+        load_pixels(path)
+    }
+}
+
+fn cmd_diff(args: &[String]) -> Result<(), String> {
+    if args.len() < 2 {
+        return Err("diff requires <ref.png|jpg|webp|vimg> <test.png|jpg|webp|vimg>".into());
+    }
+    let (a, aw, ah, ach) = load_any_image(&args[0])?;
+    let (b, bw, bh, bch) = load_any_image(&args[1])?;
+    if (aw, ah, ach) != (bw, bh, bch) {
+        return Err(format!(
+            "dimension/channel mismatch: {} is {}x{}x{} vs {} is {}x{}x{}",
+            args[0], aw, ah, ach, args[1], bw, bh, bch
+        ));
+    }
+    let psnr = psnr_db(&a, &b);
+    let ssim = ssim_score(&a, &b, aw, ah, ach);
+    let max_err = a.iter().zip(b.iter()).map(|(&x, &y)| x.abs_diff(y)).max().unwrap_or(0);
+    println!(
+        "Diff {} vs {} ({aw}x{ah}x{ach}): PSNR = {:.2} dB | SSIM = {:.5} | max_abs_err = {}",
+        args[0], args[1], psnr, ssim, max_err
     );
     Ok(())
 }
@@ -544,6 +647,7 @@ fn handle_http_encode(
                     opts.dwt_levels = l.clamp(1, 4);
                 }
             }
+            "aq" => opts.adaptive_quant = v != "0",
             _ => {}
         }
     }
@@ -761,12 +865,14 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
 
     if !query_str.is_empty() && file_path.extension().and_then(|e| e.to_str()) == Some("vimg") {
         let mut q = TransformQuery::default();
+        let mut fmt = "png";
         for pair in query_str.split('&') {
             let (k, raw_v) = pair.split_once('=').unwrap_or((pair, "1"));
             let v = raw_v.replace("%2C", ",").replace("%2c", ",");
             match k {
                 "w" => q.target_width = v.parse().ok(),
                 "h" => q.target_height = v.parse().ok(),
+                "level" => q.force_level = v.parse().ok(),
                 "crop" => q.crop = parse_quad(&v).ok(),
                 "gray" => q.grayscale = v != "0",
                 "sepia" => q.sepia = v != "0",
@@ -774,7 +880,16 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
                 "sharpen" => q.sharpen = v.parse().unwrap_or(0.0),
                 "bright" => q.brightness = v.parse().unwrap_or(0),
                 "contrast" => q.contrast = v.parse().unwrap_or(1.0),
+                "sat" => q.saturation = v.parse().unwrap_or(1.0),
+                "temp" => q.temperature = v.parse().unwrap_or(0.0),
                 "rot" => q.rotate_cw = ((v.parse::<u32>().unwrap_or(0) / 90) & 3) as u8,
+                "fmt" => {
+                    fmt = match v.as_str() {
+                        "jpg" | "jpeg" => "jpg",
+                        "webp" => "webp",
+                        _ => "png",
+                    };
+                }
                 _ => {}
             }
         }
@@ -787,17 +902,18 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
             .map_err(|e| e.to_string())
             .and_then(|img| {
                 let dec_ms = t0.elapsed().as_secs_f64() * 1000.0;
-                encode_png_bytes(&img.pixels, img.width, img.height, img.channels).map(|b| (img, b, dec_ms))
+                encode_image_bytes(&img.pixels, img.width, img.height, img.channels, fmt)
+                    .map(|(b, mime)| (img, b, mime, dec_ms))
             })
         {
-            Ok((img, png, dec_ms)) => {
+            Ok((img, body, mime, dec_ms)) => {
                 let hdr = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nETag: {etag}\r\nCache-Control: public, max-age=31536000, immutable\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: *\r\nX-VIMG-Fetched-Pct: {:.1}\r\nX-VIMG-Fetched-Bytes: {}\r\nX-VIMG-Total-Bytes: {}\r\nX-VIMG-Level: {}\r\nX-VIMG-Tiles-Fetched: {}\r\nX-VIMG-Tiles-Total: {}\r\nX-VIMG-Reqs: {}\r\nX-VIMG-Decode-Ms: {:.2}\r\nX-VIMG-Out-Dims: {}x{}\r\nConnection: close\r\n\r\n",
-                    png.len(), img.stats.fetched_pct(), img.stats.bytes_fetched, img.stats.total_file_bytes,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nETag: {etag}\r\nCache-Control: public, max-age=31536000, immutable\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: *\r\nX-VIMG-Format: {fmt}\r\nX-VIMG-Fetched-Pct: {:.1}\r\nX-VIMG-Fetched-Bytes: {}\r\nX-VIMG-Total-Bytes: {}\r\nX-VIMG-Level: {}\r\nX-VIMG-Tiles-Fetched: {}\r\nX-VIMG-Tiles-Total: {}\r\nX-VIMG-Reqs: {}\r\nX-VIMG-Decode-Ms: {:.2}\r\nX-VIMG-Out-Dims: {}x{}\r\nConnection: close\r\n\r\n",
+                    body.len(), img.stats.fetched_pct(), img.stats.bytes_fetched, img.stats.total_file_bytes,
                     img.decoded_level, img.tiles_fetched, img.tiles_total, img.stats.requests, dec_ms, img.width, img.height
                 );
                 let _ = stream.write_all(hdr.as_bytes());
-                let _ = stream.write_all(&png);
+                let _ = stream.write_all(&body);
             }
             Err(_) => {
                 let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
@@ -888,6 +1004,8 @@ fn main() {
         "decode" => cmd_decode(&args[1..]),
         "info" => cmd_info(&args[1..]),
         "crop" => cmd_crop(&args[1..]),
+        "downscale" => cmd_downscale(&args[1..]),
+        "diff" => cmd_diff(&args[1..]),
         "bench" => cmd_bench(&args[1..]),
         "serve" => cmd_serve(&args[1..]),
         "-h" | "--help" => { usage(); Ok(()) }

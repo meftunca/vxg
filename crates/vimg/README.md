@@ -7,11 +7,12 @@
   - `q = 100`: **100% bit-exact lossless** (`4:4:4`, integer `CDF 5/3`, RGB & RGBA) — **38.6% smaller than PNG**, within **5.1%** of WebP Lossless while encoding **60× faster**!
   - `q = 1..99`: **DC-unity `CDF 9/7` biorthogonal lifting** (`4:2:0`) + Laplacian MMSE dead-zone quantization + `4×4` adaptive block-significance skipping + zero-header-overhead 128-context 2D adaptive binary range coding.
 - **Direct Compressed-Domain Operations**:
-  - **Resize** — stop decoding at the coarsest wavelet level `>= target` (skip L2/L3 over the wire).
-  - **Spatial Crop** — fetch only intersecting tiles; `vimg crop` performs **zero-decode `vimg -> vimg`** tile cropping without running IDWT or color conversion.
+  - **Resize & Catmull-Rom Bicubic Refinement** — stop decoding at the coarsest wavelet level `>= target` (skip L2/L3 over the wire), then refine arbitrary widths/heights with a separable 2-pass Catmull-Rom bicubic filter.
+  - **Spatial Crop & Zero-Decode Crop / Downscale (`vimg -> vimg`)** — fetch only intersecting tiles; `vimg crop` & `vimg downscale --level 0|1|2 [--strip-meta]` re-package tile payloads verbatim without running IDWT or color conversion, with optional EXIF/XMP privacy stripping while keeping ICC/CICP color accuracy.
+  - **Stateful `ProgressiveDecoder` (`L0 → L1 → L2 → L3`)** — incrementally fetch and refine wavelet levels over HTTP Range without re-downloading or re-decoding previous levels.
   - **Grayscale / Sepia** — skip `Co`/`Cg` chroma planes completely (`0` chroma bytes fetched).
-  - **Subband Blur / Sharpen / Brightness / Contrast** — scale wavelet detail gains and `LL` coefficients directly before IDWT.
-  - **Rotate / Flip** + **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) with `recover_corrupt` tile salvaging.
+  - **Subband Blur / Sharpen / Brightness / Contrast / Saturation / Temperature** — modulate wavelet detail gains, `LL` luminance, and `Co`/`Cg` chroma saturation & white balance directly in the compressed domain.
+  - **Rotate / Flip** + **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) with `recover_corrupt` tile salvaging + **Pure-Rust 8×8 Windowed SSIM (`vimg diff`)** + **Multi-Format Edge Proxy (`?fmt=webp|jpg|png`)**.
 - **Hardware SIMD Acceleration (`ARMv8 NEON` + `x86_64 AVX2` + `wasm32 simd128`)**:
   - Vectorized `RGB <-> YCoCg-R`, `4:2:0` box downsample & `2×2` bilinear upsample, horizontal & transpose-free row-major vertical `CDF 9/7` + `CDF 5/3` lifting, `FCVTAS` rounding, branchless `CMOV` range coding, L1-hot tile-local color split & merge, per-worker reusable `WaveletScratch` (zero per-tile heap allocs), zero-alloc `CODEC_ALL_ZERO` detail skip, and dynamic `AtomicUsize` work-stealing (**~1.17 GP/s encode** & **~980 MP/s decode** on Apple M2 Max!).
 - **Production Security, Network, HDR, Color Management & UI Mode (`v0.3`)**:
@@ -24,8 +25,8 @@
 - **Zero-Dependency Core + C99 ABI + Zero-WASI `wasm32`**:
   - Core `[lib]` has **0 external crates**.
   - Deterministic `1T == NT` bit-exact encoding (IEEE-754 identical across `aarch64`, `x86_64 AVX2`, and `wasm32`) and parallel multi-core tile decoding.
-  - `wasm32-unknown-unknown` (`+simd128`) release build: **263 KiB** stripped `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
-  - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h) (`VimgQueryC`, `vimg_decode_query_v2_alloc`, `vimg_extract_icc_alloc`, `vimg_extract_cicp`, `vimg_extract_exif_alloc`, `vimg_extract_xmp_alloc`, and `vimg_wasm_*` exports, CI-verified with `cc -std=c99 -Wall -Wextra -Werror`).
+  - `wasm32-unknown-unknown` (`+simd128`) release build: **266 KiB** stripped `.wasm`, zero WASI (includes HTTP-Range planner, sparse streaming decoder, progressive level control, and `--aq` encoder).
+  - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h) (`VimgQueryC`, `vimg_decode_query_v2_alloc`, `vimg_extract_icc_alloc`, `vimg_extract_cicp`, `vimg_extract_exif_alloc`, `vimg_extract_xmp_alloc`, and `vimg_wasm_*` / `*_v3` exports, CI-verified with `cc -std=c99 -Wall -Wextra -Werror`).
 
 ---
 
@@ -107,15 +108,17 @@
 # Core library tests (zero external dependencies)
 cargo test --manifest-path crates/vimg/Cargo.toml --release
 
-# Zero-WASI WebAssembly build (143 KiB .wasm)
-cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
+# Zero-WASI WebAssembly build (+simd128, 266 KiB stripped .wasm)
+RUSTFLAGS="-C target-feature=+simd128 -C strip=symbols" cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
 
 # Build CLI with PNG/JPEG/WebP/BMP I/O
 cargo build --manifest-path crates/vimg/Cargo.toml --release --features io --bin vimg
 
-# Encode, inspect, benchmark
-vimg encode photo.png photo.vimg -q 85
+# Encode (--aq adaptive quant + CICP + metadata), inspect, diff (PSNR + SSIM), benchmark
+vimg encode photo.png photo.vimg -q 85 --aq --cicp p3 --keep-meta
 vimg info photo.vimg
+vimg diff photo.png photo.vimg
+vimg downscale photo.vimg thumb_l1.vimg --level 1 --strip-meta
 vimg bench photo.png
 
 # Start HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy + Interactive Web Playground
@@ -123,11 +126,11 @@ vimg serve ./images --port 8090
 # Open http://127.0.0.1:8090/ in your browser for interactive drag-to-crop,
 # tile-grid heatmap, live X-VIMG-* wire telemetry, and Browser vimg.wasm HTTP 206 Range mode!
 
-# Fetch remote crop + effects directly via HTTP Range
-vimg decode http://127.0.0.1:8090/photo.vimg out.png --crop 2500,2500,512,512 --blur 0.4 --sepia
+# Fetch remote crop + compressed-domain color/effects directly via HTTP Range
+vimg decode http://127.0.0.1:8090/photo.vimg out.png --crop 2500,2500,512,512 --blur 0.4 --sat 1.25 --temp 0.3
 
-# Or call the Edge Proxy directly from a browser / curl
-curl "http://127.0.0.1:8090/photo.vimg?w=752&gray=1&blur=0.5" -o thumb.png
+# Or call the Edge Proxy directly from a browser / curl (?fmt=webp|jpg|png)
+curl "http://127.0.0.1:8090/photo.vimg?w=752&gray=1&blur=0.5&fmt=webp" -o thumb.webp
 ```
 
 ---

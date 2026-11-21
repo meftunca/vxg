@@ -33,11 +33,12 @@ Unlike static monolithic codecs (`JPEG`, `WebP`, `AVIF`) that force CDNs, edge p
    - Initial `4 KiB` prefix fetch is cached and reused — early `L0` chunks require **zero** extra requests.
    - Contiguous chunk spans are coalesced via `coalesce_ranges` to minimize HTTP round trips.
 4. **Direct Compressed-Domain Operations**:
-   - **Pyramid Resize**: Stops fetching/decoding at the coarsest wavelet level `>= target`.
-   - **Spatial Crop & Zero-Decode Crop**: Fetches only intersecting tiles; `vimg crop` re-packages tile payloads verbatim (`vimg → vimg`) with **zero IDWT or color conversion**.
+   - **Pyramid Resize & Catmull-Rom Bicubic Refinement**: Stops fetching/decoding at the coarsest wavelet level `>= target`, then refines arbitrary target dimensions with a separable 2-pass Catmull-Rom bicubic kernel.
+   - **Spatial Crop & Zero-Decode Crop / Downscale (`vimg → vimg`)**: Fetches only intersecting tiles; `vimg crop` and `vimg downscale --level 0|1|2 [--strip-meta]` re-package tile payloads verbatim with **zero IDWT or color conversion**, optionally stripping EXIF/XMP while keeping ICC/CICP color accuracy.
+   - **Stateful `ProgressiveDecoder` (`L0 → L1 → L2 → L3`)**: Streams and refines wavelet tiers incrementally over HTTP Range without re-downloading or re-decoding previous levels.
    - **Grayscale / Sepia**: Skips `Co`/`Cg` chroma planes completely (`0` chroma bytes transferred).
-   - **Subband Blur / Sharpen / Brightness / Contrast**: Modulates wavelet detail gains and `LL` coefficients directly before IDWT.
-   - **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) + `recover_corrupt` tile salvaging.
+   - **Subband Blur / Sharpen / Brightness / Contrast / Saturation / Temperature**: Modulates wavelet detail gains, `LL` luminance, and `Co`/`Cg` chroma saturation & white balance directly in the compressed domain.
+   - **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) + `recover_corrupt` tile salvaging + **Pure-Rust 8×8 SSIM (`vimg diff`)** + **Multi-Format Edge Proxy (`?fmt=webp|jpg|png`)**.
 5. **Hardware SIMD Acceleration (`ARMv8 NEON` + `x86_64 AVX2` + `wasm32 simd128`)**:
    - Vectorized `RGB ↔ YCoCg-R`, `4:2:0` downsample & `2×2` bilinear upsample, horizontal & transpose-free row-major vertical `CDF 9/7` + `CDF 5/3` lifting, `FCVTAS` rounding, branchless `CMOV` range coding, L1-hot tile-local color split & merge, reusable per-worker `WaveletScratch`, zero-alloc `CODEC_ALL_ZERO` skip, and dynamic `AtomicUsize` work-stealing.
 6. **Production Hardening, HTTPS TLS, HDR, ICC, CICP/EXIF/XMP & UI Mode (`v0.3`)**:
@@ -47,7 +48,7 @@ Unlike static monolithic codecs (`JPEG`, `WebP`, `AVIF`) that force CDNs, edge p
    - **Direct `https://` TLS 1.3 Range Streaming (`tls` / `io` feature)**: Pure-Rust `rustls` + `webpki-roots` (zero OpenSSL) with `http:// → https://` redirects, `Connection: keep-alive` pooling, parallel 4-stream multi-range fetch, IPv4-first DNS fallback, and 1-RTT `16 KiB` prefix; default core `[lib]` remains **0 external crates**.
    - **10-bit & 12-bit HDR + ICC Color Profiles**: Reversible integer `CDF 5/3` & lossy `CDF 9/7` HDR (`encode_u16`, CLI `--bit-depth 10|12`) + `CRC32C`-protected Display P3 / AdobeRGB / sRGB ICC profiles.
    - **Hardened Bounds, Server & Fuzzing**: Hard OOM-bomb bounds, **12,000-case adversarial fuzz suite** (`tests/vimg_fuzz.rs`), `cargo-fuzz` / `libFuzzer` targets (`crates/vimg/fuzz/`), cross-arch golden wire vectors, and hardened `vimg serve` (`pread` `206`, `ETag`/`304`, 64-worker `503` protection, EXIF orientation).
-   - **Portability**: IEEE-754 cross-architecture deterministic `1T == NT` encoding, **263 KiB** stripped `+simd128` zero-WASI `wasm32`, and panic-safe C99 ABI (`crates/vimg/include/vimg.h`).
+   - **Portability**: IEEE-754 cross-architecture deterministic `1T == NT` encoding, **266 KiB** stripped `+simd128` zero-WASI `wasm32`, and panic-safe C99 ABI (`crates/vimg/include/vimg.h`).
 
 ---
 
@@ -92,22 +93,24 @@ All codecs encoded from the exact same lossless PNG references across 5 diverse 
 # Run core zero-dependency tests
 cargo test --manifest-path crates/vimg/Cargo.toml --release
 
-# Build zero-WASI WebAssembly module with SIMD128 (263 KiB stripped)
+# Build zero-WASI WebAssembly module with SIMD128 (266 KiB stripped)
 RUSTFLAGS="-C target-feature=+simd128 -C strip=symbols" cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
 
 # Build CLI with PNG/JPEG/WebP/BMP I/O
 cargo build --manifest-path crates/vimg/Cargo.toml --release --features io --bin vimg
 
-# Encode, inspect, benchmark
-vimg encode photo.png photo.vimg -q 80
+# Encode (--aq adaptive quant + CICP + metadata), inspect, diff (PSNR + SSIM), benchmark
+vimg encode photo.png photo.vimg -q 80 --aq --cicp p3 --keep-meta
 vimg info photo.vimg
+vimg diff photo.png photo.vimg
+vimg downscale photo.vimg thumb_l1.vimg --level 1 --strip-meta
 vimg bench photo.png -q 80
 
-# Start HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy + Playground UI
+# Start HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy (?fmt=webp|jpg|png) + Playground UI
 vimg serve ./images --port 8090
 
-# Fetch a remote 512x512 crop + subband blur + sepia over HTTP/1.1 Range
-vimg decode http://127.0.0.1:8090/photo.vimg out.png --crop 1200,800,512,512 --blur 0.4 --sepia
+# Fetch a remote 512x512 crop + subband blur + saturation/temperature over HTTP/1.1 Range
+vimg decode http://127.0.0.1:8090/photo.vimg out.png --crop 1200,800,512,512 --blur 0.4 --sat 1.25 --temp 0.3
 
 # Zero-decode tile crop (vimg -> vimg without IDWT)
 vimg crop http://127.0.0.1:8090/photo.vimg cropped.vimg --tiles 4,3,2,2
