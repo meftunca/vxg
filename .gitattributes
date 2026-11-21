@@ -1,0 +1,2 @@
+# Golden wire vectors must stay byte-exact (no CRLF/autocrlf rewriting on Windows).
+tests/vectors/* binary
