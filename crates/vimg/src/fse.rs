@@ -222,7 +222,7 @@ pub(crate) fn fse_encode_min(src: &[u8], out: &mut Vec<u8>, max_out: usize) -> b
         return false;
     }
 
-    let table_log: u32 = if m < 256 && distinct <= 32 {
+    let table_log: u32 = if m < 512 && distinct <= 32 {
         8
     } else if m < 1024 || distinct <= 48 {
         9

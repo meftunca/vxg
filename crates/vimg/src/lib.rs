@@ -7,6 +7,7 @@
 
 pub mod checksum;
 pub mod color;
+pub mod entropy;
 pub mod ffi;
 pub mod format;
 pub mod fse;
