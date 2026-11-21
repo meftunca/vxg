@@ -12,11 +12,17 @@
   - **Grayscale / Sepia** — skip `Co`/`Cg` chroma planes completely (`0` chroma bytes fetched).
   - **Subband Blur / Sharpen / Brightness / Contrast** — scale wavelet detail gains and `LL` coefficients directly before IDWT.
   - **Rotate / Flip** + **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) with `recover_corrupt` tile salvaging.
-- **Zero-Dependency Core + C ABI + Zero-WASI `wasm32`**:
+- **Hardware SIMD Acceleration (`ARMv8 NEON` + `x86_64 AVX2`)**:
+  - Vectorized `RGB <-> YCoCg-R`, `4:2:0` box downsample & `2×2` bilinear upsample, horizontal & transpose-free row-major vertical `CDF 9/7` + `CDF 5/3` lifting, `FCVTAS` rounding, L1-hot tile-local color merge, and dynamic `AtomicUsize` work-stealing (**3.1×–4.8× faster decode**, **2.2×–2.3× faster full decode than JPEG**, and **faster lossless decode than PNG**!).
+- **Production Security, Network & EXIF Hardening**:
+  - Hard OOM-bomb limits (`MAX_IMAGE_DIM`, `MAX_IMAGE_PIXELS`, `MAX_DIR_BYTES`, `MAX_CHUNK_BYTES`, `wasm32`-safe checked arithmetic) verified by a 12,000-case adversarial fuzz suite (`tests/vimg_fuzz.rs`) and cross-arch deterministic golden wire vectors (`tests/golden_vimg.rs`).
+  - `HttpRangeSource`: persistent `Connection: keep-alive` pooling, `301/302/307/308` redirect following, parallel multi-range fetching (up to 4 streams), and socket timeouts.
+  - `vimg serve`: zero-full-read `pread` `206 Partial Content`, `ETag` / `304 Not Modified` / `Cache-Control`, bounded 64-worker pool (`503` overload protection), and pure-Rust JPEG EXIF Orientation (`1..=8`) auto-correction.
+- **Zero-Dependency Core + C99 ABI + Zero-WASI `wasm32`**:
   - Core `[lib]` has **0 external crates**.
-  - Deterministic `1T == NT` bit-exact encoding and parallel multi-core tile decoding.
-  - `wasm32-unknown-unknown` release build: **160 KiB** `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
-  - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h).
+  - Deterministic `1T == NT` bit-exact encoding (IEEE-754 identical across `aarch64`, `x86_64 AVX2`, and `wasm32`) and parallel multi-core tile decoding.
+  - `wasm32-unknown-unknown` release build: **187 KiB** stripped `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
+  - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h) (`VimgQueryC` / `vimg_decode_query_v2_alloc` + `vimg_wasm_*` exports, CI-verified with `cc -std=c99 -Wall -Wextra -Werror`).
 
 ---
 
@@ -44,9 +50,19 @@
   - `01_portrait` (11.3 MP): **VIMG `q=80` (`271.6 KiB @ 39.22 dB`, `25.7 ms`) beats WebP `q=75` (`301.1 KiB @ 39.11 dB`, `649 ms`) by -9.8% size, +0.11 dB PSNR, and 25× speed!**
   - `03_landscape` (6.8 MP): **VIMG `q=80` (`432.8 KiB @ 37.11 dB`, `19.1 ms`) beats WebP `q=75` (`447.4 KiB @ 36.64 dB`, `456 ms`) by -3.3% size, +0.47 dB PSNR, and 24× speed!**
 
-### Compressed-Domain Remote Queries (`VIMG q=80`, 5-photo range)
-- **1/4 Resize (`~800px`)**: **4.57 – 8.80 ms**, **140.3 – 319.3 KiB (`26.8% – 51.6%`)** vs JPEG full+resize **43.8 – 68.9 ms (`850 – 1,811 KiB`)** (**5× – 12× faster!**)
-- **256×256 Center Crop**: **0.96 – 1.86 ms**, **28.1 – 95.9 KiB (`6.5% – 15.6%`, `4` tiles)** vs JPEG full+crop **20.1 – 33.6 ms** (**12× – 27× faster, 11× – 30× less traffic!**)
+### SIMD-Accelerated Decode & Compressed-Domain Queries (`VIMG q=80` & `q=100`, Apple M2 Max Release)
+
+| Photo | Codec / Query | Size / Wire | Enc ms | **Dec / Query ms** | vs Pre-SIMD / vs JPEG & PNG |
+|---|---|---:|---:|---:|---|
+| **`01_portrait`** (`3000×3751`, 11.3 MP) | **VIMG Lossy (`q=80`, `39.22 dB`)** | **271.6 KiB** | **16.86 ms** | **13.07 ms** | **4.71× faster** (`61.57 → 13.07 ms`), **2.22× faster dec / 5.4× faster enc than JPEG** (`29.01 / 91.32 ms`) |
+| | **VIMG Lossless (`q=100`, bit-exact)** | **6,578.8 KiB** | **55.62 ms** | **51.46 ms** | **-48.0% smaller & 1.57× faster dec than PNG** (`80.79 ms`) |
+| | **1/4 Resize (`750×938`) / Center Crop (`256²`)** | **140.3 / 32.1 KiB** | — | **2.20 / 0.63 ms** | **32× / 42× faster** than JPEG full+transform (`70.80 / 26.40 ms`) |
+| **`03_landscape`** (`3200×2136`, 6.8 MP) | **VIMG Lossy (`q=80`, `37.11 dB`)** | **432.8 KiB** | **14.05 ms** | **9.30 ms** | **4.81× faster** (`44.77 → 9.30 ms`), **2.30× faster dec / 4.5× faster enc than JPEG** (`21.38 / 62.99 ms`) |
+| | **VIMG Lossless (`q=100`, bit-exact)** | **5,043.1 KiB** | **35.46 ms** | **33.08 ms** | **-47.3% smaller & 1.40× faster dec than PNG** (`46.40 ms`) |
+| | **1/4 Resize (`800×534`) / Center Crop (`256²`)** | **152.5 / 28.1 KiB** | — | **1.63 / 0.77 ms** | **28× / 25× faster** than JPEG full+transform (`45.05 / 19.60 ms`) |
+| **`05_tokyo_night`** (`3200×2076`, 6.6 MP) | **VIMG Lossy (`q=80`, `32.76 dB`)** | **1,189.9 KiB** | **16.57 ms** | **16.13 ms** | **3.13× faster** (`50.46 → 16.13 ms`), **2.18× faster dec / 4.9× faster enc than JPEG** (`35.09 / 80.47 ms`) |
+| | **VIMG Lossless (`q=100`, bit-exact)** | **9,871.7 KiB** | **53.24 ms** | **50.61 ms** | **-18.7% smaller & 1.11× faster dec than PNG** (`56.33 ms`) |
+| | **1/4 Resize (`800×519`) / Center Crop (`256²`)** | **319.3 / 95.9 KiB** | — | **2.38 / 1.80 ms** | **24× / 19× faster** than JPEG full+transform (`57.71 / 33.70 ms`) |
 
 ---
 

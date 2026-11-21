@@ -1,9 +1,8 @@
 //! Pure-Rust, zero-dependency, zero-header-overhead **Adaptive Binary Range Coder** +
 //! 2D Spatial-Context Wavelet Subband Model (`VIMG`).
 //!
-//! Eliminates per-tile static frequency table headers completely (`0 bytes` table overhead per
-//! `(level, plane, tile)` chunk), enabling rich 2D causal neighborhood significance, sign, and
-//! logarithmic energy contexts in a single O(N) pass for both lossless (`q=100`) and lossy modes.
+//! Hot-loop optimized with 1-instruction `CLZ` energy bucketing, branchless sign trits,
+//! bounds-check-free interior raster & 4×4 block fast paths, and fused active-block dequantization.
 
 use crate::{Error, Result};
 
@@ -106,7 +105,8 @@ impl<'a> RangeDec<'a> {
     #[inline(always)]
     fn read_byte(&mut self) -> u32 {
         if self.pos < self.buf.len() {
-            let b = self.buf[self.pos] as u32;
+            // SAFETY: `self.pos < self.buf.len()` checked right above.
+            let b = unsafe { *self.buf.get_unchecked(self.pos) } as u32;
             self.pos += 1;
             b
         } else {
@@ -152,24 +152,30 @@ impl<'a> RangeDec<'a> {
     }
 }
 
+#[inline(always)]
+fn energy_bucket(act: u32) -> usize {
+    (32 - act.leading_zeros()).min(7) as usize
+}
+
+#[inline(always)]
+fn sign_trit(v: i32) -> usize {
+    usize::from(v != 0) + usize::from(v < 0)
+}
+
 /// Adaptive 2D wavelet context model (zero header bytes, adapts online per tile chunk!).
 struct SubbandModel {
-    /// 4x4 block significance: `[band(0..3) * 4 + (left_sig<<1 | top_sig)]`
     blk_sig: [u16; 12],
-    /// Coefficient non-zero significance: `[band(0..3) * 16 + sig_ctx(0..15)]`
     coeff_nz: [u16; 48],
-    /// Sign correlation: `[band(0..3) * 9 + ws*3 + ns]`
     sign_ctx: [u16; 27],
-    /// Magnitude thresholds `>1, >2, >3, >4` conditioned on 8 logarithmic 2D energy buckets
     gt1: [u16; 8],
     gt2: [u16; 8],
     gt3: [u16; 8],
     gt4: [u16; 8],
-    /// Unary exponent bits for `|v| >= 5`
     exp_unary: [u16; 14],
 }
 
 impl SubbandModel {
+    #[inline]
     fn new() -> Self {
         Self {
             blk_sig: [PROB_INIT; 12],
@@ -184,11 +190,13 @@ impl SubbandModel {
     }
 
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     fn encode_coeff(
         &mut self,
         enc: &mut RangeEnc,
         v: i32,
-        band_id: usize,
+        band_base_z: usize,
+        band_base_s: usize,
         w_val: i32,
         n_val: i32,
         nw_val: i32,
@@ -199,11 +207,11 @@ impl SubbandModel {
         let anw = nw_val.unsigned_abs();
         let ane = ne_val.unsigned_abs();
         let act = aw + an + ((anw + ane) >> 1);
-        let sig_bits = usize::from(aw > 0)
-            | (usize::from(an > 0) << 1)
-            | (usize::from(anw > 0 || ane > 0) << 2)
+        let sig_bits = usize::from(aw != 0)
+            | (usize::from(an != 0) << 1)
+            | (usize::from((anw | ane) != 0) << 2)
             | (usize::from(act >= 4) << 3);
-        let zctx = (band_id * 16) + sig_bits;
+        let zctx = band_base_z + sig_bits;
 
         if v == 0 {
             enc.encode_bit(&mut self.coeff_nz[zctx], 0);
@@ -211,9 +219,7 @@ impl SubbandModel {
         }
         enc.encode_bit(&mut self.coeff_nz[zctx], 1);
 
-        let ws = if w_val == 0 { 0 } else if w_val > 0 { 1 } else { 2 };
-        let ns = if n_val == 0 { 0 } else if n_val > 0 { 1 } else { 2 };
-        let sctx = band_id * 9 + ws * 3 + ns;
+        let sctx = band_base_s + sign_trit(w_val) * 3 + sign_trit(n_val);
         enc.encode_bit(&mut self.sign_ctx[sctx], u32::from(v < 0));
 
         let a = v.unsigned_abs();
@@ -239,24 +245,27 @@ impl SubbandModel {
         }
         enc.encode_bit(&mut self.gt4[ectx], 1);
 
-        let rem = a.min(65535) - 1;
-        let bit_len = 31 - rem.leading_zeros(); // >= 2
+        let ac = a.min(65535);
+        let rem = ac - 1;
+        let bit_len = 31 - rem.leading_zeros();
         let k = (bit_len - 2) as usize;
         for u in 0..k {
             enc.encode_bit(&mut self.exp_unary[u.min(13)], 1);
         }
         enc.encode_bit(&mut self.exp_unary[k.min(13)], 0);
-        let offset = a.min(65535) - (1 + (1u32 << bit_len));
+        let offset = ac - (1 + (1u32 << bit_len));
         for b in (0..bit_len).rev() {
             enc.encode_bypass((offset >> b) & 1);
         }
     }
 
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     fn decode_coeff(
         &mut self,
         dec: &mut RangeDec<'_>,
-        band_id: usize,
+        band_base_z: usize,
+        band_base_s: usize,
         w_val: i32,
         n_val: i32,
         nw_val: i32,
@@ -267,19 +276,17 @@ impl SubbandModel {
         let anw = nw_val.unsigned_abs();
         let ane = ne_val.unsigned_abs();
         let act = aw + an + ((anw + ane) >> 1);
-        let sig_bits = usize::from(aw > 0)
-            | (usize::from(an > 0) << 1)
-            | (usize::from(anw > 0 || ane > 0) << 2)
+        let sig_bits = usize::from(aw != 0)
+            | (usize::from(an != 0) << 1)
+            | (usize::from((anw | ane) != 0) << 2)
             | (usize::from(act >= 4) << 3);
-        let zctx = (band_id * 16) + sig_bits;
+        let zctx = band_base_z + sig_bits;
 
         if dec.decode_bit(&mut self.coeff_nz[zctx]) == 0 {
             return 0;
         }
 
-        let ws = if w_val == 0 { 0 } else if w_val > 0 { 1 } else { 2 };
-        let ns = if n_val == 0 { 0 } else if n_val > 0 { 1 } else { 2 };
-        let sctx = band_id * 9 + ws * 3 + ns;
+        let sctx = band_base_s + sign_trit(w_val) * 3 + sign_trit(n_val);
         let neg = dec.decode_bit(&mut self.sign_ctx[sctx]) != 0;
 
         let ectx = energy_bucket(act);
@@ -308,29 +315,7 @@ impl SubbandModel {
     }
 }
 
-#[inline(always)]
-fn energy_bucket(act: u32) -> usize {
-    if act == 0 {
-        0
-    } else if act == 1 {
-        1
-    } else if act <= 3 {
-        2
-    } else if act <= 7 {
-        3
-    } else if act <= 15 {
-        4
-    } else if act <= 31 {
-        5
-    } else if act <= 63 {
-        6
-    } else {
-        7
-    }
-}
-
 /// Encodes 1..3 2D bands in raster order using the 2D adaptive binary range coder (`CODEC_2D_AC`).
-/// Used for `LL` MED residuals and all lossless (`q=100`) detail bands.
 pub fn encode_2d_ac(bands: &[(&[i32], usize, usize)], out: &mut Vec<u8>) {
     let any_nz = bands.iter().any(|(b, _, _)| b.iter().any(|&v| v != 0));
     if !any_nz {
@@ -342,15 +327,36 @@ pub fn encode_2d_ac(bands: &[(&[i32], usize, usize)], out: &mut Vec<u8>) {
     let mut enc = RangeEnc::with_capacity(total_elems / 2 + 16);
     let mut model = SubbandModel::new();
     for (b_idx, &(grid, w, h)) in bands.iter().enumerate() {
+        if w == 0 || h == 0 {
+            continue;
+        }
         let bid = b_idx.min(2);
-        for y in 0..h {
-            let row = y * w;
-            for x in 0..w {
-                let w_v = if x > 0 { grid[row + x - 1] } else { 0 };
-                let n_v = if y > 0 { grid[row - w + x] } else { 0 };
-                let nw_v = if x > 0 && y > 0 { grid[row - w + x - 1] } else { 0 };
-                let ne_v = if x + 1 < w && y > 0 { grid[row - w + x + 1] } else { 0 };
-                model.encode_coeff(&mut enc, grid[row + x], bid, w_v, n_v, nw_v, ne_v);
+        let bz = bid * 16;
+        let bs = bid * 9;
+        // Row 0
+        let mut w_v = 0i32;
+        for &v in &grid[..w] {
+            model.encode_coeff(&mut enc, v, bz, bs, w_v, 0, 0, 0);
+            w_v = v;
+        }
+        // Rows 1..h with bounds-check-free interior loop
+        for y in 1..h {
+            let prev = &grid[(y - 1) * w..y * w];
+            let cur = &grid[y * w..(y + 1) * w];
+            let v0 = cur[0];
+            let ne0 = if w > 1 { prev[1] } else { 0 };
+            model.encode_coeff(&mut enc, v0, bz, bs, 0, prev[0], 0, ne0);
+            let mut w_v = v0;
+            if w > 2 {
+                for x in 1..w - 1 {
+                    let v = cur[x];
+                    model.encode_coeff(&mut enc, v, bz, bs, w_v, prev[x], prev[x - 1], prev[x + 1]);
+                    w_v = v;
+                }
+            }
+            if w > 1 {
+                let lx = w - 1;
+                model.encode_coeff(&mut enc, cur[lx], bz, bs, w_v, prev[lx], prev[lx - 1], 0);
             }
         }
     }
@@ -362,7 +368,7 @@ pub fn encode_2d_ac(bands: &[(&[i32], usize, usize)], out: &mut Vec<u8>) {
 }
 
 /// Encodes 3 lossy detail bands `(LH, HL, HH)` using 4×4 adaptive block-significance skipping +
-/// 2D causal adaptive binary range coding (`CODEC_BLK4_AC`). Skips 75–90% of zero blocks completely!
+/// 2D causal adaptive binary range coding (`CODEC_BLK4_AC`).
 pub fn encode_blk4_ac(bands: &[(&[i32], usize, usize)], out: &mut Vec<u8>) {
     let any_nz = bands.iter().any(|(b, _, _)| b.iter().any(|&v| v != 0));
     if !any_nz {
@@ -375,7 +381,12 @@ pub fn encode_blk4_ac(bands: &[(&[i32], usize, usize)], out: &mut Vec<u8>) {
     let mut model = SubbandModel::new();
 
     for (b_idx, &(grid, w, h)) in bands.iter().enumerate() {
+        if w == 0 || h == 0 {
+            continue;
+        }
         let bid = b_idx.min(2);
+        let bz = bid * 16;
+        let bs = bid * 9;
         let bx_n = w.div_ceil(4);
         let by_n = h.div_ceil(4);
         let mut sig = vec![0u8; bx_n * by_n];
@@ -406,15 +417,30 @@ pub fn encode_blk4_ac(bands: &[(&[i32], usize, usize)], out: &mut Vec<u8>) {
                 enc.encode_bit(&mut model.blk_sig[bctx], 1);
                 sig[by * bx_n + bx] = 1;
 
-                for dy in 0..bh {
-                    let y = y0 + dy;
-                    let row = y * w;
-                    for dx in 0..bw {
-                        let x = x0 + dx;
-                        let w_v = if x > 0 { grid[row + x - 1] } else { 0 };
-                        let n_v = if y > 0 { grid[row - w + x] } else { 0 };
-                        let nw_v = if x > 0 && y > 0 { grid[row - w + x - 1] } else { 0 };
-                        model.encode_coeff(&mut enc, grid[row + x], bid, w_v, n_v, nw_v, 0);
+                if bx > 0 && by > 0 && bw == 4 && bh == 4 {
+                    // Fast interior 4x4 block: zero per-pixel bounds checks!
+                    for dy in 0..4 {
+                        let y = y0 + dy;
+                        let prev = &grid[(y - 1) * w + x0 - 1..(y - 1) * w + x0 + 4];
+                        let cur = &grid[y * w + x0 - 1..y * w + x0 + 4];
+                        let mut w_v = cur[0];
+                        for dx in 0..4 {
+                            let v = cur[dx + 1];
+                            model.encode_coeff(&mut enc, v, bz, bs, w_v, prev[dx + 1], prev[dx], 0);
+                            w_v = v;
+                        }
+                    }
+                } else {
+                    for dy in 0..bh {
+                        let y = y0 + dy;
+                        let row = y * w;
+                        for dx in 0..bw {
+                            let x = x0 + dx;
+                            let w_v = if x > 0 { grid[row + x - 1] } else { 0 };
+                            let n_v = if y > 0 { grid[row - w + x] } else { 0 };
+                            let nw_v = if x > 0 && y > 0 { grid[row - w + x - 1] } else { 0 };
+                            model.encode_coeff(&mut enc, grid[row + x], bz, bs, w_v, n_v, nw_v, 0);
+                        }
                     }
                 }
             }
@@ -427,8 +453,24 @@ pub fn encode_blk4_ac(bands: &[(&[i32], usize, usize)], out: &mut Vec<u8>) {
     out.extend_from_slice(&payload);
 }
 
-/// Decodes 1..3 2D bands from `CODEC_ALL_ZERO`, `CODEC_2D_AC`, or `CODEC_BLK4_AC`.
-pub fn decode_2d_bands(payload: &[u8], targets: &mut [(&mut [i32], usize, usize)]) -> Result<()> {
+#[inline(always)]
+fn dequant_val(q: i32, step: i32) -> i32 {
+    if q == 0 {
+        0
+    } else {
+        let mag = q.abs() * step + ((step * 3) >> 3);
+        if q < 0 { -mag } else { mag }
+    }
+}
+
+/// Decodes 1..3 2D bands from `CODEC_ALL_ZERO`, `CODEC_2D_AC`, or `CODEC_BLK4_AC`,
+/// optionally applying fused active-block dequantization (`dequant_steps[i] > 1`) so
+/// zero `4×4` blocks are never touched twice in memory!
+pub fn decode_2d_bands(
+    payload: &[u8],
+    targets: &mut [(&mut [i32], usize, usize)],
+    dequant_steps: &[i32],
+) -> Result<()> {
     if payload.is_empty() {
         return Err(Error::Truncated);
     }
@@ -446,16 +488,47 @@ pub fn decode_2d_bands(payload: &[u8], targets: &mut [(&mut [i32], usize, usize)
             let mut dec = RangeDec::new(&payload[1..])?;
             let mut model = SubbandModel::new();
             for (b_idx, (grid, w, h)) in targets.iter_mut().enumerate() {
-                let bid = b_idx.min(2);
                 let (w, h) = (*w, *h);
-                for y in 0..h {
-                    let row = y * w;
-                    for x in 0..w {
-                        let w_v = if x > 0 { grid[row + x - 1] } else { 0 };
-                        let n_v = if y > 0 { grid[row - w + x] } else { 0 };
-                        let nw_v = if x > 0 && y > 0 { grid[row - w + x - 1] } else { 0 };
-                        let ne_v = if x + 1 < w && y > 0 { grid[row - w + x + 1] } else { 0 };
-                        grid[row + x] = model.decode_coeff(&mut dec, bid, w_v, n_v, nw_v, ne_v);
+                if w == 0 || h == 0 {
+                    continue;
+                }
+                let bid = b_idx.min(2);
+                let bz = bid * 16;
+                let bs = bid * 9;
+                // Row 0
+                let mut w_v = 0i32;
+                for x in 0..w {
+                    let v = model.decode_coeff(&mut dec, bz, bs, w_v, 0, 0, 0);
+                    grid[x] = v;
+                    w_v = v;
+                }
+                // Rows 1..h with bounds-check-free interior loop
+                for y in 1..h {
+                    let (above, cur_all) = grid.split_at_mut(y * w);
+                    let prev = &above[(y - 1) * w..y * w];
+                    let cur = &mut cur_all[..w];
+                    let ne0 = if w > 1 { prev[1] } else { 0 };
+                    let v0 = model.decode_coeff(&mut dec, bz, bs, 0, prev[0], 0, ne0);
+                    cur[0] = v0;
+                    let mut w_v = v0;
+                    if w > 2 {
+                        for x in 1..w - 1 {
+                            let v = model.decode_coeff(&mut dec, bz, bs, w_v, prev[x], prev[x - 1], prev[x + 1]);
+                            cur[x] = v;
+                            w_v = v;
+                        }
+                    }
+                    if w > 1 {
+                        let lx = w - 1;
+                        cur[lx] = model.decode_coeff(&mut dec, bz, bs, w_v, prev[lx], prev[lx - 1], 0);
+                    }
+                }
+                let step = dequant_steps.get(b_idx).copied().unwrap_or(1);
+                if step > 1 {
+                    for v in grid.iter_mut() {
+                        if *v != 0 {
+                            *v = dequant_val(*v, step);
+                        }
                     }
                 }
             }
@@ -465,8 +538,13 @@ pub fn decode_2d_bands(payload: &[u8], targets: &mut [(&mut [i32], usize, usize)
             let mut dec = RangeDec::new(&payload[1..])?;
             let mut model = SubbandModel::new();
             for (b_idx, (grid, w, h)) in targets.iter_mut().enumerate() {
-                let bid = b_idx.min(2);
                 let (w, h) = (*w, *h);
+                if w == 0 || h == 0 {
+                    continue;
+                }
+                let bid = b_idx.min(2);
+                let bz = bid * 16;
+                let bs = bid * 9;
                 grid.fill(0);
                 let bx_n = w.div_ceil(4);
                 let by_n = h.div_ceil(4);
@@ -485,15 +563,55 @@ pub fn decode_2d_bands(payload: &[u8], targets: &mut [(&mut [i32], usize, usize)
                         sig[by * bx_n + bx] = 1;
                         let x0 = bx * 4;
                         let bw = (w - x0).min(4);
-                        for dy in 0..bh {
-                            let y = y0 + dy;
-                            let row = y * w;
-                            for dx in 0..bw {
-                                let x = x0 + dx;
-                                let w_v = if x > 0 { grid[row + x - 1] } else { 0 };
-                                let n_v = if y > 0 { grid[row - w + x] } else { 0 };
-                                let nw_v = if x > 0 && y > 0 { grid[row - w + x - 1] } else { 0 };
-                                grid[row + x] = model.decode_coeff(&mut dec, bid, w_v, n_v, nw_v, 0);
+                        if bx > 0 && by > 0 && bw == 4 && bh == 4 {
+                            for dy in 0..4 {
+                                let y = y0 + dy;
+                                let (above, cur_all) = grid.split_at_mut(y * w);
+                                let prev = &above[(y - 1) * w + x0 - 1..(y - 1) * w + x0 + 4];
+                                let cur = &mut cur_all[x0 - 1..x0 + 4];
+                                let mut w_v = cur[0];
+                                for dx in 0..4 {
+                                    let v = model.decode_coeff(&mut dec, bz, bs, w_v, prev[dx + 1], prev[dx], 0);
+                                    cur[dx + 1] = v;
+                                    w_v = v;
+                                }
+                            }
+                        } else {
+                            for dy in 0..bh {
+                                let y = y0 + dy;
+                                let row = y * w;
+                                for dx in 0..bw {
+                                    let x = x0 + dx;
+                                    let w_v = if x > 0 { grid[row + x - 1] } else { 0 };
+                                    let n_v = if y > 0 { grid[row - w + x] } else { 0 };
+                                    let nw_v = if x > 0 && y > 0 { grid[row - w + x - 1] } else { 0 };
+                                    grid[row + x] = model.decode_coeff(&mut dec, bz, bs, w_v, n_v, nw_v, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fused active-block-only dequantization: skips 75–90% of zero blocks completely!
+                let step = dequant_steps.get(b_idx).copied().unwrap_or(1);
+                if step > 1 {
+                    for by in 0..by_n {
+                        let y0 = by * 4;
+                        let bh = (h - y0).min(4);
+                        for bx in 0..bx_n {
+                            if sig[by * bx_n + bx] == 0 {
+                                continue;
+                            }
+                            let x0 = bx * 4;
+                            let bw = (w - x0).min(4);
+                            for dy in 0..bh {
+                                let row = (y0 + dy) * w + x0;
+                                for dx in 0..bw {
+                                    let v = grid[row + dx];
+                                    if v != 0 {
+                                        grid[row + dx] = dequant_val(v, step);
+                                    }
+                                }
                             }
                         }
                     }

@@ -71,3 +71,47 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libvulkan-dev glslang-tools
       - run: cargo build --release --features vulkan
       # Does not claim an actual GPU exists on this runner.
+  vimg-validation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - run: cargo test --manifest-path crates/vimg/Cargo.toml --release --features io
+      - run: cargo clippy --manifest-path crates/vimg/Cargo.toml --all-targets --features io -- -D warnings
+      - run: cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
+      - run: cargo build --manifest-path crates/vimg/Cargo.toml --release --features io --bin vimg
+      - name: C99 ABI header & staticlib smoke test
+        shell: bash
+        run: |
+          cargo build --manifest-path crates/vimg/Cargo.toml --release --lib
+          cat <<'EOF' > /tmp/vimg_ci_c99.c
+          #include <assert.h>
+          #include <string.h>
+          #include "vimg.h"
+          int main(void) {
+              uint8_t px[64 * 64 * 3];
+              for (size_t i = 0; i < sizeof(px); i++) px[i] = (uint8_t)((i * 37 + 11) & 0xFF);
+              VimgBuf enc = vimg_encode_alloc(px, sizeof(px), 64, 64, 3, 100, 64, 2);
+              assert(enc.status == 0 && enc.ptr != NULL);
+              VimgQueryC q;
+              memset(&q, 0, sizeof(q));
+              q.sepia = 1; q.flip_h = 1; q.recover_corrupt = 1; q.contrast = 1.0f;
+              VimgBuf dec = vimg_decode_query_v2_alloc(enc.ptr, enc.len, &q);
+              assert(dec.status == 0 && dec.width == 64 && dec.height == 64);
+              VimgBuf full = vimg_decode_query_v2_alloc(enc.ptr, enc.len, NULL);
+              assert(full.status == 0 && full.len == sizeof(px) && memcmp(full.ptr, px, sizeof(px)) == 0);
+              vimg_free(full); vimg_free(dec); vimg_free(enc);
+              return 0;
+          }
+          EOF
+          TARGET_DIR=$(cargo metadata --manifest-path crates/vimg/Cargo.toml --no-deps --format-version 1 | python3 -c "import sys,json; print(json.load(sys.stdin)['target_directory'])")
+          cc -std=c99 -Wall -Wextra -Werror -Icrates/vimg/include /tmp/vimg_ci_c99.c "${TARGET_DIR}/release/libvimg.a" -lpthread -ldl -lm -o /tmp/vimg_ci_c99
+          /tmp/vimg_ci_c99
+          rm -f /tmp/vimg_ci_c99.c /tmp/vimg_ci_c99

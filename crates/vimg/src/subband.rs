@@ -114,7 +114,7 @@ pub fn encode_ll_band(ll: &[i32], w: usize, h: usize, quality: u8, plane: usize)
 pub fn decode_ll_band(payload: &[u8], w: usize, h: usize, quality: u8, plane: usize) -> Result<Vec<i32>> {
     let step = ll_quant_step(quality, plane);
     let mut residuals = vec![0i32; w * h];
-    decode_2d_bands(payload, &mut [(&mut residuals, w, h)])?;
+    decode_2d_bands(payload, &mut [(&mut residuals, w, h)], &[])?;
     let mut ll = vec![0i32; w * h];
     for y in 0..h {
         for x in 0..w {
@@ -182,34 +182,16 @@ pub fn decode_detail_level(
     let mut hl = vec![0i32; hw * lh_rows];
     let mut hh = vec![0i32; hw * hh_rows];
 
+    let step_lh = quant_step(quality, plane, detail_idx, dwt_levels, false);
+    let step_hh = quant_step(quality, plane, detail_idx, dwt_levels, true);
+    let steps = if quality < 100 { [step_lh, step_lh, step_hh] } else { [1, 1, 1] };
+
     decode_2d_bands(
         payload,
         &mut [(&mut lh, lw, hh_rows), (&mut hl, hw, lh_rows), (&mut hh, hw, hh_rows)],
+        &steps,
     )?;
 
-    if quality < 100 {
-        let step_lh = quant_step(quality, plane, detail_idx, dwt_levels, false);
-        let step_hh = quant_step(quality, plane, detail_idx, dwt_levels, true);
-        if step_lh > 1 {
-            for v in &mut lh {
-                if *v != 0 {
-                    *v = dequant(*v, step_lh);
-                }
-            }
-            for v in &mut hl {
-                if *v != 0 {
-                    *v = dequant(*v, step_lh);
-                }
-            }
-        }
-        if step_hh > 1 {
-            for v in &mut hh {
-                if *v != 0 {
-                    *v = dequant(*v, step_hh);
-                }
-            }
-        }
-    }
     Ok(DetailBands { out_w, out_h, lh, hl, hh })
 }
 

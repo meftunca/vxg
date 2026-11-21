@@ -1,6 +1,6 @@
 ---
 title: VIMG — HTTP-Range Wavelet Image Codec
-description: Pure-Rust, zero-dependency HTTP/1.1 Range-native hierarchical wavelet image codec with 2D adaptive binary range coding, direct compressed-domain resize/crop/effects, and 144 KiB zero-WASI WebAssembly support.
+description: Pure-Rust, zero-dependency HTTP/1.1 Range-native hierarchical wavelet image codec with 2D adaptive binary range coding, ARMv8 NEON & x86_64 AVX2 SIMD acceleration, direct compressed-domain resize/crop/effects, and zero-WASI WebAssembly support.
 ---
 
 # VIMG (`VIMG1`) — HTTP-Range Wavelet Image Codec
@@ -38,10 +38,12 @@ Unlike static monolithic codecs (`JPEG`, `WebP`, `AVIF`) that force CDNs, edge p
    - **Grayscale / Sepia**: Skips `Co`/`Cg` chroma planes completely (`0` chroma bytes transferred).
    - **Subband Blur / Sharpen / Brightness / Contrast**: Modulates wavelet detail gains and `LL` coefficients directly before IDWT.
    - **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) + `recover_corrupt` tile salvaging.
-5. **Portability & Determinism**:
-   - Core `[lib]` has **0 external crates**, deterministic `1T == NT` multi-threaded encode, parallel multi-core tile decode.
-   - Stripped `wasm32-unknown-unknown` binary: **144 KiB**, zero WASI (`WebAssembly.instantiateStreaming(res, {})`).
-   - Panic-safe C99 header at `crates/vimg/include/vimg.h`.
+5. **Hardware SIMD Acceleration (`ARMv8 NEON` + `x86_64 AVX2`)**:
+   - Vectorized `RGB ↔ YCoCg-R`, `4:2:0` downsample & `2×2` bilinear upsample, horizontal & transpose-free row-major vertical `CDF 9/7` + `CDF 5/3` lifting, `FCVTAS` rounding, L1-hot tile-local color merge, and dynamic `AtomicUsize` work-stealing (**3.1×–4.8× faster decode**, **2.2×–2.3× faster full decode than JPEG**, and **faster lossless decode than PNG**).
+6. **Production Hardening, Portability & Determinism**:
+   - Hard OOM-bomb bounds (`MAX_IMAGE_DIM`, `MAX_IMAGE_PIXELS`, `MAX_DIR_BYTES`, `MAX_CHUNK_BYTES`, `wasm32`-safe checked arithmetic) verified by a **12,000-case adversarial fuzz suite** (`tests/vimg_fuzz.rs`) and cross-arch golden wire-format vectors (`tests/golden_vimg.rs`).
+   - Hardened `HttpRangeSource` (`Connection: keep-alive` pooling, `301/302/307/308` redirects, parallel multi-range fetch, socket timeouts) and hardened `vimg serve` (zero-full-read `pread` `206 Partial Content`, `ETag`/`304 Not Modified`/`Cache-Control`, bounded 64-worker pool with `503` overload protection, and pure-Rust JPEG EXIF Orientation `1..=8` auto-correction).
+   - Core `[lib]` has **0 external crates**, IEEE-754 cross-architecture deterministic `1T == NT` encoding, **187 KiB** stripped zero-WASI `wasm32`, and panic-safe C99 ABI (`crates/vimg/include/vimg.h` with `VimgQueryC` / `vimg_decode_query_v2_alloc`).
 
 ---
 
@@ -68,12 +70,15 @@ All codecs encoded from the exact same lossless PNG references across 5 diverse 
 | `05_tokyo_night` | 1,811 KiB (`34.1 dB`) | **1,189.9 KiB** (`32.76 dB`, 23.7 ms) | 1,621.5 KiB (`34.48 dB`) | 1,077.2 KiB (`32.25 dB`, 589 ms) | 996.4 KiB (`33.76 dB`, 550 ms) |
 | **TOTAL (5 photos)** | **5,497 KiB** (`38.01 dB`, 351 ms) | **2,923 KiB (-46.8% vs JPEG)** (`36.74 dB`, **106 ms**) | **4,202 KiB (-23.6% vs JPEG)** (`38.77 dB`, **125 ms**) | **2,748 KiB** (`36.32 dB`, 2,624 ms) | **3,037 KiB** (`38.08 dB`, 2,172 ms) |
 
-### Compressed-Domain Remote Queries (`VIMG q=80` vs Classic Full Decode)
+### SIMD Full-Decode & Compressed-Domain Remote Queries (`VIMG q=80` & `q=100` vs JPEG/PNG)
 
-| Operation | VIMG Range Latency | VIMG Wire Transfer | Classic JPEG Full + Transform | Speedup / Traffic Saved |
+| Operation (3K+ Unsplash, Apple M2 Max) | VIMG SIMD Latency | VIMG Size / Wire | Classic JPEG / PNG | Speedup / Traffic Saved |
 |---|---:|---:|---:|---|
-| **1/4 Resize (`~800px`)** | **4.57 – 8.80 ms** | **140.3 – 319.3 KiB** (`26.8–51.6%`) | 43.8 – 68.9 ms (`850–1,811 KiB`) | **5×–12× faster**, up to **6× less traffic** |
-| **256×256 Center Crop** | **0.96 – 1.86 ms** | **28.1 – 95.9 KiB** (`4` tiles, `6.5–15.6%`) | 20.1 – 33.6 ms (`850–1,811 KiB`) | **12×–27× faster**, **10×–30× less traffic** |
+| **Full Lossy Decode (`11.3 MP`, `01_portrait`)** | **13.07 ms** *(was 61.57 ms)* | **271.6 KiB** (`39.22 dB`) | JPEG `29.01 ms` (`896.8 KiB`) | **4.71× SIMD speedup**, **2.22× faster dec & -69.7% smaller than JPEG** |
+| **Full Lossy Decode (`6.8 MP`, `03_landscape`)** | **9.30 ms** *(was 44.77 ms)* | **432.8 KiB** (`37.11 dB`) | JPEG `21.38 ms` (`850.2 KiB`) | **4.81× SIMD speedup**, **2.30× faster dec & -49.1% smaller than JPEG** |
+| **Full Lossless Decode (`11.3 MP` / `6.8 MP`)** | **51.46 / 33.08 ms** | **6,579 / 5,043 KiB** | PNG `80.79 / 46.40 ms` | **1.40×–1.57× faster dec & -47% smaller than PNG** |
+| **1/4 Resize (`~800px`)** | **1.63 – 2.38 ms** | **140.3 – 319.3 KiB** (`26.8–51.6%`) | JPEG `45.1 – 70.8 ms` (`850–1,811 KiB`) | **24×–32× faster**, up to **6.4× less traffic** |
+| **256×256 Center Crop** | **0.63 – 1.80 ms** | **28.1 – 95.9 KiB** (`4` tiles, `6.5–11.8%`) | JPEG `19.6 – 33.7 ms` (`850–1,811 KiB`) | **19×–42× faster**, **19×–30× less traffic** |
 
 ---
 
@@ -83,7 +88,7 @@ All codecs encoded from the exact same lossless PNG references across 5 diverse 
 # Run core zero-dependency tests
 cargo test --manifest-path crates/vimg/Cargo.toml --release
 
-# Build zero-WASI WebAssembly module (144 KiB stripped)
+# Build zero-WASI WebAssembly module (187 KiB stripped)
 RUSTFLAGS="-C strip=symbols" cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
 
 # Build CLI with PNG/JPEG/WebP/BMP I/O

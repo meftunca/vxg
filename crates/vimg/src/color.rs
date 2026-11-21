@@ -1,4 +1,7 @@
-//! Reversible integer `YCoCg-R` lifting color transform (`4:4:4` lossless & `4:2:0` lossy).
+//! Reversible integer `YCoCg-R` lifting color transform (`4:4:4` lossless & `4:2:0` lossy)
+//! with ARMv8 NEON / x86_64 AVX2 SIMD acceleration.
+
+use crate::simd;
 
 /// Forward reversible `YCoCg-R` lifting (Malvar & Sullivan): exact integer inverse for all RGB.
 #[inline(always)]
@@ -51,13 +54,7 @@ pub fn split_planes_444(
             a_vec[i] = pixels[o + 3] as i16;
         }
     } else {
-        for i in 0..n {
-            let o = i * 3;
-            let (y, co, cg) = rgb_to_ycocg_r(pixels[o], pixels[o + 1], pixels[o + 2]);
-            y_p[i] = y;
-            co_p[i] = co;
-            cg_p[i] = cg;
-        }
+        simd::split_rgb_ycocg_r(pixels, &mut y_p, &mut co_p, &mut cg_p);
     }
     (y_p, co_p, cg_p, a_p)
 }
@@ -73,12 +70,7 @@ pub fn downsample_2x2(src: &[i16], width: usize, height: usize) -> (Vec<i16>, us
         let row0 = &src[y0 * width..(y0 + 1) * width];
         let row1 = &src[y1 * width..(y1 + 1) * width];
         let out_row = &mut dst[cy * cw..(cy + 1) * cw];
-        for cx in 0..cw {
-            let x0 = cx * 2;
-            let x1 = (x0 + 1).min(width - 1);
-            let sum = row0[x0] as i32 + row0[x1] as i32 + row1[x0] as i32 + row1[x1] as i32;
-            out_row[cx] = ((sum + 2) >> 2) as i16;
-        }
+        simd::downsample_2x2_row(row0, row1, out_row);
     }
     (dst, cw, ch)
 }
@@ -105,19 +97,7 @@ pub fn upsample_2x2_bilinear(
         let r0 = &src[cy0 * cw..(cy0 + 1) * cw];
         let r1 = &src[cy1 * cw..(cy1 + 1) * cw];
         let out_row = &mut dst[y * width..(y + 1) * width];
-        for x in 0..width {
-            let cx0 = (x / 2).min(cw - 1);
-            let cx1 = if (x & 1) == 0 {
-                cx0.saturating_sub(1)
-            } else {
-                (cx0 + 1).min(cw - 1)
-            };
-            let v = (r0[cx0] as i32) * 9
-                + (r0[cx1] as i32) * 3
-                + (r1[cx0] as i32) * 3
-                + (r1[cx1] as i32);
-            out_row[x] = ((v + 8) >> 4) as i16;
-        }
+        simd::upsample_2x2_bilinear_row(r0, r1, out_row);
     }
     dst
 }
@@ -141,8 +121,8 @@ pub fn merge_planes_rgb(
             }
         }
         (None, _, 3) => {
-            for i in 0..n {
-                let g = y_p[i].clamp(0, 255) as u8;
+            for (i, &yv) in y_p.iter().enumerate().take(n) {
+                let g = yv.clamp(0, 255) as u8;
                 let o = i * 3;
                 out[o] = g;
                 out[o + 1] = g;
@@ -161,13 +141,7 @@ pub fn merge_planes_rgb(
             }
         }
         (Some(co), Some(cg), 3) => {
-            for i in 0..n {
-                let (r, g, b) = ycocg_r_to_rgb(y_p[i], co[i], cg[i]);
-                let o = i * 3;
-                out[o] = r;
-                out[o + 1] = g;
-                out[o + 2] = b;
-            }
+            simd::merge_ycocg_r_rgb(y_p, co, cg, &mut out);
         }
         (Some(co), Some(cg), 4) => {
             for i in 0..n {

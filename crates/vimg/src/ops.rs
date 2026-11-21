@@ -3,7 +3,7 @@
 
 use crate::checksum::crc32c;
 use crate::color::{merge_planes_rgb, upsample_2x2_bilinear};
-use crate::format::VimgIndex;
+use crate::format::{VimgIndex, MAX_IMAGE_PIXELS, MAX_RESIZE_DIM, MAX_RESIZE_PIXELS};
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
 use crate::subband::{decode_detail_level, decode_ll_band};
 use crate::wavelet::{level_dims, WaveletTile};
@@ -121,6 +121,7 @@ fn select_pyramid_level(
 
 /// Computes the exact coalesced byte ranges needed beyond `prefix_end` to satisfy `query`.
 /// Returns `(coalesced_ranges, target_level, tiles_fetched, tiles_total)`.
+#[allow(clippy::type_complexity)]
 pub fn plan_query_ranges(
     idx: &VimgIndex,
     query: &TransformQuery,
@@ -193,6 +194,11 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     };
 
     let (target_lvl, target_resize) = select_pyramid_level(&idx, cw, ch, query);
+    if let Some((tw, th)) = target_resize {
+        if tw > MAX_RESIZE_DIM || th > MAX_RESIZE_DIM || (tw as u64) * (th as u64) > MAX_RESIZE_PIXELS {
+            return Err(Error::InvalidInput("target resize dimensions exceed safety limits"));
+        }
+    }
     let max_lvl = hdr.dwt_levels as usize;
     let steps_skipped = max_lvl - target_lvl;
 
@@ -252,10 +258,15 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
         let effective_gap = query.coalesce_gap.min(hdr.total_bytes / 32);
         let (coalesced, net_map) = coalesce_ranges(&net_ranges, effective_gap);
         let spans = source.read_ranges(&coalesced)?;
+        if spans.len() != coalesced.len()
+            || spans.iter().zip(coalesced.iter()).any(|(sp, &(a, b))| sp.len() as u64 != b - a)
+        {
+            return Err(Error::Truncated);
+        }
         stats.requests += coalesced.len();
         stats.bytes_fetched += coalesced.iter().map(|&(a, b)| b - a).sum::<u64>();
         fetched.extend(spans);
-        for (&k, (ci, rel)) in net_slots.iter().zip(net_map.into_iter()) {
+        for (&k, (ci, rel)) in net_slots.iter().zip(net_map) {
             mapping[k] = (ci + 1, rel);
         }
     }
@@ -292,158 +303,10 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     }
     let box_w = col_x[sel_tx];
     let box_h = row_y[sel_ty];
-
-    let mut y_canvas = vec![0i16; box_w * box_h];
-    let mut co_canvas = if fetch_chroma || query.sepia { Some(vec![0i16; box_w * box_h]) } else { None };
-    let mut cg_canvas = if fetch_chroma || query.sepia { Some(vec![0i16; box_w * box_h]) } else { None };
-    let mut a_canvas = if fetch_alpha { Some(vec![255i16; box_w * box_h]) } else { None };
-
-    // Index fetched slices by `(lvl, plane_slot, ltx, lty)` for O(1) lookup.
-    let stride_ty = sel_tx;
-    let stride_plane = sel_ty * stride_ty;
-    let stride_lvl = planes_to_fetch.len() * stride_plane;
-
-    let mut jobs = Vec::with_capacity(planes_to_fetch.len() * sel_ty * sel_tx);
-    for (p_slot, &plane) in planes_to_fetch.iter().enumerate() {
-        for lty in 0..sel_ty {
-            for ltx in 0..sel_tx {
-                jobs.push((p_slot, plane, ltx, lty));
-            }
-        }
-    }
-
-    let decode_one = |&(p_slot, plane, ltx, lty): &(usize, usize, usize, usize)| -> Result<(usize, usize, usize, Vec<i16>)> {
-        let (pw_full, ph_full) = hdr.tile_plane_dims(tx0 + ltx, ty0 + lty, plane);
-        let (ll_w, ll_h) = level_dims(pw_full, ph_full, max_lvl);
-
-        // Level 0 (LL)
-        let k0 = p_slot * stride_plane + lty * stride_ty + ltx;
-        let e0 = chunk_keys[k0].4;
-        let (ci0, off0) = mapping[k0];
-        let blob0 = &fetched[ci0][off0..off0 + e0.len as usize];
-        let mut ll = match verify_chunk(blob0, e0.crc32c, hdr.has_crc() && query.verify_crc) {
-            Ok(()) => decode_ll_band(blob0, ll_w, ll_h, hdr.quality, plane)?,
-            Err(_) if query.recover_corrupt => vec![if plane == 0 { 128 } else { 0 }; ll_w * ll_h],
-            Err(err) => return Err(err),
-        };
-
-        // Direct LL-domain brightness / contrast on luma plane (zero pixel pass!).
-        if plane == 0 && (query.brightness != 0 || (query.contrast - 1.0).abs() > 1e-4) {
-            let c = query.contrast.clamp(0.1, 4.0);
-            let b = query.brightness as f32;
-            for v in &mut ll {
-                *v = (((*v as f32 - 128.0) * c) + 128.0 + b).round() as i32;
-            }
-        }
-
-        // Detail levels 1..=target_lvl
-        let mut details = Vec::with_capacity(target_lvl);
-        let mut out_dims = Vec::with_capacity(max_lvl);
-        let (mut dw, mut dh) = (pw_full, ph_full);
-        for _ in 0..max_lvl {
-            out_dims.push((dw, dh));
-            dw = dw.div_ceil(2);
-            dh = dh.div_ceil(2);
-        }
-        out_dims.reverse();
-
-        for lvl in 1..=target_lvl {
-            let k = lvl * stride_lvl + p_slot * stride_plane + lty * stride_ty + ltx;
-            let e = chunk_keys[k].4;
-            let (ci, off) = mapping[k];
-            let blob = &fetched[ci][off..off + e.len as usize];
-            let (ow, oh) = out_dims[lvl - 1];
-            let d = match verify_chunk(blob, e.crc32c, hdr.has_crc() && query.verify_crc) {
-                Ok(()) => decode_detail_level(blob, ow, oh, hdr.quality, plane, lvl - 1, max_lvl)?,
-                Err(_) if query.recover_corrupt => {
-                    let lw = ow.div_ceil(2);
-                    let hw = ow / 2;
-                    let lh_r = oh.div_ceil(2);
-                    let hh_r = oh / 2;
-                    crate::wavelet::DetailBands {
-                        out_w: ow,
-                        out_h: oh,
-                        lh: vec![0; lw * hh_r],
-                        hl: vec![0; hw * lh_r],
-                        hh: vec![0; hw * hh_r],
-                    }
-                }
-                Err(err) => return Err(err),
-            };
-            details.push(d);
-        }
-
-        let wt = WaveletTile { full_w: pw_full, full_h: ph_full, ll_w, ll_h, ll, details };
-        let gains_slice = if plane == 0 { &detail_gains[..] } else { &[] };
-        let (mut tile_px, tw_dec, th_dec) = wt.reconstruct_mode(target_lvl, gains_slice, hdr.is_dwt_97());
-
-        let dst_tw = col_x[ltx + 1] - col_x[ltx];
-        let dst_th = row_y[lty + 1] - row_y[lty];
-        if tw_dec != dst_tw || th_dec != dst_th {
-            tile_px = upsample_2x2_bilinear(&tile_px, tw_dec, th_dec, dst_tw, dst_th);
-        }
-        Ok((plane, ltx, lty, tile_px))
-    };
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let decoded_tiles: Vec<(usize, usize, usize, Vec<i16>)> = {
-        let n_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .min(jobs.len());
-        if n_threads <= 1 || jobs.len() < 4 {
-            jobs.iter().map(decode_one).collect::<Result<Vec<_>>>()?
-        } else {
-            let chunk_sz = jobs.len().div_ceil(n_threads);
-            let mut results: Vec<Result<Vec<(usize, usize, usize, Vec<i16>)>>> = Vec::new();
-            std::thread::scope(|s| {
-                let handles: Vec<_> = jobs
-                    .chunks(chunk_sz)
-                    .map(|slice| {
-                        let f = &decode_one;
-                        s.spawn(move || slice.iter().map(f).collect::<Result<Vec<_>>>())
-                    })
-                    .collect();
-                for h in handles {
-                    results.push(h.join().expect("vimg decode worker panicked"));
-                }
-            });
-            let mut flat = Vec::with_capacity(jobs.len());
-            for part in results {
-                flat.extend(part?);
-            }
-            flat
-        }
-    };
-
-    #[cfg(target_arch = "wasm32")]
-    let decoded_tiles: Vec<(usize, usize, usize, Vec<i16>)> =
-        jobs.iter().map(decode_one).collect::<Result<Vec<_>>>()?;
-
-    for (plane, ltx, lty, tile_px) in decoded_tiles {
-        let dst_tw = col_x[ltx + 1] - col_x[ltx];
-        let dst_th = row_y[lty + 1] - row_y[lty];
-        let dst_plane = match plane {
-            0 => &mut y_canvas,
-            1 => co_canvas.as_mut().unwrap(),
-            2 => cg_canvas.as_mut().unwrap(),
-            _ => a_canvas.as_mut().unwrap(),
-        };
-        let ox = col_x[ltx];
-        let oy = row_y[lty];
-        for y in 0..dst_th {
-            dst_plane[(oy + y) * box_w + ox..(oy + y) * box_w + ox + dst_tw]
-                .copy_from_slice(&tile_px[y * dst_tw..(y + 1) * dst_tw]);
-        }
-    }
-
-    // Apply warm sepia tint directly in YCoCg-R chroma space if requested (0 chroma fetch!).
-    if query.sepia {
-        if let (Some(co), Some(cg)) = (co_canvas.as_mut(), cg_canvas.as_mut()) {
-            co.fill(34);
-            cg.fill(6);
-        }
-    }
+    let _ = box_w
+        .checked_mul(box_h)
+        .filter(|&n| (n as u64) <= MAX_IMAGE_PIXELS)
+        .ok_or(Error::InvalidFormat("decoded tile canvas exceeds safety limits"))?;
 
     // Sub-tile exact crop trimming in decoded pyramid coordinates.
     let sub_x0 = ((cx as usize) - tx0 * ts) >> steps_skipped;
@@ -459,25 +322,187 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
         hdr.channels as usize
     };
 
+    // Index fetched slices by `(lvl, plane_slot, ltx, lty)` for O(1) lookup.
+    let stride_ty = sel_tx;
+    let stride_plane = sel_ty * stride_ty;
+    let stride_lvl = planes_to_fetch.len() * stride_plane;
+
+    // Decode all planes of one spatial tile `(ltx, lty)` in L1 cache and merge straight to packed RGB/RGBA!
+    // Eliminates full-frame intermediate i16 canvases and scales merge_planes_rgb linearly across cores.
+    let decode_tile = |tile_idx: usize| -> Result<(usize, usize, Vec<u8>)> {
+        let lty = tile_idx / sel_tx;
+        let ltx = tile_idx % sel_tx;
+        let dst_tw = col_x[ltx + 1] - col_x[ltx];
+        let dst_th = row_y[lty + 1] - row_y[lty];
+
+        let mut y_tile: Option<Vec<i16>> = None;
+        let mut co_tile: Option<Vec<i16>> = None;
+        let mut cg_tile: Option<Vec<i16>> = None;
+        let mut a_tile: Option<Vec<i16>> = None;
+
+        for (p_slot, &plane) in planes_to_fetch.iter().enumerate() {
+            let (pw_full, ph_full) = hdr.tile_plane_dims(tx0 + ltx, ty0 + lty, plane);
+            let (ll_w, ll_h) = level_dims(pw_full, ph_full, max_lvl);
+
+            let k0 = p_slot * stride_plane + lty * stride_ty + ltx;
+            let e0 = chunk_keys[k0].4;
+            let (ci0, off0) = mapping[k0];
+            let blob0 = &fetched[ci0][off0..off0 + e0.len as usize];
+            let mut ll = match verify_chunk(blob0, e0.crc32c, hdr.has_crc() && query.verify_crc) {
+                Ok(()) => decode_ll_band(blob0, ll_w, ll_h, hdr.quality, plane)?,
+                Err(_) if query.recover_corrupt => vec![if plane == 0 { 128 } else { 0 }; ll_w * ll_h],
+                Err(err) => return Err(err),
+            };
+
+            if plane == 0 && (query.brightness != 0 || (query.contrast - 1.0).abs() > 1e-4) {
+                let c = query.contrast.clamp(0.1, 4.0);
+                let b = query.brightness as f32;
+                for v in &mut ll {
+                    *v = (((*v as f32 - 128.0) * c) + 128.0 + b).round() as i32;
+                }
+            }
+
+            let mut details = Vec::with_capacity(target_lvl);
+            let mut out_dims = Vec::with_capacity(max_lvl);
+            let (mut dw, mut dh) = (pw_full, ph_full);
+            for _ in 0..max_lvl {
+                out_dims.push((dw, dh));
+                dw = dw.div_ceil(2);
+                dh = dh.div_ceil(2);
+            }
+            out_dims.reverse();
+
+            for lvl in 1..=target_lvl {
+                let k = lvl * stride_lvl + p_slot * stride_plane + lty * stride_ty + ltx;
+                let e = chunk_keys[k].4;
+                let (ci, off) = mapping[k];
+                let blob = &fetched[ci][off..off + e.len as usize];
+                let (ow, oh) = out_dims[lvl - 1];
+                let d = match verify_chunk(blob, e.crc32c, hdr.has_crc() && query.verify_crc) {
+                    Ok(()) => decode_detail_level(blob, ow, oh, hdr.quality, plane, lvl - 1, max_lvl)?,
+                    Err(_) if query.recover_corrupt => {
+                        let lw = ow.div_ceil(2);
+                        let hw = ow / 2;
+                        let lh_r = oh.div_ceil(2);
+                        let hh_r = oh / 2;
+                        crate::wavelet::DetailBands {
+                            out_w: ow,
+                            out_h: oh,
+                            lh: vec![0; lw * hh_r],
+                            hl: vec![0; hw * lh_r],
+                            hh: vec![0; hw * hh_r],
+                        }
+                    }
+                    Err(err) => return Err(err),
+                };
+                details.push(d);
+            }
+
+            let wt = WaveletTile { full_w: pw_full, full_h: ph_full, ll_w, ll_h, ll, details };
+            let gains_slice = if plane == 0 { &detail_gains[..] } else { &[] };
+            let (mut tile_px, tw_dec, th_dec) = wt.reconstruct_mode(target_lvl, gains_slice, hdr.is_dwt_97());
+            if tw_dec != dst_tw || th_dec != dst_th {
+                tile_px = upsample_2x2_bilinear(&tile_px, tw_dec, th_dec, dst_tw, dst_th);
+            }
+            match plane {
+                0 => y_tile = Some(tile_px),
+                1 => co_tile = Some(tile_px),
+                2 => cg_tile = Some(tile_px),
+                _ => a_tile = Some(tile_px),
+            }
+        }
+
+        if query.sepia {
+            co_tile = Some(vec![34i16; dst_tw * dst_th]);
+            cg_tile = Some(vec![6i16; dst_tw * dst_th]);
+        }
+
+        let rgb = merge_planes_rgb(
+            y_tile.as_deref().unwrap(),
+            co_tile.as_deref(),
+            cg_tile.as_deref(),
+            a_tile.as_deref(),
+            dst_tw,
+            dst_th,
+            out_ch,
+        );
+        Ok((ltx, lty, rgb))
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let decoded_tiles: Vec<(usize, usize, Vec<u8>)> = {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let n_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(tiles_fetched);
+        if n_threads <= 1 || tiles_fetched < 2 {
+            (0..tiles_fetched).map(decode_tile).collect::<Result<Vec<_>>>()?
+        } else {
+            let next_idx = AtomicUsize::new(0);
+            type TileBatch = Result<Vec<(usize, usize, Vec<u8>)>>;
+            let mut results: Vec<TileBatch> = Vec::with_capacity(n_threads);
+            std::thread::scope(|s| {
+                let handles: Vec<_> = (0..n_threads)
+                    .map(|_| {
+                        let f = &decode_tile;
+                        let counter = &next_idx;
+                        s.spawn(move || {
+                            let mut local = Vec::new();
+                            loop {
+                                let idx = counter.fetch_add(1, Ordering::Relaxed);
+                                if idx >= tiles_fetched {
+                                    break;
+                                }
+                                local.push(f(idx)?);
+                            }
+                            Ok(local)
+                        })
+                    })
+                    .collect();
+                for h in handles {
+                    results.push(h.join().expect("vimg decode worker panicked"));
+                }
+            });
+            let mut flat = Vec::with_capacity(tiles_fetched);
+            for part in results {
+                flat.extend(part?);
+            }
+            flat
+        }
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    let decoded_tiles: Vec<(usize, usize, Vec<u8>)> =
+        (0..tiles_fetched).map(decode_tile).collect::<Result<Vec<_>>>()?;
+
     let mut cur_w = sub_w;
     let mut cur_h = sub_h;
-    let mut pixels = if sub_x0 == 0 && sub_y0 == 0 && sub_w == box_w && sub_h == box_h {
-        merge_planes_rgb(
-            &y_canvas,
-            co_canvas.as_deref(),
-            cg_canvas.as_deref(),
-            a_canvas.as_deref(),
-            box_w,
-            box_h,
-            out_ch,
-        )
-    } else {
-        let yc = crop_plane_i16(&y_canvas, box_w, sub_x0, sub_y0, sub_w, sub_h);
-        let coc = co_canvas.as_deref().map(|p| crop_plane_i16(p, box_w, sub_x0, sub_y0, sub_w, sub_h));
-        let cgc = cg_canvas.as_deref().map(|p| crop_plane_i16(p, box_w, sub_x0, sub_y0, sub_w, sub_h));
-        let ac = a_canvas.as_deref().map(|p| crop_plane_i16(p, box_w, sub_x0, sub_y0, sub_w, sub_h));
-        merge_planes_rgb(&yc, coc.as_deref(), cgc.as_deref(), ac.as_deref(), sub_w, sub_h, out_ch)
-    };
+    let mut pixels = vec![0u8; sub_w * sub_h * out_ch];
+    let sub_x1 = sub_x0 + sub_w;
+    let sub_y1 = sub_y0 + sub_h;
+    for (ltx, lty, tile_rgb) in decoded_tiles {
+        let tx_px0 = col_x[ltx];
+        let ty_px0 = row_y[lty];
+        let dst_tw = col_x[ltx + 1] - tx_px0;
+        let dst_th = row_y[lty + 1] - ty_px0;
+        let ix0 = tx_px0.max(sub_x0);
+        let iy0 = ty_px0.max(sub_y0);
+        let ix1 = (tx_px0 + dst_tw).min(sub_x1);
+        let iy1 = (ty_px0 + dst_th).min(sub_y1);
+        if ix0 >= ix1 || iy0 >= iy1 {
+            continue;
+        }
+        let copy_cols = (ix1 - ix0) * out_ch;
+        let sx_off = (ix0 - tx_px0) * out_ch;
+        let dx_off = (ix0 - sub_x0) * out_ch;
+        for y in iy0..iy1 {
+            let src_row = (y - ty_px0) * dst_tw * out_ch + sx_off;
+            let dst_row = (y - sub_y0) * sub_w * out_ch + dx_off;
+            pixels[dst_row..dst_row + copy_cols]
+                .copy_from_slice(&tile_rgb[src_row..src_row + copy_cols]);
+        }
+    }
 
     // Final exact resize (only operates on the already-shrunk smallest pyramid level!).
     if let Some((tw, th)) = target_resize {
@@ -516,14 +541,6 @@ fn verify_chunk(blob: &[u8], expected_crc: u32, check: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn crop_plane_i16(src: &[i16], stride: usize, x0: usize, y0: usize, w: usize, h: usize) -> Vec<i16> {
-    let mut out = Vec::with_capacity(w * h);
-    for y in y0..y0 + h {
-        out.extend_from_slice(&src[y * stride + x0..y * stride + x0 + w]);
-    }
-    out
 }
 
 fn resize_bilinear_u8(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, ch: usize) -> Vec<u8> {

@@ -33,6 +33,7 @@ pub trait RangeSource {
 /// Coalesces an arbitrary list of `[start, end)` byte ranges into sorted, non-overlapping spans
 /// merging gaps `<= max_gap` bytes. Returns `(coalesced_spans, mapping)` where `mapping[i]` is
 /// `(coalesced_idx, relative_offset_within_coalesced_span)` for input `ranges[i]`.
+#[allow(clippy::type_complexity)]
 pub fn coalesce_ranges(ranges: &[(u64, u64)], max_gap: u64) -> (Vec<(u64, u64)>, Vec<(usize, usize)>) {
     if ranges.is_empty() {
         return (Vec::new(), Vec::new());
@@ -175,19 +176,30 @@ impl RangeSource for FileRangeSource {
     }
 }
 
-/// Pure-`std` HTTP/1.1 `Range: bytes=start-end` client (zero external dependencies!)
-/// supporting `HEAD` content-length discovery and persistent `Connection: keep-alive` fetches.
+/// Pure-`std` production-hardened HTTP/1.1 `Range: bytes=start-end` client (zero dependencies!):
+/// - Connect/read/write timeouts (never hangs on dead origins)
+/// - Automatic `301/302/307/308` redirect following (up to 5 hops)
+/// - `Connection: keep-alive` persistent socket reuse with transparent reconnect
+/// - Parallel multi-range fetching (up to 4 concurrent streams) for multi-tile queries
+/// - Strict response size & header count caps against malicious origins.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct HttpRangeSource {
     host_port: String,
     host_hdr: String,
     path: String,
     len: u64,
+    timeout: std::time::Duration,
+    pool: std::sync::Mutex<Option<std::io::BufReader<std::net::TcpStream>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+const MAX_HTTP_BODY_BYTES: usize = 128 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_HTTP_HEADERS: usize = 128;
+
+#[cfg(not(target_arch = "wasm32"))]
 impl HttpRangeSource {
-    pub fn connect(url: &str) -> Result<Self> {
+    fn parse_http_url(url: &str) -> Result<(String, String, String)> {
         let rest = url
             .strip_prefix("http://")
             .ok_or(Error::Unsupported("HttpRangeSource supports http:// URLs"))?;
@@ -195,86 +207,207 @@ impl HttpRangeSource {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
         };
+        if authority.is_empty() {
+            return Err(Error::InvalidInput("empty HTTP authority"));
+        }
         let host_port = if authority.contains(':') {
             authority.to_owned()
         } else {
             format!("{authority}:80")
         };
-
-        let (status, hdrs, _) = Self::http_exchange(&host_port, authority, "HEAD", path, None)?;
-        if status != 200 && status != 206 {
-            return Err(Error::Io(format!("HTTP HEAD returned status {status}")));
-        }
-        let len = hdrs
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, v)| v.trim().parse::<u64>().ok())
-            .ok_or_else(|| Error::Io("HTTP HEAD missing Content-Length".into()))?;
-        Ok(Self {
-            host_port,
-            host_hdr: authority.to_owned(),
-            path: path.to_owned(),
-            len,
-        })
+        Ok((host_port, authority.to_owned(), path.to_owned()))
     }
 
-    fn http_exchange(
+    pub fn connect(url: &str) -> Result<Self> {
+        Self::connect_with_timeout(url, std::time::Duration::from_secs(15))
+    }
+
+    pub fn connect_with_timeout(url: &str, timeout: std::time::Duration) -> Result<Self> {
+        let mut cur_url = url.to_owned();
+        for _ in 0..=5 {
+            let (host_port, host_hdr, path) = Self::parse_http_url(&cur_url)?;
+            let mut conn: Option<std::io::BufReader<std::net::TcpStream>> = None;
+            let (status, hdrs, _) =
+                Self::exchange_on(&mut conn, &host_port, &host_hdr, "HEAD", &path, None, timeout)?;
+            if matches!(status, 301 | 302 | 307 | 308) {
+                let loc = hdrs
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+                    .map(|(_, v)| v.trim().to_owned())
+                    .ok_or_else(|| Error::Io(format!("HTTP {status} redirect missing Location")))?;
+                cur_url = if loc.starts_with("http://") {
+                    loc
+                } else if loc.starts_with('/') {
+                    format!("http://{host_hdr}{loc}")
+                } else {
+                    return Err(Error::Unsupported("unsupported redirect target (non-http)"));
+                };
+                continue;
+            }
+            if status != 200 && status != 206 {
+                return Err(Error::Io(format!("HTTP HEAD returned status {status}")));
+            }
+            let len = hdrs
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, v)| v.trim().parse::<u64>().ok())
+                .ok_or_else(|| Error::Io("HTTP HEAD missing Content-Length".into()))?;
+            return Ok(Self {
+                host_port,
+                host_hdr,
+                path,
+                len,
+                timeout,
+                pool: std::sync::Mutex::new(conn),
+            });
+        }
+        Err(Error::Io("too many HTTP redirects".into()))
+    }
+
+    fn open_stream(host_port: &str, timeout: std::time::Duration) -> Result<std::io::BufReader<std::net::TcpStream>> {
+        use std::net::{TcpStream, ToSocketAddrs};
+        let addrs: Vec<_> = host_port
+            .to_socket_addrs()
+            .map_err(|e| Error::Io(e.to_string()))?
+            .collect();
+        let addr = addrs.first().ok_or_else(|| Error::Io("DNS resolved to 0 addresses".into()))?;
+        let stream = TcpStream::connect_timeout(addr, timeout.min(std::time::Duration::from_secs(10)))
+            .map_err(|e| Error::Io(e.to_string()))?;
+        let _ = stream.set_nodelay(true);
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+        Ok(std::io::BufReader::new(stream))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn exchange_on(
+        slot: &mut Option<std::io::BufReader<std::net::TcpStream>>,
         host_port: &str,
         host_hdr: &str,
         method: &str,
         path: &str,
         range: Option<(u64, u64)>,
+        timeout: std::time::Duration,
     ) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
-        use std::io::{BufRead, BufReader, Read, Write};
-        use std::net::TcpStream;
+        use std::io::{BufRead, Read, Write};
 
-        let mut stream = TcpStream::connect(host_port).map_err(|e| Error::Io(e.to_string()))?;
-        let _ = stream.set_nodelay(true);
-        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host_hdr}\r\nConnection: close\r\n");
+        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host_hdr}\r\nConnection: keep-alive\r\n");
         if let Some((s, e)) = range {
             if e > s {
                 req.push_str(&format!("Range: bytes={s}-{}\r\n", e - 1));
             }
         }
         req.push_str("\r\n");
-        stream.write_all(req.as_bytes()).map_err(|e| Error::Io(e.to_string()))?;
 
-        let mut reader = BufReader::new(stream);
-        let mut status_line = String::new();
-        reader.read_line(&mut status_line).map_err(|e| Error::Io(e.to_string()))?;
-        let status = status_line
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse::<u16>().ok())
-            .ok_or_else(|| Error::Io(format!("invalid HTTP status line: {status_line}")))?;
-
-        let mut hdrs = Vec::new();
-        let mut content_len: Option<usize> = None;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).map_err(|e| Error::Io(e.to_string()))?;
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed.is_empty() {
-                break;
+        for attempt in 0..2 {
+            let reused = slot.is_some();
+            if slot.is_none() {
+                *slot = Some(Self::open_stream(host_port, timeout)?);
             }
-            if let Some((k, v)) = trimmed.split_once(':') {
-                if k.eq_ignore_ascii_case("content-length") {
-                    content_len = v.trim().parse().ok();
+            let reader = slot.as_mut().unwrap();
+            if reader.get_mut().write_all(req.as_bytes()).is_err() {
+                *slot = None;
+                if reused && attempt == 0 {
+                    continue;
                 }
-                hdrs.push((k.trim().to_owned(), v.trim().to_owned()));
+                return Err(Error::Io("HTTP write failed".into()));
             }
-        }
 
-        let mut body = Vec::new();
-        if method != "HEAD" {
-            if let Some(cl) = content_len {
-                body.resize(cl, 0);
-                reader.read_exact(&mut body).map_err(|e| Error::Io(e.to_string()))?;
-            } else {
-                reader.read_to_end(&mut body).map_err(|e| Error::Io(e.to_string()))?;
+            let mut status_line = String::new();
+            let n = reader.read_line(&mut status_line).unwrap_or(0);
+            if n == 0 {
+                *slot = None;
+                if reused && attempt == 0 {
+                    continue;
+                }
+                return Err(Error::Io("HTTP connection closed before status line".into()));
             }
+            let status = status_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<u16>().ok())
+                .ok_or_else(|| Error::Io(format!("invalid HTTP status line: {status_line}")))?;
+
+            let mut hdrs = Vec::new();
+            let mut content_len: Option<usize> = None;
+            let mut server_close = false;
+            for _ in 0..MAX_HTTP_HEADERS {
+                let mut line = String::new();
+                reader.read_line(&mut line).map_err(|e| Error::Io(e.to_string()))?;
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = trimmed.split_once(':') {
+                    let vt = v.trim();
+                    if k.eq_ignore_ascii_case("content-length") {
+                        content_len = vt.parse().ok();
+                    } else if k.eq_ignore_ascii_case("connection") && vt.eq_ignore_ascii_case("close") {
+                        server_close = true;
+                    }
+                    hdrs.push((k.trim().to_owned(), vt.to_owned()));
+                }
+            }
+
+            let mut body = Vec::new();
+            if method != "HEAD" {
+                if let Some(cl) = content_len {
+                    if cl > MAX_HTTP_BODY_BYTES {
+                        *slot = None;
+                        return Err(Error::InvalidFormat("HTTP response exceeds safety cap"));
+                    }
+                    body.resize(cl, 0);
+                    reader.read_exact(&mut body).map_err(|e| Error::Io(e.to_string()))?;
+                } else {
+                    server_close = true;
+                    let mut limited = reader.by_ref().take((MAX_HTTP_BODY_BYTES + 1) as u64);
+                    limited.read_to_end(&mut body).map_err(|e| Error::Io(e.to_string()))?;
+                    if body.len() > MAX_HTTP_BODY_BYTES {
+                        *slot = None;
+                        return Err(Error::InvalidFormat("HTTP response exceeds safety cap"));
+                    }
+                }
+            }
+            if server_close {
+                *slot = None;
+            }
+            return Ok((status, hdrs, body));
         }
-        Ok((status, hdrs, body))
+        Err(Error::Io("HTTP exchange failed after retry".into()))
+    }
+
+    fn fetch_one_range(
+        slot: &mut Option<std::io::BufReader<std::net::TcpStream>>,
+        host_port: &str,
+        host_hdr: &str,
+        path: &str,
+        timeout: std::time::Duration,
+        s: u64,
+        e: u64,
+    ) -> Result<Vec<u8>> {
+        if s == e {
+            return Ok(Vec::new());
+        }
+        let (status, _, body) =
+            Self::exchange_on(slot, host_port, host_hdr, "GET", path, Some((s, e)), timeout)?;
+        if status == 206 {
+            if body.len() != (e - s) as usize {
+                return Err(Error::Io(format!(
+                    "HTTP 206 length mismatch: got {}, expected {}",
+                    body.len(),
+                    e - s
+                )));
+            }
+            Ok(body)
+        } else if status == 200 {
+            let (su, eu) = (s as usize, e as usize);
+            if eu > body.len() {
+                return Err(Error::Truncated);
+            }
+            Ok(body[su..eu].to_vec())
+        } else {
+            Err(Error::Io(format!("HTTP Range GET failed with status {status}")))
+        }
     }
 }
 
@@ -285,33 +418,56 @@ impl RangeSource for HttpRangeSource {
     }
 
     fn read_ranges(&self, ranges: &[(u64, u64)]) -> Result<Vec<Vec<u8>>> {
+        if ranges.len() <= 2 {
+            let mut slot = self.pool.lock().unwrap();
+            let mut out = Vec::with_capacity(ranges.len());
+            for &(s, e) in ranges {
+                out.push(Self::fetch_one_range(
+                    &mut slot,
+                    &self.host_port,
+                    &self.host_hdr,
+                    &self.path,
+                    self.timeout,
+                    s,
+                    e,
+                )?);
+            }
+            return Ok(out);
+        }
+
+        // Parallel pipelined Range fetching (up to 4 concurrent persistent connections).
+        let n_workers = ranges.len().min(4);
+        let chunk = ranges.len().div_ceil(n_workers);
+        let mut parts: Vec<Result<Vec<Vec<u8>>>> = Vec::with_capacity(n_workers);
+        std::thread::scope(|sc| {
+            let handles: Vec<_> = ranges
+                .chunks(chunk)
+                .map(|sub| {
+                    sc.spawn(move || {
+                        let mut slot = None;
+                        let mut local = Vec::with_capacity(sub.len());
+                        for &(s, e) in sub {
+                            local.push(Self::fetch_one_range(
+                                &mut slot,
+                                &self.host_port,
+                                &self.host_hdr,
+                                &self.path,
+                                self.timeout,
+                                s,
+                                e,
+                            )?);
+                        }
+                        Ok(local)
+                    })
+                })
+                .collect();
+            for h in handles {
+                parts.push(h.join().expect("http range worker panicked"));
+            }
+        });
         let mut out = Vec::with_capacity(ranges.len());
-        for &(s, e) in ranges {
-            if s == e {
-                out.push(Vec::new());
-                continue;
-            }
-            let (status, _, body) =
-                Self::http_exchange(&self.host_port, &self.host_hdr, "GET", &self.path, Some((s, e)))?;
-            if status == 206 {
-                if body.len() != (e - s) as usize {
-                    return Err(Error::Io(format!(
-                        "HTTP 206 length mismatch: got {}, expected {}",
-                        body.len(),
-                        e - s
-                    )));
-                }
-                out.push(body);
-            } else if status == 200 {
-                // Origin ignored Range header; slice requested span safely.
-                let (su, eu) = (s as usize, e as usize);
-                if eu > body.len() {
-                    return Err(Error::Truncated);
-                }
-                out.push(body[su..eu].to_vec());
-            } else {
-                return Err(Error::Io(format!("HTTP Range GET failed with status {status}")));
-            }
+        for p in parts {
+            out.extend(p?);
         }
         Ok(out)
     }

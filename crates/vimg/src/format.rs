@@ -12,6 +12,15 @@ pub const MAGIC: &[u8; 4] = b"VIMG";
 pub const VERSION_V1: u16 = 1;
 pub const HEADER_BYTES: usize = 48;
 
+/// Hard security & OOM-bomb bounds (safe on both 64-bit native and 32-bit `wasm32`).
+pub const MAX_IMAGE_DIM: u32 = 65_536;
+pub const MAX_IMAGE_PIXELS: u64 = 268_435_456; // 256 megapixels
+pub const MAX_DIR_BYTES: u32 = 16 * 1024 * 1024; // 16 MiB directory cap
+pub const MAX_CHUNK_BYTES: u32 = 64 * 1024 * 1024; // 64 MiB single-chunk cap
+pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB archive cap
+pub const MAX_RESIZE_DIM: u32 = 32_768;
+pub const MAX_RESIZE_PIXELS: u64 = 134_217_728; // 128 megapixels
+
 pub const FLAG_CRC32C: u16 = 0x0001;
 pub const FLAG_CHROMA_420: u16 = 0x0002;
 pub const FLAG_LOSSLESS: u16 = 0x0004;
@@ -146,8 +155,17 @@ impl VimgHeader {
         let dir_bytes = u32::from_le_bytes(buf[28..32].try_into().unwrap());
         let total_bytes = u64::from_le_bytes(buf[32..40].try_into().unwrap());
 
-        if width == 0 || height == 0 || !matches!(channels, 1 | 3 | 4) {
+        if width == 0
+            || height == 0
+            || width > MAX_IMAGE_DIM
+            || height > MAX_IMAGE_DIM
+            || (width as u64) * (height as u64) > MAX_IMAGE_PIXELS
+            || !matches!(channels, 1 | 3 | 4)
+        {
             return Err(Error::InvalidFormat("invalid image dimensions or channels"));
+        }
+        if quality == 0 || quality > 100 {
+            return Err(Error::InvalidFormat("invalid quality in header"));
         }
         if !(5..=9).contains(&tile_log2) || dwt_levels > 4 {
             return Err(Error::InvalidFormat("invalid tile_size_log2 or dwt_levels"));
@@ -156,12 +174,18 @@ impl VimgHeader {
         if tiles_x != width.div_ceil(tile_size) || tiles_y != height.div_ceil(tile_size) {
             return Err(Error::InvalidFormat("tile grid mismatch"));
         }
+        if dir_bytes > MAX_DIR_BYTES || total_bytes > MAX_FILE_BYTES {
+            return Err(Error::InvalidFormat("archive exceeds security size limits"));
+        }
         let expected_entries = (dwt_levels as usize + 1)
             .checked_mul(channels as usize)
             .and_then(|v| v.checked_mul(tiles_x as usize))
             .and_then(|v| v.checked_mul(tiles_y as usize))
             .ok_or(Error::InvalidFormat("directory overflow"))?;
-        if dir_bytes as usize != expected_entries * 8 {
+        let expected_dir_bytes = expected_entries
+            .checked_mul(8)
+            .ok_or(Error::InvalidFormat("directory byte overflow"))?;
+        if dir_bytes as usize != expected_dir_bytes {
             return Err(Error::InvalidFormat("directory size mismatch"));
         }
         Ok(Self {
@@ -215,6 +239,9 @@ impl VimgIndex {
         for i in 0..n_entries {
             let b = HEADER_BYTES + i * 8;
             let len = u32::from_le_bytes(prefix[b..b + 4].try_into().unwrap());
+            if len > MAX_CHUNK_BYTES {
+                return Err(Error::InvalidFormat("chunk exceeds MAX_CHUNK_BYTES"));
+            }
             let crc = u32::from_le_bytes(prefix[b + 4..b + 8].try_into().unwrap());
             entries.push(ChunkEntry { offset: cur_off, len, crc32c: crc });
             cur_off = cur_off.checked_add(len as u64).ok_or(Error::InvalidFormat("offset overflow"))?;
@@ -311,7 +338,14 @@ pub fn encode_vimg(
     opts: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let (w, h, ch) = (width as usize, height as usize, channels as usize);
-    if w == 0 || h == 0 || !matches!(channels, 1 | 3 | 4) || pixels.len() != w * h * ch {
+    if width == 0
+        || height == 0
+        || width > MAX_IMAGE_DIM
+        || height > MAX_IMAGE_DIM
+        || (width as u64) * (height as u64) > MAX_IMAGE_PIXELS
+        || !matches!(channels, 1 | 3 | 4)
+        || w.checked_mul(h).and_then(|n| n.checked_mul(ch)) != Some(pixels.len())
+    {
         return Err(Error::InvalidInput("invalid dimensions, channels, or pixel buffer length"));
     }
     let tile_size = opts.tile_size.clamp(64, 256).next_power_of_two() as usize;
@@ -421,6 +455,7 @@ pub fn encode_vimg(
     // Write directory and payloads strictly ordered by `(level, plane, tile_id)`.
     let mut dir_pos = HEADER_BYTES;
     let mut data_pos = HEADER_BYTES + dir_bytes;
+    #[allow(clippy::needless_range_loop)]
     for lvl in 0..n_levels {
         for plane in 0..ch {
             for tid in 0..n_tiles {
@@ -487,7 +522,11 @@ pub fn crop_vimg_zero_decode(
     let mut stats = RangeStats::default();
     let idx = VimgIndex::read_from_source(source, &mut stats)?;
     let h = &idx.header;
-    if ntx == 0 || nty == 0 || tx0 + ntx > h.tiles_x || ty0 + nty > h.tiles_y {
+    if ntx == 0
+        || nty == 0
+        || tx0.checked_add(ntx).is_none_or(|end| end > h.tiles_x)
+        || ty0.checked_add(nty).is_none_or(|end| end > h.tiles_y)
+    {
         return Err(Error::InvalidInput("tile crop range out of bounds"));
     }
 

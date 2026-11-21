@@ -5,6 +5,8 @@
 //! symmetric boundary extension and exact unity DC gain so every pyramid level
 //! (`L0 = 1/8, L1 = 1/4, L2 = 1/2, L3 = 1/1`) has 1:1 pixel brightness without rescaling.
 
+use crate::simd_dwt;
+
 const A97: f32 = -1.586_134_3;
 const B97: f32 = -0.052_980_12;
 const G97: f32 = 0.882_911_1;
@@ -109,46 +111,52 @@ pub fn dwt97_1d_inverse(data: &mut [f32], scratch: &mut [f32]) {
     }
 }
 
-pub fn dwt97_2d_forward_step(buf: &mut [f32], stride: usize, w: usize, h: usize) {
-    let mut scratch = vec![0.0f32; w.max(h)];
+pub fn dwt97_2d_forward_step_with(
+    buf: &mut [f32],
+    stride: usize,
+    w: usize,
+    h: usize,
+    row_scratch: &mut [f32],
+    vert_tmp: &mut [f32],
+) {
     if w > 1 {
         for y in 0..h {
-            dwt97_1d_forward(&mut buf[y * stride..y * stride + w], &mut scratch);
+            simd_dwt::dwt97_1d_forward_simd(&mut buf[y * stride..y * stride + w], row_scratch);
         }
     }
     if h > 1 {
-        let mut col = vec![0.0f32; h];
-        for x in 0..w {
-            for y in 0..h {
-                col[y] = buf[y * stride + x];
-            }
-            dwt97_1d_forward(&mut col, &mut scratch);
-            for y in 0..h {
-                buf[y * stride + x] = col[y];
-            }
+        simd_dwt::dwt97_2d_vertical_forward(buf, stride, w, h, vert_tmp);
+    }
+}
+
+pub fn dwt97_2d_inverse_step_with(
+    buf: &mut [f32],
+    stride: usize,
+    w: usize,
+    h: usize,
+    row_scratch: &mut [f32],
+    vert_tmp: &mut [f32],
+) {
+    if h > 1 {
+        simd_dwt::dwt97_2d_vertical_inverse(buf, stride, w, h, vert_tmp);
+    }
+    if w > 1 {
+        for y in 0..h {
+            simd_dwt::dwt97_1d_inverse_simd(&mut buf[y * stride..y * stride + w], row_scratch);
         }
     }
 }
 
+pub fn dwt97_2d_forward_step(buf: &mut [f32], stride: usize, w: usize, h: usize) {
+    let mut row_scratch = vec![0.0f32; w.max(h)];
+    let mut vert_tmp = vec![0.0f32; w * h];
+    dwt97_2d_forward_step_with(buf, stride, w, h, &mut row_scratch, &mut vert_tmp);
+}
+
 pub fn dwt97_2d_inverse_step(buf: &mut [f32], stride: usize, w: usize, h: usize) {
-    let mut scratch = vec![0.0f32; w.max(h)];
-    if h > 1 {
-        let mut col = vec![0.0f32; h];
-        for x in 0..w {
-            for y in 0..h {
-                col[y] = buf[y * stride + x];
-            }
-            dwt97_1d_inverse(&mut col, &mut scratch);
-            for y in 0..h {
-                buf[y * stride + x] = col[y];
-            }
-        }
-    }
-    if w > 1 {
-        for y in 0..h {
-            dwt97_1d_inverse(&mut buf[y * stride..y * stride + w], &mut scratch);
-        }
-    }
+    let mut row_scratch = vec![0.0f32; w.max(h)];
+    let mut vert_tmp = vec![0.0f32; w * h];
+    dwt97_2d_inverse_step_with(buf, stride, w, h, &mut row_scratch, &mut vert_tmp);
 }
 
 /// 1D forward integer `CDF 5/3` lifting: splits `data[0..n]` in-place into `[low(0..nl), high(0..nh)]`.
@@ -234,50 +242,56 @@ pub fn level_dims(w: usize, h: usize, steps: usize) -> (usize, usize) {
     (cw, ch)
 }
 
-/// 1-level 2D forward `CDF 5/3` on the top-left `(w, h)` region inside a buffer of row `stride`.
-pub fn dwt53_2d_forward_step(buf: &mut [i32], stride: usize, w: usize, h: usize) {
-    let mut scratch = vec![0i32; w.max(h)];
+/// 1-level 2D forward `CDF 5/3` using reusable scratch buffers and SIMD vertical lifting.
+pub fn dwt53_2d_forward_step_with(
+    buf: &mut [i32],
+    stride: usize,
+    w: usize,
+    h: usize,
+    row_scratch: &mut [i32],
+    vert_tmp: &mut [i32],
+) {
     if w > 1 {
         for y in 0..h {
-            let row = &mut buf[y * stride..y * stride + w];
-            dwt53_1d_forward(row, &mut scratch);
+            simd_dwt::dwt53_1d_forward_simd(&mut buf[y * stride..y * stride + w], row_scratch);
         }
     }
     if h > 1 {
-        let mut col = vec![0i32; h];
-        for x in 0..w {
-            for y in 0..h {
-                col[y] = buf[y * stride + x];
-            }
-            dwt53_1d_forward(&mut col, &mut scratch);
-            for y in 0..h {
-                buf[y * stride + x] = col[y];
-            }
+        simd_dwt::dwt53_2d_vertical_forward(buf, stride, w, h, vert_tmp);
+    }
+}
+
+/// 1-level 2D inverse `CDF 5/3` using reusable scratch buffers and SIMD horizontal + vertical lifting.
+pub fn dwt53_2d_inverse_step_with(
+    buf: &mut [i32],
+    stride: usize,
+    w: usize,
+    h: usize,
+    row_scratch: &mut [i32],
+    vert_tmp: &mut [i32],
+) {
+    if h > 1 {
+        simd_dwt::dwt53_2d_vertical_inverse(buf, stride, w, h, vert_tmp);
+    }
+    if w > 1 {
+        for y in 0..h {
+            simd_dwt::dwt53_1d_inverse_simd(&mut buf[y * stride..y * stride + w], row_scratch);
         }
     }
 }
 
+/// 1-level 2D forward `CDF 5/3` on the top-left `(w, h)` region inside a buffer of row `stride`.
+pub fn dwt53_2d_forward_step(buf: &mut [i32], stride: usize, w: usize, h: usize) {
+    let mut row_scratch = vec![0i32; w.max(h)];
+    let mut vert_tmp = vec![0i32; w * h];
+    dwt53_2d_forward_step_with(buf, stride, w, h, &mut row_scratch, &mut vert_tmp);
+}
+
 /// 1-level 2D inverse `CDF 5/3` on the top-left `(w, h)` region inside a buffer of row `stride`.
 pub fn dwt53_2d_inverse_step(buf: &mut [i32], stride: usize, w: usize, h: usize) {
-    let mut scratch = vec![0i32; w.max(h)];
-    if h > 1 {
-        let mut col = vec![0i32; h];
-        for x in 0..w {
-            for y in 0..h {
-                col[y] = buf[y * stride + x];
-            }
-            dwt53_1d_inverse(&mut col, &mut scratch);
-            for y in 0..h {
-                buf[y * stride + x] = col[y];
-            }
-        }
-    }
-    if w > 1 {
-        for y in 0..h {
-            let row = &mut buf[y * stride..y * stride + w];
-            dwt53_1d_inverse(row, &mut scratch);
-        }
-    }
+    let mut row_scratch = vec![0i32; w.max(h)];
+    let mut vert_tmp = vec![0i32; w * h];
+    dwt53_2d_inverse_step_with(buf, stride, w, h, &mut row_scratch, &mut vert_tmp);
 }
 
 /// Decomposed multi-level wavelet tile for one color plane.
@@ -316,20 +330,22 @@ impl WaveletTile {
         let (mut cw, mut ch) = (w, h);
         let buf: Vec<i32> = if use_97 {
             let mut fbuf: Vec<f32> = plane.iter().map(|&v| v as f32).collect();
+            let mut row_s = vec![0.0f32; w.max(h)];
+            let mut vert_t = vec![0.0f32; w * h];
             for _ in 0..n_dwt {
                 dims.push((cw, ch));
-                dwt97_2d_forward_step(&mut fbuf, w, cw, ch);
+                dwt97_2d_forward_step_with(&mut fbuf, w, cw, ch, &mut row_s, &mut vert_t);
                 cw = cw.div_ceil(2);
                 ch = ch.div_ceil(2);
             }
-            // Store coefficients in Q2 fixed-point (`* 4`) for 9/7? Keep 1:1 rounded integers
-            // so LL stays native pixel range and detail quantization steps stay clean & exact!
-            fbuf.into_iter().map(|v| v.round() as i32).collect()
+            simd_dwt::f32_to_i32_round_slice(&fbuf)
         } else {
             let mut ibuf: Vec<i32> = plane.iter().map(|&v| v as i32).collect();
+            let mut row_s = vec![0i32; w.max(h)];
+            let mut vert_t = vec![0i32; w * h];
             for _ in 0..n_dwt {
                 dims.push((cw, ch));
-                dwt53_2d_forward_step(&mut ibuf, w, cw, ch);
+                dwt53_2d_forward_step_with(&mut ibuf, w, cw, ch, &mut row_s, &mut vert_t);
                 cw = cw.div_ceil(2);
                 ch = ch.div_ceil(2);
             }
@@ -393,6 +409,8 @@ impl WaveletTile {
         let (final_w, final_h) = (self.details[lvl - 1].out_w, self.details[lvl - 1].out_h);
         if use_97 {
             let mut fbuf = vec![0.0f32; final_w * final_h];
+            let mut row_s = vec![0.0f32; final_w.max(final_h)];
+            let mut vert_t = vec![0.0f32; final_w * final_h];
             for y in 0..self.ll_h {
                 for x in 0..self.ll_w {
                     fbuf[y * final_w + x] = self.ll[y * self.ll_w + x] as f32;
@@ -423,15 +441,14 @@ impl WaveletTile {
                         *dv = sv as f32 * gain;
                     }
                 }
-                dwt97_2d_inverse_step(&mut fbuf, final_w, d.out_w, d.out_h);
+                dwt97_2d_inverse_step_with(&mut fbuf, final_w, d.out_w, d.out_h, &mut row_s, &mut vert_t);
             }
-            let out: Vec<i16> = fbuf
-                .into_iter()
-                .map(|v| v.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16)
-                .collect();
+            let out = simd_dwt::f32_to_i16_round_slice(&fbuf);
             return (out, final_w, final_h);
         }
         let mut buf = vec![0i32; final_w * final_h];
+        let mut row_s = vec![0i32; final_w.max(final_h)];
+        let mut vert_t = vec![0i32; final_w * final_h];
         for y in 0..self.ll_h {
             buf[y * final_w..y * final_w + self.ll_w]
                 .copy_from_slice(&self.ll[y * self.ll_w..(y + 1) * self.ll_w]);
@@ -490,7 +507,7 @@ impl WaveletTile {
                 }
             }
 
-            dwt53_2d_inverse_step(&mut buf, final_w, d.out_w, d.out_h);
+            dwt53_2d_inverse_step_with(&mut buf, final_w, d.out_w, d.out_h, &mut row_s, &mut vert_t);
         }
 
         let out: Vec<i16> = buf.into_iter().map(|v| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect();

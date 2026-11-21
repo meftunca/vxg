@@ -41,15 +41,17 @@ fn open_source(path_or_url: &str) -> Result<Box<dyn RangeSource>, String> {
 }
 
 fn load_pixels(path: &str) -> Result<(Vec<u8>, u32, u32, u8), String> {
-    let img = image::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let raw = fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let ori = vimg::exif::parse_jpeg_exif_orientation(&raw);
+    let img = image::load_from_memory(&raw).map_err(|e| format!("decode {path}: {e}"))?;
     let (w, h) = img.dimensions();
-    if img.color().has_alpha() {
-        let rgba = img.to_rgba8();
-        Ok((rgba.into_raw(), w, h, 4))
+    let (px, ch) = if img.color().has_alpha() {
+        (img.to_rgba8().into_raw(), 4u8)
     } else {
-        let rgb = img.to_rgb8();
-        Ok((rgb.into_raw(), w, h, 3))
-    }
+        (img.to_rgb8().into_raw(), 3u8)
+    };
+    let (px, w, h) = vimg::exif::apply_exif_orientation(px, w, h, ch, ori);
+    Ok((px, w, h, ch))
 }
 
 fn save_pixels(path: &str, pixels: &[u8], w: u32, h: u32, ch: u8) -> Result<(), String> {
@@ -482,6 +484,7 @@ fn handle_http_encode(
         }
     }
 
+    let ori = vimg::exif::parse_jpeg_exif_orientation(&body);
     let img = match image::load_from_memory(&body) {
         Ok(i) => i,
         Err(e) => { send_err(stream, &format!("unsupported image: {e}")); return; }
@@ -492,6 +495,7 @@ fn handle_http_encode(
     } else {
         (img.to_rgb8().into_raw(), 3u8)
     };
+    let (pixels, w, h) = vimg::exif::apply_exif_orientation(pixels, w, h, ch, ori);
     let t0 = Instant::now();
     let encoded = match encode(&pixels, w, h, ch, &opts) {
         Ok(b) => b,
@@ -518,13 +522,27 @@ fn handle_http_encode(
     let _ = stream.write_all(resp.as_bytes());
 }
 
+fn file_etag(path: &Path, query_str: &str) -> String {
+    let meta = fs::metadata(path).ok();
+    let len = meta.as_ref().map_or(0u64, |m| m.len());
+    let mtime = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0u128, |d| d.as_nanos());
+    let qcrc = vimg::checksum::crc32c(query_str.as_bytes());
+    format!("\"{mtime:x}-{len:x}-{qcrc:08x}\"")
+}
+
 fn handle_http_client(mut stream: TcpStream, root: &Path) {
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
     });
     let mut req_line = String::new();
-    if reader.read_line(&mut req_line).is_err() {
+    if reader.read_line(&mut req_line).is_err() || req_line.len() > 4096 {
         return;
     }
     let parts: Vec<&str> = req_line.split_whitespace().collect();
@@ -534,10 +552,11 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
     let method = parts[0];
     let target = parts[1];
     let mut range_hdr: Option<String> = None;
+    let mut if_none_match: Option<String> = None;
     let mut content_len: usize = 0;
-    loop {
+    for _ in 0..64 {
         let mut line = String::new();
-        if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+        if reader.read_line(&mut line).is_err() || line.len() > 4096 || line.trim().is_empty() {
             break;
         }
         if let Some((k, v)) = line.split_once(':') {
@@ -545,6 +564,8 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
                 range_hdr = Some(v.trim().to_owned());
             } else if k.eq_ignore_ascii_case("content-length") {
                 content_len = v.trim().parse().unwrap_or(0);
+            } else if k.eq_ignore_ascii_case("if-none-match") {
+                if_none_match = Some(v.trim().to_owned());
             }
         }
     }
@@ -626,6 +647,15 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
     }
 
     // If query params exist on a .vimg file, run live Compressed-Domain Edge Transform -> PNG!
+    let etag = file_etag(&file_path, query_str);
+    if if_none_match.as_deref() == Some(etag.as_str()) {
+        let hdr = format!(
+            "HTTP/1.1 304 Not Modified\r\nETag: {etag}\r\nCache-Control: public, max-age=31536000, immutable\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(hdr.as_bytes());
+        return;
+    }
+
     if !query_str.is_empty() && file_path.extension().and_then(|e| e.to_str()) == Some("vimg") {
         let mut q = TransformQuery::default();
         for pair in query_str.split('&') {
@@ -659,7 +689,7 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
         {
             Ok((img, png, dec_ms)) => {
                 let hdr = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: *\r\nX-VIMG-Fetched-Pct: {:.1}\r\nX-VIMG-Fetched-Bytes: {}\r\nX-VIMG-Total-Bytes: {}\r\nX-VIMG-Level: {}\r\nX-VIMG-Tiles-Fetched: {}\r\nX-VIMG-Tiles-Total: {}\r\nX-VIMG-Reqs: {}\r\nX-VIMG-Decode-Ms: {:.2}\r\nX-VIMG-Out-Dims: {}x{}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nETag: {etag}\r\nCache-Control: public, max-age=31536000, immutable\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: *\r\nX-VIMG-Fetched-Pct: {:.1}\r\nX-VIMG-Fetched-Bytes: {}\r\nX-VIMG-Total-Bytes: {}\r\nX-VIMG-Level: {}\r\nX-VIMG-Tiles-Fetched: {}\r\nX-VIMG-Tiles-Total: {}\r\nX-VIMG-Reqs: {}\r\nX-VIMG-Decode-Ms: {:.2}\r\nX-VIMG-Out-Dims: {}x{}\r\nConnection: close\r\n\r\n",
                     png.len(), img.stats.fetched_pct(), img.stats.bytes_fetched, img.stats.total_file_bytes,
                     img.decoded_level, img.tiles_fetched, img.tiles_total, img.stats.requests, dec_ms, img.width, img.height
                 );
@@ -673,43 +703,52 @@ fn handle_http_client(mut stream: TcpStream, root: &Path) {
         return;
     }
 
-    // Raw HTTP/1.1 Range Origin serving
-    let Ok(data) = fs::read(&file_path) else {
+    // True zero-full-read HTTP/1.1 Range Origin serving via FileRangeSource (`pread` / `seek`)
+    let Ok(fsrc) = FileRangeSource::open(&file_path) else {
         let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
         return;
     };
-    let total = data.len();
+    let total = fsrc.len();
     if method == "HEAD" {
         let hdr = format!(
-            "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nETag: {etag}\r\nCache-Control: public, max-age=31536000, immutable\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
         );
         let _ = stream.write_all(hdr.as_bytes());
         return;
     }
     if let Some(r) = range_hdr.and_then(|s| s.strip_prefix("bytes=").map(str::to_owned)) {
         if let Some((a, b)) = r.split_once('-') {
-            if let (Ok(s), Ok(e)) = (a.parse::<usize>(), b.parse::<usize>()) {
+            if let (Ok(s), Ok(e)) = (a.parse::<u64>(), b.parse::<u64>()) {
                 if s <= e && e < total {
-                    let slice = &data[s..=e];
-                    let hdr = format!(
-                        "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {s}-{e}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        slice.len()
-                    );
-                    let _ = stream.write_all(hdr.as_bytes());
-                    let _ = stream.write_all(slice);
-                    return;
+                    if let Ok(mut bufs) = fsrc.read_ranges(&[(s, e + 1)]) {
+                        let slice = bufs.pop().unwrap();
+                        let hdr = format!(
+                            "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nETag: {etag}\r\nCache-Control: public, max-age=31536000, immutable\r\nAccess-Control-Allow-Origin: *\r\nContent-Range: bytes {s}-{e}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            slice.len()
+                        );
+                        let _ = stream.write_all(hdr.as_bytes());
+                        let _ = stream.write_all(&slice);
+                        return;
+                    }
                 }
             }
         }
     }
+    // Full file stream in 64 KiB chunks (constant memory even for 500 MiB archives!)
     let hdr = format!(
-        "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+        "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nETag: {etag}\r\nCache-Control: public, max-age=31536000, immutable\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
     );
-    let _ = stream.write_all(hdr.as_bytes());
-    let _ = stream.write_all(&data);
+    if stream.write_all(hdr.as_bytes()).is_ok() {
+        if let Ok(mut f) = fs::File::open(&file_path) {
+            let _ = std::io::copy(&mut f, &mut stream);
+        }
+    }
 }
 
 fn cmd_serve(args: &[String]) -> Result<(), String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MAX_CONCURRENT: usize = 64;
+
     let dir = PathBuf::from(args.first().ok_or("serve requires <dir>")?);
     let mut port = 8090u16;
     if args.len() >= 3 && args[1] == "--port" {
@@ -717,10 +756,20 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
     }
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
     let root = Arc::new(dir);
-    println!("vimg HTTP Range Origin + Edge Proxy listening on http://127.0.0.1:{port} (dir={})", root.display());
-    for stream in listener.incoming().flatten() {
+    let active = Arc::new(AtomicUsize::new(0));
+    println!("vimg HTTP Range Origin + Edge Proxy listening on http://127.0.0.1:{port} (dir={}, max_conn={MAX_CONCURRENT})", root.display());
+    for mut stream in listener.incoming().flatten() {
+        if active.load(Ordering::Relaxed) >= MAX_CONCURRENT {
+            let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            continue;
+        }
+        active.fetch_add(1, Ordering::AcqRel);
         let r = Arc::clone(&root);
-        std::thread::spawn(move || handle_http_client(stream, &r));
+        let act = Arc::clone(&active);
+        std::thread::spawn(move || {
+            handle_http_client(stream, &r);
+            act.fetch_sub(1, Ordering::AcqRel);
+        });
     }
     Ok(())
 }

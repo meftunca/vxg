@@ -8,10 +8,13 @@
 pub mod checksum;
 pub mod color;
 pub mod entropy;
+pub mod exif;
 pub mod ffi;
 pub mod format;
 pub mod ops;
 pub mod range;
+pub mod simd;
+pub mod simd_dwt;
 pub mod subband;
 pub mod wavelet;
 

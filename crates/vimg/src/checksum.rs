@@ -33,7 +33,7 @@ pub fn crc32c(data: &[u8]) -> u32 {
     }
     #[cfg(all(target_arch = "aarch64", target_feature = "crc"))]
     {
-        return unsafe { arm(data) };
+        unsafe { arm(data) }
     }
     #[cfg(all(target_arch = "aarch64", not(target_feature = "crc")))]
     if std::arch::is_aarch64_feature_detected!("crc") {
@@ -52,8 +52,8 @@ pub fn crc32c(data: &[u8]) -> u32 {
 unsafe fn x86(data: &[u8]) -> u32 {
     use std::arch::x86_64::*;
     let mut crc = !0u32;
-    let mut chunks32 = data.chunks_exact(32);
-    for c in &mut chunks32 {
+    let (chunks32, rem32) = data.as_chunks::<32>();
+    for c in chunks32 {
         let w0 = u64::from_le_bytes(c[0..8].try_into().unwrap());
         let w1 = u64::from_le_bytes(c[8..16].try_into().unwrap());
         let w2 = u64::from_le_bytes(c[16..24].try_into().unwrap());
@@ -63,11 +63,11 @@ unsafe fn x86(data: &[u8]) -> u32 {
         crc = _mm_crc32_u64(crc as u64, w2) as u32;
         crc = _mm_crc32_u64(crc as u64, w3) as u32;
     }
-    let mut chunks8 = chunks32.remainder().chunks_exact(8);
-    for chunk in &mut chunks8 {
-        crc = _mm_crc32_u64(crc as u64, u64::from_le_bytes(chunk.try_into().unwrap())) as u32;
+    let (chunks8, rem8) = rem32.as_chunks::<8>();
+    for chunk in chunks8 {
+        crc = _mm_crc32_u64(crc as u64, u64::from_le_bytes(*chunk)) as u32;
     }
-    for &b in chunks8.remainder() {
+    for &b in rem8 {
         crc = _mm_crc32_u8(crc, b);
     }
     !crc
@@ -79,8 +79,8 @@ unsafe fn x86(data: &[u8]) -> u32 {
 unsafe fn arm(data: &[u8]) -> u32 {
     use std::arch::aarch64::*;
     let mut crc = !0u32;
-    let mut chunks32 = data.chunks_exact(32);
-    for c in &mut chunks32 {
+    let (chunks32, rem32) = data.as_chunks::<32>();
+    for c in chunks32 {
         let w0 = u64::from_le_bytes(c[0..8].try_into().unwrap());
         let w1 = u64::from_le_bytes(c[8..16].try_into().unwrap());
         let w2 = u64::from_le_bytes(c[16..24].try_into().unwrap());
@@ -90,11 +90,10 @@ unsafe fn arm(data: &[u8]) -> u32 {
         crc = __crc32cd(crc, w2);
         crc = __crc32cd(crc, w3);
     }
-    let mut chunks8 = chunks32.remainder().chunks_exact(8);
-    for chunk in &mut chunks8 {
-        crc = __crc32cd(crc, u64::from_le_bytes(chunk.try_into().unwrap()));
+    let (chunks8, rem) = rem32.as_chunks::<8>();
+    for chunk in chunks8 {
+        crc = __crc32cd(crc, u64::from_le_bytes(*chunk));
     }
-    let rem = chunks8.remainder();
     let mut i = 0;
     if i + 4 <= rem.len() {
         crc = __crc32cw(crc, u32::from_le_bytes(rem[i..i + 4].try_into().unwrap()));

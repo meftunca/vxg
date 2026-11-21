@@ -1,11 +1,13 @@
 //! Panic-safe C ABI (`libvimg.a` / `libvimg.dylib` / `.so` / `.dll`) and zero-WASI `wasm32` exports.
+#![allow(clippy::missing_safety_doc)]
 
 use core::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::{
-    decode_from_source, decode_query, encode, format::HEADER_BYTES, plan_query_ranges,
-    EncodeOptions, SparseRangeSource, TransformQuery, VimgHeader, VimgIndex,
+    decode_from_source, decode_query, encode,
+    format::{HEADER_BYTES, MAX_IMAGE_DIM, MAX_IMAGE_PIXELS},
+    plan_query_ranges, EncodeOptions, SparseRangeSource, TransformQuery, VimgHeader, VimgIndex,
 };
 
 const VERSION_CSTR: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
@@ -87,7 +89,67 @@ pub unsafe extern "C" fn vimg_encode_alloc(
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VimgQueryC {
+    pub crop_x: u32,
+    pub crop_y: u32,
+    pub crop_w: u32,
+    pub crop_h: u32,
+    pub target_w: u32,
+    pub target_h: u32,
+    pub grayscale: u8,
+    pub sepia: u8,
+    pub rotate_cw: u8,
+    pub flip_h: u8,
+    pub flip_v: u8,
+    pub recover_corrupt: u8,
+    pub brightness: i16,
+    pub blur: f32,
+    pub sharpen: f32,
+    pub contrast: f32,
+}
+
 #[no_mangle]
+pub unsafe extern "C" fn vimg_decode_query_v2_alloc(
+    vimg_ptr: *const u8,
+    vimg_len: usize,
+    query_ptr: *const VimgQueryC,
+) -> VimgBuf {
+    if vimg_ptr.is_null() {
+        return VimgBuf::err(-1);
+    }
+    let slice = core::slice::from_raw_parts(vimg_ptr, vimg_len);
+    let query = if query_ptr.is_null() {
+        TransformQuery::default()
+    } else {
+        let q = *query_ptr;
+        TransformQuery {
+            crop: if q.crop_w > 0 && q.crop_h > 0 { Some((q.crop_x, q.crop_y, q.crop_w, q.crop_h)) } else { None },
+            target_width: (q.target_w > 0).then_some(q.target_w),
+            target_height: (q.target_h > 0).then_some(q.target_h),
+            grayscale: q.grayscale != 0,
+            sepia: q.sepia != 0,
+            blur: q.blur,
+            sharpen: q.sharpen,
+            brightness: q.brightness,
+            contrast: if q.contrast <= 0.0 { 1.0 } else { q.contrast },
+            rotate_cw: q.rotate_cw,
+            flip_h: q.flip_h != 0,
+            flip_v: q.flip_v != 0,
+            recover_corrupt: q.recover_corrupt != 0,
+            ..TransformQuery::default()
+        }
+    };
+    match catch_unwind(AssertUnwindSafe(|| decode_query(slice, &query))) {
+        Ok(Ok(img)) => VimgBuf::from_vec(img.pixels, img.width, img.height, img.channels, img.decoded_level),
+        Ok(Err(_)) => VimgBuf::err(-2),
+        Err(_) => VimgBuf::err(-7),
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn vimg_decode_query_alloc(
     vimg_ptr: *const u8,
     vimg_len: usize,
@@ -293,12 +355,16 @@ pub unsafe extern "C" fn vimg_wasm_decode_sparse(
         let mut cursor = 0usize;
         for i in 0..n_spans {
             let l = lens[i] as usize;
-            if cursor + l > data.len() {
+            let Some(end) = cursor.checked_add(l) else {
+                meta[0] = 4;
+                return -4;
+            };
+            if end > data.len() {
                 meta[0] = 4;
                 return -4;
             }
-            spans.push((offs[i] as u64, &data[cursor..cursor + l]));
-            cursor += l;
+            spans.push((offs[i] as u64, &data[cursor..end]));
+            cursor = end;
         }
     }
     let src = SparseRangeSource { total_len: hdr.total_bytes, spans };
@@ -326,7 +392,7 @@ pub unsafe extern "C" fn vimg_wasm_decode_sparse(
                     }
                 }
                 3 => {
-                    for c in img.pixels.chunks_exact(3) {
+                    for c in img.pixels.as_chunks::<3>().0 {
                         rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
                     }
                 }
@@ -371,18 +437,33 @@ pub unsafe extern "C" fn vimg_wasm_encode_rgba(
 ) -> i32 {
     let meta = &mut *core::ptr::addr_of_mut!(WASM_META);
     meta.fill(0);
-    if rgba_ptr.is_null() || width == 0 || height == 0 {
+    if rgba_ptr.is_null() || width == 0 || height == 0 || width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
         meta[0] = 1;
         return -1;
     }
-    let n_px = (width as usize).saturating_mul(height as usize);
-    let rgba = core::slice::from_raw_parts(rgba_ptr, n_px * 4);
-    let has_alpha = rgba.chunks_exact(4).any(|p| p[3] != 255);
+    let Some(n_px_u64) = (width as u64).checked_mul(height as u64) else {
+        meta[0] = 1;
+        return -1;
+    };
+    if n_px_u64 > MAX_IMAGE_PIXELS {
+        meta[0] = 1;
+        return -1;
+    }
+    let Some(n_px) = usize::try_from(n_px_u64).ok() else {
+        meta[0] = 1;
+        return -1;
+    };
+    let Some(rgba_bytes) = n_px.checked_mul(4) else {
+        meta[0] = 1;
+        return -1;
+    };
+    let rgba = core::slice::from_raw_parts(rgba_ptr, rgba_bytes);
+    let has_alpha = rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 255);
     let (pixels, ch): (Vec<u8>, u8) = if has_alpha {
         (rgba.to_vec(), 4)
     } else {
         let mut rgb = Vec::with_capacity(n_px * 3);
-        for p in rgba.chunks_exact(4) {
+        for p in rgba.as_chunks::<4>().0 {
             rgb.extend_from_slice(&[p[0], p[1], p[2]]);
         }
         (rgb, 3)
