@@ -1,7 +1,7 @@
-//! Wavelet subband perceptual quantization, MED `LL` prediction, and 4×4 oriented micro-block
-//! 2D locality scanning (`LH` row-major, `HL` col-major, `HH` row-major).
+//! Wavelet subband perceptual quantization, MED `LL` prediction, and single-pass 2D
+//! context-adaptive subband encoding/decoding.
 
-use crate::entropy::{pack_stream, unpack_stream};
+use crate::entropy::{decode_2d_bands, encode_2d_ac, encode_blk4_ac};
 use crate::wavelet::{DetailBands, WaveletTile};
 use crate::Result;
 
@@ -35,7 +35,7 @@ pub fn quant_step(quality: u8, plane: usize, detail_idx: usize, dwt_levels: usiz
     let plane_mul = match plane {
         0 => 1.0,  // Y luma
         3 => 1.0,  // Alpha
-        _ => 1.65, // Co / Cg chroma
+        _ => 1.65, // YCoCg-R Co / Cg chroma
     };
     (base * level_mul * diag_mul * plane_mul).round().max(1.0) as i32
 }
@@ -85,87 +85,7 @@ fn med_predict(left: i32, top: i32, top_left: i32) -> i32 {
     }
 }
 
-/// Scans a 2D band into 4×4 micro-blocks (`transpose = true` scans column-major for `HL` vertical edges!).
-fn scan_band_4x4(src: &[i32], w: usize, h: usize, step: i32, transpose: bool, dst: &mut Vec<i32>) {
-    if !transpose {
-        let mut by = 0;
-        while by < h {
-            let bh = (h - by).min(4);
-            let mut bx = 0;
-            while bx < w {
-                let bw = (w - bx).min(4);
-                for dy in 0..bh {
-                    let row = (by + dy) * w + bx;
-                    for dx in 0..bw {
-                        dst.push(quant_deadzone(src[row + dx], step));
-                    }
-                }
-                bx += 4;
-            }
-            by += 4;
-        }
-    } else {
-        let mut bx = 0;
-        while bx < w {
-            let bw = (w - bx).min(4);
-            let mut by = 0;
-            while by < h {
-                let bh = (h - by).min(4);
-                for dx in 0..bw {
-                    for dy in 0..bh {
-                        dst.push(quant_deadzone(src[(by + dy) * w + bx + dx], step));
-                    }
-                }
-                by += 4;
-            }
-            bx += 4;
-        }
-    }
-}
-
-fn unscan_band_4x4(src: &[i32], w: usize, h: usize, step: i32, transpose: bool) -> Vec<i32> {
-    let mut dst = vec![0i32; w * h];
-    let mut p = 0usize;
-    if !transpose {
-        let mut by = 0;
-        while by < h {
-            let bh = (h - by).min(4);
-            let mut bx = 0;
-            while bx < w {
-                let bw = (w - bx).min(4);
-                for dy in 0..bh {
-                    let row = (by + dy) * w + bx;
-                    for dx in 0..bw {
-                        dst[row + dx] = dequant(src[p], step);
-                        p += 1;
-                    }
-                }
-                bx += 4;
-            }
-            by += 4;
-        }
-    } else {
-        let mut bx = 0;
-        while bx < w {
-            let bw = (w - bx).min(4);
-            let mut by = 0;
-            while by < h {
-                let bh = (h - by).min(4);
-                for dx in 0..bw {
-                    for dy in 0..bh {
-                        dst[(by + dy) * w + bx + dx] = dequant(src[p], step);
-                        p += 1;
-                    }
-                }
-                by += 4;
-            }
-            bx += 4;
-        }
-    }
-    dst
-}
-
-/// Encodes Level 0 (`LL`) subband using MED 2D DPCM + context-adaptive Hybrid-Golomb FSE.
+/// Encodes Level 0 (`LL`) subband using MED 2D DPCM + 4-context 2D causal activity FSE.
 pub fn encode_ll_band(ll: &[i32], w: usize, h: usize, quality: u8, plane: usize) -> Vec<u8> {
     let step = ll_quant_step(quality, plane);
     let mut residuals = vec![0i32; w * h];
@@ -186,7 +106,7 @@ pub fn encode_ll_band(ll: &[i32], w: usize, h: usize, quality: u8, plane: usize)
         }
     }
     let mut out = Vec::new();
-    pack_stream(&residuals, &mut out);
+    encode_2d_ac(&[(&residuals, w, h)], &mut out);
     out
 }
 
@@ -194,7 +114,7 @@ pub fn encode_ll_band(ll: &[i32], w: usize, h: usize, quality: u8, plane: usize)
 pub fn decode_ll_band(payload: &[u8], w: usize, h: usize, quality: u8, plane: usize) -> Result<Vec<i32>> {
     let step = ll_quant_step(quality, plane);
     let mut residuals = vec![0i32; w * h];
-    unpack_stream(payload, &mut residuals)?;
+    decode_2d_bands(payload, &mut [(&mut residuals, w, h)])?;
     let mut ll = vec![0i32; w * h];
     for y in 0..h {
         for x in 0..w {
@@ -212,7 +132,9 @@ pub fn decode_ll_band(payload: &[u8], w: usize, h: usize, quality: u8, plane: us
     Ok(ll)
 }
 
-/// Encodes one pyramid detail level (`LH + HL + HH`) using 4×4 oriented scanning + context FSE.
+/// Encodes one pyramid detail level (`LH + HL + HH`) into a single compressed chunk:
+/// - Lossless (`q=100`): direct 4-context 2D causal activity FSE (`CODEC_2D_CTX4`).
+/// - Lossy (`q<100`): `8×8` super-block significance map + 3-context 2D FSE on active `4×4` blocks (`CODEC_BLK4_CTX3`).
 pub fn encode_detail_level(
     d: &DetailBands,
     quality: u8,
@@ -220,18 +142,24 @@ pub fn encode_detail_level(
     detail_idx: usize,
     dwt_levels: usize,
 ) -> Vec<u8> {
-    let step_lh = quant_step(quality, plane, detail_idx, dwt_levels, false);
-    let step_hh = quant_step(quality, plane, detail_idx, dwt_levels, true);
     let lw = d.out_w.div_ceil(2);
     let hw = d.out_w / 2;
     let lh_rows = d.out_h.div_ceil(2);
     let hh_rows = d.out_h / 2;
-    let mut qbuf = Vec::with_capacity(d.lh.len() + d.hl.len() + d.hh.len());
-    scan_band_4x4(&d.lh, lw, hh_rows, step_lh, false, &mut qbuf);
-    scan_band_4x4(&d.hl, hw, lh_rows, step_lh, true, &mut qbuf);
-    scan_band_4x4(&d.hh, hw, hh_rows, step_hh, false, &mut qbuf);
     let mut out = Vec::new();
-    pack_stream(&qbuf, &mut out);
+
+    if quality >= 100 {
+        encode_2d_ac(&[(&d.lh, lw, hh_rows), (&d.hl, hw, lh_rows), (&d.hh, hw, hh_rows)], &mut out);
+        return out;
+    }
+
+    let step_lh = quant_step(quality, plane, detail_idx, dwt_levels, false);
+    let step_hh = quant_step(quality, plane, detail_idx, dwt_levels, true);
+    let qlh: Vec<i32> = d.lh.iter().map(|&c| quant_deadzone(c, step_lh)).collect();
+    let qhl: Vec<i32> = d.hl.iter().map(|&c| quant_deadzone(c, step_lh)).collect();
+    let qhh: Vec<i32> = d.hh.iter().map(|&c| quant_deadzone(c, step_hh)).collect();
+
+    encode_blk4_ac(&[(&qlh, lw, hh_rows), (&qhl, hw, lh_rows), (&qhh, hw, hh_rows)], &mut out);
     out
 }
 
@@ -249,28 +177,39 @@ pub fn decode_detail_level(
     let hw = out_w / 2;
     let lh_rows = out_h.div_ceil(2);
     let hh_rows = out_h / 2;
-    let n_lh = lw * hh_rows;
-    let n_hl = hw * lh_rows;
-    let n_hh = hw * hh_rows;
 
-    let mut qbuf = vec![0i32; n_lh + n_hl + n_hh];
-    let is_hybrid = unpack_stream(payload, &mut qbuf)?;
+    let mut lh = vec![0i32; lw * hh_rows];
+    let mut hl = vec![0i32; hw * lh_rows];
+    let mut hh = vec![0i32; hw * hh_rows];
 
-    let step_lh = quant_step(quality, plane, detail_idx, dwt_levels, false);
-    let step_hh = quant_step(quality, plane, detail_idx, dwt_levels, true);
-    let (lh, hl, hh) = if is_hybrid {
-        (
-            unscan_band_4x4(&qbuf[..n_lh], lw, hh_rows, step_lh, false),
-            unscan_band_4x4(&qbuf[n_lh..n_lh + n_hl], hw, lh_rows, step_lh, true),
-            unscan_band_4x4(&qbuf[n_lh + n_hl..], hw, hh_rows, step_hh, false),
-        )
-    } else {
-        (
-            qbuf[..n_lh].iter().map(|&q| dequant(q, step_lh)).collect(),
-            qbuf[n_lh..n_lh + n_hl].iter().map(|&q| dequant(q, step_lh)).collect(),
-            qbuf[n_lh + n_hl..].iter().map(|&q| dequant(q, step_hh)).collect(),
-        )
-    };
+    decode_2d_bands(
+        payload,
+        &mut [(&mut lh, lw, hh_rows), (&mut hl, hw, lh_rows), (&mut hh, hw, hh_rows)],
+    )?;
+
+    if quality < 100 {
+        let step_lh = quant_step(quality, plane, detail_idx, dwt_levels, false);
+        let step_hh = quant_step(quality, plane, detail_idx, dwt_levels, true);
+        if step_lh > 1 {
+            for v in &mut lh {
+                if *v != 0 {
+                    *v = dequant(*v, step_lh);
+                }
+            }
+            for v in &mut hl {
+                if *v != 0 {
+                    *v = dequant(*v, step_lh);
+                }
+            }
+        }
+        if step_hh > 1 {
+            for v in &mut hh {
+                if *v != 0 {
+                    *v = dequant(*v, step_hh);
+                }
+            }
+        }
+    }
     Ok(DetailBands { out_w, out_h, lh, hl, hh })
 }
 

@@ -10,7 +10,6 @@ pub mod color;
 pub mod entropy;
 pub mod ffi;
 pub mod format;
-pub mod fse;
 pub mod ops;
 pub mod range;
 pub mod subband;

@@ -3,9 +3,9 @@
 `vimg` is a standalone, pure-Rust, **zero-dependency** (`[lib]`) image codec and compressed-domain query engine engineered to VXG standards:
 
 - **HTTP/1.1 Range-Native Wire Layout (`(level, plane, tile_id)`)**: Fetch only the prefix directory plus the exact pyramid levels, color planes, and spatial tiles needed for your query.
-- **Dual-Mode Wavelet Pyramid (`YCoCg-R` + `CDF 5/3` / `CDF 9/7`)**:
-  - `q = 100`: **100% bit-exact lossless** (`4:4:4`, integer `CDF 5/3`, RGB & RGBA) — **35.4% smaller than PNG**.
-  - `q = 1..99`: **DC-unity `CDF 9/7` biorthogonal lifting** (`4:2:0`) + Laplacian MMSE dead-zone quantization + 4×4 oriented micro-block scanning + 2/3-context adaptive Hybrid-Golomb FSE.
+- **Dual-Mode Wavelet Pyramid (`YCoCg-R` + `CDF 5/3` / `CDF 9/7` + Adaptive Binary Range Coder)**:
+  - `q = 100`: **100% bit-exact lossless** (`4:4:4`, integer `CDF 5/3`, RGB & RGBA) — **38.6% smaller than PNG**, within **5.1%** of WebP Lossless while encoding **60× faster**!
+  - `q = 1..99`: **DC-unity `CDF 9/7` biorthogonal lifting** (`4:2:0`) + Laplacian MMSE dead-zone quantization + `4×4` adaptive block-significance skipping + zero-header-overhead 128-context 2D adaptive binary range coding.
 - **Direct Compressed-Domain Operations**:
   - **Resize** — stop decoding at the coarsest wavelet level `>= target` (skip L2/L3 over the wire).
   - **Spatial Crop** — fetch only intersecting tiles; `vimg crop` performs **zero-decode `vimg -> vimg`** tile cropping without running IDWT or color conversion.
@@ -15,7 +15,7 @@
 - **Zero-Dependency Core + C ABI + Zero-WASI `wasm32`**:
   - Core `[lib]` has **0 external crates**.
   - Deterministic `1T == NT` bit-exact encoding and parallel multi-core tile decoding.
-  - `wasm32-unknown-unknown` release build: **171 KiB** `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
+  - `wasm32-unknown-unknown` release build: **160 KiB** `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
   - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h).
 
 ---
@@ -27,24 +27,26 @@
 ### Lossless Totals (5 photos, 100% bit-exact)
 | Codec | Total Size | vs PNG | Total Enc Time |
 |---|---:|---:|---:|
-| PNG | 53,588 KiB | — | 204 ms |
-| **VIMG Lossless (`q=100`, 3-ctx FSE)** | **34,613 KiB** | **-35.4%** | **466 ms** |
-| WebP Lossless (`-z 6`) | 31,299 KiB | -41.6% | 18,306 ms *(39× slower)* |
+| PNG | 53,588 KiB | — | 213 ms |
+| **VIMG Lossless (`q=100`, 2D Adaptive AC)** | **32,919 KiB** | **-38.6%** | **305 ms** |
+| WebP Lossless (`-z 6`) | 31,299 KiB | -41.6% | 18,306 ms *(60× slower)* |
 
 ### Lossy Totals (5 photos, full file)
 | Codec | Total Size | Avg PSNR | Total Enc Time | vs JPEG Size |
 |---|---:|---:|---:|---:|
 | JPEG (`q=75`) | 5,497 KiB | 38.01 dB | 351 ms | — |
-| **VIMG (`q=80`, `CDF 9/7` + 3-ctx FSE)** | **3,155 KiB** | **36.74 dB** | **134 ms** *(20× faster than WebP)* | **-42.6%** |
-| **VIMG (`q=85`, `CDF 9/7` + 3-ctx FSE)** | **4,518 KiB** | **38.77 dB** *(+0.76 dB vs JPEG)* | **143 ms** | **-17.8%** |
+| **VIMG (`q=80`, `CDF 9/7` + 2D Adaptive AC)** | **2,923 KiB** | **36.74 dB** *(+0.42 dB vs WebP)* | **106 ms** *(25× faster than WebP)* | **-46.8%** |
+| **VIMG (`q=85`, `CDF 9/7` + 2D Adaptive AC)** | **4,202 KiB** | **38.77 dB** *(+0.76 dB vs JPEG)* | **125 ms** | **-23.6%** |
 | WebP (`q=75`) | 2,748 KiB | 36.32 dB | 2,624 ms | -50.0% |
 | AVIF (`q=62, s=6, MT`) | 3,037 KiB | 38.08 dB | 2,172 ms | -44.8% |
 
-- Highlight (`01_portrait`, 11.3 MP): **VIMG `q=80` (`287.7 KiB @ 39.22 dB`, `32.4 ms`) beats WebP `q=75` (`301.1 KiB @ 39.11 dB`, `648.6 ms`) in size, PSNR, and 20× encode speed!**
+- Highlights:
+  - `01_portrait` (11.3 MP): **VIMG `q=80` (`271.6 KiB @ 39.22 dB`, `25.7 ms`) beats WebP `q=75` (`301.1 KiB @ 39.11 dB`, `649 ms`) by -9.8% size, +0.11 dB PSNR, and 25× speed!**
+  - `03_landscape` (6.8 MP): **VIMG `q=80` (`432.8 KiB @ 37.11 dB`, `19.1 ms`) beats WebP `q=75` (`447.4 KiB @ 36.64 dB`, `456 ms`) by -3.3% size, +0.47 dB PSNR, and 24× speed!**
 
 ### Compressed-Domain Remote Queries (`VIMG q=80`, 5-photo range)
-- **1/4 Resize (`~800px`)**: **3.40 – 7.24 ms**, **155.5 – 331.1 KiB (`25.6% – 54.0%`)** vs JPEG full+resize **41.8 – 65.7 ms (`850 – 1,811 KiB`)** (**6× – 16× faster!**)
-- **256×256 Center Crop**: **1.08 – 1.46 ms**, **29.3 – 103.2 KiB (`6.3% – 15.8%`, `4` tiles)** vs JPEG full+crop **19.3 – 33.1 ms** (**16× – 23× faster, 10× – 29× less traffic!**)
+- **1/4 Resize (`~800px`)**: **4.57 – 8.80 ms**, **140.3 – 319.3 KiB (`26.8% – 51.6%`)** vs JPEG full+resize **43.8 – 68.9 ms (`850 – 1,811 KiB`)** (**5× – 12× faster!**)
+- **256×256 Center Crop**: **0.96 – 1.86 ms**, **28.1 – 95.9 KiB (`6.5% – 15.6%`, `4` tiles)** vs JPEG full+crop **20.1 – 33.6 ms** (**12× – 27× faster, 11× – 30× less traffic!**)
 
 ---
 

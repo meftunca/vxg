@@ -234,7 +234,7 @@ fn sparse_wasm_range_pipeline_matches_full_decode_bit_for_bit() {
         ..Default::default()
     };
     let (ranges, lvl, tf, tt) = plan_query_ranges(&idx, &q, prefix_len as u64).unwrap();
-    assert_eq!(lvl, 3);
+    assert_eq!(lvl, hdr.dwt_levels);
     assert!(tf < tt);
 
     let mut spans: Vec<(u64, &[u8])> = vec![(0, prefix)];
