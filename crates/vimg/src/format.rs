@@ -2,7 +2,9 @@
 //! parallel encoder (`1T == NT` deterministic), and zero-decode tile crop (`vimg -> vimg`).
 
 use crate::checksum::crc32c;
-use crate::color::{downsample_2x2, rgb_to_ycocg_r, rgb_to_ycocg_r_u16};
+use crate::color::{
+    downsample_2x2, downsample_2x2_i32, rgb_to_ycocg_r, rgb_to_ycocg_r_i32, rgb_to_ycocg_r_u16,
+};
 use crate::meta::{VimgMetadata, MAX_META_BYTES};
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
 use crate::simd;
@@ -30,6 +32,7 @@ pub const FLAG_LOSSLESS: u16 = 0x0004;
 pub const FLAG_DWT_97: u16 = 0x0008;
 pub const FLAG_BIT_DEPTH_10: u16 = 0x0010;
 pub const FLAG_BIT_DEPTH_12: u16 = 0x0020;
+pub const FLAG_BIT_DEPTH_16: u16 = FLAG_BIT_DEPTH_10 | FLAG_BIT_DEPTH_12;
 pub const FLAG_HAS_ICC: u16 = 0x0040;
 pub const FLAG_HAS_META: u16 = 0x0080;
 /// 2-bit shift count (`0..=3`) recording how many fine pyramid levels were stripped by
@@ -110,18 +113,17 @@ impl VimgHeader {
 
     #[inline]
     pub fn bit_depth(&self) -> u8 {
-        if (self.flags & FLAG_BIT_DEPTH_12) != 0 {
-            12
-        } else if (self.flags & FLAG_BIT_DEPTH_10) != 0 {
-            10
-        } else {
-            8
+        match self.flags & FLAG_BIT_DEPTH_16 {
+            FLAG_BIT_DEPTH_16 => 16,
+            FLAG_BIT_DEPTH_12 => 12,
+            FLAG_BIT_DEPTH_10 => 10,
+            _ => 8,
         }
     }
 
     #[inline]
     pub fn max_sample(&self) -> u16 {
-        (1u16 << self.bit_depth()) - 1
+        ((1u32 << self.bit_depth()) - 1) as u16
     }
 
     #[inline]
@@ -225,9 +227,6 @@ impl VimgHeader {
         let total_bytes = u64::from_le_bytes(buf[32..40].try_into().unwrap());
         let icc_bytes = u32::from_le_bytes(buf[44..48].try_into().unwrap());
 
-        if (flags & (FLAG_BIT_DEPTH_10 | FLAG_BIT_DEPTH_12)) == (FLAG_BIT_DEPTH_10 | FLAG_BIT_DEPTH_12) {
-            return Err(Error::InvalidFormat("conflicting bit depth flags"));
-        }
         if (flags & FLAG_HAS_ICC) != 0 {
             if icc_bytes == 0 || icc_bytes > MAX_ICC_BYTES {
                 return Err(Error::InvalidFormat("invalid ICC profile length"));
@@ -508,7 +507,7 @@ pub fn encode_vimg(
 }
 
 /// Encodes packed 10-bit or 12-bit HDR `u16` RGB / RGBA / Grayscale pixels into a `VIMG1` buffer.
-/// Set `opts.bit_depth` to `10` (`0..=1023`) or `12` (`0..=4095`).
+/// Set `opts.bit_depth` to `10` (`0..=1023`), `12` (`0..=4095`), or `16` (`0..=65535`).
 pub fn encode_vimg_u16(
     pixels: &[u16],
     width: u32,
@@ -517,8 +516,8 @@ pub fn encode_vimg_u16(
     opts: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let bit_depth = if opts.bit_depth == 8 { 10 } else { opts.bit_depth };
-    if !matches!(bit_depth, 8 | 10 | 12) {
-        return Err(Error::InvalidInput("bit_depth must be 8, 10, or 12"));
+    if !matches!(bit_depth, 8 | 10 | 12 | 16) {
+        return Err(Error::InvalidInput("bit_depth must be 8, 10, 12, or 16"));
     }
     let (w, h, ch) = (width as usize, height as usize, channels as usize);
     if width == 0
@@ -531,7 +530,7 @@ pub fn encode_vimg_u16(
     {
         return Err(Error::InvalidInput("invalid dimensions, channels, or u16 pixel buffer length"));
     }
-    let max_val = (1u16 << bit_depth) - 1;
+    let max_val = ((1u32 << bit_depth) - 1) as u16;
     encode_pixels_vimg(PixelInput::U16(pixels, max_val), width, height, channels, bit_depth, opts)
 }
 
@@ -665,6 +664,8 @@ fn encode_pixels_vimg(
         flags |= FLAG_BIT_DEPTH_10;
     } else if bit_depth == 12 {
         flags |= FLAG_BIT_DEPTH_12;
+    } else if bit_depth == 16 {
+        flags |= FLAG_BIT_DEPTH_16;
     }
     if !icc_slice.is_empty() {
         flags |= FLAG_HAS_ICC;
@@ -769,6 +770,64 @@ fn encode_one_tile(
     let tw = (img_w - x0).min(tile_size);
     let th = (img_h - y0).min(tile_size);
     let n = tw * th;
+    let use_97 = quality < 100;
+
+    // Full 16-bit precision path (`0..=65535`): uses `i32` planes so `Co/Cg` (-65535..=+65535) never overflows `i16`.
+    if bit_depth == 16 {
+        if let PixelInput::U16(pixels, max_val) = input {
+            let mut y32 = vec![0i32; n];
+            let mut co32 = if ch >= 3 { vec![0i32; n] } else { Vec::new() };
+            let mut cg32 = if ch >= 3 { vec![0i32; n] } else { Vec::new() };
+            let mut a32 = if ch == 4 { vec![0i32; n] } else { Vec::new() };
+            if ch == 1 {
+                for row in 0..th {
+                    let src = &pixels[(y0 + row) * img_w + x0..(y0 + row) * img_w + x0 + tw];
+                    let dst = &mut y32[row * tw..(row + 1) * tw];
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d = s.min(max_val) as i32;
+                    }
+                }
+            } else {
+                for row in 0..th {
+                    let src_off = ((y0 + row) * img_w + x0) * ch;
+                    let src = &pixels[src_off..src_off + tw * ch];
+                    let dst_off = row * tw;
+                    for x in 0..tw {
+                        let o = x * ch;
+                        let (yv, cov, cgv) = rgb_to_ycocg_r_i32(
+                            src[o].min(max_val),
+                            src[o + 1].min(max_val),
+                            src[o + 2].min(max_val),
+                        );
+                        y32[dst_off + x] = yv;
+                        co32[dst_off + x] = cov;
+                        cg32[dst_off + x] = cgv;
+                        if ch == 4 {
+                            a32[dst_off + x] = src[o + 3].min(max_val) as i32;
+                        }
+                    }
+                }
+            }
+            let mut out_planes = Vec::with_capacity(ch);
+            for p_idx in 0..ch {
+                let wt = if chroma_420 && (p_idx == 1 || p_idx == 2) {
+                    let src_p = if p_idx == 1 { &co32[..n] } else { &cg32[..n] };
+                    let (ds, pw, ph) = downsample_2x2_i32(src_p, tw, th);
+                    WaveletTile::forward_from_i32_mode_with(&ds, pw, ph, dwt_levels, use_97, &mut scratch.wt)
+                } else {
+                    let src_p = match p_idx {
+                        0 => &y32[..n],
+                        1 => &co32[..n],
+                        2 => &cg32[..n],
+                        _ => &a32[..n],
+                    };
+                    WaveletTile::forward_from_i32_mode_with(src_p, tw, th, dwt_levels, use_97, &mut scratch.wt)
+                };
+                out_planes.push(encode_wavelet_tile_levels_full(&wt, None, quality, p_idx, bit_depth, adaptive_quant));
+            }
+            return out_planes;
+        }
+    }
 
     // L1-hot tile-local RGB/RGBA -> YCoCg-R split straight from source pixels (zero full-frame canvas!).
     match input {
@@ -845,7 +904,6 @@ fn encode_one_tile(
         },
     }
 
-    let use_97 = quality < 100;
     let mut out_planes = Vec::with_capacity(ch);
     for p_idx in 0..ch {
         let (wt, sp_opt) = if chroma_420 && (p_idx == 1 || p_idx == 2) {

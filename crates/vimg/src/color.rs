@@ -291,6 +291,154 @@ pub fn merge_planes_u16(
     out
 }
 
+/// Forward reversible `YCoCg-R` lifting in `i32` for full 16-bit HDR (`0..=65535`, zero overflow).
+#[inline(always)]
+pub fn rgb_to_ycocg_r_i32(r: u16, g: u16, b: u16) -> (i32, i32, i32) {
+    let r = r as i32;
+    let g = g as i32;
+    let b = b as i32;
+    let co = r - b;
+    let t = b + (co >> 1);
+    let cg = g - t;
+    let y = t + (cg >> 1);
+    (y, co, cg)
+}
+
+/// Exact inverse of `rgb_to_ycocg_r_i32` clamped to `0..=max_val` (`max_val` up to `65535`).
+#[inline(always)]
+pub fn ycocg_r_to_rgb_i32(y: i32, co: i32, cg: i32, max_val: i32) -> (u16, u16, u16) {
+    let t = y - (cg >> 1);
+    let g = cg + t;
+    let b = t - (co >> 1);
+    let r = b + co;
+    (r.clamp(0, max_val) as u16, g.clamp(0, max_val) as u16, b.clamp(0, max_val) as u16)
+}
+
+/// 2x2 box downsample in `i32` for 16-bit `4:2:0` chroma planes.
+pub fn downsample_2x2_i32(src: &[i32], width: usize, height: usize) -> (Vec<i32>, usize, usize) {
+    let cw = width.div_ceil(2);
+    let ch = height.div_ceil(2);
+    let mut dst = vec![0i32; cw * ch];
+    for cy in 0..ch {
+        let y0 = cy * 2;
+        let y1 = (y0 + 1).min(height - 1);
+        let row0 = &src[y0 * width..(y0 + 1) * width];
+        let row1 = &src[y1 * width..(y1 + 1) * width];
+        let out_row = &mut dst[cy * cw..(cy + 1) * cw];
+        for (cx, dv) in out_row.iter_mut().enumerate() {
+            let x0 = cx * 2;
+            let x1 = (x0 + 1).min(width - 1);
+            *dv = (row0[x0] + row0[x1] + row1[x0] + row1[x1] + 2) >> 2;
+        }
+    }
+    (dst, cw, ch)
+}
+
+/// Bilinear 2x2 upsample in `i32` for 16-bit `4:2:0` chroma planes (zero `i16` overflow).
+pub fn upsample_2x2_bilinear_i32(
+    src: &[i32],
+    cw: usize,
+    ch: usize,
+    width: usize,
+    height: usize,
+) -> Vec<i32> {
+    let mut dst = vec![0i32; width * height];
+    if cw == 0 || ch == 0 {
+        return dst;
+    }
+    for y in 0..height {
+        let cy0 = (y / 2).min(ch - 1);
+        let cy1 = if (y & 1) == 0 {
+            cy0.saturating_sub(1)
+        } else {
+            (cy0 + 1).min(ch - 1)
+        };
+        let r0 = &src[cy0 * cw..(cy0 + 1) * cw];
+        let r1 = &src[cy1 * cw..(cy1 + 1) * cw];
+        let out_row = &mut dst[y * width..(y + 1) * width];
+        for (x, dv) in out_row.iter_mut().enumerate() {
+            let cx0 = (x / 2).min(cw - 1);
+            let cx1 = if (x & 1) == 0 {
+                cx0.saturating_sub(1)
+            } else {
+                (cx0 + 1).min(cw - 1)
+            };
+            let v = 9 * r0[cx0] + 3 * r0[cx1] + 3 * r1[cx0] + r1[cx1] + 8;
+            *dv = v >> 4;
+        }
+    }
+    dst
+}
+
+/// Merges decoded 16-bit `i32` `YCoCg-R` (or grayscale `Y`-only) planes into packed `u16` RGB/RGBA.
+#[allow(clippy::too_many_arguments)]
+pub fn merge_planes_u16_i32(
+    y_p: &[i32],
+    co_p: Option<&[i32]>,
+    cg_p: Option<&[i32]>,
+    a_p: Option<&[i32]>,
+    width: usize,
+    height: usize,
+    out_channels: usize,
+    max_val: i32,
+) -> Vec<u16> {
+    let n = width * height;
+    let mut out = vec![0u16; n * out_channels];
+    match (co_p, cg_p, out_channels) {
+        (None, _, 1) => {
+            for i in 0..n {
+                out[i] = y_p[i].clamp(0, max_val) as u16;
+            }
+        }
+        (None, _, 3) => {
+            for (i, &yv) in y_p.iter().enumerate().take(n) {
+                let g = yv.clamp(0, max_val) as u16;
+                let o = i * 3;
+                out[o] = g;
+                out[o + 1] = g;
+                out[o + 2] = g;
+            }
+        }
+        (None, _, 4) => {
+            for i in 0..n {
+                let g = y_p[i].clamp(0, max_val) as u16;
+                let a = a_p.map_or(max_val as u16, |ap| ap[i].clamp(0, max_val) as u16);
+                let o = i * 4;
+                out[o] = g;
+                out[o + 1] = g;
+                out[o + 2] = g;
+                out[o + 3] = a;
+            }
+        }
+        (Some(co), Some(cg), 3) => {
+            for i in 0..n {
+                let (r, g, b) = ycocg_r_to_rgb_i32(y_p[i], co[i], cg[i], max_val);
+                let o = i * 3;
+                out[o] = r;
+                out[o + 1] = g;
+                out[o + 2] = b;
+            }
+        }
+        (Some(co), Some(cg), 4) => {
+            for i in 0..n {
+                let (r, g, b) = ycocg_r_to_rgb_i32(y_p[i], co[i], cg[i], max_val);
+                let a = a_p.map_or(max_val as u16, |ap| ap[i].clamp(0, max_val) as u16);
+                let o = i * 4;
+                out[o] = r;
+                out[o + 1] = g;
+                out[o + 2] = b;
+                out[o + 3] = a;
+            }
+        }
+        _ => {
+            for i in 0..n {
+                out[i] = y_p[i].clamp(0, max_val) as u16;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

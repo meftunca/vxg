@@ -129,7 +129,7 @@ pub fn encode_ll_band_bd(
     bit_depth: u8,
 ) -> Vec<u8> {
     let step = ll_quant_step_bd(quality, plane, bit_depth);
-    let mid = 1i32 << (bit_depth.clamp(8, 12) - 1);
+    let mid = 1i32 << (bit_depth.clamp(8, 16) - 1);
     let mut residuals = vec![0i32; w * h];
     let mut rec = vec![0i32; w * h];
     for y in 0..h {
@@ -166,7 +166,7 @@ pub fn decode_ll_band_bd(
     bit_depth: u8,
 ) -> Result<Vec<i32>> {
     let step = ll_quant_step_bd(quality, plane, bit_depth);
-    let mid = 1i32 << (bit_depth.clamp(8, 12) - 1);
+    let mid = 1i32 << (bit_depth.clamp(8, 16) - 1);
     let mut residuals = vec![0i32; w * h];
     decode_2d_bands(payload, &mut [(&mut residuals, w, h)], &[])?;
     let mut ll = vec![0i32; w * h];

@@ -10,23 +10,27 @@ use std::time::Instant;
 
 use image::{DynamicImage, GenericImageView, ImageFormat, RgbImage, RgbaImage};
 use vimg::{
-    crop_vimg_zero_decode, decode_from_source, downscale_vimg_zero_decode, encode, encode_u16,
-    psnr_db, ssim_score, Cicp, EncodeOptions, FileRangeSource, HttpRangeSource, RangeSource,
-    RangeStats, SliceRangeSource, TransformQuery, VimgIndex,
+    crop_vimg_zero_decode, decode_from_source, downscale_vimg_zero_decode, encode,
+    encode_animation_from_vimg, encode_u16, psnr_db, ssim_score, Cicp, EncodeOptions,
+    FileRangeSource, HttpRangeSource, RangeSource, RangeStats, SliceRangeSource, TransformQuery,
+    VimaIndex, VimgIndex,
 };
 
 fn usage() {
     eprintln!(
-        "vimg {} — HTTP/HTTPS Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Engine\n\n\
+        "vimg {} — HTTP/HTTPS Range-Native Hierarchical Wavelet Image & Animation Codec\n\n\
          Usage:\n  \
-           vimg encode    <in.png|jpg|webp|bmp> <out.vimg> [--quality 1..100] [--tile 64|128|256] [--levels 1..4] [--bit-depth 8|10|12] [--aq] [--cicp srgb|p3|pq|hlg] [--icc <profile.icc>] [--keep-meta] [--no-420]\n  \
-           vimg decode    <in.vimg | http(s)://.../img.vimg> <out.png|jpg|webp> [--w W] [--h H] [--level 0..3] [--crop x,y,w,h] [--gray] [--blur 0..1] [--sharpen 0..2] [--bright N] [--contrast F] [--sat 0..3] [--temp -1..1] [--sepia] [--rot 90|180|270] [--extract-icc <out.icc>] [--extract-exif <out.exif>] [--extract-xmp <out.xmp>]\n  \
-           vimg crop      <in.vimg | http(s)://.../img.vimg> <out.vimg> --tiles tx0,ty0,ntx,nty [--gray]\n  \
-           vimg downscale <in.vimg | http(s)://.../img.vimg> <out.vimg> --level 0|1|2 [--gray] [--strip-meta]\n  \
-           vimg diff      <ref.png|jpg|webp|vimg> <test.png|jpg|webp|vimg>\n  \
-           vimg info      <in.vimg | http(s)://.../img.vimg>\n  \
-           vimg serve     <dir> [--port 8090]    (HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy ?fmt=png|jpg|webp)\n  \
-           vimg bench     <in.png|jpg|bmp> [--quality 85] [--tile 256]",
+           vimg encode      <in.png|jpg|webp|bmp> <out.vimg> [--quality 1..100] [--tile 64|128|256] [--levels 1..4] [--bit-depth 8|10|12|16] [--aq] [--cicp srgb|p3|pq|hlg] [--icc <profile.icc>] [--keep-meta] [--no-420]\n  \
+           vimg decode      <in.vimg | http(s)://.../img.vimg> <out.png|jpg|webp> [--w W] [--h H] [--level 0..3] [--crop x,y,w,h] [--gray] [--blur 0..1] [--sharpen 0..2] [--bright N] [--contrast F] [--sat 0..3] [--temp -1..1] [--sepia] [--rot 90|180|270] [--extract-icc <out.icc>] [--extract-exif <out.exif>] [--extract-xmp <out.xmp>]\n  \
+           vimg crop        <in.vimg | http(s)://.../img.vimg> <out.vimg> --tiles tx0,ty0,ntx,nty [--gray]\n  \
+           vimg downscale   <in.vimg | http(s)://.../img.vimg> <out.vimg> --level 0|1|2 [--gray] [--strip-meta]\n  \
+           vimg anim-encode <frame1.png> <frame2.png> ... -o <out.vima> [--fps 24 | --delay 42] [--loop 0] [-q 80] [--aq] [--bit-depth 8|10|12|16]\n  \
+           vimg anim-info   <in.vima | http(s)://.../anim.vima>\n  \
+           vimg anim-decode <in.vima | http(s)://.../anim.vima> <out.png> --frame <N> [--w W] [--crop x,y,w,h] [--gray] [--sat F] [--temp F]\n  \
+           vimg diff        <ref.png|jpg|webp|vimg> <test.png|jpg|webp|vimg>\n  \
+           vimg info        <in.vimg | http(s)://.../img.vimg>\n  \
+           vimg serve       <dir> [--port 8090]    (HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy ?fmt=png|jpg|webp)\n  \
+           vimg bench       <in.png|jpg|bmp> [--quality 85] [--tile 256]",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -475,6 +479,179 @@ fn cmd_diff(args: &[String]) -> Result<(), String> {
     println!(
         "Diff {} vs {} ({aw}x{ah}x{ach}): PSNR = {:.2} dB | SSIM = {:.5} | max_abs_err = {}",
         args[0], args[1], psnr, ssim, max_err
+    );
+    Ok(())
+}
+
+fn cmd_anim_encode(args: &[String]) -> Result<(), String> {
+    let mut inputs: Vec<String> = Vec::new();
+    let mut out_path: Option<String> = None;
+    let mut delay_ms: u32 = 42;
+    let mut loop_count: u32 = 0;
+    let mut opts = EncodeOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--out" => {
+                i += 1;
+                out_path = Some(args.get(i).ok_or("missing -o <out.vima>")?.clone());
+            }
+            "--fps" => {
+                i += 1;
+                let fps: f64 = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --fps")?;
+                delay_ms = (1000.0 / fps.max(0.1)).round().max(1.0) as u32;
+            }
+            "--delay" => {
+                i += 1;
+                delay_ms = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --delay")?;
+            }
+            "--loop" => {
+                i += 1;
+                loop_count = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --loop")?;
+            }
+            "--quality" | "-q" => {
+                i += 1;
+                opts.quality = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --quality")?;
+                if opts.quality >= 100 {
+                    opts.chroma_420 = false;
+                }
+            }
+            "--tile" => {
+                i += 1;
+                opts.tile_size = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --tile")?;
+            }
+            "--bit-depth" => {
+                i += 1;
+                opts.bit_depth = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --bit-depth")?;
+            }
+            "--aq" => opts.adaptive_quant = true,
+            other if other.starts_with('-') => return Err(format!("unknown flag {other}")),
+            path => inputs.push(path.to_owned()),
+        }
+        i += 1;
+    }
+    let out_file = out_path.ok_or("anim-encode requires -o <out.vima>")?;
+    if inputs.is_empty() {
+        return Err("anim-encode requires at least one input frame".into());
+    }
+    let t0 = Instant::now();
+    let mut encoded: Vec<(Vec<u8>, u32)> = Vec::with_capacity(inputs.len());
+    for p in &inputs {
+        let fb = if p.ends_with(".vimg") {
+            fs::read(p).map_err(|e| format!("read {p}: {e}"))?
+        } else if opts.bit_depth > 8 {
+            let raw = fs::read(p).map_err(|e| format!("read {p}: {e}"))?;
+            let img = image::load_from_memory(&raw).map_err(|e| format!("decode {p}: {e}"))?;
+            let (w, h) = img.dimensions();
+            let shift = 16u8.saturating_sub(opts.bit_depth);
+            let (px16, ch): (Vec<u16>, u8) = if img.color().has_alpha() {
+                (img.to_rgba16().into_raw().into_iter().map(|v| v >> shift).collect(), 4)
+            } else {
+                (img.to_rgb16().into_raw().into_iter().map(|v| v >> shift).collect(), 3)
+            };
+            encode_u16(&px16, w, h, ch, &opts).map_err(|e| e.to_string())?
+        } else {
+            let (px, w, h, ch) = load_pixels(p)?;
+            encode(&px, w, h, ch, &opts).map_err(|e| e.to_string())?
+        };
+        encoded.push((fb, delay_ms));
+    }
+    let refs: Vec<(&[u8], u32)> = encoded.iter().map(|(b, d)| (b.as_slice(), *d)).collect();
+    let vima = encode_animation_from_vimg(&refs, loop_count).map_err(|e| e.to_string())?;
+    let dt = t0.elapsed().as_secs_f64() * 1000.0;
+    fs::write(&out_file, &vima).map_err(|e| format!("write {out_file}: {e}"))?;
+    println!(
+        "Encoded VIMA1 {} frames ({} ms/frame, loop={}) -> {} ({:.1} KiB) in {:.1} ms",
+        encoded.len(),
+        delay_ms,
+        loop_count,
+        out_file,
+        vima.len() as f64 / 1024.0,
+        dt
+    );
+    Ok(())
+}
+
+fn cmd_anim_info(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("anim-info requires <in.vima|url>")?;
+    let src = open_source(path)?;
+    let mut stats = RangeStats::default();
+    let idx = VimaIndex::read_from_source(src.as_ref(), &mut stats).map_err(|e| e.to_string())?;
+    let h = &idx.header;
+    println!(
+        "VIMA v{} | {}x{}x{} ({}-bit) | {} frames ({} ms total, loop={}) | size={:.1} KiB (dir={:.1} KiB)",
+        h.version,
+        h.width,
+        h.height,
+        h.channels,
+        h.bit_depth,
+        h.frame_count,
+        idx.total_duration_ms(),
+        h.loop_count,
+        h.total_bytes as f64 / 1024.0,
+        h.dir_bytes as f64 / 1024.0
+    );
+    for (i, f) in idx.frames.iter().enumerate().take(16) {
+        println!(
+            "  Frame {:>3}: offset={:<10} len={:>7.1} KiB  delay={} ms",
+            i,
+            f.offset,
+            f.len as f64 / 1024.0,
+            f.duration_ms
+        );
+    }
+    if idx.frames.len() > 16 {
+        println!("  ... ({} more frames)", idx.frames.len() - 16);
+    }
+    Ok(())
+}
+
+fn cmd_anim_decode(args: &[String]) -> Result<(), String> {
+    if args.len() < 2 {
+        return Err("anim-decode requires <in.vima|url> <out.png> --frame <N> [--w W] [--crop x,y,w,h]".into());
+    }
+    let mut frame_idx = 0usize;
+    let mut q = TransformQuery::default();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--frame" => { i += 1; frame_idx = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --frame")?; }
+            "--w" => { i += 1; q.target_width = Some(args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --w")?); }
+            "--h" => { i += 1; q.target_height = Some(args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --h")?); }
+            "--crop" => { i += 1; q.crop = Some(parse_quad(args.get(i).ok_or("missing --crop")?)?); }
+            "--gray" => q.grayscale = true,
+            "--sepia" => q.sepia = true,
+            "--sat" => { i += 1; q.saturation = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --sat")?; }
+            "--temp" => { i += 1; q.temperature = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --temp")?; }
+            other => return Err(format!("unknown flag {other}")),
+        }
+        i += 1;
+    }
+    let src = open_source(&args[0])?;
+    let t0 = Instant::now();
+    let mut dir_stats = RangeStats::default();
+    let idx = VimaIndex::read_from_source(src.as_ref(), &mut dir_stats).map_err(|e| e.to_string())?;
+    let img = idx.decode_frame_from_source(src.as_ref(), frame_idx, &q).map_err(|e| e.to_string())?;
+    let dt = t0.elapsed().as_secs_f64() * 1000.0;
+    if let Some(ref px16) = img.pixels_u16 {
+        let shift = 16u8.saturating_sub(img.bit_depth);
+        let scaled: Vec<u16> = px16.iter().map(|&v| v << shift).collect();
+        let dyn16 = match img.channels {
+            1 => DynamicImage::ImageLuma16(image::ImageBuffer::from_raw(img.width, img.height, scaled).ok_or("bad luma16")?),
+            3 => DynamicImage::ImageRgb16(image::ImageBuffer::from_raw(img.width, img.height, scaled).ok_or("bad rgb16")?),
+            4 => DynamicImage::ImageRgba16(image::ImageBuffer::from_raw(img.width, img.height, scaled).ok_or("bad rgba16")?),
+            c => return Err(format!("unsupported channels {c}")),
+        };
+        dyn16.save(&args[1]).map_err(|e| format!("save {}: {e}", args[1]))?;
+    } else {
+        save_pixels(&args[1], &img.pixels, img.width, img.height, img.channels)?;
+    }
+    let total_fetched = dir_stats.bytes_fetched + img.stats.bytes_fetched;
+    let pct = (total_fetched as f64 * 100.0) / (idx.header.total_bytes.max(1) as f64);
+    println!(
+        "Decoded VIMA frame #{frame_idx} ({}x{}x{}, L{}, fetched {:.1} KiB / {:.1} KiB = {:.1}%) in {:.2} ms -> {}",
+        img.width, img.height, img.channels, img.decoded_level,
+        total_fetched as f64 / 1024.0, idx.header.total_bytes as f64 / 1024.0, pct, dt, args[1]
     );
     Ok(())
 }
@@ -1005,6 +1182,9 @@ fn main() {
         "info" => cmd_info(&args[1..]),
         "crop" => cmd_crop(&args[1..]),
         "downscale" => cmd_downscale(&args[1..]),
+        "anim-encode" => cmd_anim_encode(&args[1..]),
+        "anim-info" => cmd_anim_info(&args[1..]),
+        "anim-decode" => cmd_anim_decode(&args[1..]),
         "diff" => cmd_diff(&args[1..]),
         "bench" => cmd_bench(&args[1..]),
         "serve" => cmd_serve(&args[1..]),

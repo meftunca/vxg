@@ -5,10 +5,16 @@
 //! re-downloads or re-decodes earlier levels.
 
 use crate::checksum::crc32c;
-use crate::color::{merge_planes_rgb, merge_planes_u16, upsample_2x2_bilinear};
+use crate::color::{
+    merge_planes_rgb, merge_planes_u16, merge_planes_u16_i32, upsample_2x2_bilinear,
+    upsample_2x2_bilinear_i32,
+};
 use crate::entropy::{decode_spatial_palette, CODEC_SPATIAL_PALETTE};
 use crate::format::VimgIndex;
-use crate::ops::{apply_color_adjust, apply_geom_pub, build_detail_gains, resize_bicubic_u8, resize_bilinear_u16, DecodedImage, TransformQuery};
+use crate::ops::{
+    apply_color_adjust, apply_color_adjust_i32, apply_geom_pub, build_detail_gains,
+    resize_bicubic_u8, resize_bilinear_u16, DecodedImage, TransformQuery,
+};
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
 use crate::subband::{decode_detail_level_bd, decode_ll_band_bd};
 use crate::wavelet::{level_dims, DetailBands, WaveletScratch, WaveletTile};
@@ -145,7 +151,7 @@ impl ProgressiveDecoder {
         let lvl = self.next_lvl;
         let hdr = &self.index.header;
         let bit_depth = hdr.bit_depth();
-        let max_sample = hdr.max_sample() as i16;
+        let max_sample = hdr.max_sample() as i32;
         let bd_shift = bit_depth.saturating_sub(8);
         let mid_luma = 1i32 << (bit_depth - 1);
         let tiles_fetched = self.sel_tx * self.sel_ty;
@@ -358,13 +364,23 @@ impl ProgressiveDecoder {
                     let ty_px0 = row_y[lty];
                     let dst_tw = col_x[ltx + 1] - tx_px0;
                     let dst_th = row_y[lty + 1] - ty_px0;
-                    let (y_t, mut co_t, mut cg_t, a_t) = self.reconstruct_tile_planes(
-                        ltx, lty, dst_tw, dst_th, lvl, &detail_gains, &mut scratch,
-                    );
-                    apply_color_adjust(&mut co_t, &mut cg_t, dst_tw * dst_th, bd_shift, &self.query);
-                    let tile_rgb = merge_planes_u16(
-                        &y_t, co_t.as_deref(), cg_t.as_deref(), a_t.as_deref(), dst_tw, dst_th, out_ch, max_sample,
-                    );
+                    let tile_rgb = if bit_depth == 16 {
+                        let (y_t, mut co_t, mut cg_t, a_t) = self.reconstruct_tile_planes_i32(
+                            ltx, lty, dst_tw, dst_th, lvl, &detail_gains, &mut scratch,
+                        );
+                        apply_color_adjust_i32(&mut co_t, &mut cg_t, dst_tw * dst_th, bd_shift, &self.query);
+                        merge_planes_u16_i32(
+                            &y_t, co_t.as_deref(), cg_t.as_deref(), a_t.as_deref(), dst_tw, dst_th, out_ch, max_sample,
+                        )
+                    } else {
+                        let (y_t, mut co_t, mut cg_t, a_t) = self.reconstruct_tile_planes(
+                            ltx, lty, dst_tw, dst_th, lvl, &detail_gains, &mut scratch,
+                        );
+                        apply_color_adjust(&mut co_t, &mut cg_t, dst_tw * dst_th, bd_shift, &self.query);
+                        merge_planes_u16(
+                            &y_t, co_t.as_deref(), cg_t.as_deref(), a_t.as_deref(), dst_tw, dst_th, out_ch, max_sample as i16,
+                        )
+                    };
                     blit_tile(&tile_rgb, dst_tw, dst_th, tx_px0, ty_px0, sub_x0, sub_y0, sub_x1, sub_y1, sub_w, out_ch, &mut pixels16);
                 }
             }
@@ -455,6 +471,51 @@ impl ProgressiveDecoder {
             let (tw_dec, th_dec) = level_dims(slot.pw_full, slot.ph_full, self.max_lvl - lvl);
             if tw_dec != dst_tw || th_dec != dst_th {
                 tile_px = upsample_2x2_bilinear(&tile_px, tw_dec, th_dec, dst_tw, dst_th);
+            }
+            match plane {
+                0 => y_t = Some(tile_px),
+                1 => co_t = Some(tile_px),
+                2 => cg_t = Some(tile_px),
+                _ => a_t = Some(tile_px),
+            }
+        }
+        (y_t.unwrap(), co_t, cg_t, a_t)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn reconstruct_tile_planes_i32(
+        &self,
+        ltx: usize,
+        lty: usize,
+        dst_tw: usize,
+        dst_th: usize,
+        lvl: usize,
+        detail_gains: &[f32],
+        scratch: &mut WaveletScratch,
+    ) -> (Vec<i32>, Option<Vec<i32>>, Option<Vec<i32>>, Option<Vec<i32>>) {
+        let hdr = &self.index.header;
+        let n_planes = self.planes.len();
+        let mut y_t = None;
+        let mut co_t = None;
+        let mut cg_t = None;
+        let mut a_t = None;
+
+        for (p_slot, &plane) in self.planes.iter().enumerate() {
+            let c_idx = (lty * self.sel_tx + ltx) * n_planes + p_slot;
+            let slot = &self.cached[c_idx];
+            let wt = WaveletTile {
+                full_w: slot.pw_full,
+                full_h: slot.ph_full,
+                ll_w: slot.ll_w,
+                ll_h: slot.ll_h,
+                ll: slot.ll.clone(),
+                details: slot.details.clone(),
+            };
+            let g = if plane == 0 { detail_gains } else { &[] };
+            let mut tile_px = wt.reconstruct_i32_mode_with(lvl, g, hdr.is_dwt_97(), scratch).0;
+            let (tw_dec, th_dec) = level_dims(slot.pw_full, slot.ph_full, self.max_lvl - lvl);
+            if tw_dec != dst_tw || th_dec != dst_th {
+                tile_px = upsample_2x2_bilinear_i32(&tile_px, tw_dec, th_dec, dst_tw, dst_th);
             }
             match plane {
                 0 => y_t = Some(tile_px),

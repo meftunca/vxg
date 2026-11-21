@@ -721,7 +721,7 @@ onUnmounted(() => {
     <!-- Top Studio Header Bar -->
     <header class="vimg-top">
       <div class="vimg-top-left">
-        <span class="vimg-badge">VIMG v0.3</span>
+        <span class="vimg-badge">VIMG v0.4</span>
         <span class="vimg-simd-pill">WASM SIMD128 · {{ wasmSizeKiB || '—' }} KiB</span>
         <select class="vimg-sample-sel" v-model="activeId" @change="selectSample(activeId)" :disabled="!ready">
           <option v-for="s in samples" :key="s.id" :value="s.id">{{ s.label }}</option>

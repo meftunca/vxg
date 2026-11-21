@@ -2,7 +2,10 @@
 //! grayscale (chroma-skip), subband blur/sharpen, brightness/contrast, sepia, rotate & flip.
 
 use crate::checksum::crc32c;
-use crate::color::{merge_planes_rgb, merge_planes_u16, upsample_2x2_bilinear};
+use crate::color::{
+    merge_planes_rgb, merge_planes_u16, merge_planes_u16_i32, upsample_2x2_bilinear,
+    upsample_2x2_bilinear_i32,
+};
 use crate::entropy::{decode_spatial_palette, CODEC_SPATIAL_PALETTE};
 use crate::format::{VimgIndex, MAX_IMAGE_PIXELS, MAX_RESIZE_DIM, MAX_RESIZE_PIXELS};
 use crate::meta::VimgMetadata;
@@ -201,7 +204,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     let (idx, prefix) = VimgIndex::read_from_source_with_prefix(source, &mut stats)?;
     let hdr = &idx.header;
     let bit_depth = hdr.bit_depth();
-    let max_sample = hdr.max_sample() as i16;
+    let max_sample = hdr.max_sample() as i32;
     let bd_shift = bit_depth.saturating_sub(8);
     let mid_luma = 1i32 << (bit_depth - 1);
     let icc_profile = idx.read_icc_from_source(source, &prefix, query.verify_crc, &mut stats)?;
@@ -358,12 +361,16 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
         let mut co_tile: Option<Vec<i16>> = None;
         let mut cg_tile: Option<Vec<i16>> = None;
         let mut a_tile: Option<Vec<i16>> = None;
+        let mut y_tile32: Option<Vec<i32>> = None;
+        let mut co_tile32: Option<Vec<i32>> = None;
+        let mut cg_tile32: Option<Vec<i32>> = None;
+        let mut a_tile32: Option<Vec<i32>> = None;
 
         for (p_slot, &plane) in planes_to_fetch.iter().enumerate() {
             let (pw_full, ph_full) = hdr.tile_plane_dims(tx0 + ltx, ty0 + lty, plane);
 
             // Fast zero-IDWT spatial Palette+RLE shortcut for lossless UI/screenshot/solid-alpha tiles!
-            if target_lvl == max_lvl && max_lvl >= 1 && query.blur <= 0.0 && query.sharpen <= 0.0 {
+            if bit_depth <= 12 && target_lvl == max_lvl && max_lvl >= 1 && query.blur <= 0.0 && query.sharpen <= 0.0 {
                 let kf = max_lvl * stride_lvl + p_slot * stride_plane + lty * stride_ty + ltx;
                 let ef = chunk_keys[kf].4;
                 let (cif, offf) = mapping[kf];
@@ -443,42 +450,69 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
 
             let wt = WaveletTile { full_w: pw_full, full_h: ph_full, ll_w, ll_h, ll, details };
             let gains_slice = if plane == 0 { &detail_gains[..] } else { &[] };
-            let (mut tile_px, tw_dec, th_dec) =
-                wt.reconstruct_mode_with(target_lvl, gains_slice, hdr.is_dwt_97(), wt_scratch);
-            if tw_dec != dst_tw || th_dec != dst_th {
-                tile_px = upsample_2x2_bilinear(&tile_px, tw_dec, th_dec, dst_tw, dst_th);
-            }
-            match plane {
-                0 => y_tile = Some(tile_px),
-                1 => co_tile = Some(tile_px),
-                2 => cg_tile = Some(tile_px),
-                _ => a_tile = Some(tile_px),
+            if bit_depth == 16 {
+                let (mut tile_px, tw_dec, th_dec) =
+                    wt.reconstruct_i32_mode_with(target_lvl, gains_slice, hdr.is_dwt_97(), wt_scratch);
+                if tw_dec != dst_tw || th_dec != dst_th {
+                    tile_px = upsample_2x2_bilinear_i32(&tile_px, tw_dec, th_dec, dst_tw, dst_th);
+                }
+                match plane {
+                    0 => y_tile32 = Some(tile_px),
+                    1 => co_tile32 = Some(tile_px),
+                    2 => cg_tile32 = Some(tile_px),
+                    _ => a_tile32 = Some(tile_px),
+                }
+            } else {
+                let (mut tile_px, tw_dec, th_dec) =
+                    wt.reconstruct_mode_with(target_lvl, gains_slice, hdr.is_dwt_97(), wt_scratch);
+                if tw_dec != dst_tw || th_dec != dst_th {
+                    tile_px = upsample_2x2_bilinear(&tile_px, tw_dec, th_dec, dst_tw, dst_th);
+                }
+                match plane {
+                    0 => y_tile = Some(tile_px),
+                    1 => co_tile = Some(tile_px),
+                    2 => cg_tile = Some(tile_px),
+                    _ => a_tile = Some(tile_px),
+                }
             }
         }
 
-        apply_color_adjust(&mut co_tile, &mut cg_tile, dst_tw * dst_th, bd_shift, query);
-
-        let px = if bit_depth == 8 {
-            TilePixels::U8(merge_planes_rgb(
-                y_tile.as_deref().unwrap(),
-                co_tile.as_deref(),
-                cg_tile.as_deref(),
-                a_tile.as_deref(),
-                dst_tw,
-                dst_th,
-                out_ch,
-            ))
-        } else {
-            TilePixels::U16(merge_planes_u16(
-                y_tile.as_deref().unwrap(),
-                co_tile.as_deref(),
-                cg_tile.as_deref(),
-                a_tile.as_deref(),
+        let px = if bit_depth == 16 {
+            apply_color_adjust_i32(&mut co_tile32, &mut cg_tile32, dst_tw * dst_th, bd_shift, query);
+            TilePixels::U16(merge_planes_u16_i32(
+                y_tile32.as_deref().unwrap(),
+                co_tile32.as_deref(),
+                cg_tile32.as_deref(),
+                a_tile32.as_deref(),
                 dst_tw,
                 dst_th,
                 out_ch,
                 max_sample,
             ))
+        } else {
+            apply_color_adjust(&mut co_tile, &mut cg_tile, dst_tw * dst_th, bd_shift, query);
+            if bit_depth == 8 {
+                TilePixels::U8(merge_planes_rgb(
+                    y_tile.as_deref().unwrap(),
+                    co_tile.as_deref(),
+                    cg_tile.as_deref(),
+                    a_tile.as_deref(),
+                    dst_tw,
+                    dst_th,
+                    out_ch,
+                ))
+            } else {
+                TilePixels::U16(merge_planes_u16(
+                    y_tile.as_deref().unwrap(),
+                    co_tile.as_deref(),
+                    cg_tile.as_deref(),
+                    a_tile.as_deref(),
+                    dst_tw,
+                    dst_th,
+                    out_ch,
+                    max_sample as i16,
+                ))
+            }
         };
         Ok((ltx, lty, px))
     };
@@ -717,6 +751,51 @@ pub(crate) fn apply_color_adjust(
             for v in cg.iter_mut() {
                 let val = ((*v as i32) * sat_q8 + 128) >> 8;
                 *v = val.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            }
+        }
+    }
+}
+
+pub(crate) fn apply_color_adjust_i32(
+    co_tile: &mut Option<Vec<i32>>,
+    cg_tile: &mut Option<Vec<i32>>,
+    len: usize,
+    bd_shift: u8,
+    query: &TransformQuery,
+) {
+    if query.sepia {
+        let co_sep = 34i32 << bd_shift;
+        let cg_sep = 6i32 << bd_shift;
+        *co_tile = Some(vec![co_sep; len]);
+        *cg_tile = Some(vec![cg_sep; len]);
+        return;
+    }
+    let sat = query.saturation.clamp(0.0, 3.0);
+    let temp = query.temperature.clamp(-1.0, 1.0);
+    let do_sat = (sat - 1.0).abs() > 1e-4;
+    let do_temp = temp.abs() > 1e-4;
+    if !do_sat && !do_temp {
+        return;
+    }
+    let sat_q8 = (sat * 256.0).round() as i64;
+    let temp_co = (temp * 48.0 * ((1u32 << bd_shift) as f32)).round() as i64;
+    if let Some(co) = co_tile.as_mut() {
+        for v in co.iter_mut() {
+            let mut val = *v as i64;
+            if do_sat {
+                val = (val * sat_q8 + 128) >> 8;
+            }
+            if do_temp {
+                val += temp_co;
+            }
+            *v = val.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        }
+    }
+    if do_sat {
+        if let Some(cg) = cg_tile.as_mut() {
+            for v in cg.iter_mut() {
+                let val = ((*v as i64) * sat_q8 + 128) >> 8;
+                *v = val.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
             }
         }
     }

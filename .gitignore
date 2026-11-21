@@ -19,3 +19,4 @@ docs/.vitepress/dist/
 docs/.vitepress/cache/
 docs/public/vxg.wasm
 docs/public/vimg.wasm
+packages/vimg-wasm/vimg.wasm

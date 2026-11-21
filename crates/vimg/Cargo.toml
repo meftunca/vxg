@@ -1,10 +1,25 @@
 [package]
 name = "vimg"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89"
-description = "HTTP-Range-native hierarchical wavelet image codec & compressed-domain transform engine (pure Rust, zero-dep lib, wasm32)"
+description = "HTTP/HTTPS Range-native hierarchical wavelet image & animation codec (8/10/12/16-bit HDR, SIMD, zero-dep core lib, wasm32)"
 license = "MIT"
+authors = ["meftunca"]
+repository = "https://github.com/meftunca/vxg"
+homepage = "https://meftunca.github.io/vxg/VIMG"
+documentation = "https://docs.rs/vimg"
+readme = "README.md"
+keywords = ["image", "codec", "wavelet", "http-range", "wasm"]
+categories = ["multimedia::images", "multimedia::encoding", "compression", "wasm"]
+include = [
+    "Cargo.toml",
+    "README.md",
+    "src/**/*.rs",
+    "include/vimg.h",
+    "web/playground.html",
+    "tests/**/*.rs",
+]
 
 [features]
 default = []

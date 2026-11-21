@@ -355,9 +355,53 @@ impl WaveletTile {
         Self::forward_mode_with(plane, w, h, n_dwt, use_97, &mut scratch)
     }
 
-    /// Forward 2D wavelet decomposition reusing `scratch` buffers across tiles.
+    /// Forward 2D wavelet decomposition from `i16` samples reusing `scratch` buffers across tiles.
     pub fn forward_mode_with(
         plane: &[i16],
+        w: usize,
+        h: usize,
+        n_dwt: usize,
+        use_97: bool,
+        scratch: &mut WaveletScratch,
+    ) -> Self {
+        let n = w * h;
+        if use_97 {
+            scratch.fbuf.resize(n, 0.0);
+            for (dst, &sv) in scratch.fbuf[..n].iter_mut().zip(plane.iter()) {
+                *dst = sv as f32;
+            }
+        } else {
+            scratch.ibuf.resize(n, 0);
+            for (dst, &sv) in scratch.ibuf[..n].iter_mut().zip(plane.iter()) {
+                *dst = sv as i32;
+            }
+        }
+        Self::forward_loaded_scratch(w, h, n_dwt, use_97, scratch)
+    }
+
+    /// Forward 2D wavelet decomposition from `i32` samples (used for full 16-bit HDR).
+    pub fn forward_from_i32_mode_with(
+        plane: &[i32],
+        w: usize,
+        h: usize,
+        n_dwt: usize,
+        use_97: bool,
+        scratch: &mut WaveletScratch,
+    ) -> Self {
+        let n = w * h;
+        if use_97 {
+            scratch.fbuf.resize(n, 0.0);
+            for (dst, &sv) in scratch.fbuf[..n].iter_mut().zip(plane.iter()) {
+                *dst = sv as f32;
+            }
+        } else {
+            scratch.ibuf.resize(n, 0);
+            scratch.ibuf[..n].copy_from_slice(&plane[..n]);
+        }
+        Self::forward_loaded_scratch(w, h, n_dwt, use_97, scratch)
+    }
+
+    fn forward_loaded_scratch(
         w: usize,
         h: usize,
         n_dwt: usize,
@@ -369,10 +413,6 @@ impl WaveletTile {
         let n = w * h;
         let max_dim = w.max(h);
         if use_97 {
-            scratch.fbuf.resize(n, 0.0);
-            for (dst, &sv) in scratch.fbuf[..n].iter_mut().zip(plane.iter()) {
-                *dst = sv as f32;
-            }
             if scratch.frow.len() < max_dim {
                 scratch.frow.resize(max_dim, 0.0);
             }
@@ -394,10 +434,6 @@ impl WaveletTile {
             }
             scratch.ibuf = simd_dwt::f32_to_i32_round_slice(&scratch.fbuf[..n]);
         } else {
-            scratch.ibuf.resize(n, 0);
-            for (dst, &sv) in scratch.ibuf[..n].iter_mut().zip(plane.iter()) {
-                *dst = sv as i32;
-            }
             if scratch.irow.len() < max_dim {
                 scratch.irow.resize(max_dim, 0);
             }
@@ -471,18 +507,18 @@ impl WaveletTile {
         self.reconstruct_mode_with(target_level, detail_gains, use_97, &mut scratch)
     }
 
-    /// Reconstructs the tile reusing `scratch` buffers across tiles and skipping all-zero detail bands!
-    pub fn reconstruct_mode_with(
+    /// Reconstructs the tile into `scratch` buffers (`fbuf` if `use_97`, `ibuf` otherwise),
+    /// returning `(final_w, final_h, is_ll_only)`.
+    fn reconstruct_into_scratch(
         &self,
         target_level: usize,
         detail_gains: &[f32],
         use_97: bool,
         scratch: &mut WaveletScratch,
-    ) -> (Vec<i16>, usize, usize) {
+    ) -> (usize, usize, bool) {
         let lvl = target_level.min(self.details.len());
         if lvl == 0 {
-            let out: Vec<i16> = self.ll.iter().map(|&v| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect();
-            return (out, self.ll_w, self.ll_h);
+            return (self.ll_w, self.ll_h, true);
         }
         let (final_w, final_h) = (self.details[lvl - 1].out_w, self.details[lvl - 1].out_h);
         let n = final_w * final_h;
@@ -559,8 +595,7 @@ impl WaveletTile {
                 }
                 dwt97_2d_inverse_step_with(fbuf, final_w, d.out_w, d.out_h, &mut scratch.frow, &mut scratch.fvert);
             }
-            let out = simd_dwt::f32_to_i16_round_slice(fbuf);
-            return (out, final_w, final_h);
+            return (final_w, final_h, false);
         }
         if scratch.ibuf.len() < n {
             scratch.ibuf.resize(n, 0);
@@ -631,8 +666,49 @@ impl WaveletTile {
 
             dwt53_2d_inverse_step_with(buf, final_w, d.out_w, d.out_h, &mut scratch.irow, &mut scratch.ivert);
         }
+        (final_w, final_h, false)
+    }
 
-        let out: Vec<i16> = buf.iter().map(|&v| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect();
+    /// Reconstructs the tile into `i16` reusing `scratch` buffers across tiles (8/10/12-bit fast path).
+    pub fn reconstruct_mode_with(
+        &self,
+        target_level: usize,
+        detail_gains: &[f32],
+        use_97: bool,
+        scratch: &mut WaveletScratch,
+    ) -> (Vec<i16>, usize, usize) {
+        let (final_w, final_h, ll_only) = self.reconstruct_into_scratch(target_level, detail_gains, use_97, scratch);
+        if ll_only {
+            let out: Vec<i16> = self.ll.iter().map(|&v| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect();
+            return (out, final_w, final_h);
+        }
+        let n = final_w * final_h;
+        let out = if use_97 {
+            simd_dwt::f32_to_i16_round_slice(&scratch.fbuf[..n])
+        } else {
+            scratch.ibuf[..n].iter().map(|&v| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect()
+        };
+        (out, final_w, final_h)
+    }
+
+    /// Reconstructs the tile into full-range `i32` (used for 16-bit HDR with zero `i16` clamping).
+    pub fn reconstruct_i32_mode_with(
+        &self,
+        target_level: usize,
+        detail_gains: &[f32],
+        use_97: bool,
+        scratch: &mut WaveletScratch,
+    ) -> (Vec<i32>, usize, usize) {
+        let (final_w, final_h, ll_only) = self.reconstruct_into_scratch(target_level, detail_gains, use_97, scratch);
+        if ll_only {
+            return (self.ll.clone(), final_w, final_h);
+        }
+        let n = final_w * final_h;
+        let out = if use_97 {
+            simd_dwt::f32_to_i32_round_slice(&scratch.fbuf[..n])
+        } else {
+            scratch.ibuf[..n].to_vec()
+        };
         (out, final_w, final_h)
     }
 }

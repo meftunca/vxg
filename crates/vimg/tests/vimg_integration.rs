@@ -671,3 +671,145 @@ fn v03_zero_decode_downscale_progressive_color_bicubic_and_ssim() {
     let inv: Vec<u8> = px.iter().map(|&v| 255 - v).collect();
     assert!(ssim_score(&px, &inv, w as u32, h as u32, 3) < 0.25);
 }
+
+#[test]
+fn v04_true_16bit_hdr_and_vima1_range_animation() {
+    use vimg::{
+        encode_animation, encode_u16, trim_vima_zero_decode, AnimFrameInput, ProgressiveDecoder,
+        RangeStats, VimaIndex,
+    };
+
+    // 1) True 16-bit (0..=65535) lossless (bit-exact across full ±65535 Co/Cg range!), lossy, crop & progressive
+    let (w, h) = (160usize, 128usize);
+    let mut px16 = vec![0u16; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let o = (y * w + x) * 3;
+            // Include extreme corners (0 and 65535) so Co = R - B hits ±65535!
+            px16[o] = if (x + y) % 19 == 0 { 65535 } else { ((x * 410 + y * 97) % 65536) as u16 };
+            px16[o + 1] = ((x * 211 + y * 503) % 65536) as u16;
+            px16[o + 2] = if (x + y) % 19 == 0 { 0 } else { ((y * 512 + x * 131) % 65536) as u16 };
+        }
+    }
+    let v16_ll = encode_u16(
+        &px16,
+        w as u32,
+        h as u32,
+        3,
+        &EncodeOptions { bit_depth: 16, tile_size: 64, ..EncodeOptions::lossless() },
+    )
+    .unwrap();
+    let hdr16 = VimgHeader::parse(&v16_ll).unwrap();
+    assert_eq!(hdr16.bit_depth(), 16);
+    assert_eq!(hdr16.max_sample(), 65535);
+    let dec16_ll = decode(&v16_ll).unwrap();
+    assert_eq!(dec16_ll.bit_depth, 16);
+    assert_eq!(
+        dec16_ll.pixels_u16.as_deref(),
+        Some(px16.as_slice()),
+        "16-bit lossless must be 100% bit-exact across 0..=65535"
+    );
+
+    // 16-bit ProgressiveDecoder reaches bit-exact L3 match!
+    let mut prog16 = ProgressiveDecoder::open(&SliceRangeSource(&v16_ll), TransformQuery::default()).unwrap();
+    let mut last_frame = None;
+    while let Some(f) = prog16.next_level(&SliceRangeSource(&v16_ll)).unwrap() {
+        last_frame = Some(f);
+    }
+    assert_eq!(last_frame.unwrap().pixels_u16.as_deref(), Some(px16.as_slice()));
+
+    // 16-bit lossy HDR roundtrip (high PSNR in 16-bit domain)
+    let mut smooth16 = vec![0u16; w * h * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let o = (y * w + x) * 3;
+            smooth16[o] = ((x * 65535) / w) as u16;
+            smooth16[o + 1] = ((y * 65535) / h) as u16;
+            smooth16[o + 2] = (((x + y) * 32767) / (w + h)) as u16;
+        }
+    }
+    let v16_q = encode_u16(
+        &smooth16,
+        w as u32,
+        h as u32,
+        3,
+        &EncodeOptions { bit_depth: 16, quality: 85, tile_size: 64, ..EncodeOptions::default() },
+    )
+    .unwrap();
+    let dec16_q = decode(&v16_q).unwrap();
+    let mse: f64 = smooth16
+        .iter()
+        .zip(dec16_q.pixels_u16.as_ref().unwrap().iter())
+        .map(|(&a, &b)| {
+            let d = a as f64 - b as f64;
+            d * d
+        })
+        .sum::<f64>()
+        / smooth16.len() as f64;
+    let psnr16 = 10.0 * (65535.0 * 65535.0 / mse.max(1e-9)).log10();
+    assert!(psnr16 > 40.0, "16-bit lossy smooth gradient PSNR too low: {psnr16:.2} dB");
+
+    // 2) VIMA1 Range-native animation: encode, random-access partial crop of frame #4, and zero-decode trim!
+    let (aw, ah) = (256usize, 256usize);
+    let raw_frames: Vec<Vec<u8>> = (0..6u8)
+        .map(|fi| {
+            let mut buf = synth_photo_rgb(aw, ah);
+            // Shift each frame distinctly so frame parity is unambiguous
+            for v in &mut buf {
+                *v = v.wrapping_add(fi.wrapping_mul(37));
+            }
+            buf
+        })
+        .collect();
+    let inputs: Vec<AnimFrameInput<'_>> = raw_frames
+        .iter()
+        .enumerate()
+        .map(|(i, px)| AnimFrameInput {
+            pixels: px,
+            width: aw as u32,
+            height: ah as u32,
+            channels: 3,
+            duration_ms: 40 + (i as u32) * 10,
+        })
+        .collect();
+    let vima = encode_animation(
+        &inputs,
+        0,
+        &EncodeOptions { tile_size: 64, ..EncodeOptions::lossless() },
+    )
+    .unwrap();
+
+    let src = SliceRangeSource(&vima);
+    let mut dir_stats = RangeStats::default();
+    let idx = VimaIndex::read_from_source(&src, &mut dir_stats).unwrap();
+    assert_eq!(idx.header.frame_count, 6);
+    assert_eq!(idx.total_duration_ms(), 40 + 50 + 60 + 70 + 80 + 90);
+
+    // Random-access partial 64x64 crop inside frame #4 without touching frames 0..3 or 5!
+    let crop_q = TransformQuery { crop: Some((64, 128, 64, 64)), ..Default::default() };
+    let f4_crop = idx.decode_frame_from_source(&src, 4, &crop_q).unwrap();
+    assert_eq!((f4_crop.width, f4_crop.height), (64, 64));
+    let total_fetched = dir_stats.bytes_fetched + f4_crop.stats.bytes_fetched;
+    assert!(
+        total_fetched < (vima.len() as u64) / 6,
+        "Single-tile crop of 1 frame in 6-frame VIMA1 should fetch <1/6 of file (got {total_fetched} / {})",
+        vima.len()
+    );
+    // Verify bit-exact pixel parity against frame #4 reference crop!
+    let mut expected_crop = Vec::with_capacity(64 * 64 * 3);
+    for y in 128..192 {
+        expected_crop.extend_from_slice(&raw_frames[4][(y * aw + 64) * 3..(y * aw + 128) * 3]);
+    }
+    assert_eq!(f4_crop.pixels, expected_crop, "VIMA1 random-access frame crop must be bit-exact");
+
+    // Zero-decode trim: extract frames [2, 3, 4] verbatim!
+    let (trimmed, trim_stats) = trim_vima_zero_decode(&src, 2, 3).unwrap();
+    assert!(trim_stats.bytes_fetched < (vima.len() as u64) * 2 / 3);
+    let t_src = SliceRangeSource(&trimmed);
+    let mut t_stats = RangeStats::default();
+    let t_idx = VimaIndex::read_from_source(&t_src, &mut t_stats).unwrap();
+    assert_eq!(t_idx.header.frame_count, 3);
+    assert_eq!(t_idx.frames[0].duration_ms, 60);
+    let t_f2 = t_idx.decode_frame_from_source(&t_src, 2, &TransformQuery::default()).unwrap();
+    assert_eq!(t_f2.pixels, raw_frames[4], "Trimmed frame #2 must equal original frame #4 bit-for-bit");
+}

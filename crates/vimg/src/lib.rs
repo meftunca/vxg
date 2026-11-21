@@ -5,6 +5,7 @@
 //! lifting in `YCoCg-R` color space, grouped on disk by `(pyramid_level, color_plane, tile_id)`
 //! and entropy-coded with pure-Rust 2-way interleaved `tANS / FSE` + hardware `CRC32C`.
 
+pub mod anim;
 pub mod checksum;
 pub mod color;
 pub mod entropy;
@@ -22,6 +23,10 @@ pub mod wavelet;
 
 use core::fmt;
 
+pub use anim::{
+    encode_animation, encode_animation_from_vimg, trim_vima_zero_decode, AnimFrameInput,
+    VimaFrameEntry, VimaHeader, VimaIndex,
+};
 pub use format::{
     crop_vimg_zero_decode, downscale_vimg_zero_decode, encode_vimg, encode_vimg_u16, VimgHeader,
     VimgIndex,

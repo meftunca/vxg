@@ -1,5 +1,5 @@
 /*
- * VIMG v0.3.0 — HTTP/HTTPS Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Transform Engine
+ * VIMG v0.4.0 — HTTP/HTTPS Range-Native Hierarchical Wavelet Image & Animation Codec
  * SPDX-License-Identifier: MIT
  */
 

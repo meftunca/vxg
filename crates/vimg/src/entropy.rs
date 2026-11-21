@@ -233,7 +233,7 @@ impl SubbandModel {
         }
         enc.encode_bit(&mut self.gt4[ectx], 1);
 
-        let ac = a.min(65535);
+        let ac = a.min(4_194_303);
         let rem = ac - 1;
         let bit_len = 31 - rem.leading_zeros();
         let k = (bit_len - 2) as usize;
@@ -288,7 +288,7 @@ impl SubbandModel {
             4
         } else {
             let mut k = 0usize;
-            while k < 14 && dec.decode_bit(&mut self.exp_unary[k.min(13)]) != 0 {
+            while k < 20 && dec.decode_bit(&mut self.exp_unary[k.min(13)]) != 0 {
                 k += 1;
             }
             let bit_len = (k + 2) as u32;

@@ -1,0 +1,169 @@
+name: vimg-release
+
+on:
+  push:
+    tags:
+      - 'vimg-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. vimg-v0.4.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-native:
+    name: Build (${{ matrix.target_name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_name: linux-x86_64
+            ext: ""
+            lib_file: libvimg.a
+            archive: tar.gz
+          - os: ubuntu-24.04-arm
+            target_name: linux-arm64
+            ext: ""
+            lib_file: libvimg.a
+            archive: tar.gz
+          - os: macos-latest
+            target_name: macos-arm64
+            ext: ""
+            lib_file: libvimg.a
+            archive: tar.gz
+          - os: windows-latest
+            target_name: windows-x86_64
+            ext: ".exe"
+            lib_file: vimg.lib
+            archive: zip
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Determine release version
+        id: ver
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#vimg-v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Run vimg release tests
+        shell: bash
+        run: cargo test --manifest-path crates/vimg/Cargo.toml --release
+
+      - name: Build CLI (--features io) & zero-dep staticlib
+        shell: bash
+        run: |
+          cargo build --manifest-path crates/vimg/Cargo.toml --release --features io --bin vimg
+          mkdir -p stage/include
+          cp "crates/vimg/target/release/vimg${{ matrix.ext }}" "stage/vimg${{ matrix.ext }}"
+          cargo build --manifest-path crates/vimg/Cargo.toml --release --lib
+          cp "crates/vimg/target/release/${{ matrix.lib_file }}" "stage/${{ matrix.lib_file }}"
+          cp crates/vimg/include/vimg.h stage/include/vimg.h
+          cp crates/vimg/README.md stage/README.md
+
+      - name: Package tarball (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/vimg-${{ steps.ver.outputs.version }}-${{ matrix.target_name }}.tar.gz" -C stage .
+
+      - name: Package zip (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path stage\* -DestinationPath "dist\vimg-${{ steps.ver.outputs.version }}-${{ matrix.target_name }}.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target_name }}
+          path: dist/*
+
+  build-wasm:
+    name: Build (wasm32 + @vimg/wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm32
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Determine release version
+        id: ver
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#vimg-v}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build stripped scalar & +simd128 wasm32 artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          RUSTFLAGS="-C strip=symbols" cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
+          cp crates/vimg/target/wasm32-unknown-unknown/release/vimg.wasm "dist/vimg-${{ steps.ver.outputs.version }}-scalar.wasm"
+          RUSTFLAGS="-C target-feature=+simd128 -C strip=symbols" cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
+          cp crates/vimg/target/wasm32-unknown-unknown/release/vimg.wasm "dist/vimg-${{ steps.ver.outputs.version }}-simd128.wasm"
+          cp "dist/vimg-${{ steps.ver.outputs.version }}-simd128.wasm" docs/public/vimg.wasm
+          cp "dist/vimg-${{ steps.ver.outputs.version }}-simd128.wasm" packages/vimg-wasm/vimg.wasm
+          (cd packages/vimg-wasm && npm test && npm pack --pack-destination ../../dist)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wasm
+          path: dist/*
+
+  publish-release:
+    name: Publish Multi-Platform GitHub Release
+    needs: [build-native, build-wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        shell: bash
+        run: |
+          cd all-dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#vimg-v}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" all-dist/* --clobber
+          else
+            gh release create "$TAG" all-dist/* \
+              --title "VIMG v${VER}" \
+              --generate-notes
+          fi
