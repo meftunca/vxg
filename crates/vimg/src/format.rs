@@ -2,10 +2,11 @@
 //! parallel encoder (`1T == NT` deterministic), and zero-decode tile crop (`vimg -> vimg`).
 
 use crate::checksum::crc32c;
-use crate::color::{downsample_2x2, split_planes_444, split_planes_444_u16};
+use crate::color::{downsample_2x2, rgb_to_ycocg_r, rgb_to_ycocg_r_u16};
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
+use crate::simd;
 use crate::subband::encode_wavelet_tile_levels_bd;
-use crate::wavelet::{level_dims, WaveletTile};
+use crate::wavelet::{level_dims, WaveletScratch, WaveletTile};
 use crate::{EncodeOptions, Error, Result};
 
 pub const MAGIC: &[u8; 4] = b"VIMG";
@@ -360,7 +361,7 @@ impl VimgIndex {
     ) -> Result<(Self, Vec<u8>)> {
         let total = source.len();
         stats.total_file_bytes = total;
-        let initial_len = total.min(4096);
+        let initial_len = total.min(source.preferred_prefix_bytes().max(HEADER_BYTES as u64));
         if initial_len < HEADER_BYTES as u64 {
             return Err(Error::Truncated);
         }
@@ -412,23 +413,15 @@ impl VimgIndex {
     }
 }
 
-fn extract_tile_subplane(
-    plane: &[i16],
-    img_w: usize,
-    x0: usize,
-    y0: usize,
-    tw: usize,
-    th: usize,
-) -> Vec<i16> {
-    let mut out = Vec::with_capacity(tw * th);
-    for y in y0..y0 + th {
-        out.extend_from_slice(&plane[y * img_w + x0..y * img_w + x0 + tw]);
-    }
-    out
+#[derive(Clone, Copy)]
+enum PixelInput<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16], u16),
 }
 
 /// Encodes packed 8-bit RGB / RGBA / Grayscale pixels into a self-contained `VIMG1` byte buffer.
-/// Parallelized cleanly across tiles with `1T == NT` bit-identical deterministic output.
+/// Uses L1-hot tile-local color conversion, reusable per-worker scratch buffers, and `AtomicUsize`
+/// work-stealing with `1T == NT` bit-identical deterministic output.
 pub fn encode_vimg(
     pixels: &[u8],
     width: u32,
@@ -447,8 +440,7 @@ pub fn encode_vimg(
     {
         return Err(Error::InvalidInput("invalid dimensions, channels, or pixel buffer length"));
     }
-    let (y_full, co_full, cg_full, a_full) = split_planes_444(pixels, w, h, ch);
-    encode_planes_vimg(&y_full, &co_full, &cg_full, a_full.as_deref(), width, height, channels, 8, opts)
+    encode_pixels_vimg(PixelInput::U8(pixels), width, height, channels, 8, opts)
 }
 
 /// Encodes packed 10-bit or 12-bit HDR `u16` RGB / RGBA / Grayscale pixels into a `VIMG1` buffer.
@@ -476,16 +468,11 @@ pub fn encode_vimg_u16(
         return Err(Error::InvalidInput("invalid dimensions, channels, or u16 pixel buffer length"));
     }
     let max_val = (1u16 << bit_depth) - 1;
-    let (y_full, co_full, cg_full, a_full) = split_planes_444_u16(pixels, w, h, ch, max_val);
-    encode_planes_vimg(&y_full, &co_full, &cg_full, a_full.as_deref(), width, height, channels, bit_depth, opts)
+    encode_pixels_vimg(PixelInput::U16(pixels, max_val), width, height, channels, bit_depth, opts)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn encode_planes_vimg(
-    y_full: &[i16],
-    co_full: &[i16],
-    cg_full: &[i16],
-    a_full: Option<&[i16]>,
+fn encode_pixels_vimg(
+    input: PixelInput<'_>,
     width: u32,
     height: u32,
     channels: u8,
@@ -508,16 +495,6 @@ fn encode_planes_vimg(
     let n_tiles = tiles_x * tiles_y;
     let n_levels = dwt_levels + 1;
 
-    let mut planes_data: Vec<&[i16]> = Vec::with_capacity(ch);
-    planes_data.push(y_full);
-    if ch >= 3 {
-        planes_data.push(co_full);
-        planes_data.push(cg_full);
-    }
-    if let Some(a) = a_full {
-        planes_data.push(a);
-    }
-
     let n_threads = if opts.threads == 0 {
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
     } else {
@@ -526,36 +503,54 @@ fn encode_planes_vimg(
     .clamp(1, 32)
     .min(n_tiles.max(1));
 
-    // Encode every tile in parallel; each tile produces `planes × levels` compressed blobs.
+    // Encode every tile in parallel with L1-hot tile-local color split + AtomicUsize work-stealing.
     let tile_results: Vec<Vec<Vec<Vec<u8>>>> = if n_threads <= 1 {
+        let mut scratch = TileEncodeScratch::new(tile_size, ch);
         (0..n_tiles)
-            .map(|tid| encode_one_tile(tid, tiles_x, tile_size, w, h, &planes_data, chroma_420, quality, dwt_levels, bit_depth))
+            .map(|tid| {
+                encode_one_tile(
+                    tid, tiles_x, tile_size, w, h, ch, input, chroma_420, quality, dwt_levels, bit_depth, &mut scratch,
+                )
+            })
             .collect()
     } else {
-        let mut results: Vec<Option<Vec<Vec<Vec<u8>>>>> = (0..n_tiles).map(|_| None).collect();
-        let chunk = n_tiles.div_ceil(n_threads);
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        type EncodedTile = Vec<Vec<Vec<u8>>>;
+        let next_tid = AtomicUsize::new(0);
+        let mut worker_batches: Vec<Vec<(usize, EncodedTile)>> = Vec::with_capacity(n_threads);
         std::thread::scope(|s| {
-            let mut rest = results.as_mut_slice();
-            for t in 0..n_threads {
-                let start = t * chunk;
-                if start >= n_tiles {
-                    break;
-                }
-                let end = (start + chunk).min(n_tiles);
-                let (dst, tail) = rest.split_at_mut(end - start);
-                rest = tail;
-                let planes_ref = &planes_data;
-                s.spawn(move || {
-                    for (local_i, slot) in dst.iter_mut().enumerate() {
-                        let tid = start + local_i;
-                        *slot = Some(encode_one_tile(
-                            tid, tiles_x, tile_size, w, h, planes_ref, chroma_420, quality, dwt_levels, bit_depth,
-                        ));
-                    }
-                });
+            let handles: Vec<_> = (0..n_threads)
+                .map(|_| {
+                    let counter = &next_tid;
+                    s.spawn(move || {
+                        let mut scratch = TileEncodeScratch::new(tile_size, ch);
+                        let mut local = Vec::new();
+                        loop {
+                            let tid = counter.fetch_add(1, Ordering::Relaxed);
+                            if tid >= n_tiles {
+                                break;
+                            }
+                            let encoded = encode_one_tile(
+                                tid, tiles_x, tile_size, w, h, ch, input, chroma_420, quality, dwt_levels, bit_depth,
+                                &mut scratch,
+                            );
+                            local.push((tid, encoded));
+                        }
+                        local
+                    })
+                })
+                .collect();
+            for h in handles {
+                worker_batches.push(h.join().expect("vimg encode worker panicked"));
             }
         });
-        results.into_iter().map(|o| o.unwrap()).collect()
+        let mut ordered: Vec<Option<Vec<Vec<Vec<u8>>>>> = (0..n_tiles).map(|_| None).collect();
+        for batch in worker_batches {
+            for (tid, blob) in batch {
+                ordered[tid] = Some(blob);
+            }
+        }
+        ordered.into_iter().map(|o| o.unwrap()).collect()
     };
 
     let n_entries = n_levels * ch * n_tiles;
@@ -646,6 +641,27 @@ fn encode_planes_vimg(
     Ok(out)
 }
 
+struct TileEncodeScratch {
+    y: Vec<i16>,
+    co: Vec<i16>,
+    cg: Vec<i16>,
+    a: Vec<i16>,
+    wt: WaveletScratch,
+}
+
+impl TileEncodeScratch {
+    fn new(tile_size: usize, ch: usize) -> Self {
+        let cap = tile_size * tile_size;
+        Self {
+            y: vec![0i16; cap],
+            co: if ch >= 3 { vec![0i16; cap] } else { Vec::new() },
+            cg: if ch >= 3 { vec![0i16; cap] } else { Vec::new() },
+            a: if ch == 4 { vec![0i16; cap] } else { Vec::new() },
+            wt: WaveletScratch::default(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_one_tile(
     tid: usize,
@@ -653,11 +669,13 @@ fn encode_one_tile(
     tile_size: usize,
     img_w: usize,
     img_h: usize,
-    planes: &[&[i16]],
+    ch: usize,
+    input: PixelInput<'_>,
     chroma_420: bool,
     quality: u8,
     dwt_levels: usize,
     bit_depth: u8,
+    scratch: &mut TileEncodeScratch,
 ) -> Vec<Vec<Vec<u8>>> {
     let tx = tid % tiles_x;
     let ty = tid / tiles_x;
@@ -665,16 +683,99 @@ fn encode_one_tile(
     let y0 = ty * tile_size;
     let tw = (img_w - x0).min(tile_size);
     let th = (img_h - y0).min(tile_size);
+    let n = tw * th;
 
-    let mut out_planes = Vec::with_capacity(planes.len());
-    for (p_idx, plane) in planes.iter().enumerate() {
-        let sub = extract_tile_subplane(plane, img_w, x0, y0, tw, th);
-        let (work, pw, ph) = if chroma_420 && (p_idx == 1 || p_idx == 2) {
-            downsample_2x2(&sub, tw, th)
+    // L1-hot tile-local RGB/RGBA -> YCoCg-R split straight from source pixels (zero full-frame canvas!).
+    match input {
+        PixelInput::U8(pixels) => match ch {
+            1 => {
+                for row in 0..th {
+                    let src = &pixels[(y0 + row) * img_w + x0..(y0 + row) * img_w + x0 + tw];
+                    let dst = &mut scratch.y[row * tw..(row + 1) * tw];
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d = s as i16;
+                    }
+                }
+            }
+            3 => {
+                for row in 0..th {
+                    let src_off = ((y0 + row) * img_w + x0) * 3;
+                    let src = &pixels[src_off..src_off + tw * 3];
+                    let dst_off = row * tw;
+                    simd::split_rgb_ycocg_r(
+                        src,
+                        &mut scratch.y[dst_off..dst_off + tw],
+                        &mut scratch.co[dst_off..dst_off + tw],
+                        &mut scratch.cg[dst_off..dst_off + tw],
+                    );
+                }
+            }
+            _ => {
+                for row in 0..th {
+                    let src_off = ((y0 + row) * img_w + x0) * 4;
+                    let src = &pixels[src_off..src_off + tw * 4];
+                    let dst_off = row * tw;
+                    for x in 0..tw {
+                        let o = x * 4;
+                        let (yv, cov, cgv) = rgb_to_ycocg_r(src[o], src[o + 1], src[o + 2]);
+                        scratch.y[dst_off + x] = yv;
+                        scratch.co[dst_off + x] = cov;
+                        scratch.cg[dst_off + x] = cgv;
+                        scratch.a[dst_off + x] = src[o + 3] as i16;
+                    }
+                }
+            }
+        },
+        PixelInput::U16(pixels, max_val) => match ch {
+            1 => {
+                for row in 0..th {
+                    let src = &pixels[(y0 + row) * img_w + x0..(y0 + row) * img_w + x0 + tw];
+                    let dst = &mut scratch.y[row * tw..(row + 1) * tw];
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d = s.min(max_val) as i16;
+                    }
+                }
+            }
+            _ => {
+                for row in 0..th {
+                    let src_off = ((y0 + row) * img_w + x0) * ch;
+                    let src = &pixels[src_off..src_off + tw * ch];
+                    let dst_off = row * tw;
+                    for x in 0..tw {
+                        let o = x * ch;
+                        let (yv, cov, cgv) = rgb_to_ycocg_r_u16(
+                            src[o].min(max_val),
+                            src[o + 1].min(max_val),
+                            src[o + 2].min(max_val),
+                        );
+                        scratch.y[dst_off + x] = yv;
+                        scratch.co[dst_off + x] = cov;
+                        scratch.cg[dst_off + x] = cgv;
+                        if ch == 4 {
+                            scratch.a[dst_off + x] = src[o + 3].min(max_val) as i16;
+                        }
+                    }
+                }
+            }
+        },
+    }
+
+    let use_97 = quality < 100;
+    let mut out_planes = Vec::with_capacity(ch);
+    for p_idx in 0..ch {
+        let wt = if chroma_420 && (p_idx == 1 || p_idx == 2) {
+            let src_p = if p_idx == 1 { &scratch.co[..n] } else { &scratch.cg[..n] };
+            let (ds, pw, ph) = downsample_2x2(src_p, tw, th);
+            WaveletTile::forward_mode_with(&ds, pw, ph, dwt_levels, use_97, &mut scratch.wt)
         } else {
-            (sub, tw, th)
+            let src_p = match p_idx {
+                0 => &scratch.y[..n],
+                1 => &scratch.co[..n],
+                2 => &scratch.cg[..n],
+                _ => &scratch.a[..n],
+            };
+            WaveletTile::forward_mode_with(src_p, tw, th, dwt_levels, use_97, &mut scratch.wt)
         };
-        let wt = WaveletTile::forward_mode(&work, pw, ph, dwt_levels, quality < 100);
         out_planes.push(encode_wavelet_tile_levels_bd(&wt, quality, p_idx, bit_depth));
     }
     out_planes

@@ -12,8 +12,8 @@
   - **Grayscale / Sepia** — skip `Co`/`Cg` chroma planes completely (`0` chroma bytes fetched).
   - **Subband Blur / Sharpen / Brightness / Contrast** — scale wavelet detail gains and `LL` coefficients directly before IDWT.
   - **Rotate / Flip** + **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) with `recover_corrupt` tile salvaging.
-- **Hardware SIMD Acceleration (`ARMv8 NEON` + `x86_64 AVX2`)**:
-  - Vectorized `RGB <-> YCoCg-R`, `4:2:0` box downsample & `2×2` bilinear upsample, horizontal & transpose-free row-major vertical `CDF 9/7` + `CDF 5/3` lifting, `FCVTAS` rounding, L1-hot tile-local color merge, and dynamic `AtomicUsize` work-stealing (**3.1×–4.8× faster decode**, **2.2×–2.3× faster full decode than JPEG**, and **faster lossless decode than PNG**!).
+- **Hardware SIMD Acceleration (`ARMv8 NEON` + `x86_64 AVX2` + `wasm32 simd128`)**:
+  - Vectorized `RGB <-> YCoCg-R`, `4:2:0` box downsample & `2×2` bilinear upsample, horizontal & transpose-free row-major vertical `CDF 9/7` + `CDF 5/3` lifting, `FCVTAS` rounding, branchless `CMOV` range coding, L1-hot tile-local color split & merge, per-worker reusable `WaveletScratch` (zero per-tile heap allocs), zero-alloc `CODEC_ALL_ZERO` detail skip, and dynamic `AtomicUsize` work-stealing (**~1.17 GP/s encode** & **~980 MP/s decode** on Apple M2 Max!).
 - **Production Security, Network, HDR & Color Management (`v0.2`)**:
   - **Direct `https://` TLS 1.3 Range Streaming (`--features tls` / `io`)**: Pure-Rust `rustls` + `webpki-roots` (zero OpenSSL) with `http:// -> https://` redirects, `Connection: keep-alive` pooling, parallel 4-stream multi-range fetch, and socket timeouts (core default `[lib]` stays **0 external dependencies**).
   - **10-bit & 12-bit HDR (`encode_u16` / `DecodedImage.pixels_u16`)**: Bit-exact lossless `CDF 5/3` and lossy `CDF 9/7` HDR across `RGB`, `RGBA`, and `Gray`, including compressed-domain crop/resize/rotate/effects and 16-bit PNG CLI I/O (`--bit-depth 10|12`).
@@ -23,7 +23,7 @@
 - **Zero-Dependency Core + C99 ABI + Zero-WASI `wasm32`**:
   - Core `[lib]` has **0 external crates**.
   - Deterministic `1T == NT` bit-exact encoding (IEEE-754 identical across `aarch64`, `x86_64 AVX2`, and `wasm32`) and parallel multi-core tile decoding.
-  - `wasm32-unknown-unknown` release build: **226 KiB** stripped `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
+  - `wasm32-unknown-unknown` (`+simd128`) release build: **244 KiB** stripped `.wasm`, zero WASI (includes HTTP-Range planner & sparse streaming decoder).
   - Panic-safe C99 header at [`include/vimg.h`](include/vimg.h) (`VimgQueryC` / `vimg_decode_query_v2_alloc`, `vimg_extract_icc_alloc`, and `vimg_wasm_*` exports, CI-verified with `cc -std=c99 -Wall -Wextra -Werror`).
 
 ---

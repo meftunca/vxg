@@ -119,6 +119,18 @@ fn fma_pair_f32(dst: &mut [f32], l: &[f32], r: &[f32], coeff: f32) {
         }
     }
 
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe {
+        use core::arch::wasm32::*;
+        let vc = f32x4_splat(coeff);
+        while x + 4 <= w {
+            let d0 = v128_load(dst.as_ptr().add(x).cast());
+            let s0 = f32x4_add(v128_load(l.as_ptr().add(x).cast()), v128_load(r.as_ptr().add(x).cast()));
+            v128_store(dst.as_mut_ptr().add(x).cast(), f32x4_add(d0, f32x4_mul(vc, s0)));
+            x += 4;
+        }
+    }
+
     while x < w {
         dst[x] += coeff * (l[x] + r[x]);
         x += 1;
@@ -168,6 +180,17 @@ fn scale_slice_f32(dst: &mut [f32], factor: f32) {
     if is_x86_feature_detected!("avx2") {
         unsafe {
             x = scale_slice_f32_avx2(dst, factor);
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe {
+        use core::arch::wasm32::*;
+        let vf = f32x4_splat(factor);
+        while x + 4 <= w {
+            let v0 = v128_load(dst.as_ptr().add(x).cast());
+            v128_store(dst.as_mut_ptr().add(x).cast(), f32x4_mul(v0, vf));
+            x += 4;
         }
     }
 
@@ -438,6 +461,18 @@ fn lift53_predict_row(dst: &mut [i32], l: &[i32], r: &[i32], inv: bool) {
         }
     }
 
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe {
+        use core::arch::wasm32::*;
+        while x + 4 <= w {
+            let d = v128_load(dst.as_ptr().add(x).cast());
+            let s = i32x4_shr(i32x4_add(v128_load(l.as_ptr().add(x).cast()), v128_load(r.as_ptr().add(x).cast())), 1);
+            let res = if inv { i32x4_add(d, s) } else { i32x4_sub(d, s) };
+            v128_store(dst.as_mut_ptr().add(x).cast(), res);
+            x += 4;
+        }
+    }
+
     if inv {
         while x < w {
             dst[x] += (l[x] + r[x]) >> 1;
@@ -493,6 +528,20 @@ fn lift53_update_row(dst: &mut [i32], l: &[i32], r: &[i32], inv: bool) {
     if is_x86_feature_detected!("avx2") {
         unsafe {
             x = lift53_update_row_avx2(dst, l, r, inv);
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe {
+        use core::arch::wasm32::*;
+        let v2 = i32x4_splat(2);
+        while x + 4 <= w {
+            let d = v128_load(dst.as_ptr().add(x).cast());
+            let sum = i32x4_add(i32x4_add(v128_load(l.as_ptr().add(x).cast()), v128_load(r.as_ptr().add(x).cast())), v2);
+            let s = i32x4_shr(sum, 2);
+            let res = if inv { i32x4_sub(d, s) } else { i32x4_add(d, s) };
+            v128_store(dst.as_mut_ptr().add(x).cast(), res);
+            x += 4;
         }
     }
 

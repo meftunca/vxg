@@ -1,5 +1,6 @@
-//! Hardware SIMD acceleration (`ARMv8 NEON` on `aarch64` + runtime-detected `AVX2` on `x86_64`)
-//! with 100% bit-exact scalar fallbacks (`wasm32`, generic targets) for:
+//! Hardware SIMD acceleration (`ARMv8 NEON` on `aarch64`, runtime-detected `AVX2` on `x86_64`,
+//! and `wasm32 simd128` when compiled with `-C target-feature=+simd128`) with 100% bit-exact
+//! scalar fallbacks for:
 //! - `RGB <-> YCoCg-R` planar color transforms
 //! - `4:2:0` box downsample & `2×2` bilinear chroma upsample.
 
@@ -44,6 +45,13 @@ pub fn split_rgb_ycocg_r(pixels: &[u8], y_p: &mut [i16], co_p: &mut [i16], cg_p:
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        unsafe {
+            i = split_rgb_ycocg_r_avx2(pixels, y_p, co_p, cg_p);
+        }
+    }
+
     while i < n {
         let o = i * 3;
         let (r, g, b) = (pixels[o] as i16, pixels[o + 1] as i16, pixels[o + 2] as i16);
@@ -55,6 +63,42 @@ pub fn split_rgb_ycocg_r(pixels: &[u8], y_p: &mut [i16], co_p: &mut [i16], cg_p:
         cg_p[i] = cg;
         i += 1;
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn split_rgb_ycocg_r_avx2(
+    pixels: &[u8],
+    y_p: &mut [i16],
+    co_p: &mut [i16],
+    cg_p: &mut [i16],
+) -> usize {
+    use core::arch::x86_64::*;
+    let n = y_p.len();
+    let mut i = 0usize;
+    let mut rb = [0u8; 16];
+    let mut gb = [0u8; 16];
+    let mut bb = [0u8; 16];
+    while i + 16 <= n {
+        let base = i * 3;
+        for k in 0..16 {
+            rb[k] = *pixels.get_unchecked(base + k * 3);
+            gb[k] = *pixels.get_unchecked(base + k * 3 + 1);
+            bb[k] = *pixels.get_unchecked(base + k * 3 + 2);
+        }
+        let r = _mm256_cvtepu8_epi16(_mm_loadu_si128(rb.as_ptr().cast()));
+        let g = _mm256_cvtepu8_epi16(_mm_loadu_si128(gb.as_ptr().cast()));
+        let b = _mm256_cvtepu8_epi16(_mm_loadu_si128(bb.as_ptr().cast()));
+        let co = _mm256_sub_epi16(r, b);
+        let t = _mm256_add_epi16(b, _mm256_srai_epi16(co, 1));
+        let cg = _mm256_sub_epi16(g, t);
+        let y = _mm256_add_epi16(t, _mm256_srai_epi16(cg, 1));
+        _mm256_storeu_si256(y_p.as_mut_ptr().add(i).cast(), y);
+        _mm256_storeu_si256(co_p.as_mut_ptr().add(i).cast(), co);
+        _mm256_storeu_si256(cg_p.as_mut_ptr().add(i).cast(), cg);
+        i += 16;
+    }
+    i
 }
 
 #[inline]
@@ -91,6 +135,13 @@ pub fn merge_ycocg_r_rgb(y_p: &[i16], co_p: &[i16], cg_p: &[i16], out: &mut [u8]
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        unsafe {
+            i = merge_ycocg_r_rgb_avx2(y_p, co_p, cg_p, out);
+        }
+    }
+
     while i < n {
         let y = y_p[i];
         let co = co_p[i];
@@ -105,6 +156,46 @@ pub fn merge_ycocg_r_rgb(y_p: &[i16], co_p: &[i16], cg_p: &[i16], out: &mut [u8]
         out[o + 2] = b.clamp(0, 255) as u8;
         i += 1;
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn merge_ycocg_r_rgb_avx2(
+    y_p: &[i16],
+    co_p: &[i16],
+    cg_p: &[i16],
+    out: &mut [u8],
+) -> usize {
+    use core::arch::x86_64::*;
+    let n = y_p.len();
+    let mut i = 0usize;
+    let mut rb = [0u8; 16];
+    let mut gb = [0u8; 16];
+    let mut bb = [0u8; 16];
+    while i + 16 <= n {
+        let y = _mm256_loadu_si256(y_p.as_ptr().add(i).cast());
+        let co = _mm256_loadu_si256(co_p.as_ptr().add(i).cast());
+        let cg = _mm256_loadu_si256(cg_p.as_ptr().add(i).cast());
+        let t = _mm256_sub_epi16(y, _mm256_srai_epi16(cg, 1));
+        let g = _mm256_add_epi16(cg, t);
+        let b = _mm256_sub_epi16(t, _mm256_srai_epi16(co, 1));
+        let r = _mm256_add_epi16(b, co);
+
+        let r8 = _mm_packus_epi16(_mm256_castsi256_si128(r), _mm256_extracti128_si256::<1>(r));
+        let g8 = _mm_packus_epi16(_mm256_castsi256_si128(g), _mm256_extracti128_si256::<1>(g));
+        let b8 = _mm_packus_epi16(_mm256_castsi256_si128(b), _mm256_extracti128_si256::<1>(b));
+        _mm_storeu_si128(rb.as_mut_ptr().cast(), r8);
+        _mm_storeu_si128(gb.as_mut_ptr().cast(), g8);
+        _mm_storeu_si128(bb.as_mut_ptr().cast(), b8);
+        let base = i * 3;
+        for k in 0..16 {
+            *out.get_unchecked_mut(base + k * 3) = rb[k];
+            *out.get_unchecked_mut(base + k * 3 + 1) = gb[k];
+            *out.get_unchecked_mut(base + k * 3 + 2) = bb[k];
+        }
+        i += 16;
+    }
+    i
 }
 
 // ============================================================================
@@ -132,6 +223,30 @@ pub fn downsample_2x2_row(row0: &[i16], row1: &[i16], out_row: &mut [i16]) {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        unsafe {
+            cx = downsample_2x2_row_avx2(row0, row1, out_row);
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    unsafe {
+        use core::arch::wasm32::*;
+        let pairs_w = w / 2;
+        let v2 = i32x4_splat(2);
+        while cx + 8 <= pairs_w {
+            let a0 = i32x4_extadd_pairwise_i16x8(v128_load(row0.as_ptr().add(cx * 2).cast()));
+            let b0 = i32x4_extadd_pairwise_i16x8(v128_load(row1.as_ptr().add(cx * 2).cast()));
+            let r0 = i32x4_shr(i32x4_add(i32x4_add(a0, b0), v2), 2);
+            let a1 = i32x4_extadd_pairwise_i16x8(v128_load(row0.as_ptr().add(cx * 2 + 8).cast()));
+            let b1 = i32x4_extadd_pairwise_i16x8(v128_load(row1.as_ptr().add(cx * 2 + 8).cast()));
+            let r1 = i32x4_shr(i32x4_add(i32x4_add(a1, b1), v2), 2);
+            v128_store(out_row.as_mut_ptr().add(cx).cast(), i16x8_narrow_i32x4(r0, r1));
+            cx += 8;
+        }
+    }
+
     while cx < cw {
         let x0 = cx * 2;
         let x1 = (x0 + 1).min(w - 1);
@@ -139,6 +254,27 @@ pub fn downsample_2x2_row(row0: &[i16], row1: &[i16], out_row: &mut [i16]) {
         out_row[cx] = ((sum + 2) >> 2) as i16;
         cx += 1;
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn downsample_2x2_row_avx2(row0: &[i16], row1: &[i16], out_row: &mut [i16]) -> usize {
+    use core::arch::x86_64::*;
+    let pairs_w = row0.len() / 2;
+    let ones = _mm256_set1_epi16(1);
+    let v2 = _mm256_set1_epi32(2);
+    let mut cx = 0usize;
+    while cx + 8 <= pairs_w {
+        let v0 = _mm256_loadu_si256(row0.as_ptr().add(cx * 2).cast());
+        let v1 = _mm256_loadu_si256(row1.as_ptr().add(cx * 2).cast());
+        let s0 = _mm256_madd_epi16(v0, ones);
+        let s1 = _mm256_madd_epi16(v1, ones);
+        let avg = _mm256_srai_epi32(_mm256_add_epi32(_mm256_add_epi32(s0, s1), v2), 2);
+        let packed = _mm_packs_epi32(_mm256_castsi256_si128(avg), _mm256_extracti128_si256::<1>(avg));
+        _mm_storeu_si128(out_row.as_mut_ptr().add(cx).cast(), packed);
+        cx += 8;
+    }
+    cx
 }
 
 /// Bit-exact SIMD `2×2` bilinear upsample row: expands `r0/r1 (cw)` into `out_row (width)`.

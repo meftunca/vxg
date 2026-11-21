@@ -49,14 +49,10 @@ impl RangeEnc {
     fn encode_bit(&mut self, prob: &mut u16, bit: u32) {
         let p = *prob as u32;
         let bound = (self.range >> 11) * p;
-        if bit == 0 {
-            self.range = bound;
-            *prob = (p + ((2048 - p) >> 5)) as u16;
-        } else {
-            self.low += bound as u64;
-            self.range -= bound;
-            *prob = (p - (p >> 5)) as u16;
-        }
+        let is_zero = bit == 0;
+        self.low += if is_zero { 0 } else { bound as u64 };
+        self.range = if is_zero { bound } else { self.range - bound };
+        *prob = (if is_zero { p + ((2048 - p) >> 5) } else { p - (p >> 5) }) as u16;
         if self.range < TOP {
             self.range <<= 8;
             self.shift_low();
@@ -66,9 +62,7 @@ impl RangeEnc {
     #[inline(always)]
     fn encode_bypass(&mut self, bit: u32) {
         self.range >>= 1;
-        if bit != 0 {
-            self.low += self.range as u64;
-        }
+        self.low += if bit != 0 { self.range as u64 } else { 0 };
         if self.range < TOP {
             self.range <<= 8;
             self.shift_low();
@@ -118,37 +112,28 @@ impl<'a> RangeDec<'a> {
     fn decode_bit(&mut self, prob: &mut u16) -> u32 {
         let p = *prob as u32;
         let bound = (self.range >> 11) * p;
-        let bit = if self.code < bound {
-            self.range = bound;
-            *prob = (p + ((2048 - p) >> 5)) as u16;
-            0
-        } else {
-            self.range -= bound;
-            self.code -= bound;
-            *prob = (p - (p >> 5)) as u16;
-            1
-        };
+        let lt = self.code < bound;
+        // Pure branchless CSEL / CMOV on ARM64 & x86_64 — eliminates mispredictions on 50/50 bits!
+        self.range = if lt { bound } else { self.range - bound };
+        self.code = if lt { self.code } else { self.code - bound };
+        *prob = (if lt { p + ((2048 - p) >> 5) } else { p - (p >> 5) }) as u16;
         if self.range < TOP {
             self.range <<= 8;
             self.code = (self.code << 8) | self.read_byte();
         }
-        bit
+        u32::from(!lt)
     }
 
     #[inline(always)]
     fn decode_bypass(&mut self) -> u32 {
         self.range >>= 1;
-        let bit = if self.code >= self.range {
-            self.code -= self.range;
-            1
-        } else {
-            0
-        };
+        let ge = self.code >= self.range;
+        self.code = if ge { self.code - self.range } else { self.code };
         if self.range < TOP {
             self.range <<= 8;
             self.code = (self.code << 8) | self.read_byte();
         }
-        bit
+        u32::from(ge)
     }
 }
 

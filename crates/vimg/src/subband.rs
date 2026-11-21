@@ -248,6 +248,11 @@ pub fn decode_detail_level_bd(
     dwt_levels: usize,
     bit_depth: u8,
 ) -> Result<DetailBands> {
+    // Fast zero-allocation path for all-zero detail chunks (`CODEC_ALL_ZERO`)!
+    if payload.len() == 1 && payload[0] == 0 {
+        return Ok(DetailBands::all_zero(out_w, out_h));
+    }
+
     let lw = out_w.div_ceil(2);
     let hw = out_w / 2;
     let lh_rows = out_h.div_ceil(2);

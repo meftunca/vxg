@@ -33,14 +33,12 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Build zero-dependency vxg.wasm and vimg.wasm for Playgrounds
-        env:
-          RUSTFLAGS: "-C strip=symbols"
+      - name: Build zero-dependency vxg.wasm and vimg.wasm (+simd128) for Playgrounds
         run: |
           mkdir -p docs/public
-          cargo build --release --lib --target wasm32-unknown-unknown
+          RUSTFLAGS="-C strip=symbols" cargo build --release --lib --target wasm32-unknown-unknown
           cp target/wasm32-unknown-unknown/release/vxg.wasm docs/public/vxg.wasm
-          cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
+          RUSTFLAGS="-C target-feature=+simd128 -C strip=symbols" cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
           cp crates/vimg/target/wasm32-unknown-unknown/release/vimg.wasm docs/public/vimg.wasm
 
       - name: Setup Node.js

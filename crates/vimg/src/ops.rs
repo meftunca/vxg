@@ -6,7 +6,7 @@ use crate::color::{merge_planes_rgb, merge_planes_u16, upsample_2x2_bilinear};
 use crate::format::{VimgIndex, MAX_IMAGE_PIXELS, MAX_RESIZE_DIM, MAX_RESIZE_PIXELS};
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
 use crate::subband::{decode_detail_level_bd, decode_ll_band_bd};
-use crate::wavelet::{level_dims, WaveletTile};
+use crate::wavelet::{level_dims, WaveletScratch, WaveletTile};
 use crate::{Error, Result};
 
 /// Declarative compressed-domain image transform query.
@@ -344,8 +344,8 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     }
 
     // Decode all planes of one spatial tile `(ltx, lty)` in L1 cache and merge straight to packed RGB/RGBA!
-    // Eliminates full-frame intermediate i16 canvases and scales merge_planes_rgb linearly across cores.
-    let decode_tile = |tile_idx: usize| -> Result<(usize, usize, TilePixels)> {
+    // Reuses per-worker `WaveletScratch` across tiles to eliminate ~1,500 heap allocations per frame.
+    let decode_tile = |tile_idx: usize, wt_scratch: &mut WaveletScratch| -> Result<(usize, usize, TilePixels)> {
         let lty = tile_idx / sel_tx;
         let ltx = tile_idx % sel_tx;
         let dst_tw = col_x[ltx + 1] - col_x[ltx];
@@ -397,19 +397,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
                 let (ow, oh) = out_dims[lvl - 1];
                 let d = match verify_chunk(blob, e.crc32c, hdr.has_crc() && query.verify_crc) {
                     Ok(()) => decode_detail_level_bd(blob, ow, oh, hdr.quality, plane, lvl - 1, max_lvl, bit_depth)?,
-                    Err(_) if query.recover_corrupt => {
-                        let lw = ow.div_ceil(2);
-                        let hw = ow / 2;
-                        let lh_r = oh.div_ceil(2);
-                        let hh_r = oh / 2;
-                        crate::wavelet::DetailBands {
-                            out_w: ow,
-                            out_h: oh,
-                            lh: vec![0; lw * hh_r],
-                            hl: vec![0; hw * lh_r],
-                            hh: vec![0; hw * hh_r],
-                        }
-                    }
+                    Err(_) if query.recover_corrupt => crate::wavelet::DetailBands::all_zero(ow, oh),
                     Err(err) => return Err(err),
                 };
                 details.push(d);
@@ -417,7 +405,8 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
 
             let wt = WaveletTile { full_w: pw_full, full_h: ph_full, ll_w, ll_h, ll, details };
             let gains_slice = if plane == 0 { &detail_gains[..] } else { &[] };
-            let (mut tile_px, tw_dec, th_dec) = wt.reconstruct_mode(target_lvl, gains_slice, hdr.is_dwt_97());
+            let (mut tile_px, tw_dec, th_dec) =
+                wt.reconstruct_mode_with(target_lvl, gains_slice, hdr.is_dwt_97(), wt_scratch);
             if tw_dec != dst_tw || th_dec != dst_th {
                 tile_px = upsample_2x2_bilinear(&tile_px, tw_dec, th_dec, dst_tw, dst_th);
             }
@@ -469,7 +458,8 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
             .unwrap_or(1)
             .min(tiles_fetched);
         if n_threads <= 1 || tiles_fetched < 2 {
-            (0..tiles_fetched).map(decode_tile).collect::<Result<Vec<_>>>()?
+            let mut scratch = WaveletScratch::default();
+            (0..tiles_fetched).map(|i| decode_tile(i, &mut scratch)).collect::<Result<Vec<_>>>()?
         } else {
             let next_idx = AtomicUsize::new(0);
             type TileBatch = Result<Vec<(usize, usize, TilePixels)>>;
@@ -480,13 +470,14 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
                         let f = &decode_tile;
                         let counter = &next_idx;
                         s.spawn(move || {
+                            let mut scratch = WaveletScratch::default();
                             let mut local = Vec::new();
                             loop {
                                 let idx = counter.fetch_add(1, Ordering::Relaxed);
                                 if idx >= tiles_fetched {
                                     break;
                                 }
-                                local.push(f(idx)?);
+                                local.push(f(idx, &mut scratch)?);
                             }
                             Ok(local)
                         })
@@ -505,8 +496,10 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     };
 
     #[cfg(target_arch = "wasm32")]
-    let decoded_tiles: Vec<(usize, usize, TilePixels)> =
-        (0..tiles_fetched).map(decode_tile).collect::<Result<Vec<_>>>()?;
+    let decoded_tiles: Vec<(usize, usize, TilePixels)> = {
+        let mut scratch = WaveletScratch::default();
+        (0..tiles_fetched).map(|i| decode_tile(i, &mut scratch)).collect::<Result<Vec<_>>>()?
+    };
 
     let mut cur_w = sub_w;
     let mut cur_h = sub_h;

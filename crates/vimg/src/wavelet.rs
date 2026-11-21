@@ -312,9 +312,34 @@ pub struct WaveletTile {
 pub struct DetailBands {
     pub out_w: usize,
     pub out_h: usize,
-    pub lh: Vec<i32>, // size: lw * hh
-    pub hl: Vec<i32>, // size: hw * lh
-    pub hh: Vec<i32>, // size: hw * hh
+    pub lh: Vec<i32>, // size: lw * hh (or empty when all-zero!)
+    pub hl: Vec<i32>, // size: hw * lh (or empty when all-zero!)
+    pub hh: Vec<i32>, // size: hw * hh (or empty when all-zero!)
+}
+
+impl DetailBands {
+    /// Zero-allocation representation of an all-zero detail level (`CODEC_ALL_ZERO`).
+    #[inline]
+    pub fn all_zero(out_w: usize, out_h: usize) -> Self {
+        Self { out_w, out_h, lh: Vec::new(), hl: Vec::new(), hh: Vec::new() }
+    }
+
+    #[inline]
+    pub fn is_all_zero(&self) -> bool {
+        self.lh.is_empty() && self.hl.is_empty() && self.hh.is_empty()
+    }
+}
+
+/// Reusable per-worker scratch buffers so encoding/decoding 180+ tiles performs zero per-tile
+/// `fbuf`/`vert_tmp`/`row_scratch` heap allocations!
+#[derive(Default)]
+pub struct WaveletScratch {
+    fbuf: Vec<f32>,
+    frow: Vec<f32>,
+    fvert: Vec<f32>,
+    ibuf: Vec<i32>,
+    irow: Vec<i32>,
+    ivert: Vec<i32>,
 }
 
 impl WaveletTile {
@@ -326,31 +351,74 @@ impl WaveletTile {
     /// Forward `n_dwt` levels of 2D wavelet decomposition (`use_97 = true` for lossy `CDF 9/7`,
     /// `false` for bit-exact integer `CDF 5/3`).
     pub fn forward_mode(plane: &[i16], w: usize, h: usize, n_dwt: usize, use_97: bool) -> Self {
+        let mut scratch = WaveletScratch::default();
+        Self::forward_mode_with(plane, w, h, n_dwt, use_97, &mut scratch)
+    }
+
+    /// Forward 2D wavelet decomposition reusing `scratch` buffers across tiles.
+    pub fn forward_mode_with(
+        plane: &[i16],
+        w: usize,
+        h: usize,
+        n_dwt: usize,
+        use_97: bool,
+        scratch: &mut WaveletScratch,
+    ) -> Self {
         let mut dims = Vec::with_capacity(n_dwt);
         let (mut cw, mut ch) = (w, h);
-        let buf: Vec<i32> = if use_97 {
-            let mut fbuf: Vec<f32> = plane.iter().map(|&v| v as f32).collect();
-            let mut row_s = vec![0.0f32; w.max(h)];
-            let mut vert_t = vec![0.0f32; w * h];
+        let n = w * h;
+        let max_dim = w.max(h);
+        if use_97 {
+            scratch.fbuf.resize(n, 0.0);
+            for (dst, &sv) in scratch.fbuf[..n].iter_mut().zip(plane.iter()) {
+                *dst = sv as f32;
+            }
+            if scratch.frow.len() < max_dim {
+                scratch.frow.resize(max_dim, 0.0);
+            }
+            if scratch.fvert.len() < n {
+                scratch.fvert.resize(n, 0.0);
+            }
             for _ in 0..n_dwt {
                 dims.push((cw, ch));
-                dwt97_2d_forward_step_with(&mut fbuf, w, cw, ch, &mut row_s, &mut vert_t);
+                dwt97_2d_forward_step_with(
+                    &mut scratch.fbuf[..n],
+                    w,
+                    cw,
+                    ch,
+                    &mut scratch.frow,
+                    &mut scratch.fvert,
+                );
                 cw = cw.div_ceil(2);
                 ch = ch.div_ceil(2);
             }
-            simd_dwt::f32_to_i32_round_slice(&fbuf)
+            scratch.ibuf = simd_dwt::f32_to_i32_round_slice(&scratch.fbuf[..n]);
         } else {
-            let mut ibuf: Vec<i32> = plane.iter().map(|&v| v as i32).collect();
-            let mut row_s = vec![0i32; w.max(h)];
-            let mut vert_t = vec![0i32; w * h];
+            scratch.ibuf.resize(n, 0);
+            for (dst, &sv) in scratch.ibuf[..n].iter_mut().zip(plane.iter()) {
+                *dst = sv as i32;
+            }
+            if scratch.irow.len() < max_dim {
+                scratch.irow.resize(max_dim, 0);
+            }
+            if scratch.ivert.len() < n {
+                scratch.ivert.resize(n, 0);
+            }
             for _ in 0..n_dwt {
                 dims.push((cw, ch));
-                dwt53_2d_forward_step_with(&mut ibuf, w, cw, ch, &mut row_s, &mut vert_t);
+                dwt53_2d_forward_step_with(
+                    &mut scratch.ibuf[..n],
+                    w,
+                    cw,
+                    ch,
+                    &mut scratch.irow,
+                    &mut scratch.ivert,
+                );
                 cw = cw.div_ceil(2);
                 ch = ch.div_ceil(2);
             }
-            ibuf
-        };
+        }
+        let buf = &scratch.ibuf[..n];
         let (ll_w, ll_h) = (cw, ch);
         let mut ll = Vec::with_capacity(ll_w * ll_h);
         for y in 0..ll_h {
@@ -393,13 +461,23 @@ impl WaveletTile {
     }
 
     /// Reconstructs the tile up to `target_level` (`0` = coarsest `LL`, `n_dwt` = full resolution).
-    /// `detail_gains[k]` (`k = 0..target_level`) scales `(lh, hl, hh)` directly in subband domain
-    /// (`1.0` = identity, `< 1.0` = blur, `> 1.0` = sharpen).
     pub fn reconstruct_mode(
         &self,
         target_level: usize,
         detail_gains: &[f32],
         use_97: bool,
+    ) -> (Vec<i16>, usize, usize) {
+        let mut scratch = WaveletScratch::default();
+        self.reconstruct_mode_with(target_level, detail_gains, use_97, &mut scratch)
+    }
+
+    /// Reconstructs the tile reusing `scratch` buffers across tiles and skipping all-zero detail bands!
+    pub fn reconstruct_mode_with(
+        &self,
+        target_level: usize,
+        detail_gains: &[f32],
+        use_97: bool,
+        scratch: &mut WaveletScratch,
     ) -> (Vec<i16>, usize, usize) {
         let lvl = target_level.min(self.details.len());
         if lvl == 0 {
@@ -407,13 +485,24 @@ impl WaveletTile {
             return (out, self.ll_w, self.ll_h);
         }
         let (final_w, final_h) = (self.details[lvl - 1].out_w, self.details[lvl - 1].out_h);
+        let n = final_w * final_h;
+        let max_dim = final_w.max(final_h);
         if use_97 {
-            let mut fbuf = vec![0.0f32; final_w * final_h];
-            let mut row_s = vec![0.0f32; final_w.max(final_h)];
-            let mut vert_t = vec![0.0f32; final_w * final_h];
+            if scratch.fbuf.len() < n {
+                scratch.fbuf.resize(n, 0.0);
+            }
+            if scratch.frow.len() < max_dim {
+                scratch.frow.resize(max_dim, 0.0);
+            }
+            if scratch.fvert.len() < n {
+                scratch.fvert.resize(n, 0.0);
+            }
+            let fbuf = &mut scratch.fbuf[..n];
             for y in 0..self.ll_h {
-                for x in 0..self.ll_w {
-                    fbuf[y * final_w + x] = self.ll[y * self.ll_w + x] as f32;
+                let dst = &mut fbuf[y * final_w..y * final_w + self.ll_w];
+                let src = &self.ll[y * self.ll_w..(y + 1) * self.ll_w];
+                for (dv, &sv) in dst.iter_mut().zip(src) {
+                    *dv = sv as f32;
                 }
             }
             for (k, d) in self.details.iter().enumerate().take(lvl) {
@@ -422,32 +511,67 @@ impl WaveletTile {
                 let hw = d.out_w / 2;
                 let lh_rows = d.out_h.div_ceil(2);
                 let hh_rows = d.out_h / 2;
-                for y in 0..hh_rows {
-                    let dst = &mut fbuf[(lh_rows + y) * final_w..(lh_rows + y) * final_w + lw];
-                    for (dv, &sv) in dst.iter_mut().zip(&d.lh[y * lw..(y + 1) * lw]) {
-                        *dv = sv as f32 * gain;
+                if d.is_all_zero() || gain <= 1e-6 {
+                    for y in 0..hh_rows {
+                        fbuf[(lh_rows + y) * final_w..(lh_rows + y) * final_w + d.out_w].fill(0.0);
+                    }
+                    for y in 0..lh_rows {
+                        fbuf[y * final_w + lw..y * final_w + d.out_w].fill(0.0);
+                    }
+                } else if (gain - 1.0).abs() < 1e-6 {
+                    for y in 0..hh_rows {
+                        let dst = &mut fbuf[(lh_rows + y) * final_w..(lh_rows + y) * final_w + lw];
+                        for (dv, &sv) in dst.iter_mut().zip(&d.lh[y * lw..(y + 1) * lw]) {
+                            *dv = sv as f32;
+                        }
+                    }
+                    for y in 0..lh_rows {
+                        let dst = &mut fbuf[y * final_w + lw..y * final_w + d.out_w];
+                        for (dv, &sv) in dst.iter_mut().zip(&d.hl[y * hw..(y + 1) * hw]) {
+                            *dv = sv as f32;
+                        }
+                    }
+                    for y in 0..hh_rows {
+                        let dst = &mut fbuf[(lh_rows + y) * final_w + lw..(lh_rows + y) * final_w + d.out_w];
+                        for (dv, &sv) in dst.iter_mut().zip(&d.hh[y * hw..(y + 1) * hw]) {
+                            *dv = sv as f32;
+                        }
+                    }
+                } else {
+                    for y in 0..hh_rows {
+                        let dst = &mut fbuf[(lh_rows + y) * final_w..(lh_rows + y) * final_w + lw];
+                        for (dv, &sv) in dst.iter_mut().zip(&d.lh[y * lw..(y + 1) * lw]) {
+                            *dv = sv as f32 * gain;
+                        }
+                    }
+                    for y in 0..lh_rows {
+                        let dst = &mut fbuf[y * final_w + lw..y * final_w + d.out_w];
+                        for (dv, &sv) in dst.iter_mut().zip(&d.hl[y * hw..(y + 1) * hw]) {
+                            *dv = sv as f32 * gain;
+                        }
+                    }
+                    for y in 0..hh_rows {
+                        let dst = &mut fbuf[(lh_rows + y) * final_w + lw..(lh_rows + y) * final_w + d.out_w];
+                        for (dv, &sv) in dst.iter_mut().zip(&d.hh[y * hw..(y + 1) * hw]) {
+                            *dv = sv as f32 * gain;
+                        }
                     }
                 }
-                for y in 0..lh_rows {
-                    let dst = &mut fbuf[y * final_w + lw..y * final_w + d.out_w];
-                    for (dv, &sv) in dst.iter_mut().zip(&d.hl[y * hw..(y + 1) * hw]) {
-                        *dv = sv as f32 * gain;
-                    }
-                }
-                for y in 0..hh_rows {
-                    let dst = &mut fbuf[(lh_rows + y) * final_w + lw..(lh_rows + y) * final_w + d.out_w];
-                    for (dv, &sv) in dst.iter_mut().zip(&d.hh[y * hw..(y + 1) * hw]) {
-                        *dv = sv as f32 * gain;
-                    }
-                }
-                dwt97_2d_inverse_step_with(&mut fbuf, final_w, d.out_w, d.out_h, &mut row_s, &mut vert_t);
+                dwt97_2d_inverse_step_with(fbuf, final_w, d.out_w, d.out_h, &mut scratch.frow, &mut scratch.fvert);
             }
-            let out = simd_dwt::f32_to_i16_round_slice(&fbuf);
+            let out = simd_dwt::f32_to_i16_round_slice(fbuf);
             return (out, final_w, final_h);
         }
-        let mut buf = vec![0i32; final_w * final_h];
-        let mut row_s = vec![0i32; final_w.max(final_h)];
-        let mut vert_t = vec![0i32; final_w * final_h];
+        if scratch.ibuf.len() < n {
+            scratch.ibuf.resize(n, 0);
+        }
+        if scratch.irow.len() < max_dim {
+            scratch.irow.resize(max_dim, 0);
+        }
+        if scratch.ivert.len() < n {
+            scratch.ivert.resize(n, 0);
+        }
+        let buf = &mut scratch.ibuf[..n];
         for y in 0..self.ll_h {
             buf[y * final_w..y * final_w + self.ll_w]
                 .copy_from_slice(&self.ll[y * self.ll_w..(y + 1) * self.ll_w]);
@@ -460,7 +584,14 @@ impl WaveletTile {
             let lh_rows = d.out_h.div_ceil(2);
             let hh_rows = d.out_h / 2;
 
-            if (gain - 1.0).abs() < 1e-6 {
+            if d.is_all_zero() || gain <= 1e-6 {
+                for y in 0..hh_rows {
+                    buf[(lh_rows + y) * final_w..(lh_rows + y) * final_w + d.out_w].fill(0);
+                }
+                for y in 0..lh_rows {
+                    buf[y * final_w + lw..y * final_w + d.out_w].fill(0);
+                }
+            } else if (gain - 1.0).abs() < 1e-6 {
                 for y in 0..hh_rows {
                     let row = &mut buf[(lh_rows + y) * final_w..(lh_rows + y) * final_w + lw];
                     row.copy_from_slice(&d.lh[y * lw..(y + 1) * lw]);
@@ -472,13 +603,6 @@ impl WaveletTile {
                 for y in 0..hh_rows {
                     let row = &mut buf[(lh_rows + y) * final_w + lw..(lh_rows + y) * final_w + d.out_w];
                     row.copy_from_slice(&d.hh[y * hw..(y + 1) * hw]);
-                }
-            } else if gain <= 1e-6 {
-                for y in 0..hh_rows {
-                    buf[(lh_rows + y) * final_w..(lh_rows + y) * final_w + d.out_w].fill(0);
-                }
-                for y in 0..lh_rows {
-                    buf[y * final_w + lw..y * final_w + d.out_w].fill(0);
                 }
             } else {
                 let g_q8 = (gain * 256.0).round() as i32;
@@ -505,10 +629,10 @@ impl WaveletTile {
                 }
             }
 
-            dwt53_2d_inverse_step_with(&mut buf, final_w, d.out_w, d.out_h, &mut row_s, &mut vert_t);
+            dwt53_2d_inverse_step_with(buf, final_w, d.out_w, d.out_h, &mut scratch.irow, &mut scratch.ivert);
         }
 
-        let out: Vec<i16> = buf.into_iter().map(|v| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect();
+        let out: Vec<i16> = buf.iter().map(|&v| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect();
         (out, final_w, final_h)
     }
 }

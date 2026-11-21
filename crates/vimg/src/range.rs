@@ -27,6 +27,10 @@ pub trait RangeSource {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Optimal initial prefix size for 1-RTT header+directory fetch.
+    fn preferred_prefix_bytes(&self) -> u64 {
+        4096
+    }
     fn read_ranges(&self, ranges: &[(u64, u64)]) -> Result<Vec<Vec<u8>>>;
 }
 
@@ -354,13 +358,30 @@ impl HttpRangeSource {
         timeout: std::time::Duration,
     ) -> Result<std::io::BufReader<HttpStream>> {
         use std::net::{TcpStream, ToSocketAddrs};
-        let addrs: Vec<_> = host_port
+        let mut addrs: Vec<_> = host_port
             .to_socket_addrs()
             .map_err(|e| Error::Io(e.to_string()))?
             .collect();
-        let addr = addrs.first().ok_or_else(|| Error::Io("DNS resolved to 0 addresses".into()))?;
-        let stream = TcpStream::connect_timeout(addr, timeout.min(std::time::Duration::from_secs(10)))
-            .map_err(|e| Error::Io(e.to_string()))?;
+        if addrs.is_empty() {
+            return Err(Error::Io("DNS resolved to 0 addresses".into()));
+        }
+        // Prefer IPv4 first to avoid broken IPv6 blackholes, falling back across every resolved address.
+        addrs.sort_by_key(|a| !a.is_ipv4());
+        let per_addr_timeout = timeout.min(std::time::Duration::from_secs(5));
+        let mut last_err = None;
+        let mut connected = None;
+        for addr in &addrs {
+            match TcpStream::connect_timeout(addr, per_addr_timeout) {
+                Ok(s) => {
+                    connected = Some(s);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let stream = connected.ok_or_else(|| {
+            Error::Io(last_err.map_or_else(|| "connect failed".into(), |e| e.to_string()))
+        })?;
         let _ = stream.set_nodelay(true);
         let _ = stream.set_read_timeout(Some(timeout));
         let _ = stream.set_write_timeout(Some(timeout));
@@ -536,6 +557,15 @@ impl HttpRangeSource {
 impl RangeSource for HttpRangeSource {
     fn len(&self) -> u64 {
         self.len
+    }
+
+    fn preferred_prefix_bytes(&self) -> u64 {
+        // Fetch 16 KiB in 1 RTT for >=256 KiB remote images (covers header + 3K/4K dir + ICC!).
+        if self.len >= 256 * 1024 {
+            16_384
+        } else {
+            4096
+        }
     }
 
     fn read_ranges(&self, ranges: &[(u64, u64)]) -> Result<Vec<Vec<u8>>> {
