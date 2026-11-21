@@ -363,3 +363,177 @@ fn hdr_10bit_12bit_and_icc_profile_roundtrip_and_zero_decode_crop() {
         assert_eq!(dec_q.icc_profile.as_deref(), Some(fake_p3.as_slice()));
     }
 }
+
+#[test]
+fn v03_ui_palette_rle_adaptive_quant_and_cicp_exif_xmp_metadata() {
+    use vimg::ffi::{
+        vimg_extract_cicp, vimg_extract_exif_alloc, vimg_extract_xmp_alloc, vimg_free, VimgCicpC,
+    };
+    use vimg::{encode_u16, Cicp, Error, VimgHeader};
+
+    // 1) Synthetic 512x512 RGBA dark-mode UI screenshot (sharp panels, borders, text blocks, solid alpha)
+    let (uw, uh) = (512usize, 512usize);
+    let mut ui_rgba = vec![0u8; uw * uh * 4];
+    for y in 0..uh {
+        for x in 0..uw {
+            let (r, g, b) = if y < 48 {
+                (30, 34, 42) // top navbar
+            } else if x < 120 {
+                (24, 27, 34) // sidebar
+            } else if x == 120 || y == 48 {
+                (68, 76, 92) // 1px crisp border
+            } else if (x > 160 && x < 460) && (y > 90 && y < 380) && ((y / 14) % 2 == 0) && ((x / 8) % 3 != 0) {
+                (212, 218, 228) // crisp simulated monospace text
+            } else {
+                (18, 21, 27) // editor background
+            };
+            let o = (y * uw + x) * 4;
+            ui_rgba[o] = r;
+            ui_rgba[o + 1] = g;
+            ui_rgba[o + 2] = b;
+            ui_rgba[o + 3] = 255;
+        }
+    }
+    let ui_vimg = encode(
+        &ui_rgba,
+        uw as u32,
+        uh as u32,
+        4,
+        &EncodeOptions { tile_size: 128, ..EncodeOptions::lossless() },
+    )
+    .unwrap();
+    let ui_dec = decode(&ui_vimg).unwrap();
+    assert_eq!(ui_dec.pixels, ui_rgba, "UI lossless palette+RLE roundtrip must be 100% bit-exact");
+    // Raw RGBA = 1024 KiB; UI screenshot must compress > 40x smaller!
+    assert!(
+        ui_vimg.len() < 25 * 1024,
+        "UI lossless expected <25 KiB with palette+RLE, got {} B",
+        ui_vimg.len()
+    );
+
+    // 2) Tile-adaptive psychovisual quantization (CODEC_BLK4_AQ) on mixed smooth + noisy image
+    let (mw, mh) = (512usize, 256usize);
+    let mut mixed = vec![0u8; mw * mh * 3];
+    for y in 0..mh {
+        for x in 0..mw {
+            let o = (y * mw + x) * 3;
+            if x < 256 {
+                // Smooth sky/skin gradient on left tiles
+                mixed[o] = (120 + (x / 4)) as u8;
+                mixed[o + 1] = (150 + (y / 4)) as u8;
+                mixed[o + 2] = 210;
+            } else {
+                // High-frequency chaotic texture on right tiles
+                let h = (((x * 73) ^ (y * 137)).wrapping_mul(2654435761)) >> 24;
+                mixed[o] = (80 + (h % 140)) as u8;
+                mixed[o + 1] = (60 + ((h.wrapping_mul(3)) % 140)) as u8;
+                mixed[o + 2] = (50 + ((h.wrapping_mul(7)) % 140)) as u8;
+            }
+        }
+    }
+    let std_bytes = encode(
+        &mixed,
+        mw as u32,
+        mh as u32,
+        3,
+        &EncodeOptions { quality: 80, tile_size: 128, adaptive_quant: false, threads: 1, ..EncodeOptions::default() },
+    )
+    .unwrap();
+    let aq_1t = encode(
+        &mixed,
+        mw as u32,
+        mh as u32,
+        3,
+        &EncodeOptions { quality: 80, tile_size: 128, adaptive_quant: true, threads: 1, ..EncodeOptions::default() },
+    )
+    .unwrap();
+    let aq_4t = encode(
+        &mixed,
+        mw as u32,
+        mh as u32,
+        3,
+        &EncodeOptions { quality: 80, tile_size: 128, adaptive_quant: true, threads: 4, ..EncodeOptions::default() },
+    )
+    .unwrap();
+    assert_eq!(aq_1t, aq_4t, "AQ encoding must be 100% deterministic across 1T/4T");
+    assert!(
+        aq_1t.len() < std_bytes.len(),
+        "AQ should save bits on chaotic tiles: aq={} B vs std={} B",
+        aq_1t.len(),
+        std_bytes.len()
+    );
+    // Smooth left half must stay razor-sharp under AQ!
+    let dec_aq = decode_query(&aq_1t, &TransformQuery { crop: Some((0, 0, 256, 256)), ..Default::default() }).unwrap();
+    let mut left_ref = Vec::with_capacity(256 * 256 * 3);
+    for y in 0..256 {
+        left_ref.extend_from_slice(&mixed[y * mw * 3..y * mw * 3 + 256 * 3]);
+    }
+    let smooth_psnr = psnr_db(&left_ref, &dec_aq.pixels);
+    assert!(smooth_psnr > 44.0, "smooth region PSNR under AQ should be >44 dB, got {smooth_psnr:.2}");
+
+    // 3) CICP HDR (BT.2020/PQ) + EXIF + XMP trailing TLV metadata + C ABI + zero-decode crop + tamper check
+    let fake_exif = b"II*\0\x08\0\0\0EXIF_CAMERA_DATA".to_vec();
+    let fake_xmp = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">VIMG_V03</x:xmpmeta>".to_vec();
+    let px10 = vec![512u16; 128 * 128 * 3];
+    let hdr_meta_vimg = encode_u16(
+        &px10,
+        128,
+        128,
+        3,
+        &EncodeOptions {
+            bit_depth: 10,
+            tile_size: 64,
+            cicp: Some(Cicp::BT2020_PQ),
+            exif: Some(fake_exif.clone()),
+            xmp: Some(fake_xmp.clone()),
+            ..EncodeOptions::lossless()
+        },
+    )
+    .unwrap();
+    let hdr = VimgHeader::parse(&hdr_meta_vimg).unwrap();
+    assert!(hdr.has_meta());
+
+    let full = decode(&hdr_meta_vimg).unwrap();
+    let m = full.metadata.as_ref().expect("metadata must be decoded");
+    assert_eq!(m.cicp, Some(Cicp::BT2020_PQ));
+    assert_eq!(m.exif.as_deref(), Some(fake_exif.as_slice()));
+    assert_eq!(m.xmp.as_deref(), Some(fake_xmp.as_slice()));
+
+    // Partial decode with load_metadata = false skips trailing metadata cleanly
+    let skip_meta = decode_query(
+        &hdr_meta_vimg,
+        &TransformQuery { load_metadata: false, ..Default::default() },
+    )
+    .unwrap();
+    assert!(skip_meta.metadata.is_none());
+
+    // Zero-decode tile crop preserves CICP + EXIF + XMP verbatim!
+    let (cropped, _) = crop_vimg_zero_decode(&SliceRangeSource(&hdr_meta_vimg), 0, 0, 1, 1, false).unwrap();
+    let dec_cropped = decode(&cropped).unwrap();
+    assert_eq!(dec_cropped.metadata, full.metadata);
+
+    // Tampering with trailing metadata triggers CRC32C ChecksumMismatch!
+    let mut bad_meta = hdr_meta_vimg.clone();
+    let last_payload = bad_meta.len() - 6;
+    bad_meta[last_payload] ^= 0xFF;
+    assert!(matches!(decode(&bad_meta), Err(Error::ChecksumMismatch { .. })));
+
+    // C ABI metadata extraction parity
+    unsafe {
+        let mut cicp_c = VimgCicpC::default();
+        assert_eq!(vimg_extract_cicp(hdr_meta_vimg.as_ptr(), hdr_meta_vimg.len(), &mut cicp_c), 0);
+        assert_eq!(cicp_c.present, 1);
+        assert_eq!(cicp_c.color_primaries, 9);
+        assert_eq!(cicp_c.transfer_characteristics, 16);
+
+        let eb = vimg_extract_exif_alloc(hdr_meta_vimg.as_ptr(), hdr_meta_vimg.len());
+        assert_eq!(eb.status, 0);
+        assert_eq!(core::slice::from_raw_parts(eb.ptr, eb.len), fake_exif.as_slice());
+        vimg_free(eb);
+
+        let xb = vimg_extract_xmp_alloc(hdr_meta_vimg.as_ptr(), hdr_meta_vimg.len());
+        assert_eq!(xb.status, 0);
+        assert_eq!(core::slice::from_raw_parts(xb.ptr, xb.len), fake_xmp.as_slice());
+        vimg_free(xb);
+    }
+}

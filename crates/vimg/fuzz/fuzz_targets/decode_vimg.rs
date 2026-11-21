@@ -1,6 +1,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use vimg::ffi::{vimg_decode_query_v2_alloc, vimg_extract_icc_alloc, vimg_free};
+use vimg::ffi::{
+    vimg_decode_query_v2_alloc, vimg_extract_cicp, vimg_extract_exif_alloc, vimg_extract_icc_alloc,
+    vimg_extract_xmp_alloc, vimg_free, VimgCicpC,
+};
 use vimg::{crop_vimg_zero_decode, decode, decode_query, SliceRangeSource, TransformQuery, VimgHeader, VimgIndex};
 
 fuzz_target!(|data: &[u8]| {
@@ -14,5 +17,11 @@ fuzz_target!(|data: &[u8]| {
         vimg_free(dec);
         let icc = vimg_extract_icc_alloc(data.as_ptr(), data.len());
         vimg_free(icc);
+        let mut cicp = VimgCicpC::default();
+        let _ = vimg_extract_cicp(data.as_ptr(), data.len(), &mut cicp);
+        let exif = vimg_extract_exif_alloc(data.as_ptr(), data.len());
+        vimg_free(exif);
+        let xmp = vimg_extract_xmp_alloc(data.as_ptr(), data.len());
+        vimg_free(xmp);
     }
 });

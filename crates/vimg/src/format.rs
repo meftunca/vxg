@@ -3,9 +3,10 @@
 
 use crate::checksum::crc32c;
 use crate::color::{downsample_2x2, rgb_to_ycocg_r, rgb_to_ycocg_r_u16};
+use crate::meta::{VimgMetadata, MAX_META_BYTES};
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
 use crate::simd;
-use crate::subband::encode_wavelet_tile_levels_bd;
+use crate::subband::encode_wavelet_tile_levels_full;
 use crate::wavelet::{level_dims, WaveletScratch, WaveletTile};
 use crate::{EncodeOptions, Error, Result};
 
@@ -30,6 +31,7 @@ pub const FLAG_DWT_97: u16 = 0x0008;
 pub const FLAG_BIT_DEPTH_10: u16 = 0x0010;
 pub const FLAG_BIT_DEPTH_12: u16 = 0x0020;
 pub const FLAG_HAS_ICC: u16 = 0x0040;
+pub const FLAG_HAS_META: u16 = 0x0080;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VimgHeader {
@@ -60,6 +62,10 @@ pub struct VimgIndex {
     pub header: VimgHeader,
     /// Flat entries indexed by `entry_idx(level, plane, tile_id)`.
     pub entries: Vec<ChunkEntry>,
+    /// Byte offset of optional trailing TLV metadata block (`[meta_offset..total_bytes]`).
+    pub meta_offset: u64,
+    /// Wire length in bytes of the trailing TLV metadata block (`0` when absent).
+    pub meta_wire_len: u64,
 }
 
 impl VimgHeader {
@@ -117,6 +123,11 @@ impl VimgHeader {
     #[inline]
     pub fn has_icc(&self) -> bool {
         (self.flags & FLAG_HAS_ICC) != 0 && self.icc_bytes > 0
+    }
+
+    #[inline]
+    pub fn has_meta(&self) -> bool {
+        (self.flags & FLAG_HAS_META) != 0
     }
 
     #[inline]
@@ -303,10 +314,47 @@ impl VimgIndex {
             entries.push(ChunkEntry { offset: cur_off, len, crc32c: crc });
             cur_off = cur_off.checked_add(len as u64).ok_or(Error::InvalidFormat("offset overflow"))?;
         }
-        if cur_off != header.total_bytes {
-            return Err(Error::InvalidFormat("total_bytes mismatch with directory"));
+        let (meta_offset, meta_wire_len) = if header.has_meta() {
+            if cur_off >= header.total_bytes {
+                return Err(Error::InvalidFormat("FLAG_HAS_META set but trailing metadata missing"));
+            }
+            let mlen = header.total_bytes - cur_off;
+            let max_wire = (MAX_META_BYTES as u64) + if header.has_crc() { 4 } else { 0 };
+            if mlen > max_wire {
+                return Err(Error::InvalidFormat("trailing metadata exceeds MAX_META_BYTES"));
+            }
+            (cur_off, mlen)
+        } else {
+            if cur_off != header.total_bytes {
+                return Err(Error::InvalidFormat("total_bytes mismatch with directory"));
+            }
+            (cur_off, 0)
+        };
+        Ok(Self { header, entries, meta_offset, meta_wire_len })
+    }
+
+    /// Reads and CRC-verifies the optional trailing TLV metadata block (`CICP`, `EXIF`, `XMP`).
+    pub fn read_metadata_from_source(
+        &self,
+        source: &dyn RangeSource,
+        verify_crc: bool,
+        stats: &mut RangeStats,
+    ) -> Result<Option<VimgMetadata>> {
+        if self.meta_wire_len == 0 {
+            return Ok(None);
         }
-        Ok(Self { header, entries })
+        let end = self
+            .meta_offset
+            .checked_add(self.meta_wire_len)
+            .ok_or(Error::InvalidFormat("metadata range overflow"))?;
+        let mut got = source.read_ranges(&[(self.meta_offset, end)])?;
+        stats.requests += 1;
+        stats.bytes_fetched += self.meta_wire_len;
+        let buf = got.pop().unwrap_or_default();
+        if buf.len() as u64 != self.meta_wire_len {
+            return Err(Error::Truncated);
+        }
+        Ok(Some(VimgMetadata::decode_tlv(&buf, self.header.has_crc(), verify_crc)?))
     }
 
     /// Reads and CRC-verifies the embedded ICC color profile (if present), reusing `prefix` bytes
@@ -503,13 +551,26 @@ fn encode_pixels_vimg(
     .clamp(1, 32)
     .min(n_tiles.max(1));
 
+    let adaptive_quant = opts.adaptive_quant && !is_lossless;
+    let meta = VimgMetadata {
+        cicp: opts.cicp,
+        exif: opts.exif.clone(),
+        xmp: opts.xmp.clone(),
+    };
+    let meta_wire = if meta.is_empty() {
+        Vec::new()
+    } else {
+        meta.encode_tlv(opts.checksum)?
+    };
+
     // Encode every tile in parallel with L1-hot tile-local color split + AtomicUsize work-stealing.
     let tile_results: Vec<Vec<Vec<Vec<u8>>>> = if n_threads <= 1 {
         let mut scratch = TileEncodeScratch::new(tile_size, ch);
         (0..n_tiles)
             .map(|tid| {
                 encode_one_tile(
-                    tid, tiles_x, tile_size, w, h, ch, input, chroma_420, quality, dwt_levels, bit_depth, &mut scratch,
+                    tid, tiles_x, tile_size, w, h, ch, input, chroma_420, quality, dwt_levels, bit_depth,
+                    adaptive_quant, &mut scratch,
                 )
             })
             .collect()
@@ -532,7 +593,7 @@ fn encode_pixels_vimg(
                             }
                             let encoded = encode_one_tile(
                                 tid, tiles_x, tile_size, w, h, ch, input, chroma_420, quality, dwt_levels, bit_depth,
-                                &mut scratch,
+                                adaptive_quant, &mut scratch,
                             );
                             local.push((tid, encoded));
                         }
@@ -569,7 +630,7 @@ fn encode_pixels_vimg(
         }
     }
 
-    let total_bytes = HEADER_BYTES + dir_bytes + icc_wire_len + payload_bytes;
+    let total_bytes = HEADER_BYTES + dir_bytes + icc_wire_len + payload_bytes + meta_wire.len();
     let mut out = vec![0u8; total_bytes];
 
     let mut flags = 0u16;
@@ -591,6 +652,9 @@ fn encode_pixels_vimg(
     }
     if !icc_slice.is_empty() {
         flags |= FLAG_HAS_ICC;
+    }
+    if !meta_wire.is_empty() {
+        flags |= FLAG_HAS_META;
     }
     let header = VimgHeader {
         version: VERSION_V1,
@@ -637,6 +701,10 @@ fn encode_pixels_vimg(
             }
         }
     }
+    if !meta_wire.is_empty() {
+        out[data_pos..data_pos + meta_wire.len()].copy_from_slice(&meta_wire);
+        data_pos += meta_wire.len();
+    }
     debug_assert_eq!(data_pos, total_bytes);
     Ok(out)
 }
@@ -675,6 +743,7 @@ fn encode_one_tile(
     quality: u8,
     dwt_levels: usize,
     bit_depth: u8,
+    adaptive_quant: bool,
     scratch: &mut TileEncodeScratch,
 ) -> Vec<Vec<Vec<u8>>> {
     let tx = tid % tiles_x;
@@ -763,10 +832,10 @@ fn encode_one_tile(
     let use_97 = quality < 100;
     let mut out_planes = Vec::with_capacity(ch);
     for p_idx in 0..ch {
-        let wt = if chroma_420 && (p_idx == 1 || p_idx == 2) {
+        let (wt, sp_opt) = if chroma_420 && (p_idx == 1 || p_idx == 2) {
             let src_p = if p_idx == 1 { &scratch.co[..n] } else { &scratch.cg[..n] };
             let (ds, pw, ph) = downsample_2x2(src_p, tw, th);
-            WaveletTile::forward_mode_with(&ds, pw, ph, dwt_levels, use_97, &mut scratch.wt)
+            (WaveletTile::forward_mode_with(&ds, pw, ph, dwt_levels, use_97, &mut scratch.wt), None)
         } else {
             let src_p = match p_idx {
                 0 => &scratch.y[..n],
@@ -774,9 +843,12 @@ fn encode_one_tile(
                 2 => &scratch.cg[..n],
                 _ => &scratch.a[..n],
             };
-            WaveletTile::forward_mode_with(src_p, tw, th, dwt_levels, use_97, &mut scratch.wt)
+            (
+                WaveletTile::forward_mode_with(src_p, tw, th, dwt_levels, use_97, &mut scratch.wt),
+                if !use_97 { Some(src_p) } else { None },
+            )
         };
-        out_planes.push(encode_wavelet_tile_levels_bd(&wt, quality, p_idx, bit_depth));
+        out_planes.push(encode_wavelet_tile_levels_full(&wt, sp_opt, quality, p_idx, bit_depth, adaptive_quant));
     }
     out_planes
 }
@@ -811,6 +883,17 @@ pub fn crop_vimg_zero_decode(
     } else {
         icc_slice.len() + if h.has_crc() { 4 } else { 0 }
     };
+    let meta_wire = if idx.meta_wire_len > 0 {
+        let mut got = source.read_ranges(&[(idx.meta_offset, idx.meta_offset + idx.meta_wire_len)])?;
+        stats.requests += 1;
+        stats.bytes_fetched += idx.meta_wire_len;
+        let raw = got.pop().unwrap_or_default();
+        // Verify metadata CRC32C before copying verbatim!
+        let _ = VimgMetadata::decode_tlv(&raw, h.has_crc(), h.has_crc())?;
+        raw
+    } else {
+        Vec::new()
+    };
 
     let out_ch: u8 = if grayscale { 1 } else { h.channels };
     let n_levels = h.n_levels();
@@ -840,7 +923,7 @@ pub fn crop_vimg_zero_decode(
     let new_h = ((h.height - ty0 * h.tile_size).min(nty * h.tile_size)).max(1);
     let dir_bytes = req_meta.len() * 8;
     let payload_bytes: usize = req_meta.iter().map(|e| e.len as usize).sum();
-    let total_bytes = HEADER_BYTES + dir_bytes + icc_wire_len + payload_bytes;
+    let total_bytes = HEADER_BYTES + dir_bytes + icc_wire_len + payload_bytes + meta_wire.len();
 
     let mut flags = h.flags;
     if grayscale {
@@ -889,6 +972,9 @@ pub fn crop_vimg_zero_decode(
         dir_pos += 8;
         out[data_pos..data_pos + slice.len()].copy_from_slice(slice);
         data_pos += slice.len();
+    }
+    if !meta_wire.is_empty() {
+        out[data_pos..data_pos + meta_wire.len()].copy_from_slice(&meta_wire);
     }
     Ok((out, stats))
 }

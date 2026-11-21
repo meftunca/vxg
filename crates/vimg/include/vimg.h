@@ -1,5 +1,5 @@
 /*
- * VIMG v0.2.0 — HTTP/HTTPS Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Transform Engine
+ * VIMG v0.3.0 — HTTP/HTTPS Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Transform Engine
  * SPDX-License-Identifier: MIT
  */
 
@@ -88,6 +88,25 @@ VimgBuf vimg_extract_icc_alloc(
     const uint8_t *vimg_ptr,
     size_t vimg_len
 );
+
+typedef struct {
+    uint8_t color_primaries;
+    uint8_t transfer_characteristics;
+    uint8_t matrix_coefficients;
+    uint8_t full_range;
+    uint8_t present;
+} VimgCicpC;
+
+/* Extract CICP HDR color tags (returns 0 on success with out->present=1/0, <0 on error). */
+int32_t vimg_extract_cicp(
+    const uint8_t *vimg_ptr,
+    size_t vimg_len,
+    VimgCicpC *out_cicp
+);
+
+/* Extract embedded raw EXIF or XMP metadata (status=0 + bytes, status=1 if absent, <0 on error). */
+VimgBuf vimg_extract_exif_alloc(const uint8_t *vimg_ptr, size_t vimg_len);
+VimgBuf vimg_extract_xmp_alloc(const uint8_t *vimg_ptr, size_t vimg_len);
 
 /* Zero-WASI WebAssembly / sparse HTTP-Range exports */
 const uint32_t *vimg_wasm_meta_ptr(void);

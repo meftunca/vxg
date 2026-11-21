@@ -216,6 +216,99 @@ pub unsafe extern "C" fn vimg_extract_icc_alloc(
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VimgCicpC {
+    pub color_primaries: u8,
+    pub transfer_characteristics: u8,
+    pub matrix_coefficients: u8,
+    pub full_range: u8,
+    pub present: u8,
+}
+
+/// Extracts CICP HDR color signaling (`BT.2020`, `PQ`, `HLG`, `Display P3`, `sRGB`) from a `.vimg` buffer.
+/// Returns `0` on success (`out.present == 1` if CICP is present, `0` if absent) or `< 0` on error.
+#[no_mangle]
+pub unsafe extern "C" fn vimg_extract_cicp(
+    vimg_ptr: *const u8,
+    vimg_len: usize,
+    out_ptr: *mut VimgCicpC,
+) -> i32 {
+    if vimg_ptr.is_null() || out_ptr.is_null() {
+        return -1;
+    }
+    *out_ptr = VimgCicpC::default();
+    let slice = core::slice::from_raw_parts(vimg_ptr, vimg_len);
+    match catch_unwind(AssertUnwindSafe(|| {
+        let idx = VimgIndex::parse_prefix(slice)?;
+        let src = SliceRangeSource(slice);
+        let mut stats = RangeStats::default();
+        idx.read_metadata_from_source(&src, true, &mut stats)
+    })) {
+        Ok(Ok(Some(meta))) => {
+            if let Some(c) = meta.cicp {
+                *out_ptr = VimgCicpC {
+                    color_primaries: c.color_primaries,
+                    transfer_characteristics: c.transfer_characteristics,
+                    matrix_coefficients: c.matrix_coefficients,
+                    full_range: u8::from(c.full_range),
+                    present: 1,
+                };
+            }
+            0
+        }
+        Ok(Ok(None)) => 0,
+        Ok(Err(_)) => -2,
+        Err(_) => -7,
+    }
+}
+
+/// Extracts the embedded raw EXIF payload (returns `status=0` + bytes, `status=1` if absent, `<0` on error).
+#[no_mangle]
+pub unsafe extern "C" fn vimg_extract_exif_alloc(vimg_ptr: *const u8, vimg_len: usize) -> VimgBuf {
+    if vimg_ptr.is_null() {
+        return VimgBuf::err(-1);
+    }
+    let slice = core::slice::from_raw_parts(vimg_ptr, vimg_len);
+    match catch_unwind(AssertUnwindSafe(|| {
+        let idx = VimgIndex::parse_prefix(slice)?;
+        let src = SliceRangeSource(slice);
+        let mut stats = RangeStats::default();
+        idx.read_metadata_from_source(&src, true, &mut stats)
+    })) {
+        Ok(Ok(Some(meta))) => match meta.exif {
+            Some(exif) => VimgBuf::from_vec(exif, 0, 0, 0, 0),
+            None => VimgBuf::err(1),
+        },
+        Ok(Ok(None)) => VimgBuf::err(1),
+        Ok(Err(_)) => VimgBuf::err(-2),
+        Err(_) => VimgBuf::err(-7),
+    }
+}
+
+/// Extracts the embedded raw XMP XML packet (returns `status=0` + bytes, `status=1` if absent, `<0` on error).
+#[no_mangle]
+pub unsafe extern "C" fn vimg_extract_xmp_alloc(vimg_ptr: *const u8, vimg_len: usize) -> VimgBuf {
+    if vimg_ptr.is_null() {
+        return VimgBuf::err(-1);
+    }
+    let slice = core::slice::from_raw_parts(vimg_ptr, vimg_len);
+    match catch_unwind(AssertUnwindSafe(|| {
+        let idx = VimgIndex::parse_prefix(slice)?;
+        let src = SliceRangeSource(slice);
+        let mut stats = RangeStats::default();
+        idx.read_metadata_from_source(&src, true, &mut stats)
+    })) {
+        Ok(Ok(Some(meta))) => match meta.xmp {
+            Some(xmp) => VimgBuf::from_vec(xmp, 0, 0, 0, 0),
+            None => VimgBuf::err(1),
+        },
+        Ok(Ok(None)) => VimgBuf::err(1),
+        Ok(Err(_)) => VimgBuf::err(-2),
+        Err(_) => VimgBuf::err(-7),
+    }
+}
+
 // ============================================================================
 // Zero-WASI WebAssembly HTTP-Range Streaming Exports (no wasm-bindgen needed)
 // ============================================================================

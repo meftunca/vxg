@@ -88,6 +88,59 @@ fn parse_tiff_orientation(tiff: &[u8]) -> Option<u8> {
     None
 }
 
+/// Extracts raw EXIF TIFF payload from a JPEG `APP1` (`Exif\0\0`) segment for metadata preservation.
+pub fn parse_jpeg_exif_raw(data: &[u8]) -> Option<Vec<u8>> {
+    extract_jpeg_app1_prefix(data, b"Exif\0\0")
+}
+
+/// Extracts raw UTF-8 XMP XML packet from a JPEG `APP1` (`http://ns.adobe.com/xap/1.0/\0`) segment.
+pub fn parse_jpeg_xmp_raw(data: &[u8]) -> Option<Vec<u8>> {
+    extract_jpeg_app1_prefix(data, b"http://ns.adobe.com/xap/1.0/\0")
+}
+
+fn extract_jpeg_app1_prefix(data: &[u8], prefix: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut pos = 2usize;
+    while pos + 4 <= data.len() {
+        if data[pos] != 0xFF {
+            break;
+        }
+        while pos < data.len() && data[pos] == 0xFF {
+            pos += 1;
+        }
+        if pos >= data.len() {
+            break;
+        }
+        let marker = data[pos];
+        pos += 1;
+        if marker == 0xD9 || marker == 0xDA {
+            break;
+        }
+        if (0xD0..=0xD8).contains(&marker) || marker == 0x01 {
+            continue;
+        }
+        if pos + 2 > data.len() {
+            break;
+        }
+        let seg_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        if seg_len < 2 || pos + seg_len > data.len() {
+            break;
+        }
+        if marker == 0xE1 {
+            let seg = &data[pos + 2..pos + seg_len];
+            if let Some(rest) = seg.strip_prefix(prefix) {
+                if !rest.is_empty() && rest.len() <= crate::meta::MAX_META_BYTES as usize {
+                    return Some(rest.to_vec());
+                }
+            }
+        }
+        pos += seg_len;
+    }
+    None
+}
+
 /// Extracts an embedded ICC color profile from JPEG `APP2` (`ICC_PROFILE\0`) segments.
 /// Supports multi-chunk ICC profiles reassembled in sequence order (`1..=total`).
 pub fn parse_jpeg_icc_profile(data: &[u8]) -> Option<Vec<u8>> {

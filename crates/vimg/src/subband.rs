@@ -1,7 +1,9 @@
 //! Wavelet subband perceptual quantization, MED `LL` prediction, and single-pass 2D
 //! context-adaptive subband encoding/decoding.
 
-use crate::entropy::{decode_2d_bands, encode_2d_ac, encode_blk4_ac};
+use crate::entropy::{
+    decode_2d_bands, encode_2d_ac, encode_blk4_ac_with_aq, try_encode_spatial_palette,
+};
 use crate::wavelet::{DetailBands, WaveletTile};
 use crate::Result;
 
@@ -195,6 +197,44 @@ pub fn encode_detail_level(
     encode_detail_level_bd(d, quality, plane, detail_idx, dwt_levels, 8)
 }
 
+/// Computes a tile-adaptive psychovisual quantization multiplier in fixed-point `1/16` (`16 = 1.0×`).
+/// Smooth sky/skin tiles get finer quantization (`0.75×–0.875×`) to eliminate banding & ringing;
+/// chaotic/noisy high-frequency tiles get contrast-masked coarser quantization (`1.19×–1.50×`).
+#[inline]
+fn compute_aq_mul_q4(d: &DetailBands, plane: usize, bit_depth: u8) -> u8 {
+    if plane == 3 {
+        return 16; // Always keep alpha crisp
+    }
+    let total = d.lh.len() + d.hl.len() + d.hh.len();
+    if total < 64 {
+        return 16;
+    }
+    let mut sum: u64 = 0;
+    for &v in &d.lh {
+        sum += v.unsigned_abs() as u64;
+    }
+    for &v in &d.hl {
+        sum += v.unsigned_abs() as u64;
+    }
+    for &v in &d.hh {
+        sum += v.unsigned_abs() as u64;
+    }
+    let mad_8bit = (sum / (total as u64)) >> bit_depth.saturating_sub(8);
+    if mad_8bit <= 2 {
+        12 // 0.75× — razor-sharp smooth gradients, zero banding
+    } else if mad_8bit <= 5 {
+        14 // 0.875×
+    } else if mad_8bit <= 12 {
+        16 // 1.00× — standard
+    } else if mad_8bit <= 22 {
+        19 // 1.1875× — contrast masking on moderate texture
+    } else if mad_8bit <= 36 {
+        22 // 1.375× — contrast masking on busy foliage/night texture
+    } else {
+        24 // 1.50× — strong contrast masking on chaotic high-frequency grain
+    }
+}
+
 pub fn encode_detail_level_bd(
     d: &DetailBands,
     quality: u8,
@@ -202,6 +242,18 @@ pub fn encode_detail_level_bd(
     detail_idx: usize,
     dwt_levels: usize,
     bit_depth: u8,
+) -> Vec<u8> {
+    encode_detail_level_full(d, quality, plane, detail_idx, dwt_levels, bit_depth, false)
+}
+
+pub fn encode_detail_level_full(
+    d: &DetailBands,
+    quality: u8,
+    plane: usize,
+    detail_idx: usize,
+    dwt_levels: usize,
+    bit_depth: u8,
+    adaptive_quant: bool,
 ) -> Vec<u8> {
     let lw = d.out_w.div_ceil(2);
     let hw = d.out_w / 2;
@@ -214,13 +266,25 @@ pub fn encode_detail_level_bd(
         return out;
     }
 
-    let step_lh = quant_step_bd(quality, plane, detail_idx, dwt_levels, false, bit_depth);
-    let step_hh = quant_step_bd(quality, plane, detail_idx, dwt_levels, true, bit_depth);
+    let base_lh = quant_step_bd(quality, plane, detail_idx, dwt_levels, false, bit_depth);
+    let base_hh = quant_step_bd(quality, plane, detail_idx, dwt_levels, true, bit_depth);
+    let q_mul_q4 = if adaptive_quant { compute_aq_mul_q4(d, plane, bit_depth) } else { 16 };
+    let step_lh = if q_mul_q4 != 16 && base_lh > 1 {
+        ((base_lh * q_mul_q4 as i32 + 8) >> 4).max(1)
+    } else {
+        base_lh
+    };
+    let step_hh = if q_mul_q4 != 16 && base_hh > 1 {
+        ((base_hh * q_mul_q4 as i32 + 8) >> 4).max(1)
+    } else {
+        base_hh
+    };
+
     let qlh: Vec<i32> = d.lh.iter().map(|&c| quant_deadzone(c, step_lh)).collect();
     let qhl: Vec<i32> = d.hl.iter().map(|&c| quant_deadzone(c, step_lh)).collect();
     let qhh: Vec<i32> = d.hh.iter().map(|&c| quant_deadzone(c, step_hh)).collect();
 
-    encode_blk4_ac(&[(&qlh, lw, hh_rows), (&qhl, hw, lh_rows), (&qhh, hw, hh_rows)], &mut out);
+    encode_blk4_ac_with_aq(&[(&qlh, lw, hh_rows), (&qhl, hw, lh_rows), (&qhh, hw, hh_rows)], q_mul_q4, &mut out);
     out
 }
 
@@ -286,11 +350,41 @@ pub fn encode_wavelet_tile_levels_bd(
     plane: usize,
     bit_depth: u8,
 ) -> Vec<Vec<u8>> {
+    encode_wavelet_tile_levels_full(wt, None, quality, plane, bit_depth, false)
+}
+
+pub fn encode_wavelet_tile_levels_full(
+    wt: &WaveletTile,
+    spatial_plane: Option<&[i16]>,
+    quality: u8,
+    plane: usize,
+    bit_depth: u8,
+    adaptive_quant: bool,
+) -> Vec<Vec<u8>> {
     let dwt_levels = wt.details.len();
     let mut out = Vec::with_capacity(dwt_levels + 1);
     out.push(encode_ll_band_bd(&wt.ll, wt.ll_w, wt.ll_h, quality, plane, bit_depth));
     for (k, d) in wt.details.iter().enumerate() {
-        out.push(encode_detail_level_bd(d, quality, plane, k, dwt_levels, bit_depth));
+        out.push(encode_detail_level_full(d, quality, plane, k, dwt_levels, bit_depth, adaptive_quant));
+    }
+    // In lossless mode, if the raw spatial tile has <=32 unique values (UI/screenshots/solid alpha),
+    // store the finest chunk directly via `CODEC_SPATIAL_PALETTE` whenever it beats wavelet details!
+    // Keeps L0..L(n-1) pyramid intact for thumbnails/resize while enabling zero-IDWT full decode!
+    if quality >= 100 && dwt_levels >= 1 {
+        if let Some(sp) = spatial_plane {
+            if let Some(sp_blob) = try_encode_spatial_palette(sp, wt.full_w, wt.full_h) {
+                let detail_total: usize = out[1..=dwt_levels].iter().map(Vec::len).sum();
+                if sp_blob.len() + (dwt_levels - 1) < detail_total {
+                    // Replace smeared multi-level wavelet details with 1-byte CODEC_ALL_ZERO on
+                    // intermediate levels (L0 LL stays intact for previews) + exact zero-IDWT
+                    // CODEC_SPATIAL_PALETTE at the finest level!
+                    for slot in &mut out[1..dwt_levels] {
+                        *slot = vec![0u8]; // CODEC_ALL_ZERO
+                    }
+                    out[dwt_levels] = sp_blob;
+                }
+            }
+        }
     }
     out
 }

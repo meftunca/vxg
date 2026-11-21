@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use image::{DynamicImage, GenericImageView, ImageFormat, RgbImage, RgbaImage};
 use vimg::{
-    crop_vimg_zero_decode, decode_from_source, encode, encode_u16, psnr_db, EncodeOptions,
+    crop_vimg_zero_decode, decode_from_source, encode, encode_u16, psnr_db, Cicp, EncodeOptions,
     FileRangeSource, HttpRangeSource, RangeSource, RangeStats, SliceRangeSource, TransformQuery,
     VimgIndex,
 };
@@ -19,8 +19,8 @@ fn usage() {
     eprintln!(
         "vimg {} — HTTP/HTTPS Range-Native Hierarchical Wavelet Image Codec & Compressed-Domain Engine\n\n\
          Usage:\n  \
-           vimg encode <in.png|jpg|webp|bmp> <out.vimg> [--quality 1..100] [--tile 64|128|256] [--levels 1..4] [--bit-depth 8|10|12] [--icc <profile.icc>] [--no-420]\n  \
-           vimg decode <in.vimg | http(s)://.../img.vimg> <out.png|jpg|webp> [--w W] [--h H] [--crop x,y,w,h] [--gray] [--blur 0..1] [--sharpen 0..2] [--bright N] [--contrast F] [--sepia] [--rot 90|180|270] [--extract-icc <out.icc>]\n  \
+           vimg encode <in.png|jpg|webp|bmp> <out.vimg> [--quality 1..100] [--tile 64|128|256] [--levels 1..4] [--bit-depth 8|10|12] [--aq] [--cicp srgb|p3|pq|hlg] [--icc <profile.icc>] [--keep-meta] [--no-420]\n  \
+           vimg decode <in.vimg | http(s)://.../img.vimg> <out.png|jpg|webp> [--w W] [--h H] [--crop x,y,w,h] [--gray] [--blur 0..1] [--sharpen 0..2] [--bright N] [--contrast F] [--sepia] [--rot 90|180|270] [--extract-icc <out.icc>] [--extract-exif <out.exif>] [--extract-xmp <out.xmp>]\n  \
            vimg crop   <in.vimg | http(s)://.../img.vimg> <out.vimg> --tiles tx0,ty0,ntx,nty [--gray]\n  \
            vimg info   <in.vimg | http(s)://.../img.vimg>\n  \
            vimg serve  <dir> [--port 8090]    (HTTP/1.1 Range Origin + Live Compressed-Domain Edge Proxy)\n  \
@@ -101,6 +101,7 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
         return Err("encode requires <in> <out.vimg>".into());
     }
     let mut opts = EncodeOptions::default();
+    let mut keep_meta = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -120,6 +121,14 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
                 opts.dwt_levels = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --levels")?;
             }
             "--no-420" => opts.chroma_420 = false,
+            "--aq" => opts.adaptive_quant = true,
+            "--no-aq" => opts.adaptive_quant = false,
+            "--keep-meta" => keep_meta = true,
+            "--cicp" => {
+                i += 1;
+                let preset = args.get(i).ok_or("missing --cicp preset (srgb|p3|pq|hlg)")?;
+                opts.cicp = Some(Cicp::from_preset(preset).ok_or("bad --cicp preset (use srgb|p3|pq|hlg)")?);
+            }
             "--bit-depth" => {
                 i += 1;
                 opts.bit_depth = args.get(i).and_then(|s| s.parse().ok()).ok_or("bad --bit-depth")?;
@@ -136,6 +145,10 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
     let raw = fs::read(&args[0]).map_err(|e| format!("read {}: {e}", args[0]))?;
     if opts.icc_profile.is_none() {
         opts.icc_profile = vimg::exif::parse_jpeg_icc_profile(&raw);
+    }
+    if keep_meta {
+        opts.exif = vimg::exif::parse_jpeg_exif_raw(&raw);
+        opts.xmp = vimg::exif::parse_jpeg_xmp_raw(&raw);
     }
     let t0 = Instant::now();
     let (vimg_bytes, w, h, ch) = if opts.bit_depth > 8 {
@@ -183,6 +196,8 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     }
     let mut q = TransformQuery::default();
     let mut extract_icc: Option<String> = None;
+    let mut extract_exif: Option<String> = None;
+    let mut extract_xmp: Option<String> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -206,6 +221,14 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
                 i += 1;
                 extract_icc = Some(args.get(i).ok_or("missing --extract-icc path")?.clone());
             }
+            "--extract-exif" => {
+                i += 1;
+                extract_exif = Some(args.get(i).ok_or("missing --extract-exif path")?.clone());
+            }
+            "--extract-xmp" => {
+                i += 1;
+                extract_xmp = Some(args.get(i).ok_or("missing --extract-xmp path")?.clone());
+            }
             other => return Err(format!("unknown flag {other}")),
         }
         i += 1;
@@ -216,6 +239,14 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     let dt = t0.elapsed().as_secs_f64() * 1000.0;
     if let (Some(icc_path), Some(icc)) = (extract_icc, img.icc_profile.as_deref()) {
         fs::write(&icc_path, icc).map_err(|e| format!("write {icc_path}: {e}"))?;
+    }
+    if let Some(ref meta) = img.metadata {
+        if let (Some(p), Some(exif)) = (extract_exif, meta.exif.as_deref()) {
+            fs::write(&p, exif).map_err(|e| format!("write {p}: {e}"))?;
+        }
+        if let (Some(p), Some(xmp)) = (extract_xmp, meta.xmp.as_deref()) {
+            fs::write(&p, xmp).map_err(|e| format!("write {p}: {e}"))?;
+        }
     }
     if let Some(ref px16) = img.pixels_u16 {
         let shift = 16u8.saturating_sub(img.bit_depth);
@@ -260,15 +291,29 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
     let mut stats = RangeStats::default();
     let idx = VimgIndex::read_from_source(src.as_ref(), &mut stats).map_err(|e| e.to_string())?;
     let h = &idx.header;
+    let meta = idx.read_metadata_from_source(src.as_ref(), true, &mut stats).map_err(|e| e.to_string())?;
+    let mut meta_desc = String::new();
+    if let Some(ref m) = meta {
+        if let Some(c) = m.cicp {
+            meta_desc.push_str(&format!(", cicp={c}"));
+        }
+        if let Some(ref e) = m.exif {
+            meta_desc.push_str(&format!(", exif={}B", e.len()));
+        }
+        if let Some(ref x) = m.xmp {
+            meta_desc.push_str(&format!(", xmp={}B", x.len()));
+        }
+    }
     let bpp = (h.total_bytes as f64 * 8.0) / ((h.width as f64) * (h.height as f64));
     println!(
-        "VIMG v{} | {}x{}x{} ({}-bit{}) | quality={} ({}) | chroma={} | tile={} ({}x{}={}) | size={:.1} KiB ({:.2} bpp) | dir={:.1} KiB",
+        "VIMG v{} | {}x{}x{} ({}-bit{}{}) | quality={} ({}) | chroma={} | tile={} ({}x{}={}) | size={:.1} KiB ({:.2} bpp) | dir={:.1} KiB",
         h.version,
         h.width,
         h.height,
         h.channels,
         h.bit_depth(),
         if h.has_icc() { format!(", icc={}B", h.icc_bytes) } else { String::new() },
+        meta_desc,
         h.quality,
         if h.is_lossless() { "lossless" } else { "lossy" },
         if h.is_chroma_420() { "4:2:0" } else { "4:4:4" },

@@ -3,7 +3,9 @@
 
 use crate::checksum::crc32c;
 use crate::color::{merge_planes_rgb, merge_planes_u16, upsample_2x2_bilinear};
+use crate::entropy::{decode_spatial_palette, CODEC_SPATIAL_PALETTE};
 use crate::format::{VimgIndex, MAX_IMAGE_PIXELS, MAX_RESIZE_DIM, MAX_RESIZE_PIXELS};
+use crate::meta::VimgMetadata;
 use crate::range::{coalesce_ranges, RangeSource, RangeStats};
 use crate::subband::{decode_detail_level_bd, decode_ll_band_bd};
 use crate::wavelet::{level_dims, WaveletScratch, WaveletTile};
@@ -40,8 +42,11 @@ pub struct TransformQuery {
     pub verify_crc: bool,
     /// If `true`, salvage corrupt tiles as zeroed subbands instead of aborting decode.
     pub recover_corrupt: bool,
-    /// Coalesce nearby Range gaps `<= coalesce_gap` bytes (default `8192`).
+    /// Coalesce nearby Range gaps `<= coalesce_gap` bytes (default `2048`).
     pub coalesce_gap: u64,
+    /// Load optional trailing TLV metadata (`CICP`, `EXIF`, `XMP`) when present (default `true`).
+    /// Set to `false` for partial remote thumbnails/crops to avoid an extra trailing Range fetch.
+    pub load_metadata: bool,
 }
 
 impl Default for TransformQuery {
@@ -63,6 +68,7 @@ impl Default for TransformQuery {
             verify_crc: true,
             recover_corrupt: false,
             coalesce_gap: 2048,
+            load_metadata: true,
         }
     }
 }
@@ -83,6 +89,8 @@ pub struct DecodedImage {
     pub stats: RangeStats,
     /// Embedded ICC color profile (if present in the archive).
     pub icc_profile: Option<Vec<u8>>,
+    /// Embedded trailing TLV metadata (`CICP`, `EXIF`, `XMP`) when present and `load_metadata` is true.
+    pub metadata: Option<VimgMetadata>,
 }
 
 /// Computes target `(out_w, out_h)` and optimal minimum pyramid level `0..=dwt_levels`.
@@ -191,6 +199,11 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
     let bd_shift = bit_depth.saturating_sub(8);
     let mid_luma = 1i32 << (bit_depth - 1);
     let icc_profile = idx.read_icc_from_source(source, &prefix, query.verify_crc, &mut stats)?;
+    let metadata = if query.load_metadata && idx.meta_wire_len > 0 {
+        idx.read_metadata_from_source(source, query.verify_crc, &mut stats)?
+    } else {
+        None
+    };
 
     let (cx, cy, cw, ch) = match query.crop {
         Some((x, y, w, h)) => {
@@ -358,6 +371,41 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
 
         for (p_slot, &plane) in planes_to_fetch.iter().enumerate() {
             let (pw_full, ph_full) = hdr.tile_plane_dims(tx0 + ltx, ty0 + lty, plane);
+
+            // Fast zero-IDWT spatial Palette+RLE shortcut for lossless UI/screenshot/solid-alpha tiles!
+            if target_lvl == max_lvl && max_lvl >= 1 && query.blur <= 0.0 && query.sharpen <= 0.0 {
+                let kf = max_lvl * stride_lvl + p_slot * stride_plane + lty * stride_ty + ltx;
+                let ef = chunk_keys[kf].4;
+                let (cif, offf) = mapping[kf];
+                let blobf = &fetched[cif][offf..offf + ef.len as usize];
+                if blobf.first() == Some(&CODEC_SPATIAL_PALETTE) {
+                    let mut tile_px = match verify_chunk(blobf, ef.crc32c, hdr.has_crc() && query.verify_crc) {
+                        Ok(()) => decode_spatial_palette(blobf, pw_full, ph_full)?,
+                        Err(_) if query.recover_corrupt => vec![if plane == 0 { mid_luma as i16 } else { 0 }; pw_full * ph_full],
+                        Err(err) => return Err(err),
+                    };
+                    if plane == 0 && (query.brightness != 0 || (query.contrast - 1.0).abs() > 1e-4) {
+                        let c = query.contrast.clamp(0.1, 4.0);
+                        let b = (query.brightness as f32) * ((1u32 << bd_shift) as f32);
+                        let mid_f = mid_luma as f32;
+                        for v in &mut tile_px {
+                            *v = ((((*v as f32 - mid_f) * c) + mid_f + b).round() as i32)
+                                .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        }
+                    }
+                    if pw_full != dst_tw || ph_full != dst_th {
+                        tile_px = upsample_2x2_bilinear(&tile_px, pw_full, ph_full, dst_tw, dst_th);
+                    }
+                    match plane {
+                        0 => y_tile = Some(tile_px),
+                        1 => co_tile = Some(tile_px),
+                        2 => cg_tile = Some(tile_px),
+                        _ => a_tile = Some(tile_px),
+                    }
+                    continue;
+                }
+            }
+
             let (ll_w, ll_h) = level_dims(pw_full, ph_full, max_lvl);
 
             let k0 = p_slot * stride_plane + lty * stride_ty + ltx;
@@ -556,6 +604,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
             tiles_total: hdr.n_tiles(),
             stats,
             icc_profile,
+            metadata,
         })
     } else {
         let mut pixels16 = vec![0u16; sub_w * sub_h * out_ch];
@@ -608,6 +657,7 @@ pub fn decode_from_source(source: &dyn RangeSource, query: &TransformQuery) -> R
             tiles_total: hdr.n_tiles(),
             stats,
             icc_profile,
+            metadata,
         })
     }
 }

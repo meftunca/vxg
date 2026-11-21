@@ -112,7 +112,13 @@ jobs:
               assert(full.status == 0 && full.len == sizeof(px) && memcmp(full.ptr, px, sizeof(px)) == 0);
               VimgBuf no_icc = vimg_extract_icc_alloc(enc.ptr, enc.len);
               assert(no_icc.status == 1 && no_icc.ptr == NULL);
-              vimg_free(no_icc); vimg_free(full); vimg_free(dec); vimg_free(enc);
+              VimgCicpC cicp;
+              assert(vimg_extract_cicp(enc.ptr, enc.len, &cicp) == 0 && cicp.present == 0);
+              VimgBuf no_exif = vimg_extract_exif_alloc(enc.ptr, enc.len);
+              assert(no_exif.status == 1 && no_exif.ptr == NULL);
+              VimgBuf no_xmp = vimg_extract_xmp_alloc(enc.ptr, enc.len);
+              assert(no_xmp.status == 1 && no_xmp.ptr == NULL);
+              vimg_free(no_xmp); vimg_free(no_exif); vimg_free(no_icc); vimg_free(full); vimg_free(dec); vimg_free(enc);
               return 0;
           }
           EOF

@@ -11,6 +11,7 @@ pub mod entropy;
 pub mod exif;
 pub mod ffi;
 pub mod format;
+pub mod meta;
 pub mod ops;
 pub mod range;
 pub mod simd;
@@ -21,6 +22,7 @@ pub mod wavelet;
 use core::fmt;
 
 pub use format::{crop_vimg_zero_decode, encode_vimg, encode_vimg_u16, VimgHeader, VimgIndex};
+pub use meta::{Cicp, VimgMetadata};
 pub use ops::{decode_from_source, plan_query_ranges, DecodedImage, TransformQuery};
 pub use range::{coalesce_ranges, RangeSource, RangeStats, SliceRangeSource, SparseRangeSource};
 #[cfg(not(target_arch = "wasm32"))]
@@ -74,6 +76,15 @@ pub struct EncodeOptions {
     pub bit_depth: u8,
     /// Optional embedded ICC color profile (e.g., Display P3, AdobeRGB, sRGB; capped at 16 MiB).
     pub icc_profile: Option<Vec<u8>>,
+    /// Enable tile-adaptive psychovisual quantization (`CODEC_BLK4_AQ`) in lossy mode (`quality < 100`).
+    /// Smooth regions get finer steps (less banding); chaotic textures get contrast-masked coarser steps.
+    pub adaptive_quant: bool,
+    /// Optional CICP HDR color tags (`sRGB`, `Display P3`, `BT.2020 PQ`, `BT.2020 HLG`).
+    pub cicp: Option<Cicp>,
+    /// Optional raw EXIF metadata payload preserved in the trailing TLV section.
+    pub exif: Option<Vec<u8>>,
+    /// Optional raw XMP XML metadata packet preserved in the trailing TLV section.
+    pub xmp: Option<Vec<u8>>,
 }
 
 impl Default for EncodeOptions {
@@ -87,6 +98,10 @@ impl Default for EncodeOptions {
             threads: 0,
             bit_depth: 8,
             icc_profile: None,
+            adaptive_quant: false,
+            cicp: None,
+            exif: None,
+            xmp: None,
         }
     }
 }

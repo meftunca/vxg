@@ -40,12 +40,14 @@ Unlike static monolithic codecs (`JPEG`, `WebP`, `AVIF`) that force CDNs, edge p
    - **Per-Chunk Hardware `CRC32C`** (`ARMv8`, `SSE4.2`, software fallback) + `recover_corrupt` tile salvaging.
 5. **Hardware SIMD Acceleration (`ARMv8 NEON` + `x86_64 AVX2` + `wasm32 simd128`)**:
    - Vectorized `RGB ↔ YCoCg-R`, `4:2:0` downsample & `2×2` bilinear upsample, horizontal & transpose-free row-major vertical `CDF 9/7` + `CDF 5/3` lifting, `FCVTAS` rounding, branchless `CMOV` range coding, L1-hot tile-local color split & merge, reusable per-worker `WaveletScratch`, zero-alloc `CODEC_ALL_ZERO` skip, and dynamic `AtomicUsize` work-stealing.
-6. **Production Hardening, HTTPS TLS, HDR, ICC & Fuzzing (`v0.2`)**:
-   - **Direct `https://` TLS 1.3 Range Streaming (`tls` / `io` feature)**: Pure-Rust `rustls` + `webpki-roots` (zero OpenSSL) with `http:// → https://` redirects, `Connection: keep-alive` pooling, parallel 4-stream multi-range fetch, and timeouts; default core `[lib]` remains **0 external crates**.
-   - **10-bit & 12-bit HDR + ICC Color Profiles**: Reversible integer `CDF 5/3` & lossy `CDF 9/7` HDR (`encode_u16` / `DecodedImage.pixels_u16`, CLI `--bit-depth 10|12`) + `CRC32C`-protected embedded Display P3 / AdobeRGB / sRGB ICC profiles preserved across zero-decode `vimg crop` and auto-extracted from JPEG `APP2`.
-   - **Hardened Bounds & Fuzzing**: `MAX_IMAGE_DIM`, `MAX_IMAGE_PIXELS`, `MAX_DIR_BYTES`, `MAX_ICC_BYTES`, `MAX_CHUNK_BYTES`, `wasm32`-safe checked arithmetic, **12,000-case adversarial fuzz suite** (`tests/vimg_fuzz.rs`), `cargo-fuzz` / `libFuzzer` targets (`crates/vimg/fuzz/`), and cross-arch golden wire vectors (`tests/golden_vimg.rs`).
-   - **Hardened `vimg serve`**: Zero-full-read `pread` `206 Partial Content`, `ETag`/`304 Not Modified`/`Cache-Control`, bounded 64-worker pool (`503` overload protection), and pure-Rust JPEG EXIF Orientation `1..=8` auto-correction.
-   - **Portability**: IEEE-754 cross-architecture deterministic `1T == NT` encoding, **244 KiB** stripped `+simd128` zero-WASI `wasm32`, and panic-safe C99 ABI (`crates/vimg/include/vimg.h` with `VimgQueryC`, `vimg_decode_query_v2_alloc`, `vimg_extract_icc_alloc`).
+6. **Production Hardening, HTTPS TLS, HDR, ICC, CICP/EXIF/XMP & UI Mode (`v0.3`)**:
+   - **Tile-Adaptive Psychovisual Quantization (`--aq` / `CODEC_BLK4_AQ`)**: Finer quantization (`0.75×–0.875×`) on smooth sky/skin tiles and contrast-masked coarser steps (`1.19×–1.50×`) on chaotic high-frequency textures, fully tile-independent for HTTP-Range.
+   - **Lossless UI / Screenshot Mode (`CODEC_SPATIAL_PALETTE` + 2D Scanline Repeat)**: Automatic `<= 32`-value spatial palette + horizontal RLE + 2D previous-row repeat on lossless UI/diagram/solid-alpha tiles — decodes 1080p UI screenshots in **`1.00 ms`** (zero IDWT, faster than PNG) at **`0.20 bpp` (`118×` compression)**.
+   - **CICP HDR Signaling + EXIF / XMP Trailing TLV Metadata**: ITU-T H.273 CICP (`sRGB`, `Display-P3`, `BT.2020/PQ`, `BT.2020/HLG`) + raw EXIF & XMP preserved in a `CRC32C`-protected trailing TLV block (skipped on remote partial queries when `load_metadata = false`, preserved across zero-decode `vimg crop`).
+   - **Direct `https://` TLS 1.3 Range Streaming (`tls` / `io` feature)**: Pure-Rust `rustls` + `webpki-roots` (zero OpenSSL) with `http:// → https://` redirects, `Connection: keep-alive` pooling, parallel 4-stream multi-range fetch, IPv4-first DNS fallback, and 1-RTT `16 KiB` prefix; default core `[lib]` remains **0 external crates**.
+   - **10-bit & 12-bit HDR + ICC Color Profiles**: Reversible integer `CDF 5/3` & lossy `CDF 9/7` HDR (`encode_u16`, CLI `--bit-depth 10|12`) + `CRC32C`-protected Display P3 / AdobeRGB / sRGB ICC profiles.
+   - **Hardened Bounds, Server & Fuzzing**: Hard OOM-bomb bounds, **12,000-case adversarial fuzz suite** (`tests/vimg_fuzz.rs`), `cargo-fuzz` / `libFuzzer` targets (`crates/vimg/fuzz/`), cross-arch golden wire vectors, and hardened `vimg serve` (`pread` `206`, `ETag`/`304`, 64-worker `503` protection, EXIF orientation).
+   - **Portability**: IEEE-754 cross-architecture deterministic `1T == NT` encoding, **263 KiB** stripped `+simd128` zero-WASI `wasm32`, and panic-safe C99 ABI (`crates/vimg/include/vimg.h`).
 
 ---
 
@@ -90,7 +92,7 @@ All codecs encoded from the exact same lossless PNG references across 5 diverse 
 # Run core zero-dependency tests
 cargo test --manifest-path crates/vimg/Cargo.toml --release
 
-# Build zero-WASI WebAssembly module with SIMD128 (244 KiB stripped)
+# Build zero-WASI WebAssembly module with SIMD128 (263 KiB stripped)
 RUSTFLAGS="-C target-feature=+simd128 -C strip=symbols" cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
 
 # Build CLI with PNG/JPEG/WebP/BMP I/O
