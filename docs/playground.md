@@ -8,6 +8,8 @@ aside: false
 
 Run the exact Rust `VXG1` v4 codec and compressed-domain analytics engine directly inside your browser via `wasm32-unknown-unknown` — **100% client-side, zero WASI/host imports, zero server uploads**.
 
+Looking for compressed-domain **image** crop/resize/effects over HTTP/1.1 `Range`? Try the **[Live `vimg.wasm` Image Playground →](/vimg-playground)**.
+
 <WasmPlayground />
 
 ---

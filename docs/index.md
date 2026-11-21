@@ -2,22 +2,25 @@
 layout: home
 
 hero:
-  name: "VXG Codec v0.5.3"
+  name: "VXG Codec v0.6.0"
   text: "Vectorized Execution Grammar"
   tagline: "Store raw NDJSON/CSV verbatim (1.2x–15.4x faster ingest than Parquet ETL), 1.17x–1.97x smaller 64 KiB blocks than Zstd + Trained Dict [32..256 KiB] on flat tabular & time-series records, beat Zstd+Dict-9 on the 6-dataset real public geomean (0.1171 vs 0.1181), run SQL or filtered zero-dependency Arrow / DuckDB / Polars read_vxg() exports on 40M+ compressed rows, and recover the original file byte-for-byte."
   actions:
     - theme: brand
-      text: Try Live WASM Playground →
+      text: VXG WASM Playground →
       link: /playground
     - theme: brand
-      text: AI Tensor & Metal LLM (.vxt) →
+      text: VIMG Image Playground →
+      link: /vimg-playground
+    - theme: alt
+      text: Image Codec (.vimg)
+      link: /VIMG
+    - theme: alt
+      text: AI Tensor (.vxt)
       link: /TENSOR
     - theme: alt
       text: Get Started
       link: /guide/getting-started
-    - theme: alt
-      text: Real Corpora & 40M DuckDB Benchmarks
-      link: /CHIMERA_BENCHMARKS
     - theme: alt
       text: View on GitHub
       link: https://github.com/meftunca/vxg
@@ -31,6 +34,8 @@ features:
     details: "With zero-alloc GroupAccumSoa, Top-K zone-map pruning & row-bounded `--record-aligned`, VXG wins 15/15 in-cache 1T & 8T (`0.03–0.23 ms` 8T), 5/5 1T & 8T on 10M NDJSON (`1.31–4.31 ms` 8T, `8.10–31.06 ms` 1T), and 5/5 8T (4/5 1T) on 40M CSV, while DuckDB + Parquet leads 1T 40M CSV Top-10 and fixed-64K 10M NDJSON scans."
   - title: "vxg-tensor (.vxt) AI Model Codec, Metal & NVIDIA CUDA Resident LLM"
     details: "VXT-Turbo E8/E8-HQ beats GGUF Q6_K (-0.43 GB, -32% TR KLD) and Q8_0 (-0.89 GB, -56% TR KLD) on Qwen3.5-9B; 962.86 tok/s Q3 / 796.28 tok/s Q6 on RTX 5090 CUDA Resident, 298 tok/s on Apple M2 Max Metal, MoE + Vision 3D M-RoPE, zero-OOM streaming packer, and OpenAI SSE + Prometheus server."
+  - title: "vimg (.vimg) HTTP-Range Wavelet Image Codec & 144 KiB WASM Studio"
+    details: "Zero-dependency pure-Rust YCoCg-R + CDF 5/3 & 9/7 wavelet pyramid + 128-context 2D Adaptive Binary Range Coder. -38.6% vs PNG lossless, -46.8% vs JPEG lossy (beats WebP on portraits/landscapes at 25x faster encode), and 1 ms remote HTTP 206 crops/resizes/effects."
 ---
 
 ## Why VXG?

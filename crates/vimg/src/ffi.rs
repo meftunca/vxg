@@ -357,3 +357,63 @@ pub unsafe extern "C" fn vimg_wasm_decode_sparse(
         }
     }
 }
+
+/// Encodes browser `ImageData` (`RGBA8`, `width * height * 4` bytes) into a `.vimg` buffer in WASM.
+/// Auto-detects opaque images and packs them as 3-channel RGB for maximum compression ratio.
+/// On success returns `0` with `WASM_META[6] = ptr`, `WASM_META[7] = len` (`cap == len`).
+#[no_mangle]
+pub unsafe extern "C" fn vimg_wasm_encode_rgba(
+    rgba_ptr: *const u8,
+    width: u32,
+    height: u32,
+    quality: u8,
+    tile_size: u32,
+) -> i32 {
+    let meta = &mut *core::ptr::addr_of_mut!(WASM_META);
+    meta.fill(0);
+    if rgba_ptr.is_null() || width == 0 || height == 0 {
+        meta[0] = 1;
+        return -1;
+    }
+    let n_px = (width as usize).saturating_mul(height as usize);
+    let rgba = core::slice::from_raw_parts(rgba_ptr, n_px * 4);
+    let has_alpha = rgba.chunks_exact(4).any(|p| p[3] != 255);
+    let (pixels, ch): (Vec<u8>, u8) = if has_alpha {
+        (rgba.to_vec(), 4)
+    } else {
+        let mut rgb = Vec::with_capacity(n_px * 3);
+        for p in rgba.chunks_exact(4) {
+            rgb.extend_from_slice(&[p[0], p[1], p[2]]);
+        }
+        (rgb, 3)
+    };
+    let opts = EncodeOptions {
+        quality: quality.clamp(1, 100),
+        tile_size: if tile_size == 0 { 256 } else { tile_size },
+        dwt_levels: 3,
+        chroma_420: quality < 100,
+        checksum: true,
+        threads: 1,
+    };
+    match encode(&pixels, width, height, ch, &opts) {
+        Ok(mut encoded) => {
+            encoded.shrink_to_fit();
+            let ptr = encoded.as_mut_ptr();
+            let len = encoded.len();
+            core::mem::forget(encoded);
+            meta[1] = width;
+            meta[2] = height;
+            meta[3] = ch as u32;
+            meta[6] = ptr as u32;
+            meta[7] = len as u32;
+            meta[9] = len as u32;
+            meta[10] = opts.tile_size;
+            meta[11] = opts.dwt_levels as u32;
+            0
+        }
+        Err(_) => {
+            meta[0] = 2;
+            -2
+        }
+    }
+}

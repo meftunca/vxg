@@ -26,7 +26,14 @@ export default defineConfig({
   themeConfig: {
     siteTitle: 'VXG v0.6.0',
     nav: [
-      { text: 'Playground (WASM)', link: '/playground' },
+      {
+        text: 'Playgrounds (WASM)',
+        items: [
+          { text: 'VXG Data Studio (vxg.wasm)', link: '/playground' },
+          { text: 'VIMG HTTP-Range Image Studio (vimg.wasm)', link: '/vimg-playground' }
+        ]
+      },
+      { text: 'Image (.vimg)', link: '/VIMG' },
       { text: 'AI Tensor (.vxt)', link: '/TENSOR' },
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Architecture', link: '/guide/architecture' },
@@ -38,6 +45,7 @@ export default defineConfig({
         items: [
           { text: 'Wire Format (v1–v5)', link: '/FORMAT' },
           { text: 'Column Models (v3/v4)', link: '/FORMAT_V3' },
+          { text: 'Image Codec (VIMG1)', link: '/VIMG' },
           { text: 'AI Tensor Codec (VXT1)', link: '/TENSOR' },
           { text: 'Mathematical Proofs', link: '/PROOFS' },
           { text: 'Safety & Security', link: '/SAFETY' },
@@ -50,7 +58,9 @@ export default defineConfig({
         text: 'Introduction & Guide',
         items: [
           { text: 'Overview', link: '/' },
-          { text: 'Live WASM Playground', link: '/playground' },
+          { text: 'Live WASM Playground (VXG)', link: '/playground' },
+          { text: 'Live WASM Playground (VIMG)', link: '/vimg-playground' },
+          { text: 'HTTP-Range Image Codec (.vimg)', link: '/VIMG' },
           { text: 'AI Tensor & Metal LLM (.vxt)', link: '/TENSOR' },
           { text: 'Getting Started & CLI', link: '/guide/getting-started' },
           { text: 'Architecture & SIMD Internals', link: '/guide/architecture' },

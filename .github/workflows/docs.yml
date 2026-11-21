@@ -5,6 +5,7 @@ on:
     paths:
       - "docs/**"
       - "src/**"
+      - "crates/vimg/**"
       - "Cargo.toml"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -32,13 +33,15 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Build zero-dependency vxg.wasm for Playground
+      - name: Build zero-dependency vxg.wasm and vimg.wasm for Playgrounds
         env:
           RUSTFLAGS: "-C strip=symbols"
         run: |
           mkdir -p docs/public
           cargo build --release --lib --target wasm32-unknown-unknown
           cp target/wasm32-unknown-unknown/release/vxg.wasm docs/public/vxg.wasm
+          cargo build --manifest-path crates/vimg/Cargo.toml --release --lib --target wasm32-unknown-unknown
+          cp crates/vimg/target/wasm32-unknown-unknown/release/vimg.wasm docs/public/vimg.wasm
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
