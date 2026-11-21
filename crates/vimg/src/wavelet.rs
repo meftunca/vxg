@@ -416,8 +416,7 @@ impl WaveletTile {
                     fbuf[y * final_w + x] = self.ll[y * self.ll_w + x] as f32;
                 }
             }
-            for k in 0..lvl {
-                let d = &self.details[k];
+            for (k, d) in self.details.iter().enumerate().take(lvl) {
                 let gain = detail_gains.get(k).copied().unwrap_or(1.0);
                 let lw = d.out_w.div_ceil(2);
                 let hw = d.out_w / 2;
@@ -454,8 +453,7 @@ impl WaveletTile {
                 .copy_from_slice(&self.ll[y * self.ll_w..(y + 1) * self.ll_w]);
         }
 
-        for k in 0..lvl {
-            let d = &self.details[k];
+        for (k, d) in self.details.iter().enumerate().take(lvl) {
             let gain = detail_gains.get(k).copied().unwrap_or(1.0);
             let lw = d.out_w.div_ceil(2);
             let hw = d.out_w / 2;
