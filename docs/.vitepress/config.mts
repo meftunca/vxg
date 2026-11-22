@@ -32,75 +32,76 @@ export default defineConfig({
     siteTitle: 'VXG v0.7.0',
     nav: [
       {
-        text: 'Playgrounds (WASM)',
+        text: 'Modules',
         items: [
-          { text: 'VXG Data Studio (vxg.wasm)', link: '/playground' },
-          { text: 'VIMG HTTP-Range Image Studio (vimg.wasm)', link: '/vimg-playground' }
+          { text: 'VXG Core (Data & SQL · v0.7.0)', link: '/guide/getting-started' },
+          { text: 'VXG-KV (Stateless Redis · v0.3.0)', link: '/KV' },
+          { text: 'VXT-Turbo (E8 AI LLM · v0.6.0)', link: '/TENSOR' },
+          { text: 'VIMG (Wavelet Imaging · v0.4.0)', link: '/VIMG' }
         ]
       },
-      { text: 'VXG-KV (Redis)', link: '/KV' },
-      { text: 'Image (.vimg)', link: '/VIMG' },
-      { text: 'AI Tensor (.vxt)', link: '/TENSOR' },
-      { text: 'Guide', link: '/guide/getting-started' },
-      { text: 'Benchmarks', link: '/BENCHMARKS' },
       {
-        text: 'Specifications',
+        text: 'Playgrounds',
+        items: [
+          { text: 'VXG SQL Studio (WASM)', link: '/playground' },
+          { text: 'VIMG Image Studio (WASM)', link: '/vimg-playground' }
+        ]
+      },
+      { text: 'Quick Start', link: '/guide/getting-started' },
+      { text: 'Benchmarks', link: '/CHIMERA_BENCHMARKS' },
+      {
+        text: 'Specs',
         items: [
           { text: 'Wire Format (v1–v5)', link: '/FORMAT' },
-          { text: 'Column Models (v3/v4)', link: '/FORMAT_V3' },
-          { text: 'Stateless Redis (VXG-KV)', link: '/KV' },
-          { text: 'Image Codec (VIMG1)', link: '/VIMG' },
-          { text: 'AI Tensor Codec (VXT1)', link: '/TENSOR' },
           { text: 'Architecture & SIMD', link: '/guide/architecture' },
-          { text: 'API & FFI', link: '/guide/api-and-ffi' },
-          { text: 'Energy (GCI)', link: '/ENERGY_BENCHMARKS' },
-          { text: 'Mathematical Proofs', link: '/PROOFS' },
+          { text: 'Rust API & FFI / Arrow', link: '/guide/api-and-ffi' },
           { text: 'Safety & Security', link: '/SAFETY' },
-          { text: 'GPU Kernels', link: '/GPU' }
+          { text: 'Roadmap', link: '/ROADMAP' }
         ]
       }
     ],
     sidebar: [
       {
-        text: 'Introduction & Ecosystem',
+        text: 'Start Here',
         items: [
           { text: 'Overview', link: '/' },
-          { text: 'Live WASM Playground (VXG)', link: '/playground' },
-          { text: 'Live WASM Playground (VIMG)', link: '/vimg-playground' },
-          { text: 'Stateless Redis (VXG-KV)', link: '/KV' },
-          { text: 'HTTP-Range Image Codec (.vimg)', link: '/VIMG' },
-          { text: 'AI Tensor & Metal/CUDA LLM (.vxt)', link: '/TENSOR' },
-          { text: 'Getting Started & CLI', link: '/guide/getting-started' },
-          { text: 'Architecture & SIMD Internals', link: '/guide/architecture' },
-          { text: 'Compressed-Domain Engine', link: '/STAGE2_DESIGN' },
-          { text: 'Rust API, Analytics & FFI', link: '/guide/api-and-ffi' },
-          { text: 'Cross-Language FFI Reference', link: '/FFI' },
-          { text: 'Roadmap', link: '/ROADMAP' }
+          { text: 'Quick Start & CLI', link: '/guide/getting-started' },
+          { text: 'SQL Playground (WASM)', link: '/playground' },
+          { text: 'Image Studio (WASM)', link: '/vimg-playground' }
         ]
       },
       {
-        text: 'Benchmarks & Energy',
+        text: 'Modules',
         items: [
-          { text: 'Cross-Platform Benchmarks', link: '/BENCHMARKS' },
+          { text: 'VXG Core (Data, SQL & Range)', link: '/guide/getting-started' },
+          { text: 'VXG-KV (Stateless Redis)', link: '/KV' },
+          { text: 'VXT-Turbo (AI LLM / Metal / CUDA)', link: '/TENSOR' },
+          { text: 'VIMG (Wavelet Image & Animation)', link: '/VIMG' }
+        ]
+      },
+      {
+        text: 'Benchmarks',
+        items: [
           { text: 'Competitor Sweep & 40M DuckDB', link: '/CHIMERA_BENCHMARKS' },
-          { text: 'Energy & Composite Indices (VPI / GCI)', link: '/ENERGY_BENCHMARKS' },
+          { text: 'Cross-Platform CI Baseline', link: '/BENCHMARKS' },
+          { text: 'Energy & Green Codec Index', link: '/ENERGY_BENCHMARKS' },
           { text: 'Validation & Reproducibility', link: '/VALIDATION' }
         ]
       },
       {
-        text: 'Wire Format & Proofs',
-        items: [
-          { text: 'VXG1 Wire Specification (v1–v5)', link: '/FORMAT' },
-          { text: 'Structured Column Models', link: '/FORMAT_V3' },
-          { text: 'Mathematical Contracts & Proofs', link: '/PROOFS' },
-          { text: 'Safety & Security Boundary', link: '/SAFETY' },
-          { text: 'Native GPU Architecture', link: '/GPU' }
-        ]
-      },
-      {
-        text: 'Engineering History',
+        text: 'Specs & Deep Dive',
         collapsed: true,
         items: [
+          { text: 'Architecture & SIMD Internals', link: '/guide/architecture' },
+          { text: 'Rust API, Analytics & FFI', link: '/guide/api-and-ffi' },
+          { text: 'Cross-Language FFI Reference', link: '/FFI' },
+          { text: 'VXG1 Wire Specification (v1–v5)', link: '/FORMAT' },
+          { text: 'Structured Column Models', link: '/FORMAT_V3' },
+          { text: 'Compressed-Domain Engine', link: '/STAGE2_DESIGN' },
+          { text: 'Mathematical Proofs', link: '/PROOFS' },
+          { text: 'Safety & Security Boundary', link: '/SAFETY' },
+          { text: 'Native GPU Architecture', link: '/GPU' },
+          { text: 'Roadmap', link: '/ROADMAP' },
           { text: 'Release Progress Log', link: '/PROGRESS' },
           { text: 'References', link: '/REFERENCES' }
         ]

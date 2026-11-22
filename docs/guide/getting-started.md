@@ -34,13 +34,17 @@ Build outputs in `target/release/`:
 
 | Command | Description |
 | :--- | :--- |
-| `vxg compress` (`c`) `INPUT OUTPUT [FLAGS]` | Compress `INPUT` file or `stdin` (`-`) into a Format v4 `.vxg` frame. |
+| `vxg compress` (`c`) `INPUT OUTPUT [FLAGS]` | Compress `INPUT` file or `stdin` (`-`) into a Format v4/v5 `.vxg` frame (`--record-aligned`, `--level 1..9`). |
 | `vxg decompress` (`d`) `INPUT OUTPUT [FLAGS]` | Decompress `.vxg` frame (single or concatenated stream) to `OUTPUT` or `stdout` (`-`). |
+| `vxg sql` `FRAME_OR_URL "SELECT ..."` | Run compressed-domain SQL (`EXPLAIN`, `SELECT`, `DISTINCT`, `COUNT(DISTINCT)`, `WHERE` + `IS [NOT] NULL`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT/OFFSET`) locally or over `http://` Range! |
+| `vxg serve` `DIR [--port 8080]` | Serve local `.vxg` files over HTTP/1.1 `Range` (`206 Partial Content`) with zero external dependencies. |
+| `vxg arrow` `FRAME OUTPUT.arrows [--where ...]` | Export filtered compressed-domain columns directly to zero-dependency Apache Arrow IPC (`DuckDB` / `Polars` `read_vxg()`). |
+| `vxg recover` `FRAME OUTPUT [--report]` | Salvage intact blocks from partially corrupted `.vxg` frames. |
 | `vxg verify` (`t`) `FRAME [FLAGS]` | Verify frame header, compact directory, block boundaries, and CRC32C checksums without writing output. |
-| `vxg info` (`list`) `FRAME [--summary]` | Print frame version (`v1`–`v4`), raw/encoded byte sizes, ratio, and block-type breakdown (`RAW`, `LZ`, `COLUMN`). |
-| `vxg block` `FRAME INDEX [OUTPUT] [-f]` | $O(1)$ random-access extraction of a single block (`0..block_count`) without decoding other blocks. |
-| `vxg query` (`q`) `FRAME [QUERY_FLAGS]` | Compressed-domain row count, row/range extraction, substring search, compound `--where` filter, `--select` column projection, and `--order-by COL [--desc\|--asc]` Top-K heap query. |
-| `vxg agg` `FRAME [AGG_FLAGS]` | Compressed-domain scalar aggregation (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) and `GROUP BY` (`--group-by COL`) with `--order-by key\|rows\|count\|sum\|avg\|min\|max [--desc\|--asc] [--limit K]`. |
+| `vxg info` (`list`) `FRAME_OR_URL [--summary]` | Print frame version (`v1`–`v5`), raw/encoded byte sizes, ratio, and block-type breakdown (`RAW`, `LZ`, `DICT_LZ`, `COLUMN`). |
+| `vxg block` `FRAME_OR_URL INDEX [OUTPUT] [-f]` | $O(1)$ random-access extraction of a single block (`0..block_count`) locally or over `http://` Range. |
+| `vxg query` (`q`) `FRAME_OR_URL [QUERY_FLAGS]` | Compressed-domain row count, row/range extraction, substring search, compound `--where` filter, `--select`, and `--order-by` Top-K. |
+| `vxg agg` `FRAME [AGG_FLAGS]` | Compressed-domain scalar aggregation (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) and `GROUP BY`. |
 | `vxg project` `INPUT OUTPUT --cols C1,C2,...` | Compressed-domain column projection into a new `.vxg` frame (zero-reencode column splicing when unfiltered). |
 | `vxg filter-frame` `INPUT OUTPUT --where EXPR` | Produce a new `.vxg` frame containing only rows matching compound `--where EXPR` (splices 100%-matching blocks verbatim). |
 | `vxg update` `INPUT OUTPUT --where SPEC --col COL ...` | Conditional single-column mutation (`--set`, `--set-raw`, `--upper`, `--lower`, `--redact`, `--add`) without full decode/re-encode. |
