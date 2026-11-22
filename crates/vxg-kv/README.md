@@ -35,15 +35,15 @@ cargo run --release -p vxg-kv -- bench --keys 100000
 
 ## Head-to-Head vs `Redis 8.10.3` (`redis-benchmark`, Same Host)
 
-| Benchmark (`redis-benchmark`) | `Redis 8.10.3` | `vxg-kv` | Speedup |
+| Benchmark (`redis-benchmark`) | `Redis 8.10.3` | `vxg-kv` | Speedup / Savings |
 | :--- | ---: | ---: | :---: |
-| **`c=1, P=1` (11 commands: `PING`/`SET`/`GET`/`INCR`/`LPUSH`/`HSET`/`ZADD`/`MSET`…)** | 42.6k – 48.9k ops/s (`1.74s` CPU, `7.8 MiB`) | **46.7k – 51.4k ops/s (`1.44s` CPU, `5.0 MiB`)** | **`1.03× – 1.13×`** (11/11) |
-| **`c=1, P=16` (`PING`/`SET`/`GET`/`INCR`/`LPUSH`/`LPOP`/`HSET`/`ZADD`/`MSET`)** | 235k – 595k ops/s (`1.23s` CPU) | **353k – 637k ops/s (`0.89s` CPU)** | **`1.00× – 1.51×`** |
-| **`c=16, P=16` (`SET`/`INCR`/`LPUSH`/`RPUSH`/`LPOP`/`SADD`/`HSET`/`ZADD`/`MSET`)** | 325k – 1.41M ops/s | **962k – 1.56M ops/s** | **`1.09× – 2.96×`** |
-| **100k JSON Load (`12 MB` raw, `P=500`)** | `201.3 ms` | **`181.2 ms`** *(+ `86.6 ms` compact)* | **`1.11×`** |
+| **`c=1, P=1` (`PING`/`SET`/`GET`/`INCR`/`LPUSH`/`HSET`/`ZADD`/`MSET`)** | 34.9k – 49.4k ops/s (`1.72s` CPU, `7.7 MiB`) | **50.8k – 53.9k ops/s (`1.37s` CPU, `4.4 MiB`)** | **`1.05× – 1.50×`** |
+| **`c=1, P=16` (11 / 11 commands: `PING`/`SET`/`GET`/`INCR`/`LPUSH`/`LPOP`/`SADD`/`HSET`/`ZADD`/`MSET`)** | 238k – 606k ops/s (`1.25s` CPU) | **645k – 926k ops/s (`0.50s` CPU)** | **`1.24× – 2.78×`** (`2.5×` less CPU!) |
+| **`c=16, P=16` (`PING`/`SET`/`LPUSH`/`RPUSH`/`LPOP`/`SADD`/`HSET`/`ZADD`/`MSET`)** | 325k – 1.43M ops/s (`1.05s` CPU) | **1.45M – 1.67M ops/s (`0.85s` CPU)** | **`1.04× – 4.46×`** (`19%` less CPU!) |
+| **100k JSON Load (`12 MB` raw, `P=500`)** | `197.9 ms` | **`166.2 ms`** *(+ `66.4 ms` compact)* | **`1.19×` faster** |
 | **100k JSON Disk / Snapshot** | `5,458 KiB` (`dump.rdb`) | **`271.3 KiB`** (`snap.vxg`) | **`20.1×` smaller** |
-| **100k JSON Cold Reader Pod RAM (RSS)** | `20.39 MiB` | **`2.91 MiB`** | **`7.0×` less RAM** |
-| **100k JSON `GROUP BY` Analytics** | `212.83 ms` (`MGET` + JSON) | **`8.73 ms`** (`VXG.SQL`) | **`24.4×` faster** |
+| **100k JSON Cold Reader Pod RAM (RSS)** | `20.53 MiB` | **`2.88 MiB`** | **`7.1×` less RAM** |
+| **100k JSON `GROUP BY` Analytics** | `210.06 ms` (`MGET` + JSON) | **`8.84 ms`** (`VXG.SQL`) | **`23.8×` faster** |
 | **Live TCP Streams `XADD` (`P=32`)** | — | **`692,471 ops/s`** | Zero-clone in-place |
 
 ## Supported Commands

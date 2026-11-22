@@ -1,8 +1,36 @@
 //! Core KV data types, canonical NDJSON record wire format (VXG SQL-queryable & binary-safe),
 //! wall-clock helpers, and Redis glob pattern matching (`*`, `?`, `[abc]`).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::hash::{BuildHasher, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Default, Clone, Copy)]
+pub struct FxBuildHasher;
+pub struct FxHasher(u64);
+impl BuildHasher for FxBuildHasher {
+    type Hasher = FxHasher;
+    #[inline]
+    fn build_hasher(&self) -> FxHasher { FxHasher(0) }
+}
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 { self.0 }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        const K: u64 = 0x517cc1b727220a95;
+        let (chunks, rem) = bytes.as_chunks::<8>();
+        let mut h = self.0;
+        for c in chunks { h = (h.rotate_left(5) ^ u64::from_le_bytes(*c)).wrapping_mul(K); }
+        for &b in rem { h = (h.rotate_left(5) ^ (b as u64)).wrapping_mul(K); }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (self.0.rotate_left(5) ^ (i as u64)).wrapping_mul(0x517cc1b727220a95);
+    }
+}
+pub type FastMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 /// Current UTC Unix timestamp in milliseconds.
 pub fn now_ms() -> u64 {

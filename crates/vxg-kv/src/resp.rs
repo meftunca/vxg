@@ -111,16 +111,22 @@ impl Default for RespBuffer {
 impl RespBuffer {
     pub fn new() -> Self {
         Self {
-            buf: Vec::with_capacity(8192),
+            buf: Vec::with_capacity(32_768),
             pos: 0,
         }
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.pos >= self.buf.len()
     }
 
-    /// Read more bytes from `stream`. Returns `Ok(0)` on clean EOF.
+    #[inline]
+    pub fn raw_buf(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Read more bytes directly into internal buffer (zero intermediate copy). Returns `Ok(0)` on EOF.
     pub fn read_more<R: Read>(&mut self, stream: &mut R) -> io::Result<usize> {
         if self.pos > 0 {
             if self.pos >= self.buf.len() {
@@ -131,12 +137,124 @@ impl RespBuffer {
                 self.pos = 0;
             }
         }
-        let mut tmp = [0u8; 8192];
-        let n = stream.read(&mut tmp)?;
-        if n > 0 {
-            self.buf.extend_from_slice(&tmp[..n]);
+        let old_len = self.buf.len();
+        self.buf.resize(old_len + 32_768, 0);
+        match stream.read(&mut self.buf[old_len..]) {
+            Ok(n) => {
+                self.buf.truncate(old_len + n);
+                Ok(n)
+            }
+            Err(e) => {
+                self.buf.truncate(old_len);
+                Err(e)
+            }
         }
-        Ok(n)
+    }
+
+    /// Zero-allocation RESP2 + simple inline command scanner.
+    /// Appends `(start, end)` byte offsets into `self.buf` for every argument of every complete
+    /// command currently buffered, and appends `(arg_start, arg_end)` ranges into `cmd_ranges`.
+    /// Returns `Ok(true)` if all buffered commands were parsed with zero allocation, or `Ok(false)`
+    /// if a quoted inline command was encountered (caller can fall back to `next_command()`).
+    pub fn parse_batch_spans(
+        &mut self,
+        arg_spans: &mut Vec<(usize, usize)>,
+        cmd_ranges: &mut Vec<(usize, usize)>,
+    ) -> Result<bool, String> {
+        arg_spans.clear();
+        cmd_ranges.clear();
+        let bytes = &self.buf;
+        let len = bytes.len();
+        while self.pos < len {
+            let b = bytes[self.pos];
+            if b == b'\r' || b == b'\n' {
+                self.pos += 1;
+                continue;
+            }
+            if b == b'*' {
+                let mut cur = self.pos + 1;
+                let Some((argc, next)) = parse_usize_crlf(bytes, cur) else {
+                    break;
+                };
+                cur = next;
+                if argc == 0 {
+                    self.pos = cur;
+                    continue;
+                }
+                let saved_args = arg_spans.len();
+                let mut incomplete = false;
+                for _ in 0..argc {
+                    if cur >= len {
+                        incomplete = true;
+                        break;
+                    }
+                    if bytes[cur] != b'$' {
+                        arg_spans.truncate(saved_args);
+                        return Ok(false);
+                    }
+                    let Some((blen, body_start)) = parse_usize_crlf(bytes, cur + 1) else {
+                        incomplete = true;
+                        break;
+                    };
+                    if blen > 512 * 1024 * 1024 {
+                        arg_spans.truncate(saved_args);
+                        return Err("ERR bulk string exceeds 512 MiB".to_owned());
+                    }
+                    let body_end = body_start + blen;
+                    if body_end + 2 > len {
+                        incomplete = true;
+                        break;
+                    }
+                    arg_spans.push((body_start, body_end));
+                    cur = body_end + 2;
+                }
+                if incomplete {
+                    arg_spans.truncate(saved_args);
+                    break;
+                }
+                cmd_ranges.push((saved_args, arg_spans.len()));
+                self.pos = cur;
+            } else {
+                // Simple unquoted inline command (e.g. `PING\r\n`, `GET foo\r\n`)
+                let Some(rel_nl) = bytes[self.pos..].iter().position(|&c| c == b'\n') else {
+                    if len - self.pos > 1_048_576 {
+                        return Err("ERR inline command too large".to_owned());
+                    }
+                    break;
+                };
+                let line_end = self.pos + rel_nl;
+                let trim_end = if line_end > self.pos && bytes[line_end - 1] == b'\r' {
+                    line_end - 1
+                } else {
+                    line_end
+                };
+                if bytes[self.pos..trim_end]
+                    .iter()
+                    .any(|&c| c == b'"' || c == b'\'' || c == b'\\')
+                {
+                    return Ok(false);
+                }
+                let saved_args = arg_spans.len();
+                let mut i = self.pos;
+                while i < trim_end {
+                    while i < trim_end && matches!(bytes[i], b' ' | b'\t') {
+                        i += 1;
+                    }
+                    let st = i;
+                    while i < trim_end && !matches!(bytes[i], b' ' | b'\t') {
+                        i += 1;
+                    }
+                    if st < i {
+                        arg_spans.push((st, i));
+                    }
+                }
+                if arg_spans.len() > saved_args {
+                    cmd_ranges.push((saved_args, arg_spans.len()));
+                }
+                self.pos = line_end + 1;
+            }
+        }
+        Ok(true)
     }
 
     /// Try to parse one complete command (either RESP2 `*N` array or inline `PING\r\n`).
@@ -204,6 +322,27 @@ impl RespBuffer {
         self.pos += used;
         Ok(Some(val))
     }
+}
+
+#[inline]
+fn parse_usize_crlf(b: &[u8], start: usize) -> Option<(usize, usize)> {
+    let len = b.len();
+    let mut i = start;
+    let mut acc = 0usize;
+    let mut any = false;
+    while i < len {
+        let c = b[i];
+        if c.is_ascii_digit() {
+            acc = acc.checked_mul(10)?.checked_add((c - b'0') as usize)?;
+            any = true;
+            i += 1;
+        } else if c == b'\r' && i + 1 < len && b[i + 1] == b'\n' && any {
+            return Some((acc, i + 2));
+        } else {
+            return None;
+        }
+    }
+    None
 }
 
 fn find_crlf(b: &[u8]) -> Option<usize> {

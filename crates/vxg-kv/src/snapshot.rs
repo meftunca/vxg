@@ -10,7 +10,7 @@ use crate::index::{BlockIndexEntry, DecodedBlock, SnapshotIndex};
 use crate::pubsub::PubSubEvent;
 use crate::store::{ObjectStore, StoreRangeReader};
 use crate::types::{
-    decode_record_line, encode_record_line, hex_decode, hex_encode, now_ms, Record,
+    decode_record_line, encode_record_line, hex_decode, hex_encode, now_ms, FastMap, Record,
 };
 
 pub const MANIFEST_KEY: &str = "manifest.json";
@@ -181,22 +181,24 @@ fn parse_snap_array(s: &str, marker: &str) -> Result<Vec<SnapshotRef>, String> {
     Ok(out)
 }
 
-/// Build and upload a sorted VXG v5 snapshot (`snap_<epoch>.vxg`) + `VXI1` index (`snap_<epoch>.idx`).
-pub fn write_snapshot(
+/// Build and upload a sorted VXG v5 snapshot (`snap_<epoch>.vxg`) + `VXI1` index (`snap_<epoch>.idx`)
+/// from an already key-sorted slice of `(key, record)` pairs (zero JSON re-decode during indexing!).
+pub fn write_snapshot_sorted(
     store: &Arc<dyn ObjectStore>,
     epoch: u64,
-    records: &BTreeMap<Vec<u8>, Record>,
+    sorted: &[(&[u8], &Record)],
     block_size: usize,
 ) -> Result<(SnapshotRef, SnapshotIndex), String> {
     let now = now_ms();
-    let mut raw = Vec::with_capacity(records.len() * 64);
-    let mut live_count = 0u64;
-    for (k, rec) in records {
+    let mut raw = Vec::with_capacity(sorted.len() * 64);
+    let mut line_keys: Vec<(usize, &[u8])> = Vec::with_capacity(sorted.len());
+    for &(k, rec) in sorted {
         if rec.is_live(now) {
+            line_keys.push((raw.len(), k));
             encode_record_line(&mut raw, k, rec);
-            live_count += 1;
         }
     }
+    let live_count = line_keys.len() as u64;
     let enc_opts = Options {
         block_size: block_size.clamp(4096, 262_144),
         record_aligned: true,
@@ -208,18 +210,15 @@ pub fn write_snapshot(
     let frame = Frame::parse(&compressed, usize::MAX).map_err(|e| format!("frame parse: {e}"))?;
 
     let mut idx_blocks = Vec::with_capacity(frame.block_count());
+    let mut cursor = 0usize;
+    let mut key_refs: Vec<&[u8]> = Vec::new();
     for (bi, binfo) in frame.blocks().enumerate() {
-        let slice = &raw[binfo.raw_offset..binfo.raw_offset + binfo.raw_size];
-        let mut keys_owned: Vec<Vec<u8>> = Vec::new();
-        for line in slice.split(|&b| b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((k, _)) = decode_record_line(line) {
-                keys_owned.push(k);
-            }
+        let end_off = binfo.raw_offset + binfo.raw_size;
+        key_refs.clear();
+        while cursor < line_keys.len() && line_keys[cursor].0 < end_off {
+            key_refs.push(line_keys[cursor].1);
+            cursor += 1;
         }
-        let key_refs: Vec<&[u8]> = keys_owned.iter().map(Vec::as_slice).collect();
         idx_blocks.push(BlockIndexEntry::build(bi as u32, &key_refs));
     }
     let index = SnapshotIndex {
@@ -241,6 +240,27 @@ pub fn write_snapshot(
         created_ms: now,
     };
     Ok((snap_ref, index))
+}
+
+pub fn write_snapshot(
+    store: &Arc<dyn ObjectStore>,
+    epoch: u64,
+    records: &BTreeMap<Vec<u8>, Record>,
+    block_size: usize,
+) -> Result<(SnapshotRef, SnapshotIndex), String> {
+    let sorted: Vec<(&[u8], &Record)> = records.iter().map(|(k, r)| (k.as_slice(), r)).collect();
+    write_snapshot_sorted(store, epoch, &sorted, block_size)
+}
+
+pub fn write_snapshot_fastmap(
+    store: &Arc<dyn ObjectStore>,
+    epoch: u64,
+    records: &FastMap<Vec<u8>, Record>,
+    block_size: usize,
+) -> Result<(SnapshotRef, SnapshotIndex), String> {
+    let mut sorted: Vec<(&[u8], &Record)> = records.iter().map(|(k, r)| (k.as_slice(), r)).collect();
+    sorted.sort_unstable_by_key(|(k, _)| *k);
+    write_snapshot_sorted(store, epoch, &sorted, block_size)
 }
 
 /// Fetch strictly ONE block from a remote `.vxg` snapshot via `vxg::RemoteFrame` Range I/O.
@@ -292,7 +312,7 @@ pub fn read_full_snapshot(
 
 /// Encode KV delta mutations + cross-pod Pub/Sub events into a compressed `.vxg` WAL segment.
 pub fn encode_wal_segment(
-    mutations: &BTreeMap<Vec<u8>, Record>,
+    mutations: &FastMap<Vec<u8>, Record>,
     events: &[PubSubEvent],
 ) -> Result<Vec<u8>, String> {
     let mut raw = Vec::with_capacity(mutations.len() * 64 + events.len() * 64);

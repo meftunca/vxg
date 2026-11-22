@@ -9,16 +9,16 @@ use crate::engine::KvEngine;
 use crate::index::SnapshotIndex;
 use crate::snapshot::{
     decode_wal_segment, encode_wal_segment, execute_vxg_sql_on_frame, read_full_snapshot,
-    write_snapshot, Manifest, SnapshotRef, WalRef, MANIFEST_KEY,
+    write_snapshot, write_snapshot_fastmap, Manifest, SnapshotRef, WalRef, MANIFEST_KEY,
 };
 use crate::store::PutOutcome;
-use crate::types::{encode_record_line, glob_match, now_ms, Record};
+use crate::types::{encode_record_line, glob_match, now_ms, FastMap, Record};
 
 impl KvEngine {
     /// Clear all local and remote keys (commits an empty compacted snapshot).
     pub fn flush_all(&mut self) -> Result<u64, String> {
-        self.mem = BTreeMap::new();
-        self.wal_overlay = BTreeMap::new();
+        self.mem = FastMap::default();
+        self.wal_overlay = FastMap::default();
         self.pending_events.clear();
         self.applied_wals.clear();
         self.key_versions.clear();
@@ -68,7 +68,7 @@ impl KvEngine {
             (None, None) => false,
         };
         if base_changed {
-            self.wal_overlay = BTreeMap::new();
+            self.wal_overlay = FastMap::default();
             self.applied_wals.clear();
             self.remote_handle = None;
             if let Some(ref b) = remote.base_snapshot {
@@ -208,8 +208,8 @@ impl KvEngine {
             let next_epoch = self.manifest.epoch + 1;
             let base_empty = self.base.as_ref().is_none_or(|(s, _)| s.key_count == 0);
             let (snap_ref, idx) = if base_empty && self.wal_overlay.is_empty() {
-                // Zero-clone fast path: serialize directly from MemTable without duplicating 100k keys!
-                write_snapshot(&self.store, next_epoch, &self.mem, self.cfg.block_size)?
+                // Zero-clone fast path: sort references & serialize directly from MemTable!
+                write_snapshot_fastmap(&self.store, next_epoch, &self.mem, self.cfg.block_size)?
             } else {
                 let merged = self.materialize_live()?;
                 write_snapshot(&self.store, next_epoch, &merged, self.cfg.block_size)?
@@ -228,8 +228,8 @@ impl KvEngine {
             };
             match outcome {
                 PutOutcome::Written(new_etag) => {
-                    self.mem = BTreeMap::new();
-                    self.wal_overlay = BTreeMap::new();
+                    self.mem = FastMap::default();
+                    self.wal_overlay = FastMap::default();
                     self.applied_wals.clear();
                     self.pending_events.clear();
                     self.remote_handle = None;

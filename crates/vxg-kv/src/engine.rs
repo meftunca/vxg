@@ -11,7 +11,7 @@ use crate::index::{DecodedBlock, LookupPlan, LruBlockCache, SnapshotIndex};
 use crate::pubsub::{PubSubBroker, PubSubEvent};
 use crate::snapshot::{Manifest, SnapshotRef};
 use crate::store::{ObjectStore, StoreRangeReader};
-use crate::types::{decode_record_line, now_ms, Record, Value};
+use crate::types::{decode_record_line, now_ms, FastMap, Record, Value};
 
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -53,8 +53,8 @@ pub struct KvEngine {
     pub broker: Arc<PubSubBroker>,
     pub manifest: Manifest,
     pub manifest_etag: Option<String>,
-    pub mem: BTreeMap<Vec<u8>, Record>,
-    pub wal_overlay: BTreeMap<Vec<u8>, Record>,
+    pub mem: FastMap<Vec<u8>, Record>,
+    pub wal_overlay: FastMap<Vec<u8>, Record>,
     pub applied_wals: BTreeSet<u64>,
     pub pending_events: Vec<PubSubEvent>,
     pub base: Option<(SnapshotRef, SnapshotIndex)>,
@@ -62,7 +62,7 @@ pub struct KvEngine {
     pub(crate) remote_handle: Option<(u64, RemoteFrame<StoreRangeReader>)>,
     pub cache: LruBlockCache,
     pub next_ver: u64,
-    pub key_versions: HashMap<Vec<u8>, u64>,
+    pub key_versions: FastMap<Vec<u8>, u64>,
     pub stats: EngineStats,
 }
 
@@ -79,8 +79,8 @@ impl KvEngine {
             broker,
             manifest: Manifest::default(),
             manifest_etag: None,
-            mem: BTreeMap::new(),
-            wal_overlay: BTreeMap::new(),
+            mem: FastMap::default(),
+            wal_overlay: FastMap::default(),
             applied_wals: BTreeSet::new(),
             pending_events: Vec::new(),
             base: None,
@@ -88,7 +88,7 @@ impl KvEngine {
             remote_handle: None,
             cache,
             next_ver: 1,
-            key_versions: HashMap::new(),
+            key_versions: FastMap::default(),
             stats: EngineStats::default(),
         };
         eng.pull()?;
@@ -320,9 +320,29 @@ impl KvEngine {
     }
 
     /// Insert or update a live record in MemTable.
+    #[inline]
     pub fn set_record(&mut self, key: Vec<u8>, value: Value, expires_at_ms: Option<u64>) {
         let v = self.bump_ver(&key);
         self.mem.insert(key, Record::live(value, expires_at_ms, v));
+    }
+
+    /// Zero-allocation in-place string `SET`: reuses existing key & value Vec capacity on overwrite!
+    #[inline]
+    pub fn set_str_in_place(&mut self, key: &[u8], val: &[u8]) {
+        let v = self.bump_ver(key);
+        if let Some(rec) = self.mem.get_mut(key) {
+            rec.expires_at_ms = None;
+            rec.version = v;
+            if let Some(Value::Str(buf)) = rec.value.as_mut() {
+                buf.clear();
+                buf.extend_from_slice(val);
+            } else {
+                rec.value = Some(Value::Str(val.to_vec()));
+            }
+            return;
+        }
+        self.mem
+            .insert(key.to_vec(), Record::live(Value::Str(val.to_vec()), None, v));
     }
 
     /// Delete a key (writing a tombstone if it existed anywhere). Returns true if key existed.

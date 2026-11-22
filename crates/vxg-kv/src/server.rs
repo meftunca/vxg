@@ -7,9 +7,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::dispatch::ConnState;
-use crate::dispatch_vxg::dispatch_batch;
+use crate::dispatch::{dispatch_command, ConnState};
 use crate::engine::KvEngine;
+use crate::fast_path::dispatch_span_batch;
 use crate::pubsub::{PubSubBroker, PushMessage};
 use crate::resp::{RespBuffer, RespVal};
 
@@ -157,8 +157,9 @@ fn handle_client(
     let sub_id = broker.register(tx);
     let mut conn = ConnState::new(sub_id);
     let mut buf = RespBuffer::new();
-    let mut out_wire = Vec::with_capacity(8192);
-    let mut batch: Vec<Vec<Vec<u8>>> = Vec::with_capacity(32);
+    let mut out_wire = Vec::with_capacity(16_384);
+    let mut arg_spans: Vec<(usize, usize)> = Vec::with_capacity(128);
+    let mut cmd_ranges: Vec<(usize, usize)> = Vec::with_capacity(64);
     let mut sub_mode = false;
 
     while !shutdown.load(Ordering::Relaxed) && !conn.quit {
@@ -186,33 +187,75 @@ fn handle_client(
             Err(_) => break,
         }
 
-        batch.clear();
-        let mut parse_err = None;
-        loop {
-            match buf.next_command() {
-                Ok(Some(args)) => batch.push(args),
-                Ok(None) => break,
-                Err(err) => {
-                    parse_err = Some(err);
-                    break;
+        out_wire.clear();
+        let mut had_sub_cmd = false;
+        match buf.parse_batch_spans(&mut arg_spans, &mut cmd_ranges) {
+            Ok(true) => {
+                let raw = buf.raw_buf();
+                if !cmd_ranges.is_empty() {
+                    had_sub_cmd = cmd_ranges.iter().any(|&(a, b)| {
+                        a < b && {
+                            let (s, e) = arg_spans[a];
+                            let c = &raw[s..e];
+                            c.eq_ignore_ascii_case(b"SUBSCRIBE")
+                                || c.eq_ignore_ascii_case(b"UNSUBSCRIBE")
+                                || c.eq_ignore_ascii_case(b"PSUBSCRIBE")
+                                || c.eq_ignore_ascii_case(b"PUNSUBSCRIBE")
+                        }
+                    });
+                    dispatch_span_batch(
+                        &engine,
+                        &broker,
+                        &mut conn,
+                        raw,
+                        &arg_spans,
+                        &cmd_ranges,
+                        &mut out_wire,
+                    );
                 }
             }
-        }
-        out_wire.clear();
-        let had_sub_cmd = batch.iter().any(|a| {
-            a.first().is_some_and(|c| {
-                c.eq_ignore_ascii_case(b"SUBSCRIBE")
-                    || c.eq_ignore_ascii_case(b"UNSUBSCRIBE")
-                    || c.eq_ignore_ascii_case(b"PSUBSCRIBE")
-                    || c.eq_ignore_ascii_case(b"PUNSUBSCRIBE")
-            })
-        });
-        if !batch.is_empty() {
-            let cmds = std::mem::take(&mut batch);
-            dispatch_batch(&engine, &broker, &mut conn, cmds, &mut out_wire);
-        }
-        if let Some(err) = parse_err {
-            RespVal::err(err).encode(&mut out_wire);
+            Ok(false) => {
+                // Execute any spans parsed before the quoted inline command, then fallback
+                if !cmd_ranges.is_empty() {
+                    dispatch_span_batch(
+                        &engine,
+                        &broker,
+                        &mut conn,
+                        buf.raw_buf(),
+                        &arg_spans,
+                        &cmd_ranges,
+                        &mut out_wire,
+                    );
+                }
+                loop {
+                    match buf.next_command() {
+                        Ok(Some(args)) => {
+                            if args.first().is_some_and(|c| {
+                                c.eq_ignore_ascii_case(b"SUBSCRIBE")
+                                    || c.eq_ignore_ascii_case(b"UNSUBSCRIBE")
+                                    || c.eq_ignore_ascii_case(b"PSUBSCRIBE")
+                                    || c.eq_ignore_ascii_case(b"PUNSUBSCRIBE")
+                            }) {
+                                had_sub_cmd = true;
+                            }
+                            for reply in dispatch_command(&engine, &broker, &mut conn, args) {
+                                reply.encode(&mut out_wire);
+                            }
+                            if conn.quit {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            RespVal::err(err).encode(&mut out_wire);
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                RespVal::err(err).encode(&mut out_wire);
+            }
         }
         if !out_wire.is_empty() && stream.write_all(&out_wire).is_err() {
             break;

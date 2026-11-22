@@ -8,6 +8,7 @@ pub mod dispatch_vxg;
 pub mod dispatch_zset;
 pub mod engine;
 mod engine_sync;
+pub mod fast_path;
 pub mod index;
 pub mod origin;
 pub mod pubsub;
