@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#060A14"/>
+      <stop offset="50%" stop-color="#0B1325"/>
+      <stop offset="100%" stop-color="#080E1D"/>
+    </linearGradient>
+    <radialGradient id="g-em" cx="15%" cy="22%" r="45%">
+      <stop offset="0%" stop-color="#10B981" stop-opacity="0.26"/>
+      <stop offset="100%" stop-color="#10B981" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-or" cx="44%" cy="82%" r="36%">
+      <stop offset="0%" stop-color="#F97316" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#F97316" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-vi" cx="86%" cy="24%" r="44%">
+      <stop offset="0%" stop-color="#A855F7" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#A855F7" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-sk" cx="82%" cy="84%" r="38%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bar" x1="72" y1="0" x2="1208" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="33%" stop-color="#F97316"/>
+      <stop offset="66%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#38BDF8"/>
+    </linearGradient>
+    <linearGradient id="m-vxg" x1="0" y1="0" x2="112" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#06B6D4"/>
+    </linearGradient>
+    <linearGradient id="m-kv" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#EF4444"/>
+    </linearGradient>
+    <linearGradient id="m-vxt" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#EC4899"/>
+    </linearGradient>
+    <linearGradient id="m-vimg" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background & Ambient Glows -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#g-em)"/>
+  <rect width="1280" height="640" fill="url(#g-or)"/>
+  <rect width="1280" height="640" fill="url(#g-vi)"/>
+  <rect width="1280" height="640" fill="url(#g-sk)"/>
+
+  <!-- Subtle Technical Grid -->
+  <g stroke="#334155" stroke-opacity="0.16" stroke-width="1">
+    <line x1="0" y1="128" x2="1280" y2="128"/>
+    <line x1="0" y1="256" x2="1280" y2="256"/>
+    <line x1="0" y1="384" x2="1280" y2="384"/>
+    <line x1="0" y1="512" x2="1280" y2="512"/>
+    <line x1="160" y1="0" x2="160" y2="640"/>
+    <line x1="320" y1="0" x2="320" y2="640"/>
+    <line x1="480" y1="0" x2="480" y2="640"/>
+    <line x1="640" y1="0" x2="640" y2="640"/>
+    <line x1="800" y1="0" x2="800" y2="640"/>
+    <line x1="960" y1="0" x2="960" y2="640"/>
+    <line x1="1120" y1="0" x2="1120" y2="640"/>
+  </g>
+
+  <!-- Outer Frame -->
+  <rect x="28" y="28" width="1224" height="584" rx="26" stroke="#1E293B" stroke-width="2" fill="none"/>
+  <rect x="72" y="56" width="1136" height="4" rx="2" fill="url(#bar)" fill-opacity="0.9"/>
+
+  <!-- Header: Brand Logo + Title + Pills -->
+  <g transform="translate(72, 92)">
+    <rect x="0" y="0" width="112" height="112" rx="26" fill="#0D1629" stroke="url(#m-vxg)" stroke-width="2.6"/>
+    <path d="M22 30 L47 84 L56 68 L38 30 Z" fill="url(#m-vxg)"/>
+    <path d="M90 30 L65 84 L56 68 L74 30 Z" fill="url(#m-vxg)" fill-opacity="0.82"/>
+    <polygon points="56,37 68,52 56,67 44,52" fill="#ECFEFF"/>
+    <polygon points="56,43 62.5,52 56,61 49.5,52" fill="url(#m-vxg)"/>
+  </g>
+
+  <text x="212" y="150" fill="#F8FAFC" font-family="Helvetica Neue, Arial, sans-serif" font-size="68" font-weight="800" letter-spacing="-1.5">VXG</text>
+
+  <!-- Badges -->
+  <rect x="374" y="106" width="106" height="36" rx="18" fill="#10B981" fill-opacity="0.18" stroke="#10B981" stroke-opacity="0.7" stroke-width="1.5"/>
+  <text x="427" y="130" text-anchor="middle" fill="#6EE7B7" font-family="Menlo, Monaco, monospace" font-size="16" font-weight="700">v0.7.0</text>
+
+  <rect x="494" y="106" width="144" height="36" rx="18" fill="#1E293B" fill-opacity="0.8" stroke="#475569" stroke-width="1.3"/>
+  <text x="566" y="130" text-anchor="middle" fill="#E2E8F0" font-family="Menlo, Monaco, monospace" font-size="15" font-weight="600">Pure Rust</text>
+
+  <rect x="652" y="106" width="212" height="36" rx="18" fill="#1E293B" fill-opacity="0.8" stroke="#475569" stroke-width="1.3"/>
+  <text x="758" y="130" text-anchor="middle" fill="#E2E8F0" font-family="Menlo, Monaco, monospace" font-size="15" font-weight="600">0 Core Dependencies</text>
+
+  <text x="212" y="194" fill="#CBD5E1" font-family="Helvetica Neue, Arial, sans-serif" font-size="27" font-weight="500">Unified Compressed-Domain Computing Engine</text>
+
+  <!-- 2x2 Pillar Grid -->
+  <!-- Card 1: VXG Core -->
+  <g transform="translate(72, 240)">
+    <rect width="554" height="142" rx="18" fill="#0D1527" fill-opacity="0.92" stroke="#10B981" stroke-opacity="0.55" stroke-width="1.6"/>
+    <g transform="translate(22, 22)">
+      <rect width="48" height="48" rx="12" fill="#0B1824" stroke="url(#m-vxg)" stroke-width="1.8"/>
+      <path d="M10 13 L21 36 L24 30 L16 13 Z" fill="url(#m-vxg)"/>
+      <path d="M38 13 L27 36 L24 30 L32 13 Z" fill="url(#m-vxg)" fill-opacity="0.82"/>
+      <polygon points="24,17 29,24 24,31 19,24" fill="#ECFEFF"/>
+    </g>
+    <text x="86" y="46" fill="#F8FAFC" font-family="Helvetica Neue, Arial, sans-serif" font-size="24" font-weight="700">VXG Core</text>
+    <text x="530" y="45" text-anchor="end" fill="#6EE7B7" font-family="Menlo, Monaco, monospace" font-size="15" font-weight="700">v0.7.0</text>
+    <text x="86" y="70" fill="#94A3B8" font-family="Helvetica Neue, Arial, sans-serif" font-size="16">Data Codec · Compressed SQL · Arrow · HTTP/1.1 Range</text>
+    <text x="24" y="116" fill="#6EE7B7" font-family="Menlo, Monaco, monospace" font-size="14.5" font-weight="700">0.1171 real ratio · 15/15 vs DuckDB · 100% lossless</text>
+  </g>
+
+  <!-- Card 2: VXG-KV -->
+  <g transform="translate(654, 240)">
+    <rect width="554" height="142" rx="18" fill="#0D1527" fill-opacity="0.92" stroke="#F97316" stroke-opacity="0.55" stroke-width="1.6"/>
+    <g transform="translate(22, 22)">
+      <rect width="48" height="48" rx="12" fill="#1C110D" stroke="url(#m-kv)" stroke-width="1.8"/>
+      <path d="M24 9 L38 16 L24 23 L10 16 Z" fill="url(#m-kv)"/>
+      <path d="M10 24 L24 31 L38 24" stroke="#FB923C" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M26 16 L19 27 H25 L22 40 L31 27 H25 L26 16 Z" fill="#FFF7ED"/>
+    </g>
+    <text x="86" y="46" fill="#F8FAFC" font-family="Helvetica Neue, Arial, sans-serif" font-size="24" font-weight="700">VXG-KV</text>
+    <text x="530" y="45" text-anchor="end" fill="#FDBA74" font-family="Menlo, Monaco, monospace" font-size="15" font-weight="700">v0.3.0</text>
+    <text x="86" y="70" fill="#94A3B8" font-family="Helvetica Neue, Arial, sans-serif" font-size="16">Stateless Snapshot Redis (RESP2/RESP3) · JSON · Geo · SQL</text>
+    <text x="24" y="116" fill="#FDBA74" font-family="Menlo, Monaco, monospace" font-size="14.5" font-weight="700">1.85M ops/s (11/11 Redis 8) · 20x smaller · 7x RAM</text>
+  </g>
+
+  <!-- Card 3: VXT-Turbo -->
+  <g transform="translate(72, 404)">
+    <rect width="554" height="142" rx="18" fill="#0D1527" fill-opacity="0.92" stroke="#A855F7" stroke-opacity="0.55" stroke-width="1.6"/>
+    <g transform="translate(22, 22)">
+      <rect width="48" height="48" rx="12" fill="#160E26" stroke="url(#m-vxt)" stroke-width="1.8"/>
+      <polygon points="24,7 36,12 41,24 36,36 24,41 12,36 7,24 12,12" stroke="url(#m-vxt)" stroke-width="1.8" fill="none"/>
+      <polygon points="24,13 33,24 24,35 15,24" fill="url(#m-vxt)"/>
+      <circle cx="24" cy="24" r="3.5" fill="#FAF5FF"/>
+    </g>
+    <text x="86" y="46" fill="#F8FAFC" font-family="Helvetica Neue, Arial, sans-serif" font-size="24" font-weight="700">VXT-Turbo</text>
+    <text x="530" y="45" text-anchor="end" fill="#D8B4FE" font-family="Menlo, Monaco, monospace" font-size="15" font-weight="700">v0.6.0</text>
+    <text x="86" y="70" fill="#94A3B8" font-family="Helvetica Neue, Arial, sans-serif" font-size="16">E8 Gosset Lattice LLM / VLM / MoE · Metal &amp; CUDA Kernels</text>
+    <text x="24" y="116" fill="#D8B4FE" font-family="Menlo, Monaco, monospace" font-size="14.5" font-weight="700">963 tok/s CUDA · 298 tok/s Metal · Beats GGUF Q6_K</text>
+  </g>
+
+  <!-- Card 4: VIMG -->
+  <g transform="translate(654, 404)">
+    <rect width="554" height="142" rx="18" fill="#0D1527" fill-opacity="0.92" stroke="#38BDF8" stroke-opacity="0.55" stroke-width="1.6"/>
+    <g transform="translate(22, 22)">
+      <rect width="48" height="48" rx="12" fill="#0D152E" stroke="url(#m-vimg)" stroke-width="1.8"/>
+      <rect x="9" y="9" width="30" height="30" rx="5" stroke="url(#m-vimg)" stroke-width="1.6" fill="none"/>
+      <line x1="24" y1="9" x2="24" y2="39" stroke="#38BDF8" stroke-opacity="0.5" stroke-width="1.2"/>
+      <line x1="9" y1="24" x2="39" y2="24" stroke="#38BDF8" stroke-opacity="0.5" stroke-width="1.2"/>
+      <rect x="11" y="11" width="10" height="10" rx="2" fill="#38BDF8"/>
+      <circle cx="32" cy="17" r="4.5" fill="#6366F1"/>
+    </g>
+    <text x="86" y="46" fill="#F8FAFC" font-family="Helvetica Neue, Arial, sans-serif" font-size="24" font-weight="700">VIMG</text>
+    <text x="530" y="45" text-anchor="end" fill="#7DD3FC" font-family="Menlo, Monaco, monospace" font-size="15" font-weight="700">v0.4.0</text>
+    <text x="86" y="70" fill="#94A3B8" font-family="Helvetica Neue, Arial, sans-serif" font-size="16">HTTP-Range Wavelet Image &amp; Animation Codec (8–16-bit HDR)</text>
+    <text x="24" y="116" fill="#7DD3FC" font-family="Menlo, Monaco, monospace" font-size="14.5" font-weight="700">1.00 ms UI decode · Zero-decode crop · 277 KiB WASM</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="72" y="584" fill="#94A3B8" font-family="Menlo, Monaco, monospace" font-size="17" font-weight="600">github.com/meftunca/vxg</text>
+  <text x="640" y="584" text-anchor="middle" fill="#64748B" font-family="Menlo, Monaco, monospace" font-size="16">Live WASM Playgrounds: meftunca.github.io/vxg</text>
+  <text x="1208" y="584" text-anchor="end" fill="#64748B" font-family="Menlo, Monaco, monospace" font-size="16">MIT License</text>
+</svg>

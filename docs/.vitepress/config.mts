@@ -22,7 +22,10 @@ export default defineConfig({
     ['meta', { name: 'theme-color', content: '#10b981' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:title', content: 'VXG — Unified Compressed-Domain Engine (Data/SQL · VXG-KV · VXT-Turbo · VIMG)' }],
-    ['meta', { name: 'og:description', content: 'Zero-dependency Rust compressed-domain ecosystem: VXG Data/SQL (0.1171 ratio, 15/15 vs DuckDB), VXG-KV Stateless Redis (1.85M ops/s, 20x smaller snapshots), VXT-Turbo E8 LLM (963 tok/s CUDA), and VIMG HTTP-Range Wavelet Imaging.' }]
+    ['meta', { name: 'og:description', content: 'Zero-dependency Rust compressed-domain ecosystem: VXG Data/SQL (0.1171 ratio, 15/15 vs DuckDB), VXG-KV Stateless Redis (1.85M ops/s, 20x smaller snapshots), VXT-Turbo E8 LLM (963 tok/s CUDA), and VIMG HTTP-Range Wavelet Imaging.' }],
+    ['meta', { name: 'og:image', content: 'https://meftunca.github.io/vxg/social-preview.png' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: 'https://meftunca.github.io/vxg/social-preview.png' }]
   ],
   themeConfig: {
     logo: '/logos/vxg.svg',
