@@ -65,6 +65,16 @@ fn execute_query_to_writer<W: Write>(args: &[String], writer: &mut W) -> R<()> {
         );
     }
 
+    if is_http_url(input) {
+        if let Some(idx) = row_idx {
+            return run_remote_query_row(input, idx, &opts, writer);
+        }
+        return Err(
+            "remote http:// URLs in `vxg query` support --row IDX (use `vxg sql http://...` for filters/aggregations)"
+                .into(),
+        );
+    }
+
     if stream_mode || (input == "-" && row_idx.is_none() && range.is_none()) {
         let mut rdr = open_stream_reader(input)?;
         if let Some(os) = order_spec.as_deref() {

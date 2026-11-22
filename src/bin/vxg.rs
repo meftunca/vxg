@@ -47,7 +47,8 @@ Usage:
   vxg filter-frame INPUT OUTPUT --where EXPR [--block-size BYTES] [--no-checksum] [--stream] [--no-mmap] [-f] [-q]
   vxg update       INPUT OUTPUT --where SPEC --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [--stream] [--no-mmap] [-f] [-q]
   vxg map          INPUT OUTPUT --col COL (--set VAL|--set-raw RAW|--upper|--lower|--redact|--add N) [--stream] [--no-mmap] [-f] [-q]
-  vxg info|list    FRAME        [--summary] [--no-mmap]
+  vxg info|list    FRAME|URL    [--summary] [--no-mmap]
+  vxg serve        DIR          [--port 8080]
   vxg hardware
   vxg gpu-check    metal|vulkan|cuda
   vxg --version|-V
@@ -169,6 +170,9 @@ fn run_args(args: &[String]) -> R<()> {
                     "--no-mmap" => use_mmap = false,
                     x => return Err(format!("unknown option {x}").into()),
                 }
+            }
+            if is_http_url(&args[1]) {
+                return run_remote_info(&args[1]);
             }
             let bytes = read_input_bytes(&args[1], use_mmap)?;
             let frames = Frame::parse_all(&bytes, usize::MAX)?;
@@ -334,6 +338,9 @@ fn run_args(args: &[String]) -> R<()> {
             if output != "-" && !force && Path::new(output).exists() {
                 return Err("output exists (use --force to replace it)".into());
             }
+            if is_http_url(input) {
+                return run_remote_block(input, block_idx, output, force, &dec);
+            }
             let bytes = read_input_bytes(input, use_mmap)?;
             if let vxg::InputBytes::Mapped(ref m) = bytes {
                 m.advise_random();
@@ -353,6 +360,7 @@ fn run_args(args: &[String]) -> R<()> {
         "agg" | "group-by" => return run_agg_cmd(args),
         "sql" => return run_sql_cmd(args),
         "arrow" => return run_arrow_cmd(args),
+        "serve" => return run_serve_cmd(args),
         "recover" => return run_recover_cmd(args),
         "filter-frame" | "project" | "update" | "map" => return run_ops_cmd(args),
         "c" | "compress" => {}
@@ -553,4 +561,5 @@ include!("cli_support/agg.rs");
 include!("cli_support/sql.rs");
 include!("cli_support/arrow_cli.rs");
 include!("cli_support/recover.rs");
+include!("cli_support/remote_cli.rs");
 include!("cli_support/tests.rs");

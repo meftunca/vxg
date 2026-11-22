@@ -45,6 +45,13 @@ fn execute_sql_to_vec(args: &[String]) -> R<Vec<u8>> {
     };
     let parsed = vxg::SqlQuery::parse(sql)?;
 
+    if is_http_url(input) {
+        if arrow_ipc {
+            return Err("--arrow is not yet supported with remote http:// URLs".into());
+        }
+        return execute_remote_sql(input, &parsed, format, no_header, &dec);
+    }
+
     if stream_mode || input == "-" {
         let mut rdr = open_stream_reader(input)?;
         let mut out = Vec::new();

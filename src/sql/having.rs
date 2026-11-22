@@ -12,9 +12,9 @@ use crate::{
 };
 
 use super::exec::{resolve_group_cols, resolve_order_expr};
-use super::format::{cmp_sql_val, SqlVal};
+use super::format::{cmp_sql_val, SqlTable, SqlVal};
 use super::parser::SqlParser;
-use super::{OwnedCol, SelectExpr, SelectItem, SqlQuery};
+use super::{OwnedCol, SelectExpr, SelectItem, SelectProjection, SqlLeafPred, SqlQuery, SqlWhere};
 
 /// Comparison operator inside a SQL `HAVING` predicate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,15 +89,11 @@ pub(crate) fn collect_having_cols(
 ) {
     match having {
         SqlHaving::Cmp { expr, .. } => match resolve_having_expr(items, expr) {
-            SelectExpr::Agg { col, .. } => {
-                if !agg_cols.contains(col) {
-                    agg_cols.push(col.clone());
-                }
+            SelectExpr::Agg { col, .. } if !agg_cols.contains(col) => {
+                agg_cols.push(col.clone());
             }
-            SelectExpr::CountDistinct(col) => {
-                if !distinct_cols.contains(col) {
-                    distinct_cols.push(col.clone());
-                }
+            SelectExpr::CountDistinct(col) if !distinct_cols.contains(col) => {
+                distinct_cols.push(col.clone());
             }
             _ => {}
         },
@@ -358,5 +354,118 @@ fn parse_having_unary(p: &mut SqlParser<'_>) -> Result<SqlHaving> {
         expr,
         op,
         rhs: literal_to_sql_val(quoted, &raw),
+    })
+}
+
+/// Build `col IS [NOT] NULL` matching both empty CSV cells and JSON `null` literals.
+pub(super) fn parse_is_null_after_is(p: &mut SqlParser<'_>, col: OwnedCol) -> Result<SqlWhere> {
+    let neg = p.eat_kw("NOT");
+    if !p.eat_kw("NULL") {
+        return Err(Error::InvalidOption("expected NULL after IS [NOT] in SQL WHERE"));
+    }
+    let is_null = SqlWhere::Any(vec![
+        SqlWhere::Col {
+            col: col.clone(),
+            pred: SqlLeafPred::StrEq(Vec::new()),
+        },
+        SqlWhere::Col {
+            col,
+            pred: SqlLeafPred::StrEq(b"null".to_vec()),
+        },
+    ]);
+    Ok(if neg {
+        SqlWhere::Not(Box::new(is_null))
+    } else {
+        is_null
+    })
+}
+
+/// Produce a structured `EXPLAIN` execution plan table for `query` against `frame_bytes`.
+pub(crate) fn build_explain_table(
+    frame_bytes: Option<&[u8]>,
+    query: &SqlQuery,
+    dec_options: &DecodeOptions,
+) -> Result<SqlTable> {
+    let mut rows: Vec<Vec<SqlVal>> = Vec::new();
+    let mut push = |stage: &str, detail: String| {
+        rows.push(vec![SqlVal::Str(stage.to_owned()), SqlVal::Str(detail)]);
+    };
+    let (kind, proj_str) = match &query.projection {
+        SelectProjection::Star => ("ScanStar", "*".to_owned()),
+        SelectProjection::Items(items) => {
+            let has_agg = items.iter().any(|it| it.expr.is_agg());
+            let k = if !query.group_by.is_empty() {
+                "CompressedGroupBy"
+            } else if query.distinct && !has_agg {
+                "CompressedDistinct"
+            } else if has_agg {
+                "CompressedScalarAgg"
+            } else {
+                "CompressedProject"
+            };
+            let p = items
+                .iter()
+                .map(SelectItem::header_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            (k, p)
+        }
+    };
+    push("operator", kind.to_owned());
+    push("projection", proj_str);
+    push("distinct", query.distinct.to_string());
+    push(
+        "where",
+        if query.where_clause.is_some() {
+            "compressed_domain_pushdown".to_owned()
+        } else {
+            "none".to_owned()
+        },
+    );
+    if !query.group_by.is_empty() {
+        push("group_by_cols", query.group_by.len().to_string());
+    }
+    if query.having.is_some() {
+        push("having", "post_agg_filter".to_owned());
+    }
+    if !query.order_by.is_empty() {
+        push("order_by_keys", query.order_by.len().to_string());
+    }
+    if query.limit.is_some() || query.offset > 0 {
+        push(
+            "slice",
+            format!("limit={:?} offset={}", query.limit, query.offset),
+        );
+    }
+    if let Some(bytes) = frame_bytes {
+        if let Ok(h) = crate::frame::v5::parse_v1_to_v5_header(bytes, dec_options.max_output) {
+            let ratio = if h.raw_size > 0 {
+                bytes.len() as f64 / h.raw_size as f64
+            } else {
+                0.0
+            };
+            push(
+                "archive",
+                format!(
+                    "v{} blocks={} raw={}B compressed={}B ratio={:.4}",
+                    h.version,
+                    h.count,
+                    h.raw_size,
+                    bytes.len(),
+                    ratio
+                ),
+            );
+            let zero_block = matches!(&query.projection, SelectProjection::Items(items) if items.len() == 1 && matches!(items[0].expr, SelectExpr::CountStar))
+                && query.where_clause.is_none()
+                && query.group_by.is_empty()
+                && h.has_row_index;
+            if zero_block {
+                push("fast_path", "O(1) FLAG_ROW_INDEX header count (0 blocks decoded)".to_owned());
+            }
+        }
+    }
+    Ok(SqlTable {
+        headers: vec!["stage".to_owned(), "detail".to_owned()],
+        rows,
     })
 }

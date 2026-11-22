@@ -23,6 +23,7 @@ const sample = Array.from({ length: 200 }, (_, i) =>
     user: `u${i % 13}`,
     status: i % 10 === 0 ? 500 : 200,
     latency: 20 + (i % 40) * 5,
+    note: i % 5 === 0 ? null : `ok-${i % 7}`,
   })
 ).join('\n') + '\n';
 
@@ -35,9 +36,13 @@ assert.equal(distinctOut, 'service\nbilling\nedge\n');
 
 const havingOut = codec.sql(
   frame,
-  'SELECT service, COUNT(*) AS cnt, COUNT(DISTINCT user) AS uniq_u FROM t WHERE status = 200 GROUP BY service HAVING cnt >= 40 AND uniq_u >= 5 ORDER BY service ASC'
+  'SELECT service, COUNT(*) AS cnt, COUNT(DISTINCT user) AS uniq_u FROM t WHERE status = 200 AND note IS NOT NULL GROUP BY service HAVING cnt >= 30 AND uniq_u >= 5 ORDER BY service ASC'
 );
 assert.ok(havingOut.startsWith('service\tcnt\tuniq_u\n'));
 assert.equal(havingOut.trim().split('\n').length, 5);
 
-console.log(`@vxg/wasm Node test OK (${sample.length}B -> ${frame.length}B, SQL DISTINCT+HAVING+OFFSET verified)`);
+const explainOut = codec.sql(frame, 'EXPLAIN SELECT service, COUNT(*) FROM t WHERE note IS NOT NULL GROUP BY service');
+assert.ok(explainOut.includes('operator\tCompressedGroupBy'));
+assert.ok(explainOut.includes('where\tcompressed_domain_pushdown'));
+
+console.log(`@vxg/wasm Node test OK (${sample.length}B -> ${frame.length}B, SQL DISTINCT+HAVING+OFFSET+IS_NULL+EXPLAIN verified)`);

@@ -37,6 +37,9 @@ pub(crate) mod pool;
 #[cfg(kani)]
 mod proofs;
 pub mod query;
+pub mod remote;
+#[cfg(not(target_arch = "wasm32"))]
+mod remote_http;
 pub mod simd;
 pub mod sql;
 pub mod stream;
@@ -74,6 +77,9 @@ pub use query::{
     block_row_count, extract_block_row, extract_block_row_range, extract_row, extract_row_range,
     filter_json_u64, filter_rows, find_first, frame_row_count, NumCmp, RowMatch,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use remote::{serve_http_range, serve_http_range_listener, HttpRangeReader};
+pub use remote::{RangeReader, RangeStats, RemoteFrame, RemoteFrameInfo, SliceRangeReader};
 pub use simd::Simd;
 pub use sql::{
     execute_sql, execute_sql_stream, execute_sql_table, SqlFormat, SqlQuery, SqlTable, SqlVal,

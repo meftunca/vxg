@@ -347,6 +347,9 @@ impl<'a> SqlParser<'a> {
         }
 
         let col = OwnedCol::parse(&self.read_ident()?)?;
+        if self.eat_kw("IS") {
+            return super::having::parse_is_null_after_is(self, col);
+        }
         let neg_op = self.eat_kw("NOT");
 
         if self.eat_kw("BETWEEN") {
@@ -467,6 +470,7 @@ impl<'a> SqlParser<'a> {
     }
 
     pub(super) fn parse_query(&mut self) -> Result<SqlQuery> {
+        let explain = self.eat_kw("EXPLAIN");
         if !self.eat_kw("SELECT") {
             return Err(Error::InvalidOption("SQL query must begin with SELECT"));
         }
@@ -582,15 +586,8 @@ impl<'a> SqlParser<'a> {
         }
 
         Ok(SqlQuery {
-            distinct,
-            projection,
-            from_table,
-            where_clause,
-            group_by,
-            having,
-            order_by,
-            limit,
-            offset,
+            explain, distinct, projection, from_table, where_clause, group_by, having, order_by,
+            limit, offset,
         })
     }
 }

@@ -24,7 +24,7 @@ pub const VERSION_RELEASE: u16 = VERSION_V4;
 pub const ENTRY_SIZE_V4: usize = 8;
 const MIN_VERSION: u16 = 1;
 const MAX_VERSION: u16 = VERSION_V6;
-const V4_SIZE_MASK: u32 = 0x3fff_ffff;
+pub(crate) const V4_SIZE_MASK: u32 = 0x3fff_ffff;
 
 /// Directory entry size for a given frame version.
 #[inline]
@@ -120,7 +120,7 @@ pub struct ValidatedFrame<'a> {
 /// `Frame::into_validated` after that validation succeeds.
 #[derive(Debug)]
 struct ValidatedCommandStreams(());
-fn read_u32(src: &[u8], p: usize) -> Result<u32> {
+pub(crate) fn read_u32(src: &[u8], p: usize) -> Result<u32> {
     let v = src
         .get(p..p.checked_add(4).ok_or(Error::SizeOverflow)?)
         .ok_or(Error::Truncated)?;

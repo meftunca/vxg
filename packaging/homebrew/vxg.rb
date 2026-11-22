@@ -1,8 +1,8 @@
 class Vxg < Formula
   desc "Adaptive block-independent lossless codec & compressed-domain SQL/Arrow engine"
   homepage "https://meftunca.github.io/vxg/"
-  url "https://github.com/meftunca/vxg/archive/refs/tags/v0.6.1.tar.gz"
-  version "0.6.1"
+  url "https://github.com/meftunca/vxg/archive/refs/tags/v0.7.0.tar.gz"
+  version "0.7.0"
   license "MIT"
   head "https://github.com/meftunca/vxg.git", branch: "main"
 

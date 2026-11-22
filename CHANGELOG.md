@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 — Zero-Dependency HTTP/1.1 `Range` Remote Query Engine (`vxg serve` & `http://` CLI), SQL `EXPLAIN` & `IS [NOT] NULL` Pushdown
+
+- **Zero-Dependency HTTP/1.1 `Range` Random-Access & Remote SQL Engine (`src/remote.rs`, `src/remote_http.rs`, `src/bin/cli_support/remote_cli.rs`, `tests/remote_http_and_explain.rs`):**
+  - Added `RangeReader`, `SliceRangeReader`, `HttpRangeReader` (persistent `Connection: keep-alive` TCP sockets with `0` external crates), `RemoteFrame<R>`, and `RangeStats` wire-transfer telemetry.
+  - Supports remote `info` (`0` block payloads fetched), single-block `extract_block`, $O(\log B)$ single-row `extract_row` (`FLAG_ROW_INDEX` fetching strictly 1 block), `O(1)` header-assisted `SELECT COUNT(*)`, lazy early-exit `LIMIT` streaming, and full remote analytical SQL (`WHERE`, `GROUP BY`, `HAVING`, `COUNT(DISTINCT)`, `ORDER BY`) over `HTTP/1.1 Range` (`vxg info/block/query/sql http://...`).
+  - Added built-in **`vxg serve <dir> [--port 8080]`** HTTP/1.1 Range origin server (`serve_http_range` / `serve_http_range_listener`) with live compressed-domain SQL API (`GET /file.vxg?sql=...&fmt=json|csv|tsv`, returning `X-VXG-Query-Ms`).
+- **SQL `EXPLAIN SELECT ...` & `IS [NOT] NULL` Pushdown (`src/sql/parser.rs`, `src/sql/having.rs`, `src/sql/exec.rs`, `src/sql/stream.rs`, `src/ops/line.rs`, `src/columns/ops_pred.rs`):**
+  - Added **`EXPLAIN SELECT ...`** reporting structured compressed-domain execution plans (`operator`, `projection`, `distinct`, `where`, `group_by_cols`, `having`, `order_by_keys`, `slice`, `archive`, and `O(1) FLAG_ROW_INDEX` `fast_path`) across CLI, Rust API, streaming SQL, C ABI, and `@vxg/wasm`.
+  - Added **`IS NULL` / `IS NOT NULL`** compressed-domain predicate pushdown across both NDJSON (`null`) and CSV/TSV/PSV (empty cells), including columnar precheck and line fallback parity.
+- **Compiler & Target Hygiene (`build.rs`, `src/mmap/pread.rs`):**
+  - Eliminated all compiler warnings on both native Rust (`cargo check --lib --bins --tests`) and zero-WASI `wasm32-unknown-unknown` builds.
+
 ## 0.6.1 — Compressed-Domain SQL `HAVING`, `SELECT DISTINCT`, `COUNT(DISTINCT col)` & `OFFSET`, `@vxg/wasm` Package, `crates.io` / Homebrew Packaging & Automated 4-Platform Releases
 
 - **Expanded Compressed-Domain SQL Engine (`src/sql/having.rs`, `src/sql/parser.rs`, `src/sql/exec.rs`, `src/sql/project.rs`, `src/sql/stream.rs`, `tests/sql_having_distinct_offset.rs`):**

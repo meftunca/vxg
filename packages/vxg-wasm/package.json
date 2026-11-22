@@ -1,6 +1,6 @@
 {
   "name": "@vxg/wasm",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Zero-WASI WebAssembly VXG adaptive block codec & compressed-domain SQL engine (NDJSON/CSV/Logs)",
   "type": "module",
   "main": "./index.mjs",

@@ -258,6 +258,7 @@ impl SqlWhere {
 /// Parsed compressed-domain SQL query.
 #[derive(Clone, Debug)]
 pub struct SqlQuery {
+    pub explain: bool,
     pub distinct: bool,
     pub projection: SelectProjection,
     pub from_table: Option<String>,

@@ -1,6 +1,6 @@
 [package]
 name = "vxg"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Adaptive block-independent lossless codec & compressed-domain SQL/Arrow engine with CPU SIMD, wasm32, and native GPU backends"

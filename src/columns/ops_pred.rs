@@ -361,8 +361,8 @@ fn can_col_match_pred_fast(
             };
             let is_bool_cmp = matches!(
                 sc,
-                crate::ops::StrCmp::Eq(b"true" | b"false")
-                    | crate::ops::StrCmp::Ne(b"true" | b"false")
+                crate::ops::StrCmp::Eq(b"true" | b"false" | b"null")
+                    | crate::ops::StrCmp::Ne(b"true" | b"false" | b"null")
             );
             if matches!(pred.col, crate::ops::ColTarget::JsonKey(_))
                 && !is_bool_cmp

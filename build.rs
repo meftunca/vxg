@@ -159,8 +159,10 @@ fn main() {
             "invalid SPIR-V size"
         );
         let words: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| u32::from_le_bytes(b))
             .collect();
         assert_eq!(words[0], 0x07230203);
         let text = words

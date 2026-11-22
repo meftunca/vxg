@@ -309,10 +309,11 @@ pub fn eval_token_pred(col: ColTarget<'_>, raw_tok: &[u8], pred: ValuePred<'_>) 
         ValuePred::Str(sc) => match col {
             ColTarget::JsonKey(_) => match unescape_json_str(raw_tok) {
                 Some(s) => sc.test(&s),
-                None if matches!(raw_tok, b"true" | b"false")
+                None if matches!(raw_tok, b"true" | b"false" | b"null")
                     && matches!(
                         sc,
-                        StrCmp::Eq(b"true" | b"false") | StrCmp::Ne(b"true" | b"false")
+                        StrCmp::Eq(b"true" | b"false" | b"null")
+                            | StrCmp::Ne(b"true" | b"false" | b"null")
                     ) =>
                 {
                     sc.test(raw_tok)

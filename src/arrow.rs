@@ -338,6 +338,7 @@ pub fn export_arrow_batch(
     dec_options: &DecodeOptions,
 ) -> Result<ArrowBatch> {
     let default_star = SqlQuery {
+        explain: false,
         distinct: false,
         projection: SelectProjection::Star,
         from_table: None,
@@ -368,6 +369,7 @@ pub fn export_arrow_batch(
                 })
                 .collect();
             let expanded = SqlQuery {
+                explain: q.explain,
                 distinct: q.distinct,
                 projection: SelectProjection::Items(items),
                 from_table: q.from_table.clone(),

@@ -15,8 +15,8 @@ use crate::{
 
 use super::format::{self, cmp_sql_val, SqlFormat, SqlTable, SqlVal};
 use super::having::{
-    apply_offset_limit, collect_group_query_cols, collect_having_cols, count_distinct_grouped,
-    count_distinct_scalar, eval_having, SqlHaving,
+    apply_offset_limit, build_explain_table, collect_group_query_cols, collect_having_cols,
+    count_distinct_grouped, count_distinct_scalar, eval_having, SqlHaving,
 };
 use super::project::{exec_projection, exec_star};
 use super::{
@@ -286,6 +286,9 @@ pub fn execute_sql_table(
     query: &SqlQuery,
     dec_options: &DecodeOptions,
 ) -> Result<SqlTable> {
+    if query.explain {
+        return build_explain_table(Some(frame_bytes), query, dec_options);
+    }
     with_opt_sql_where(query.where_clause.as_ref(), |where_expr| match &query.projection {
         SelectProjection::Star => exec_star(frame_bytes, where_expr, query, dec_options),
         SelectProjection::Items(items) => {
@@ -479,6 +482,7 @@ pub fn execute_sql(
     dec_options: &DecodeOptions,
 ) -> Result<Vec<u8>> {
     if matches!(query.projection, SelectProjection::Star)
+        && !query.explain
         && !query.distinct
         && query.offset == 0
         && query.group_by.is_empty()

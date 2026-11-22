@@ -47,12 +47,14 @@ pub fn reset_pread_counters() {
     PREAD_BYTES.store(0, Ordering::Relaxed);
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn register_mapping(addr: usize, len: usize, fd: i32) {
     if let Ok(mut guard) = ACTIVE_MAPS.lock() {
         guard.push((addr, len, fd));
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn unregister_mapping(addr: usize, len: usize, fd: i32) {
     if let Ok(mut guard) = ACTIVE_MAPS.lock() {
         if let Some(pos) = guard
@@ -101,16 +103,16 @@ pub(crate) fn resolve_backing_fd(slice: &[u8]) -> Option<(i32, u64)> {
             }
         }
     }
-    if let Some((c_ptr, c_len, fd, off)) = LAST_RESOLVED_FD.with(|c| *c.borrow()) {
+    if let Some((c_ptr, c_len, _fd, _off)) = LAST_RESOLVED_FD.with(|c| *c.borrow()) {
         if c_ptr == ptr && c_len == slice.len() {
             #[cfg(unix)]
             {
                 use std::os::unix::io::FromRawFd;
-                let f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+                let f = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(_fd) });
                 if f.metadata()
-                    .is_ok_and(|m| m.is_file() && m.len() >= off + (slice.len() as u64))
+                    .is_ok_and(|m| m.is_file() && m.len() >= _off + (slice.len() as u64))
                 {
-                    return Some((fd, off));
+                    return Some((_fd, _off));
                 }
             }
         }

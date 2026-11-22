@@ -22,7 +22,8 @@ use crate::{
 use super::exec::{execute_sql, finish_group_table, with_opt_sql_where};
 use super::format::{self, SqlFormat, SqlTable, SqlVal};
 use super::having::{
-    collect_group_query_cols, collect_having_cols, eval_having, maps_to_distinct_counts,
+    build_explain_table, collect_group_query_cols, collect_having_cols, eval_having,
+    maps_to_distinct_counts,
 };
 use super::project::stream_projection;
 use super::{OrderKey, OwnedCol, SelectExpr, SelectItem, SelectProjection, SqlQuery};
@@ -38,6 +39,10 @@ pub fn execute_sql_stream<R: Read, W: Write>(
     dec_options: &DecodeOptions,
 ) -> Result<()> {
     dec_options.validate()?;
+    if query.explain {
+        return build_explain_table(None, query, dec_options)?
+            .write_formatted(&mut writer, format, no_header);
+    }
     with_opt_sql_where(query.where_clause.as_ref(), |where_expr| match &query.projection {
         SelectProjection::Items(items)
             if !query.group_by.is_empty()
