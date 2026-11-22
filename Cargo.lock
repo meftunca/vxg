@@ -414,6 +414,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vxg-kv"
+version = "0.1.0"
+dependencies = [
+ "vxg",
+]
+
+[[package]]
 name = "vxg-tensor"
 version = "0.6.0"
 dependencies = [

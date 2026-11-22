@@ -1,0 +1,125 @@
+name: vxg-kv-release
+
+on:
+  push:
+    tags:
+      - 'vxg-kv-v[0-9]*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. vxg-kv-v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-native:
+    name: Build VXG-KV (${{ matrix.target_name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target_name: linux-x86_64
+            ext: ""
+            archive: tar.gz
+          - os: ubuntu-24.04-arm
+            target_name: linux-arm64
+            ext: ""
+            archive: tar.gz
+          - os: macos-latest
+            target_name: macos-arm64
+            ext: ""
+            archive: tar.gz
+          - os: windows-latest
+            target_name: windows-x86_64
+            ext: ".exe"
+            archive: zip
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Determine release version
+        id: ver
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#vxg-kv-v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Run VXG-KV release tests
+        shell: bash
+        run: cargo test --release -p vxg-kv
+
+      - name: Build vxg-kv binary
+        shell: bash
+        run: |
+          cargo build --release -p vxg-kv --bin vxg-kv
+          mkdir -p stage
+          cp "target/release/vxg-kv${{ matrix.ext }}" "stage/vxg-kv${{ matrix.ext }}"
+          cp crates/vxg-kv/README.md stage/README.md
+          cp LICENSE stage/LICENSE
+
+      - name: Package tarball (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/vxg-kv-${{ steps.ver.outputs.version }}-${{ matrix.target_name }}.tar.gz" -C stage .
+
+      - name: Package zip (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path stage\* -DestinationPath "dist\vxg-kv-${{ steps.ver.outputs.version }}-${{ matrix.target_name }}.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vxg-kv-dist-${{ matrix.target_name }}
+          path: dist/*
+
+  publish:
+    name: Publish VXG-KV Release
+    needs: [build-native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd all-dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create or Update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          NOTES=$(cat <<'EOF'
+          ## VXG-KV — Stateless Snapshot Redis (`RESP2`) + Cross-Pod Pub/Sub + Compressed-Domain SQL over VXG
+
+          Zero external dependencies. Zero dedicated Redis host. Object-storage source of truth for thousands of stateless pods.
+
+          - **Full Redis Data Types (`RESP2` + Pipelining):** Strings, Counters, TTL, Hash, List, Set, Sorted Set (`ZSet`), **Streams (`XADD`/`XLEN`/`XRANGE`/`XREVRANGE`/`XREAD`/`XDEL`/`XTRIM`)**, **Bitmaps**, **16384-register HyperLogLog**, `MULTI`/`EXEC`/`WATCH`, and Local + Cross-Pod **Pub/Sub** (`SUBSCRIBE`/`PSUBSCRIBE`/`PUBLISH`).
+          - **Object-Store-Native Source of Truth:** Built-in zero-dep HTTP/1.1 CAS + Range Origin (`vxg-kv origin`), `HttpObjectStore`, `LocalFsStore`, pluggable 6-method `ObjectStore` trait, `ETag` `If-Match`/`If-None-Match` `412` automatic rebase/retry, and linearizable **`VXG.CAS`** distributed locking.
+          - **VXG Superpowers:** Sorted `VXG v5` snapshots (`40x` smaller), Fence-Pointer + 10-bit/key Bloom Filters (`0` Range I/O on misses), single-block HTTP `Range` cold reads (`<5%` wire transfer), **Time-Travel** (`VXG.SNAPSHOTS`, `VXG.AT`, `VXG.PIN`/`VXG.UNPIN`), and **`VXG.SQL`** compressed-domain SQL.
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" all-dist/* --clobber
+          else
+            gh release create "$TAG" all-dist/* --title "VXG-KV ${TAG#vxg-kv-}" --notes "$NOTES"
+          fi

@@ -133,6 +133,6 @@ lto = "thin"
 codegen-units = 1
 
 [workspace]
-members = [".", "crates/vxg-tensor"]
+members = [".", "crates/vxg-tensor", "crates/vxg-kv"]
 default-members = ["."]
 exclude = ["fuzz", "apps/vxt-studio/src-tauri"]

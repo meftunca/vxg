@@ -1,4 +1,4 @@
-# VXG 0.7.0 — Unified Compressed-Domain Engine (`VXG` Data/SQL · `VXT-Turbo` AI LLM/VLM · `VIMG` Imaging)
+# VXG 0.7.0 — Unified Compressed-Domain Engine (`VXG` Data/SQL · `VXG-KV` Stateless Redis · `VXT-Turbo` AI LLM/VLM · `VIMG` Imaging)
 
 [![CI — Source Validation](https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/ci.yml)
 [![CI — Cross-Platform Benchmarks](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml)
@@ -8,6 +8,7 @@
 | Pillar | Crate / App | What It Does | Live Docs & Releases |
 | :--- | :--- | :--- | :--- |
 | **Core `VXG` (`v0.7.0`)** | [`src/`](src/) (`vxg`) | Zero-dep adaptive block codec (`0.1171` 6-dataset geomean, beats `Zstd+Dict-9`), compressed-domain SQL (`EXPLAIN`, `SELECT`, `DISTINCT`, `COUNT(DISTINCT)`, `WHERE` + `IS [NOT] NULL`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT/OFFSET`), zero-dep **HTTP/1.1 `Range` remote queries + `vxg serve`**, hybrid `mincore + pread`, Arrow/DuckDB/Polars bridge, `@vxg/wasm` | [Live SQL Playground](https://meftunca.github.io/vxg/playground) · [`packages/vxg-wasm`](packages/vxg-wasm) |
+| **`VXG-KV` (`v0.1.0`)** | [`crates/vxg-kv`](crates/vxg-kv) (`vxg-kv`) | Zero-dep **Stateless Snapshot Redis (`RESP2`)** over HTTP/1.1 `Range` + ETag CAS Object Storage (`41×` smaller sorted `VXG v5` snapshots, `8.9M ops/s` hot GET, `0.99 µs` Bloom miss, String/Hash/List/Set/ZSet/Streams/Bitmaps/HLL, `MULTI/WATCH`, `VXG.CAS`, **Time-Travel** `VXG.AT`/`VXG.PIN`, **`VXG.SQL`**, Cross-Pod Pub/Sub) | [`crates/vxg-kv/README.md`](crates/vxg-kv/README.md) · [`vxg-kv-v0.1.0`](https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.1.0) |
 | **`VXT-Turbo` (`v0.6.0`)** | [`crates/vxg-tensor`](crates/vxg-tensor) · [`apps/vxt-studio`](apps/vxt-studio) | Compressed-domain `E8` / `E8-HQ` Gosset lattice LLM/VLM/MoE codec (beats `GGUF Q6_K` & `Q8_0` at smaller sizes), **963 tok/s** RTX 5090 CUDA Resident, **40.7 / 298 tok/s** Apple Metal, Speculative Decoding, OpenAI API + `VXT Studio` desktop app | [AI Tensor Spec & Benchmarks](docs/TENSOR.md) |
 | **`VIMG` (`v0.4.0`)** | [`crates/vimg`](crates/vimg) · [`packages/vimg-wasm`](packages/vimg-wasm) | Zero-dep HTTP/HTTPS Range-native hierarchical wavelet image & `VIMA1` animation codec (8/10/12/16-bit HDR, `--aq`, `1.00 ms` UI Palette+RLE, zero-decode crop/downscale, `ProgressiveDecoder`, WebP Edge Proxy, 277 KiB `+simd128` WASM) | [Live Image Playground](https://meftunca.github.io/vxg/vimg-playground) · [`vimg-v0.4.0`](https://github.com/meftunca/vxg/releases/tag/vimg-v0.4.0) |
 

@@ -1,0 +1,326 @@
+//! Zero-dependency Redis Serialization Protocol (`RESP2` + inline commands) parser & encoder.
+//!
+//! Supports full pipelining (multiple commands buffered in one read), binary-safe bulk strings,
+//! and standard `redis-cli` / `ioredis` / `redis-py` / `go-redis` wire compatibility.
+
+use std::io::{self, Read, Write};
+
+/// A RESP2 value sent over the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RespVal {
+    Simple(String),
+    Error(String),
+    Integer(i64),
+    Bulk(Option<Vec<u8>>),
+    Array(Option<Vec<RespVal>>),
+}
+
+impl RespVal {
+    pub fn ok() -> Self {
+        Self::Simple("OK".to_owned())
+    }
+    pub fn pong() -> Self {
+        Self::Simple("PONG".to_owned())
+    }
+    pub fn nil() -> Self {
+        Self::Bulk(None)
+    }
+    pub fn nil_array() -> Self {
+        Self::Array(None)
+    }
+    pub fn err(msg: impl Into<String>) -> Self {
+        Self::Error(msg.into())
+    }
+    pub fn bulk(b: impl Into<Vec<u8>>) -> Self {
+        Self::Bulk(Some(b.into()))
+    }
+    pub fn int(n: i64) -> Self {
+        Self::Integer(n)
+    }
+    pub fn array(items: Vec<RespVal>) -> Self {
+        Self::Array(Some(items))
+    }
+
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Simple(s) => {
+                out.push(b'+');
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Error(s) => {
+                out.push(b'-');
+                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Integer(n) => {
+                out.push(b':');
+                out.extend_from_slice(n.to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Bulk(None) => out.extend_from_slice(b"$-1\r\n"),
+            Self::Bulk(Some(b)) => {
+                out.push(b'$');
+                out.extend_from_slice(b.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+                out.extend_from_slice(b);
+                out.extend_from_slice(b"\r\n");
+            }
+            Self::Array(None) => out.extend_from_slice(b"*-1\r\n"),
+            Self::Array(Some(items)) => {
+                out.push(b'*');
+                out.extend_from_slice(items.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+                for it in items {
+                    it.encode(out);
+                }
+            }
+        }
+    }
+
+    pub fn to_wire(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.encode(&mut out);
+        out
+    }
+
+    pub fn write_to<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        let buf = self.to_wire();
+        w.write_all(&buf)
+    }
+}
+
+/// Encode a client command (`&[&[u8]]`) as a RESP2 array of bulk strings.
+pub fn encode_command(args: &[&[u8]]) -> Vec<u8> {
+    let items = args.iter().map(|a| RespVal::bulk(*a)).collect();
+    RespVal::array(items).to_wire()
+}
+
+/// Incremental RESP2 + inline command buffer supporting pipelined TCP reads.
+pub struct RespBuffer {
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl Default for RespBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RespBuffer {
+    pub fn new() -> Self {
+        Self {
+            buf: Vec::with_capacity(8192),
+            pos: 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pos >= self.buf.len()
+    }
+
+    /// Read more bytes from `stream`. Returns `Ok(0)` on clean EOF.
+    pub fn read_more<R: Read>(&mut self, stream: &mut R) -> io::Result<usize> {
+        if self.pos > 0 {
+            if self.pos >= self.buf.len() {
+                self.buf.clear();
+                self.pos = 0;
+            } else if self.pos > 4096 {
+                self.buf.drain(..self.pos);
+                self.pos = 0;
+            }
+        }
+        let mut tmp = [0u8; 8192];
+        let n = stream.read(&mut tmp)?;
+        if n > 0 {
+            self.buf.extend_from_slice(&tmp[..n]);
+        }
+        Ok(n)
+    }
+
+    /// Try to parse one complete command (either RESP2 `*N` array or inline `PING\r\n`).
+    /// Returns `Ok(None)` if more bytes are needed.
+    pub fn next_command(&mut self) -> Result<Option<Vec<Vec<u8>>>, String> {
+        loop {
+            let rem = &self.buf[self.pos..];
+            if rem.is_empty() {
+                return Ok(None);
+            }
+            if rem[0] == b'\r' || rem[0] == b'\n' {
+                self.pos += 1;
+                continue;
+            }
+            if rem[0] == b'*' {
+                let Some((val, used)) = parse_resp_frame(rem)? else {
+                    return Ok(None);
+                };
+                self.pos += used;
+                return match val {
+                    RespVal::Array(Some(items)) => {
+                        let mut cmd = Vec::with_capacity(items.len());
+                        for it in items {
+                            match it {
+                                RespVal::Bulk(Some(b)) => cmd.push(b),
+                                RespVal::Simple(s) => cmd.push(s.into_bytes()),
+                                RespVal::Integer(n) => cmd.push(n.to_string().into_bytes()),
+                                _ => return Err("ERR invalid command argument type".to_owned()),
+                            }
+                        }
+                        if cmd.is_empty() {
+                            continue;
+                        }
+                        Ok(Some(cmd))
+                    }
+                    _ => Err("ERR expected RESP array for command".to_owned()),
+                };
+            }
+            // Inline command (e.g. `PING\r\n` or `SET foo "hello world"\r\n`)
+            let Some(nl) = rem.iter().position(|&b| b == b'\n') else {
+                if rem.len() > 1_048_576 {
+                    return Err("ERR inline command too large".to_owned());
+                }
+                return Ok(None);
+            };
+            let line = rem[..nl].strip_suffix(b"\r").unwrap_or(&rem[..nl]);
+            let parsed = split_inline(line)?;
+            self.pos += nl + 1;
+            if parsed.is_empty() {
+                continue;
+            }
+            return Ok(Some(parsed));
+        }
+    }
+
+    /// Try to parse one arbitrary RESP2 reply (used by clients/tests).
+    pub fn next_value(&mut self) -> Result<Option<RespVal>, String> {
+        let rem = &self.buf[self.pos..];
+        if rem.is_empty() {
+            return Ok(None);
+        }
+        let Some((val, used)) = parse_resp_frame(rem)? else {
+            return Ok(None);
+        };
+        self.pos += used;
+        Ok(Some(val))
+    }
+}
+
+fn find_crlf(b: &[u8]) -> Option<usize> {
+    b.windows(2).position(|w| w == b"\r\n")
+}
+
+pub fn parse_resp_frame(src: &[u8]) -> Result<Option<(RespVal, usize)>, String> {
+    if src.is_empty() {
+        return Ok(None);
+    }
+    let Some(eol) = find_crlf(src) else {
+        return Ok(None);
+    };
+    let head = &src[1..eol];
+    let after = eol + 2;
+    match src[0] {
+        b'+' => Ok(Some((
+            RespVal::Simple(String::from_utf8_lossy(head).into_owned()),
+            after,
+        ))),
+        b'-' => Ok(Some((
+            RespVal::Error(String::from_utf8_lossy(head).into_owned()),
+            after,
+        ))),
+        b':' => {
+            let n: i64 = std::str::from_utf8(head)
+                .map_err(|_| "ERR bad integer")?
+                .parse()
+                .map_err(|_| "ERR bad integer")?;
+            Ok(Some((RespVal::Integer(n), after)))
+        }
+        b'$' => {
+            let len: isize = std::str::from_utf8(head)
+                .map_err(|_| "ERR bad bulk length")?
+                .parse()
+                .map_err(|_| "ERR bad bulk length")?;
+            if len < 0 {
+                return Ok(Some((RespVal::Bulk(None), after)));
+            }
+            let len = len as usize;
+            if len > 512 * 1024 * 1024 {
+                return Err("ERR bulk string exceeds 512 MiB".to_owned());
+            }
+            if src.len() < after + len + 2 {
+                return Ok(None);
+            }
+            let data = src[after..after + len].to_vec();
+            Ok(Some((RespVal::Bulk(Some(data)), after + len + 2)))
+        }
+        b'*' => {
+            let cnt: isize = std::str::from_utf8(head)
+                .map_err(|_| "ERR bad array length")?
+                .parse()
+                .map_err(|_| "ERR bad array length")?;
+            if cnt < 0 {
+                return Ok(Some((RespVal::Array(None), after)));
+            }
+            let cnt = cnt as usize;
+            let mut cur = after;
+            let mut items = Vec::with_capacity(cnt.min(1024));
+            for _ in 0..cnt {
+                let Some((v, used)) = parse_resp_frame(&src[cur..])? else {
+                    return Ok(None);
+                };
+                items.push(v);
+                cur += used;
+            }
+            Ok(Some((RespVal::Array(Some(items)), cur)))
+        }
+        other => Err(format!("ERR protocol error: unexpected byte 0x{other:02x}")),
+    }
+}
+
+fn split_inline(line: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < line.len() {
+        while i < line.len() && matches!(line[i], b' ' | b'\t') {
+            i += 1;
+        }
+        if i >= line.len() {
+            break;
+        }
+        if line[i] == b'"' || line[i] == b'\'' {
+            let q = line[i];
+            i += 1;
+            let mut cur = Vec::new();
+            let mut closed = false;
+            while i < line.len() {
+                if line[i] == b'\\' && i + 1 < line.len() {
+                    cur.push(match line[i + 1] {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        c => c,
+                    });
+                    i += 2;
+                } else if line[i] == q {
+                    i += 1;
+                    closed = true;
+                    break;
+                } else {
+                    cur.push(line[i]);
+                    i += 1;
+                }
+            }
+            if !closed {
+                return Err("ERR unbalanced quotes in inline command".to_owned());
+            }
+            out.push(cur);
+        } else {
+            let start = i;
+            while i < line.len() && !matches!(line[i], b' ' | b'\t') {
+                i += 1;
+            }
+            out.push(line[start..i].to_vec());
+        }
+    }
+    Ok(out)
+}
