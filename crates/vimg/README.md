@@ -1,4 +1,18 @@
-# VIMG (`VIMG1`) — HTTP-Range-Native Hierarchical Wavelet Image Codec
+<p align="center">
+  <img src="../../assets/logos/vimg.svg" width="88" height="88" alt="VIMG Logo" />
+</p>
+
+<h1 align="center">VIMG <code>v0.4.0</code> (<code>VIMG1</code> / <code>VIMA1</code>)</h1>
+<p align="center">
+  <strong>HTTP/HTTPS Range-Native Hierarchical Wavelet Image &amp; Animation Codec</strong><br/>
+  Zero core dependencies · 8/10/12/16-bit HDR · Zero-decode crop/downscale · <code>277 KiB</code> <code>+simd128</code> WASM
+</p>
+
+<p align="center">
+  <a href="https://github.com/meftunca/vxg/releases/tag/vimg-v0.4.0"><img src="https://img.shields.io/badge/release-vimg--v0.4.0-3B82F6?style=flat-square" alt="Release" /></a>
+  <a href="https://meftunca.github.io/vxg/vimg-playground"><img src="https://img.shields.io/badge/playground-Live%20WASM%20Studio-0EA5E9?style=flat-square" alt="Playground" /></a>
+  <a href="../../docs/VIMG.md"><img src="https://img.shields.io/badge/docs-VIMG%20Spec-6366F1?style=flat-square" alt="Spec" /></a>
+</p>
 
 `vimg` is a standalone, pure-Rust, **zero-dependency** (`[lib]`) image codec and compressed-domain query engine engineered to VXG standards:
 

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" fill="none">
+  <defs>
+    <linearGradient id="vxt-g" x1="12" y1="12" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="55%" stop-color="#8B5CF6"/>
+      <stop offset="100%" stop-color="#EC4899"/>
+    </linearGradient>
+    <linearGradient id="vxt-bg" x1="0" y1="0" x2="120" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#110B1F"/>
+      <stop offset="100%" stop-color="#1D1132"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="112" height="112" rx="26" fill="url(#vxt-bg)" stroke="url(#vxt-g)" stroke-width="2.5"/>
+  <!-- E8 Gosset Lattice Octagram -->
+  <polygon points="60,18 90,30 102,60 90,90 60,102 30,90 18,60 30,30" stroke="url(#vxt-g)" stroke-width="2.6" fill="#A855F7" fill-opacity="0.08"/>
+  <line x1="60" y1="18" x2="60" y2="102" stroke="#C084FC" stroke-opacity="0.4" stroke-width="1.6"/>
+  <line x1="18" y1="60" x2="102" y2="60" stroke="#C084FC" stroke-opacity="0.4" stroke-width="1.6"/>
+  <line x1="30" y1="30" x2="90" y2="90" stroke="#F472B6" stroke-opacity="0.45" stroke-width="1.6"/>
+  <line x1="90" y1="30" x2="30" y2="90" stroke="#F472B6" stroke-opacity="0.45" stroke-width="1.6"/>
+  <!-- Inner Tensor Crystal -->
+  <polygon points="60,34 82,60 60,86 38,60" fill="url(#vxt-g)" fill-opacity="0.88"/>
+  <circle cx="60" cy="60" r="8" fill="#FAF5FF"/>
+  <!-- Lattice Vertices -->
+  <circle cx="60" cy="18" r="4" fill="#E9D5FF"/>
+  <circle cx="90" cy="30" r="3.5" fill="#F472B6"/>
+  <circle cx="102" cy="60" r="4" fill="#E9D5FF"/>
+  <circle cx="90" cy="90" r="3.5" fill="#F472B6"/>
+  <circle cx="60" cy="102" r="4" fill="#E9D5FF"/>
+  <circle cx="30" cy="90" r="3.5" fill="#F472B6"/>
+  <circle cx="18" cy="60" r="4" fill="#E9D5FF"/>
+  <circle cx="30" cy="30" r="3.5" fill="#F472B6"/>
+</svg>

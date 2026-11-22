@@ -18,13 +18,15 @@ export default defineConfig({
     /\.\.\/\.github\//
   ],
   head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/vxg/logos/vxg.svg' }],
     ['meta', { name: 'theme-color', content: '#10b981' }],
     ['meta', { name: 'og:type', content: 'website' }],
-    ['meta', { name: 'og:title', content: 'VXG — Vectorized Execution Grammar Codec' }],
-    ['meta', { name: 'og:description', content: 'Store raw NDJSON/CSV verbatim, 0.1172 6-dataset real public geomean (beating Zstd-9 & Zstd+Dict-9 [32..256K] 0.1181), PFOR-Delta time-series (Covid-19 0.0963 vs Zstd-9 0.1415), SQL & Arrow/DuckDB scan up to 40M+ rows, 100% byte-exact reversible.' }]
+    ['meta', { name: 'og:title', content: 'VXG — Unified Compressed-Domain Engine (Data/SQL · VXG-KV · VXT-Turbo · VIMG)' }],
+    ['meta', { name: 'og:description', content: 'Zero-dependency Rust compressed-domain ecosystem: VXG Data/SQL (0.1171 ratio, 15/15 vs DuckDB), VXG-KV Stateless Redis (1.85M ops/s, 20x smaller snapshots), VXT-Turbo E8 LLM (963 tok/s CUDA), and VIMG HTTP-Range Wavelet Imaging.' }]
   ],
   themeConfig: {
-    siteTitle: 'VXG v0.6.0',
+    logo: '/logos/vxg.svg',
+    siteTitle: 'VXG v0.7.0',
     nav: [
       {
         text: 'Playgrounds (WASM)',
@@ -33,20 +35,22 @@ export default defineConfig({
           { text: 'VIMG HTTP-Range Image Studio (vimg.wasm)', link: '/vimg-playground' }
         ]
       },
+      { text: 'VXG-KV (Redis)', link: '/KV' },
       { text: 'Image (.vimg)', link: '/VIMG' },
       { text: 'AI Tensor (.vxt)', link: '/TENSOR' },
       { text: 'Guide', link: '/guide/getting-started' },
-      { text: 'Architecture', link: '/guide/architecture' },
-      { text: 'API & FFI', link: '/guide/api-and-ffi' },
       { text: 'Benchmarks', link: '/BENCHMARKS' },
-      { text: 'Energy (GCI)', link: '/ENERGY_BENCHMARKS' },
       {
         text: 'Specifications',
         items: [
           { text: 'Wire Format (v1–v5)', link: '/FORMAT' },
           { text: 'Column Models (v3/v4)', link: '/FORMAT_V3' },
+          { text: 'Stateless Redis (VXG-KV)', link: '/KV' },
           { text: 'Image Codec (VIMG1)', link: '/VIMG' },
           { text: 'AI Tensor Codec (VXT1)', link: '/TENSOR' },
+          { text: 'Architecture & SIMD', link: '/guide/architecture' },
+          { text: 'API & FFI', link: '/guide/api-and-ffi' },
+          { text: 'Energy (GCI)', link: '/ENERGY_BENCHMARKS' },
           { text: 'Mathematical Proofs', link: '/PROOFS' },
           { text: 'Safety & Security', link: '/SAFETY' },
           { text: 'GPU Kernels', link: '/GPU' }
@@ -55,13 +59,14 @@ export default defineConfig({
     ],
     sidebar: [
       {
-        text: 'Introduction & Guide',
+        text: 'Introduction & Ecosystem',
         items: [
           { text: 'Overview', link: '/' },
           { text: 'Live WASM Playground (VXG)', link: '/playground' },
           { text: 'Live WASM Playground (VIMG)', link: '/vimg-playground' },
+          { text: 'Stateless Redis (VXG-KV)', link: '/KV' },
           { text: 'HTTP-Range Image Codec (.vimg)', link: '/VIMG' },
-          { text: 'AI Tensor & Metal LLM (.vxt)', link: '/TENSOR' },
+          { text: 'AI Tensor & Metal/CUDA LLM (.vxt)', link: '/TENSOR' },
           { text: 'Getting Started & CLI', link: '/guide/getting-started' },
           { text: 'Architecture & SIMD Internals', link: '/guide/architecture' },
           { text: 'Compressed-Domain Engine', link: '/STAGE2_DESIGN' },

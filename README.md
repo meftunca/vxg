@@ -1,49 +1,122 @@
-# VXG 0.7.0 — Unified Compressed-Domain Engine (`VXG` Data/SQL · `VXG-KV` Stateless Redis · `VXT-Turbo` AI LLM/VLM · `VIMG` Imaging)
+<p align="center">
+  <img src="assets/vxg-banner.svg" alt="VXG — Unified Compressed-Domain Engine" width="100%" />
+</p>
 
-[![CI — Source Validation](https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/ci.yml)
-[![CI — Cross-Platform Benchmarks](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml)
-[![Release v0.7.0](https://img.shields.io/github/v/release/meftunca/vxg)](https://github.com/meftunca/vxg/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/meftunca/vxg/actions/workflows/ci.yml"><img src="https://github.com/meftunca/vxg/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml"><img src="https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg" alt="Benchmarks" /></a>
+  <a href="https://github.com/meftunca/vxg/releases"><img src="https://img.shields.io/github/v/release/meftunca/vxg?color=10B981" alt="Release" /></a>
+  <a href="https://meftunca.github.io/vxg/playground"><img src="https://img.shields.io/badge/WASM-SQL%20Playground-06B6D4" alt="VXG Playground" /></a>
+  <a href="https://meftunca.github.io/vxg/vimg-playground"><img src="https://img.shields.io/badge/WASM-Image%20Studio-3B82F6" alt="VIMG Playground" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
+</p>
 
-| Pillar | Crate / App | What It Does | Live Docs & Releases |
-| :--- | :--- | :--- | :--- |
-| **Core `VXG` (`v0.7.0`)** | [`src/`](src/) (`vxg`) | Zero-dep adaptive block codec (`0.1171` 6-dataset geomean, beats `Zstd+Dict-9`), compressed-domain SQL (`EXPLAIN`, `SELECT`, `DISTINCT`, `COUNT(DISTINCT)`, `WHERE` + `IS [NOT] NULL`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT/OFFSET`), zero-dep **HTTP/1.1 `Range` remote queries + `vxg serve`**, hybrid `mincore + pread`, Arrow/DuckDB/Polars bridge, `@vxg/wasm` | [Live SQL Playground](https://meftunca.github.io/vxg/playground) · [`packages/vxg-wasm`](packages/vxg-wasm) |
-| **`VXG-KV` (`v0.3.0`)** | [`crates/vxg-kv`](crates/vxg-kv) (`vxg-kv`) | Zero-dep **Stateless Snapshot Redis (`RESP2/RESP3`)** over HTTP/1.1 `Range` + Sharded ETag CAS Object Storage — native zero-lock `kqueue`/`epoll` reactor beating `Redis 8.10.3` **`11/11` on `c=16, P=16` (`1.67M–1.85M ops/s`, `1.93×` less CPU)**, `20×` smaller snapshots, `7.0×` less cold-pod RAM, `AUTH`/`HELLO 3`, `JSON.*`, `GEO*`, `BLPOP`/`BRPOP`, `XGROUP`/`XREADGROUP`/`XACK`, $O(1)$ `DBSIZE` + fence-pruned `SCAN`, `--wal-shards N`, **Time-Travel**, **`VXG.SQL`** (`26.8×` faster), Cross-Pod Pub/Sub | [`crates/vxg-kv/README.md`](crates/vxg-kv/README.md) · [`vxg-kv-v0.3.0`](https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.3.0) |
-| **`VXT-Turbo` (`v0.6.0`)** | [`crates/vxg-tensor`](crates/vxg-tensor) · [`apps/vxt-studio`](apps/vxt-studio) | Compressed-domain `E8` / `E8-HQ` Gosset lattice LLM/VLM/MoE codec (beats `GGUF Q6_K` & `Q8_0` at smaller sizes), **963 tok/s** RTX 5090 CUDA Resident, **40.7 / 298 tok/s** Apple Metal, Speculative Decoding, OpenAI API + `VXT Studio` desktop app | [AI Tensor Spec & Benchmarks](docs/TENSOR.md) |
-| **`VIMG` (`v0.4.0`)** | [`crates/vimg`](crates/vimg) · [`packages/vimg-wasm`](packages/vimg-wasm) | Zero-dep HTTP/HTTPS Range-native hierarchical wavelet image & `VIMA1` animation codec (8/10/12/16-bit HDR, `--aq`, `1.00 ms` UI Palette+RLE, zero-decode crop/downscale, `ProgressiveDecoder`, WebP Edge Proxy, 277 KiB `+simd128` WASM) | [Live Image Playground](https://meftunca.github.io/vxg/vimg-playground) · [`vimg-v0.4.0`](https://github.com/meftunca/vxg/releases/tag/vimg-v0.4.0) |
-
-**Store raw NDJSON/CSV verbatim (`1.2×–15.4×` faster ingest than Parquet ETL), achieve `1.17×–1.97×` smaller `64 KiB` random-access blocks than `Zstd + Trained Dictionary [32..256 KiB]` on flat tabular & cumulative time-series records, beat `Zstd+Dict-9 [32..256 KiB]` on the 6-dataset real public geomean (`0.1171` vs `0.1181`), run SQL (`vxg sql` — `SELECT`, `DISTINCT`, `COUNT(DISTINCT)`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY Top-K`, `LIMIT/OFFSET`) or filtered zero-dependency Apache Arrow / DuckDB / Polars `read_vxg()` exports directly on compressed files up to `40M+` rows, and recover the original file byte-for-byte.**
-
-> **Scope on Real-World Data (`Section 1`, `Section 2`, & `Section 3` — `1T` & `8T` reported side-by-side):**
-> - **Where VXG wins:** Flat tabular and cumulative time-series records (`nyc-taxi.ndjson`, `nyc-taxi.csv`, `datasets/covid-19` — `1.17×–1.97×` smaller `64 KiB` blocks than `Zstd + Trained Dict L9 [32..256 KiB]`, faster `8T` encode & decode than `LZ4 (a1)` on NDJSON at `8.84 / 38.59 GB/s` vs `6.36 / 21.98 GB/s`, and **zero-ETL 100% byte-exact original file preservation**); the **6-dataset real public `64 KiB` geomean** (`0.1171`, ahead of `Zstd+Dict-9 [32..256K]` `0.1181`, `Zstd+Dict-3` `0.1385`, `Zstd-9` `0.1419`, `Zstd-1` `0.1620`, and `LZ4` `0.2500`); **in-cache SQL vs `DuckDB 2.0 + Parquet`** (**`15 / 15` on `8T` (`0.03–0.23 ms`) and `15 / 15` on `1T` (`0.12–1.07 ms`)** with `VXG --record-aligned`; default fixed-`64 KiB` `VXG` wins `15 / 15` on `8T` and `11 / 15` on `1T`); and **warm OS page-cache multi-GB `10M` NDJSON (`5 / 5` `8T` at `1.58–5.91 ms`, `5 / 5` `1T` at `9.58–32.58 ms`) + `40M` CSV (`5 / 5` `8T` at `11.07–27.79 ms`, `4 / 5` `1T` at `82.42–162.75 ms`)** with `--record-aligned`, using pure Rust (`0` C dependencies, `wasm32` compatible).
-> - **Where competitors win:** On individual deeply nested JSON (`gharchive`: `0.1072` vs `0.1181`), free-text/HTTP logs (`apache-access.clf`: `0.0896` vs `0.0974`, `macos-install.log`: `0.0452` vs `0.0548`), non-repeating source code (`vxg-src-nonrepeating.rs`: `0.1872` vs `0.1917`, though `VXG` beats `Zstd-9` `0.1939`), prose (`shakespeare`: `0.3729` vs `0.3780`), and camera BMP (`0.7363` vs `0.7985`), `Zstd + Trained Dict L9 [32..256K]` (`FSE + optimal parsing`) leads per-file `64 KiB` ratio; `LZ4 (a1)` leads raw `GB/s` on CSV and unstructured files (`4.95 / 20.52 GB/s` vs `1.52 / 15.35 GB/s` `8T` geomean); and `DuckDB + Parquet` leads `1T` `40M` CSV `Top-10` (`30.05` vs `63.08 ms`), `4 / 15` `1T` in-cache queries on fixed-`64 KiB` NDJSON, fixed-`64 KiB` (non-`--record-aligned`) `10M` NDJSON scans (`8.02–15.43 ms` vs `13.98–38.73 ms`), and **cold NVMe SSD cache (`F_NOCACHE` page-cache evicted)** scans (`12.21–62.92 ms` vs `103.21–643.57 ms`, because Parquet reads contiguous `122,880`-row column chunks via `pread()` whereas VXG's self-contained `PAX` block layout faults pages across all blocks).
-> - **Block mode & `--record-aligned` trade-offs:** All Section 1 codec tables use default fixed `64 KiB` blocks (`--block-size 65536`). Sections 2 & 3 report both default fixed `64 KiB` (`VXG (64K std)`) and `VXG --record-aligned` side-by-side. Fixed `64 KiB` remains the general-purpose default because `--record-aligned` has three concrete trade-offs: (1) on verbose NDJSON it packs `4,096` rows (`<= 1 MiB` raw) per block, so single-row / single-block random access (`extract_row` / `extract_block`) decodes up to `16×` more bytes (`~1 MiB` vs `64 KiB`); (2) arbitrary byte-offset `extract_range` uses $O(\log B)$ binary search over `FLAG_VAR_RAW` (`+4 B/block` header directory) instead of $O(1)$ division (`offset / 65536`); and (3) on small `200k–300k`-row files, `\n` boundary scanning + larger block template discovery increases `8T` encode latency (`27.0–41.6 ms` vs `6.8–9.1 ms`, whereas on `10M–40M` rows `--record-aligned` encodes `3.1×–4.8×` faster because it processes `16×` fewer blocks).
-
-VXG `v4/v5` inspects each independent block at runtime and routes it by exact byte budget to `BLOCK_COLUMN` (grammar + typed column models including exception-patched `PFOR-Delta` and multi-level `depth <= 4` nested JSON flattening), `BLOCK_DICT_LZ` (`v5` self-contained frame prefix dictionary + `--level 1..9` lazy/repcode matcher + 5-stream canonical Huffman / 2-way `FSE` `tANS`), `BLOCK_LZ` (2D stride/pixel planes or `Fast-LZ`), or `BLOCK_RAW`. Every block is self-contained, enabling **$O(1)$ random-access block & row extraction** (`FLAG_ROW_INDEX`), **corrupt-frame partial block recovery (`vxg recover`)**, and **multi-core scaling** without cross-block decompression dependencies.
-
----
-
-## Key Capabilities
-
-| Area | Highlights |
-| :--- | :--- |
-| **Format v4/v5 Wire Layout & Frozen Compatibility** | Compact 8-byte per-block directory (`payload_size \| kind << 30`, `crc32c`); `v5` adds self-contained frame prefix dictionary (`FLAG_FRAME_DICT`, `<= 256 KiB`), `BLOCK_DICT_LZ` (`kind = 3` with Huffman & `FLAG_FSE = 0x10`), `\n`-snapped / row-bounded `--record-aligned` blocks (`FLAG_VAR_RAW`), and optional per-block row-count index (`FLAG_ROW_INDEX = 0x0008` for $O(1)$ `frame_row_count` and $O(\log B)$ `extract_row`); **100% backward read compatibility with `v1`–`v5` frames** enforced by 18 frozen wire vectors in [`tests/vectors/`](tests/vectors/) |
-| **Structured Column & `PFOR-Delta` Engine** | Automatic schema & delimiter discovery for **NDJSON, Multi-Level (`depth <= 4`) Nested JSON (`actor.login`, `payload.pull_request.head.sha`), Pretty-Printed JSON, nullable/headered CSV/TSV/PSV, CLF/Bracketed Logs, and Logfmt**; 12+ models including exception-patched **`PFOR-Delta`** (`0x80 \| base_width` in `DecimalDelta` & `ScaledDecimal` for cumulative time series with jumps), `Dictionary`, `Timestamp` (quoted & unquoted ISO-8601 SWAR+SIMD), `HexSuffix`, `EpochCounter`, `SegmentDictionary`, `FrontCodedDict`, and `Pattern` |
-| **Compressed-Domain SQL (`vxg sql`) & Filtered Arrow / DuckDB / Polars Interop** | Store raw NDJSON/CSV verbatim, execute `SELECT col, COUNT(*), SUM/MIN/MAX/AVG(col) ... WHERE ... GROUP BY ... ORDER BY ... LIMIT K` (`vxg sql`, `vxg::sql`, `vxg_sql_alloc` C ABI) with zero-alloc `GroupAccumSoa` fused group buckets, dynamic `Top-K` zone-map/delta pruning, and atomic work-stealing (`0.03–0.23 ms` `8T` / `0.12–1.07 ms` `1T` on `200k–300k` rows; `1.31–4.31 ms` `8T` / `8.10–31.06 ms` `1T` on `10M` NDJSON; `10.77–25.04 ms` `8T` / `61.76–156.39 ms` `1T` on `40M` CSV), **filtered compressed-domain Apache Arrow IPC / C Data / C Stream pushdown (`vxg arrow --where`, `vxg_arrow_query_stream`, `read_vxg()` in `DuckDB` & `Polars`)**, and zero-reencode `VXG -> VXG` column splicing |
-| **Image & Stride Engine** | 24-bpp / 32-bpp BMP and multi-stride (`1, 2, 3, 4, 8`) byte-plane transpose + `Subtract-Green` (`R-G`, `B-G`) color decorrelation + 2-level 64-bit hierarchical zero-mask & per-plane `Fast-LZ` |
-| **Unstructured Logs, Prose, Parallel `FastCover` & `FSE (tANS)`** | Parallel `std::thread::scope` FastCover + macroscopic SWAR `sketch16` frame dictionary trainer (`<= 256 KiB`, embedded in-frame) + L1D `u16` / register-tagged `PreparedDict` `BLOCK_DICT_LZ` with configurable `--level 1..9` (`Options::level`, default `3`), 3 repcodes, +1/+2 lookahead lazy matching, and per-stream byte-budget competition between canonical Huffman and 2-way interleaved `FSE` (`tANS`, `table_log = 9`) |
-| **Cross-Platform SIMD & SWAR** | Runtime-dispatched `NEON` (`aarch64`) and `SSE2` / `AVX2` / `AVX-512` (`x86_64`) fast paths, including 32-byte branchless string scanning, 64-byte `FastPiece` unaligned `u128` row assembly, and SIMD prefix-sum plane interleaving |
-| **Integrity, Partial Recovery & CI Ratio/Speed Gates** | Hardware-accelerated CRC32C (`ARMv8 CRC` / `SSE4.2`); deterministic atomic rejection of corrupt frames by default (`1,200+` adversarial mutations tested) plus opt-in `vxg::recover_frame` (`vxg recover` / `vxg decompress --recover`) salvaging intact blocks; CI `<= 1%` compression-ratio and `<= 10%` encode-speed regression gates (`scripts/check_ratio_gate.py`) |
-| **Zero-Copy `mmap` & Streaming Engine** | Zero-dependency cross-platform `MappedFile` / `MappedFileMut`, zero-output-alloc parallel `verify_frame` (`12+ GB/s`, `~64 KiB` L2 scratch/thread), and bounded-memory (`O(single_frame)`) multi-GB streaming across `sql`, `query`, `agg`, `project`, `filter-frame`, `update`, and `map`, plus `staticlib` / `cdylib` C ABI ([`include/vxg.h`](include/vxg.h)) |
+<p align="center">
+  <a href="https://meftunca.github.io/vxg/"><strong>Documentation</strong></a> ·
+  <a href="https://meftunca.github.io/vxg/playground"><strong>SQL Playground</strong></a> ·
+  <a href="https://meftunca.github.io/vxg/vimg-playground"><strong>Image Studio</strong></a> ·
+  <a href="crates/vxg-kv/README.md"><strong>VXG-KV</strong></a> ·
+  <a href="docs/CHIMERA_BENCHMARKS.md"><strong>Full Benchmarks</strong></a> ·
+  <a href="CONTRIBUTING.md"><strong>Contributing</strong></a>
+</p>
 
 ---
 
-## 1. Real-World Public, Time-Series & Source Corpora (`64 KiB` Blocks vs. `Zstd+Dict [32..256 KiB]` & `zstd -19 --long`)
+**VXG** is a pure-Rust, zero-core-dependency **compressed-domain computing ecosystem**. Instead of treating compression as a passive archival step you have to unpack before doing real work, every VXG format is engineered to **query, filter, slice, serve over HTTP/1.1 `Range`, and execute directly on compressed blocks**.
 
-Measured sequentially on an uncontested host via `vxg-bench` (`Apple Silicon aarch64 NEON`, `64 KiB` independent blocks, `liblz4 1.10.0`, `libzstd 1.5.7`, checksums off; fetched reproducibly via [`scripts/fetch_real_corpora.py`](scripts/fetch_real_corpora.py)). Every table below is generated deterministically from [`reports/`](reports/) by [`scripts/render_tables.py`](scripts/render_tables.py) and drift-checked in CI.
-- **Equal Dictionary Budget (`Zstd + Dict [32..256K]`):** `zstd-dict-l3` and `zstd-dict-l9` sweep **`32 KiB`, `64 KiB`, `112 KiB`, and `256 KiB`** per dataset via `ZDICT_trainFromBuffer` and report the **minimum total size (including `dict_bytes` charged once)**, matching `VXG v5`'s `<= 256 KiB` self-contained frame dictionary budget (`Enc`/`Dec` measure steady-state `ZSTD_CDict`/`ZSTD_DDict` speed, excluding `ZDICT` training; **`VXG v0.5.3` `Enc`/`Dec` include full dictionary training and header decoding**).
-- **Whole-file `zstd -19 --long` (`128 MiB` window, single stream, `random access = NO`):** Reference column quantifying the exact compression-ratio cost of `64 KiB` block independence.
-- **Reading the tables:** Bold cells mark **only the actual per-row winner** on each metric. Full `1T` & `8T` parameter sweeps: **[`docs/CHIMERA_BENCHMARKS.md`](docs/CHIMERA_BENCHMARKS.md)**, [`reports/real-public-1t.md`](reports/real-public-1t.md), [`reports/real-public-8t.md`](reports/real-public-8t.md), and [`reports/covid-19-and-src-8t.md`](reports/covid-19-and-src-8t.md).
+## The Four Pillars
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/logos/vxg.svg" width="44" height="44" align="left" alt="VXG Core" />
+      <strong>&nbsp; <a href="docs/guide/getting-started.md">VXG Core</a> <code>v0.7.0</code></strong><br/>
+      <sub>&nbsp; Data Compression · SQL · Arrow · HTTP/1.1 Range</sub>
+      <br clear="left"/><br/>
+      Store raw NDJSON/CSV verbatim (100% byte-exact reversible), beat <code>Zstd+Dict-9</code> on the 6-dataset real geomean (<code>0.1171</code> vs <code>0.1181</code>), run SQL or filtered DuckDB/Polars <code>read_vxg()</code> over 40M+ rows (<strong>15/15 vs DuckDB 2.0</strong> in-cache), and query remote <code>http://</code> files via HTTP Range.<br/><br/>
+      <a href="https://meftunca.github.io/vxg/playground">Live Playground</a> · <a href="packages/vxg-wasm/README.md"><code>@vxg/wasm</code></a> · <a href="https://github.com/meftunca/vxg/releases/tag/v0.7.0">Release</a>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/logos/vxg-kv.svg" width="44" height="44" align="left" alt="VXG-KV" />
+      <strong>&nbsp; <a href="crates/vxg-kv/README.md">VXG-KV</a> <code>v0.3.0</code></strong><br/>
+      <sub>&nbsp; Stateless Snapshot Redis (RESP2/RESP3)</sub>
+      <br clear="left"/><br/>
+      Zero-dep <code>kqueue</code>/<code>epoll</code> Redis server backed by HTTP Range + sharded ETag CAS object storage. Beats <code>Redis 8.10.3</code> <strong>11/11</strong> (<code>1.67M–1.85M ops/s</code>, <code>1.93×</code> less CPU) with <code>20×</code> smaller snapshots, <code>7×</code> less cold RAM, <code>AUTH/HELLO 3</code>, <code>JSON.*</code>, <code>GEO*</code>, <code>BLPOP</code>, <code>XGROUP</code>, Time-Travel &amp; <code>VXG.SQL</code>.<br/><br/>
+      <a href="crates/vxg-kv/README.md">Docs</a> · <a href="docs/KV.md">Architecture</a> · <a href="https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.3.0">Release</a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/logos/vxt-turbo.svg" width="44" height="44" align="left" alt="VXT-Turbo" />
+      <strong>&nbsp; <a href="crates/vxg-tensor/README.md">VXT-Turbo</a> <code>v0.6.0</code></strong><br/>
+      <sub>&nbsp; E8 Lattice AI Model Codec · Metal &amp; CUDA</sub>
+      <br clear="left"/><br/>
+      Compressed-domain <code>E8</code> / <code>E8-HQ</code> Gosset lattice LLM/VLM/MoE codec beating <code>GGUF Q6_K</code> &amp; <code>Q8_0</code> at smaller footprints. Executes directly on GPU at <strong>963 tok/s</strong> (RTX 5090 CUDA Resident) and <strong>298 tok/s</strong> (Apple Metal), with Speculative Decoding &amp; OpenAI SSE server.<br/><br/>
+      <a href="docs/TENSOR.md">Spec &amp; Benchmarks</a> · <a href="apps/vxt-studio/README.md">VXT Studio</a>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/logos/vimg.svg" width="44" height="44" align="left" alt="VIMG" />
+      <strong>&nbsp; <a href="crates/vimg/README.md">VIMG</a> <code>v0.4.0</code></strong><br/>
+      <sub>&nbsp; HTTP-Range Wavelet Image &amp; Animation Codec</sub>
+      <br clear="left"/><br/>
+      Zero-dep 8/10/12/16-bit HDR wavelet pyramid (<code>VIMG1</code>) &amp; animation container (<code>VIMA1</code>). <code>1.00 ms</code> UI Palette+RLE, zero-decode crop/downscale, <code>ProgressiveDecoder</code>, WebP Edge Proxy, and <code>277 KiB</code> <code>+simd128</code> WASM.<br/><br/>
+      <a href="https://meftunca.github.io/vxg/vimg-playground">Image Studio</a> · <a href="packages/vimg-wasm/README.md"><code>@vimg/wasm</code></a> · <a href="https://github.com/meftunca/vxg/releases/tag/vimg-v0.4.0">Release</a>
+    </td>
+  </tr>
+</table>
+
+---
+
+## Quick Start in 30 Seconds
+
+```bash
+# 1. VXG Core: compress NDJSON/CSV & run compressed-domain SQL (local or http:// Range!)
+cargo run --release --bin vxg -- compress trips.ndjson trips.vxg --record-aligned -t auto -f
+cargo run --release --bin vxg -- sql trips.vxg \
+  "SELECT payment_type, COUNT(*), SUM(total_cents) GROUP BY payment_type ORDER BY SUM(total_cents) DESC"
+
+# 2. VXG-KV: start stateless Redis server backed by local dir or HTTP CAS origin
+cargo run --release -p vxg-kv -- server --port 6379 --dir ./kv-data --wal-shards 4
+redis-cli -p 6379 JSON.SET user:1 '$' '{"plan":"pro","spend":120}'
+redis-cli -p 6379 VXG.SQL "SELECT data.plan, COUNT(*), SUM(data.spend) GROUP BY data.plan"
+
+# 3. VIMG: encode wavelet image & serve HTTP 206 partial crops / resizes
+cargo run --release -p vimg -- encode photo.png photo.vimg -q 80 --aq
+cargo run --release -p vimg -- serve ./images --port 8080
+
+# 4. VXT-Turbo: pack GGUF/SafeTensors to E8 .vxt & serve OpenAI-compatible API
+cargo run --release -p vxg-tensor -- pack model.gguf model.vxt --preset q6
+```
+
+---
+
+## Headline Benchmarks (Reproducible, Honest Trade-Offs)
+
+| Pillar | Benchmark | Result | Competitor Baseline |
+| :--- | :--- | :---: | :--- |
+| **VXG Core** | 6-dataset real public `64 KiB` geomean (`8T`) | **`0.1171`** (`15.35 GB/s` dec) | `Zstd+Dict-9 [32..256K]` `0.1181` · `LZ4` `0.2500` |
+| **VXG Core** | Cumulative time-series (`covid-19` `64 KiB`) | **`0.0963`** (`PFOR-Delta`) | `Zstd-9` `0.1415` · whole `zstd -19 --long` `0.1066` |
+| **VXG Core** | In-cache SQL (`200k–300k` rows, `1T` & `8T`) | **15 / 15 wins** (`0.03–0.23 ms` `8T`) | `DuckDB 2.0 + Parquet` (`0.81–6.86 ms`) |
+| **VXG-KV** | `redis-benchmark` (`c=16, P=16`, 11 cmds) | **11 / 11 wins** (`1.67M–1.85M ops/s`, `0.55s` CPU) | `Redis 8.10.3` (`311k–1.56M ops/s`, `1.06s` CPU) |
+| **VXG-KV** | 100k JSON Snapshot / Cold RSS / `GROUP BY` | **`271 KiB`** / **`2.86 MiB`** / **`7.88 ms`** | `Redis 8.10.3` `5,458 KiB` / `20.12 MiB` / `211 ms` |
+| **VXT-Turbo** | `Qwen3.5-9B` GPU Inference (`E8-HQ`) | **`963 tok/s`** CUDA · **`298 tok/s`** Metal (0.8B) | Beats `GGUF Q6_K` (`-0.43 GB`) & `Q8_0` (`-0.89 GB`) |
+| **VIMG** | 1080p Lossless UI / Lossless Photo | **`1.00 ms`** (`0.20 bpp`) / **`-38.6%` vs PNG** | `PNG` `1.38 ms` · `WebP Lossless` (`60×` slower enc) |
+
+> **Honest Scope — Where Competitors Win:**
+> - **Individual unstructured files (`64 KiB`):** `Zstd+Dict-9 [32..256K]` leads individual nested JSON (`gharchive`: `0.1072` vs `0.1181`), free-text logs (`apache-access.clf`, `macos-install.log`), non-repeating source (`0.1872` vs `0.1917`), prose (`shakespeare`), and raw camera BMP (`0.7363` vs `0.7985`). `LZ4 (a1)` leads raw `GB/s` on unstructured inputs (`4.95 / 20.52` vs `1.52 / 15.35 GB/s`).
+> - **Cold NVMe SSD (`F_NOCACHE`) multi-GB analytics:** `DuckDB + Parquet` wins `10 / 10` true cold-disk queries (`12–63 ms` vs `103–644 ms`) because Parquet stores contiguous `122,880`-row column chunks vs VXG's self-contained PAX blocks.
+> - **Redis Lua/Functions & Geo-replicated active-active:** `VXG-KV` targets stateless snapshot/object-storage workloads and does not ship Lua scripting or Redis Cluster slot resharding.
+
+---
+
+## Verified Benchmark Tables (CI Drift-Checked from `reports/`)
+
+Every table below is deterministically generated from [`reports/`](reports/) via [`scripts/render_tables.py`](scripts/render_tables.py) and drift-checked on every CI push. Click to expand any suite (full commentary in [`docs/CHIMERA_BENCHMARKS.md`](docs/CHIMERA_BENCHMARKS.md) & [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)):
+
+<details open>
+<summary><strong>1. Real-World Public, Time-Series &amp; Source Corpora (<code>64 KiB</code> blocks vs Zstd+Dict-9 &amp; LZ4)</strong></summary>
+
+<br/>
 
 <!-- BEGIN GENERATED TABLE: real-public-summary-8t -->
 | Real Public / OS Corpus (`8T`, `64 KiB` blocks) | Size | VXG Ratio | LZ4 (`a1`) | Zstd-9 | Zstd+Dict-9 `[32..256K]` | `zstd -19 --long` *(whole)* | VXG Enc / Dec (`GB/s`) | LZ4 (`a1`) Enc / Dec | Zstd-1 Enc / Dec | Zstd+D3 Enc / Dec |
@@ -58,7 +131,7 @@ Measured sequentially on an uncontested host via `vxg-bench` (`Apple Silicon aar
 | **Text & Structured Geomean (6)** | — | **0.1171** | 0.2500 | 0.1419 | 0.1181 | 0.0795 | 1.52 / 15.35 | **4.95** / **20.52** | 4.04 / 10.21 | 2.27 / 8.17 |
 <!-- END GENERATED TABLE: real-public-summary-8t -->
 
-### Cumulative Numeric Time-Series (`datasets/covid-19`) & Non-Repeating Source Code (`0%` Repeat)
+<br/>
 
 <!-- BEGIN GENERATED TABLE: covid-and-src -->
 | Cumulative Time-Series & Non-Repeating Source (`64 KiB` blocks) | Size | VXG Ratio | LZ4 (`a1`) | Zstd-1 | Zstd-9 | Zstd+Dict-9 `[32..256K]` | `zstd -19 --long` *(whole)* | `1T` VXG Enc / Dec (`GB/s`) | `8T` VXG Enc / Dec (`GB/s`) | `8T` LZ4 (`a1`) Enc / Dec |
@@ -68,15 +141,12 @@ Measured sequentially on an uncontested host via `vxg-bench` (`Apple Silicon aar
 | **`vxg-src-nonrepeating.rs`** *(All unique VXG src/*.rs files, 0% repeat)* | 2.9 MB | 0.1917 | 0.3333 | 0.2322 | 0.1939 | **0.1872** | 0.1342 | 0.08 / 1.30 | 0.38 / 7.26 | **4.21** / **13.04** |
 <!-- END GENERATED TABLE: covid-and-src -->
 
-**Summary of Real-World Trade-Offs:**
-- **Flat tabular & cumulative time-series records (`nyc-taxi`, `datasets/covid-19`):** `VXG v0.5.3` achieves the smallest `64 KiB` blocks across every structured table (`1.17×–1.97×` smaller than `Zstd + Trained Dict L9 [32..256K]`). With exception-patched `PFOR-Delta`, `time-series-19-covid-combined.csv` drops from `0.1836` (`v0.5.1` `DICT_LZ` fallback) to **`0.0963`** (`131/131` `BLOCK_COLUMN` — beating `Zstd-9` `0.1415` by `31.9%` and even beating whole-file `zstd -19 --long` `0.1066`!), and `us_confirmed_33m.csv` drops to **`0.0456`** (`1.97×` smaller than `Zstd-9` `0.0897`). On `nyc-taxi.ndjson`, `VXG` beats `LZ4 (a1)` on both `8T` encode (`8.84` vs `6.36 GB/s`) and decode (`38.59` vs `21.98 GB/s`).
-- **Unstructured logs, nested JSON, prose & non-repeating source code:** `v0.5.3` adds parallel `FastCover` dictionary training, 2-way interleaved `FSE` (`tANS`) stream competition (`FLAG_FSE = 0x10`) with a 2-pair 64-bit register backward bit-reader, and multi-level (`depth <= 4`) nested JSON flattening (`apache-access.clf` `0.1037 -> 0.0974` at default `-l 3`, `0.0932` at `-l 9`, beating `v0.5.0`'s `0.0990`; `gharchive` `0.1231 -> 0.1181`; `macos-install.log` `0.0594 -> 0.0548`; `shakespeare` `0.3884 -> 0.3780`), pushing the **6-dataset real geomean to `0.1171`** — **ahead of `Zstd+Dict-9 [32..256K]` (`0.1181`)** — at **`15.35 GB/s` `8T` decode** (`1.88×` faster than `Zstd+Dict-3` `8.17 GB/s`). On `8T` encode, the 6-dataset geomean moved from `2.43 GB/s` (`v0.4.6` `Fast-LZ`, `0.1484` ratio, no dictionary) to `2.17 GB/s` (`v0.5.1` `WAYS=2, DWAYS=2` `64 KiB` L1D tables, `0.1213` ratio) and **`1.52 GB/s`** (`v0.5.2` `1.51 GB/s` -> `v0.5.3` `1.52 GB/s`) because default `--level 3` uses `WAYS=4, DWAYS=4` (`128 KiB` local match tables), 3 repcodes, step-4 intra-match hash insertion, and `+1/+2` lazy lookahead (pass `--level 1` for `2.07 GB/s` or `--level 2` for `1.71 GB/s`). On non-repeating `vxg-src-nonrepeating.rs` (`2.9 MB`), `VXG` (`0.1917`) beats `Zstd-9` (`0.1939`), while `Zstd+Dict-9 [32..256K]` (`0.1872`) leads by `2.3%`, and `LZ4` leads raw `GB/s` on unstructured inputs.
+</details>
 
----
+<details>
+<summary><strong>2. In-Cache Analytical SQL (<code>200k–300k</code> Rows, <code>1T / 8T</code>): VXG vs DuckDB 2.0 + Parquet</strong></summary>
 
-## 2. In-Cache Analytical Queries (`200k–300k` Rows, `1T` & `8T`): `VXG v0.5.3` vs. `DuckDB 2.0.0 + Parquet`
-
-Measured standalone with zero background CPU contention (`libvxg.dylib` vs `duckdb 2.0.0`, warm OS cache, median of 5–7 runs, **100% result equality verified** via [`scripts/bench_vs_duckdb.py`](scripts/bench_vs_duckdb.py); raw artifact: [`reports/duckdb-vs-vxg.json`](reports/duckdb-vs-vxg.json)). Both **`1T` and `8T` latencies (`1T / 8T` in `ms`)** are shown side-by-side, and `DuckDB + Parquet` is tested at both default `ROW_GROUP_SIZE = 122880` and fine-grained `ROW_GROUP_SIZE = 16384` (`SELECT 1` `PREPARE/EXECUTE` overhead = `0.04 ms` `1T`, `0.09 ms` `8T`). **None of the 15 in-cache or 10 scale queries below read precomputed block `sum/min/max` metadata:** `MODEL_DECIMAL_PACKED` / `MODEL_SCALED_DECIMAL` headers store only `(min, bit_width)` and unpack every row's bit-packed residual $r_i$ in 64-row SIMD chunks (`unpack_u16_chunk64` + NEON `vaddlvq_u16` / `vminvq_u16` / `vmaxvq_u16` in `src/columns/ops_agg_fast.rs`); only unfiltered `SELECT COUNT(*)` (`frame_row_count`, not included in these 15/10 queries) reads $O(1)$ `FLAG_ROW_INDEX` header metadata. With `v0.5.3` zero-alloc `GroupAccumSoa` fused group buckets, dynamic `Top-K` zone-map/delta pruning, and atomic work-stealing, **`VXG --record-aligned` wins `15 / 15` on `8T` (`0.03–0.23 ms`) and `15 / 15` on `1T` (`0.12–1.07 ms`)**, while fixed-`64 KiB` `VXG` wins `15 / 15` on `8T` and `11 / 15` on `1T`.
+<br/>
 
 <!-- BEGIN GENERATED TABLE: duckdb-in-cache -->
 | Corpus & Query (`1T / 8T` latency in `ms`, lower is faster) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* | DuckDB Raw |
@@ -101,14 +171,12 @@ Measured standalone with zero background CPU contention (`libvxg.dylib` vs `duck
 | ↳ `SELECT 3 cols WHERE fraud & 500 & lat>=150` | 2.80 / 0.82 | **0.96** / **0.20** | 6.82 / 6.86 | 4.64 / 4.67 | 8.87 / 9.00 | 108.23 / 64.17 |
 <!-- END GENERATED TABLE: duckdb-in-cache -->
 
----
+</details>
 
-## 3. Out-of-Cache Multi-GB Scale Benchmark (`10M`–`40M` Real 2024 NYC TLC Rows, Warm OS Cache vs. Cold NVMe Cache)
+<details>
+<summary><strong>3. Multi-GB Scale (<code>10M–40M</code> NYC Taxi Rows): Warm OS Cache vs Cold NVMe (<code>F_NOCACHE</code>)</strong></summary>
 
-Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data** (`41.17M` official rows; [`scripts/bench_scale_duckdb.py`](scripts/bench_scale_duckdb.py), [`reports/scale-duckdb-vs-vxg.md`](reports/scale-duckdb-vs-vxg.md), **100% numerical equality & lossless `vxg_verify_file` verified**), reporting **both Warm OS Page Cache (`1T / 8T` median of 3 runs) and Cold NVMe Cache (`8T` 1st run after Darwin `F_NOCACHE` OS page-cache eviction)** separately:
-- **Warm OS Page Cache (`nyc-taxi-2024-40m.csv`, `40,000,000` rows, `3.06 GB` raw):** `VXG --record-aligned` (**`550.4 MB`**, **`1.69 s`** `8T` ingest, `lossless = YES`) is **smaller and `2.2×–2.6×` faster to ingest** than both `Parquet-Zstd` (`579.4 MB`, `3.72 s`, `lossless = NO`) and `Parquet-Snappy` (`773.1 MB`, `4.32 s`, `lossless = NO`), winning **`5 / 5` `8T` queries** (`11.07–27.79 ms` vs `Parquet-Snappy` `18.03–36.79 ms`) and **`4 / 5` `1T` queries** (`82.42–162.75 ms` vs `138.55–177.54 ms`; `Parquet-Snappy` leads `1T` `Top-10` `30.05` vs `63.08 ms`).
-- **Warm OS Page Cache (`nyc-taxi-2024-10m.ndjson`, `10,000,000` rows, `2.62 GB` raw):** `VXG --record-aligned` (**`140.8 MB`**, **`0.68 s`** `8T` ingest, `lossless = YES`) is **smaller and faster to ingest than both `Parquet-Snappy` (`193.3 MB`, `0.96 s`) and `Parquet-Zstd` (`144.6 MB`, `0.96 s`)**, winning **`5 / 5` `8T` queries (`1.58–5.91 ms` vs `8.02–15.43 ms`)** and **`5 / 5` `1T` queries (`9.58–32.58 ms` vs `16.10–43.92 ms`)**. Fixed-`64 KiB` `VXG` (`~40,000` blocks of `~245` verbose JSON rows) remains slower than `Parquet` (`13.98–38.73 ms` `8T`), confirming that block count—rather than row count—governs verbose NDJSON scan overhead ([`reports/ndjson-scale-diagnostics.json`](reports/ndjson-scale-diagnostics.json)).
-- **Cold NVMe Cache (`8T` 1st run after `F_NOCACHE` OS page-cache eviction):** In true cold-disk execution, **`DuckDB + Parquet` wins `10 / 10` queries** (`12.21–52.59 ms` on `10M` NDJSON and `27.02–62.92 ms` on `40M` CSV vs `VXG --record-aligned` `103.21–146.93 ms` and `370.81–643.57 ms`). Because `Parquet` groups `122,880` rows into macro column chunks, `DuckDB` issues large sequential `pread()` calls for only the queried columns' `~18–45 MB` byte ranges, whereas `VXG`'s self-contained `PAX` block layout stores all 13 columns inside each block (`2,442`–`47,892` blocks) so `mmap` page-faults across the full `140.8 MB` / `550.4 MB` archive from NVMe SSD (notice that shrinking `Parquet` to `ROW_GROUP_SIZE = 16384` similarly slows cold `Parquet-Snappy` `30.23 -> 101.47 ms` and `32.44 -> 148.02 ms` on `40M` CSV).
+<br/>
 
 <!-- BEGIN GENERATED TABLE: duckdb-scale-40m-csv -->
 | `nyc-taxi-2024-40m.csv` (`40M` rows, `3.06 GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |
@@ -121,6 +189,8 @@ Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data**
 | `ORDER BY total_cents DESC LIMIT 10` | 88.79 / 20.98 | 63.08 / **11.07** | **30.05** / 18.03 | 91.18 / 78.75 | 46.00 / 21.97 |
 <!-- END GENERATED TABLE: duckdb-scale-40m-csv -->
 
+<br/>
+
 <!-- BEGIN GENERATED TABLE: duckdb-scale-40m-csv-cold -->
 | `nyc-taxi-2024-40m.csv` (`40M` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG -l 3` (`64K` std, cold) | `VXG -l 3 --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -130,6 +200,8 @@ Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data**
 | `GROUP BY payment_type: COUNT(*), SUM(total_cents)` | 410.40 | 582.47 | **62.92** | 193.06 | 63.24 |
 | `ORDER BY total_cents DESC LIMIT 10` | 529.15 | 643.57 | 30.23 | 101.47 | **27.02** |
 <!-- END GENERATED TABLE: duckdb-scale-40m-csv-cold -->
+
+<br/>
 
 <!-- BEGIN GENERATED TABLE: duckdb-scale-10m-ndjson -->
 | `nyc-taxi-2024-10m.ndjson` (`10M` rows, `2.62 GB` raw; **Warm OS Cache** `1T / 8T` in `ms`) | `VXG -l 3` (`64K` std) | `VXG -l 3 --record-aligned` | DuckDB `Parquet-Snappy` *(prep)* | DuckDB `Parquet-Snappy` *(RG=16k)* | DuckDB `Parquet-Zstd` *(prep)* |
@@ -142,6 +214,8 @@ Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data**
 | `ORDER BY total_cents DESC LIMIT 10` | 84.78 / 38.73 | **9.58** / **1.58** | 16.10 / 9.50 | 24.29 / 27.98 | 27.29 / 14.11 |
 <!-- END GENERATED TABLE: duckdb-scale-10m-ndjson -->
 
+<br/>
+
 <!-- BEGIN GENERATED TABLE: duckdb-scale-10m-ndjson-cold -->
 | `nyc-taxi-2024-10m.ndjson` (`10M` rows; **Cold NVMe Cache** `8T` in `ms`, `F_NOCACHE` evicted) | `VXG -l 3` (`64K` std, cold) | `VXG -l 3 --record-aligned` (cold) | DuckDB `Parquet-Snappy` *(cold)* | DuckDB `Parquet-Snappy` *(RG=16k, cold)* | DuckDB `Parquet-Zstd` *(cold)* |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -152,296 +226,49 @@ Measured over **all 12 months of unmodified 2024 NYC TLC Yellow Taxi trip data**
 | `ORDER BY total_cents DESC LIMIT 10` | 170.46 | 146.93 | 52.59 | 23.37 | **16.86** |
 <!-- END GENERATED TABLE: duckdb-scale-10m-ndjson-cold -->
 
----
-
-## 4. Synthetic & Procedural Qualification Suites (`--suite v4` & Multi-Template Generators)
-
-> **Important (Synthetic Provenance & Periodic Seed Disclosure):** All datasets below (`--suite v4`, `scripts/gen_varied_ndjson.py`, `scripts/gen_format_bench.py`) are **synthetic / procedurally generated** qualification workloads (`reports/synthetic-v4-{1t,8t}.md`, `reports/synthetic-multitpl-{1t,8t}.md`). In particular:
-> - **`source-and-docs.txt` in `--suite v4` (`0.0036` in `v5`, `0.0029` in whole-file `zstd -19 --long`)** repeats a `~190 KiB` 10-file source/docs seed to `16 MiB` via `fill_repeated` (`src/bin/bench_support/datasets.rs`), so the entire periodic seed fits inside `v5`'s `<= 256 KiB` frame dictionary. For **non-repeating real source code**, see **`vxg-src-nonrepeating.rs` (`0.1917`)** in Section 1 (`--suite v4-nonrep` in `vxg-bench` also replaces `source-and-docs.txt` with non-repeating workspace source).
-> - The two `.bmp` files in `--suite v4` are procedural flat-shaded UI/gradient framebuffers (`208:1`–`833:1`) and are separated from the 8 text/structured datasets below; for real optical camera photographs, see `kodak-truecolor-16.bmp` (`0.7985`) in Section 1.
-
-| Synthetic Suite (`64 KiB` blocks) | **VXG v0.5 Ratio** | LZ4 (`a1`) | Zstd-9 | Zstd+Dict-9 | `zstd -19 --long` *(whole)* | `1T` VXG vs LZ4 (`Enc / Dec GB/s`) | `8T` VXG vs LZ4 (`a1`) (`Enc / Dec GB/s`) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`v4` Text & Structured Geomean (8 sets, `16 MiB`, incl. periodic `source-and-docs`)** | **0.0259** | 0.2107 | 0.0859 | 0.0846 | 0.0081 | **`1.58` / `9.69`** vs `1.51` / `5.79` | `6.34` / **`50.84`** vs **`8.17`** / `28.13` |
-| **`v4` Procedural UI BMP Geomean (2 sets, `16 MiB`)** | **0.0024** | 0.0178 | 0.0103 | 0.0111 | 0.0010 | `8.69` / **`14.69`** vs **`11.64`** / `14.30` | `27.61` / **`75.11`** vs **`35.50`** / `54.52` |
-| **Synthetic Multi-Template (`ndjson_varied`, `56.5 MB`)** | **0.0914** | 0.2898 | 0.1480 | 0.1452 | 0.1198 | `1.04` / **`5.65`** vs **`1.17`** / `4.57` | **`6.20` / `40.29`** vs `5.98` / `25.44` |
-| **Synthetic Delimited (`data.csv` / `data.clf`, `31 MB`)** | **0.1794 / 0.0980** | 0.4458 / 0.2843 | 0.2651 / 0.1504 | 0.2606 / 0.1454 | 0.2257 / 0.1225 | `0.67 / 2.36` · `0.61 / 2.53` (`LZ4` faster) | `3.78/14.73` · `3.61/`**`17.92`** (`LZ4 a1`: `17.25`) |
+</details>
 
 ---
 
-## Historical Cross-Platform CI Baseline — VXG `v0.4.1` Pre-`v5` (`--suite v4` Synthetic Suite on `macos-14`, `ubuntu-latest`, `windows-latest`)
+## Cross-Language FFI, Arrow / DuckDB & WebAssembly
 
-> **Version Note:** The three tables below archive the **`v0.4.1` (`Format v4`, pre-`FLAG_FRAME_DICT` / pre-`BLOCK_DICT_LZ`)** single-thread GitHub Actions baseline ([`reports/ci-v0.4.1/`](reports/ci-v0.4.1/)). In `v0.4.1`, `source-and-docs.txt` compressed to `0.2678–0.2712` via `64 KiB` block-local `FAST_LZ` because cross-block frame dictionaries (`Format v5`) did not yet exist.
+VXG ships a zero-dependency C99 ABI ([`include/vxg.h`](include/vxg.h)), Apache Arrow C Data / C Stream export (`vxg_arrow_query_stream`), and zero-WASI WebAssembly packages (`@vxg/wasm`, `@vimg/wasm`). Ready-to-run examples live in [`examples/ffi/`](examples/ffi/) and full reference docs in [`docs/FFI.md`](docs/FFI.md):
 
-Executed automatically on GitHub Actions via [`.github/workflows/benchmarks.yml`](.github/workflows/benchmarks.yml) against native C **`liblz4`** (`lz4-c-a1`) and **`libzstd`** (`zstd-c-l1`) on `65,536`-byte independent blocks (`16 MiB` per synthetic `--suite v4` dataset, single thread, checksums off). Full artifacts: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) and [`reports/ci-v0.4.1/`](reports/ci-v0.4.1/).
-
-### 1. macOS (`macos-14` / Apple Silicon `aarch64` NEON)
-
-| Dataset | Size | VXG v4 Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG v4 Encode | LZ4 Encode | Zstd-1 Encode | VXG v4 Decode | LZ4 Decode | Zstd-1 Decode | VXG `VPI` (`vs LZ4` / `Zstd-1`) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`telemetry.csv`** | 16 MiB | **0.0407** | 0.1994 | 0.0841 | **1.296 GB/s** | 0.982 GB/s | 0.730 GB/s | **5.954 GB/s** | 5.514 GB/s | 1.739 GB/s | **68.2** (`5.84x` / `5.09x`) |
-| **`events.tsv`** | 16 MiB | **0.0334** | 0.2223 | 0.0741 | **1.187 GB/s** | 0.952 GB/s | 0.751 GB/s | **7.044 GB/s** | 4.026 GB/s | 1.715 GB/s | **86.6** (`9.83x` / `5.65x`) |
-| **`app-logs.logfmt`** | 16 MiB | **0.0353** | 0.2007 | 0.0695 | **1.614 GB/s** | 1.205 GB/s | 0.770 GB/s | **8.613 GB/s** | 5.748 GB/s | 2.104 GB/s | **105.6** (`8.05x` / `5.77x`) |
-| **`json-records.ndjson`** | 16 MiB | **0.0227** | 0.1497 | 0.0542 | **1.618 GB/s** | 1.437 GB/s | 0.917 GB/s | **9.242 GB/s** | 6.288 GB/s | 2.811 GB/s | **170.6** (`8.50x` / `5.77x`) |
-| **`field-order-optional-escaping.ndjson`** | 16 MiB | **0.0445** | 0.2132 | 0.1043 | **1.175 GB/s** | 0.873 GB/s | 0.616 GB/s | **4.980 GB/s** | 3.274 GB/s | 1.348 GB/s | **54.4** (`6.86x` / `6.22x`) |
-| **`event-mix-identifiers.ndjson`** | 16 MiB | **0.0248** | 0.1545 | 0.0779 | **1.281 GB/s** | 1.260 GB/s | 0.770 GB/s | **5.830 GB/s** | 4.055 GB/s | 1.597 GB/s | **110.1** (`7.52x` / `7.73x`) |
-| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | 0.940 GB/s | **0.985 GB/s** | 0.671 GB/s | **3.503 GB/s** | 3.411 GB/s | 1.467 GB/s | **37.8** (`4.26x` / `4.56x`) |
-| **`source-and-docs.txt`** | 16 MiB | **0.2702** | 0.3778 | 0.2714 | 0.374 GB/s | **0.496 GB/s** | 0.390 GB/s | 1.696 GB/s | **3.200 GB/s** | 1.084 GB/s | 2.9 (`0.88x` / `1.23x`) |
-| **`ui-render-32bpp.bmp`** *(procedural)* | 16 MiB | **0.0048** | 0.0140 | 0.0091 | **6.423 GB/s** | 3.846 GB/s | 2.456 GB/s | 9.170 GB/s | **14.402 GB/s** | 2.719 GB/s | **1603.8** (`3.02x` / `5.66x`) |
-| **`rgb-frame-24bpp.bmp`** *(procedural)* | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **6.025 GB/s** | 4.357 GB/s | 3.669 GB/s | **9.611 GB/s** | 8.715 GB/s | 5.913 GB/s | **6131.5** (`22.59x` / `15.71x`) |
-| **All-10 Geometric Mean** | — | **0.0249** | 0.1270 | 0.0607 | **1.554 GB/s** | 1.307 GB/s | 0.920 GB/s | **5.896 GB/s** | 5.205 GB/s | 1.990 GB/s | **121.4** (`5.91x` / `5.45x`) |
-
-### 2. Linux (`ubuntu-latest` / `x86_64` AVX2+SSE2)
-
-| Dataset | Size | VXG v4 Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG v4 Encode | LZ4 Encode | Zstd-1 Encode | VXG v4 Decode | LZ4 Decode | Zstd-1 Decode | VXG `VPI` (`vs LZ4` / `Zstd-1`) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`telemetry.csv`** | 16 MiB | **0.0407** | 0.1994 | 0.0841 | **1.706 GB/s** | 1.437 GB/s | 0.737 GB/s | **7.513 GB/s** | 7.170 GB/s | 2.395 GB/s | **87.9** (`5.46x` / `5.56x`) |
-| **`events.tsv`** | 16 MiB | **0.0334** | 0.2223 | 0.0741 | **1.460 GB/s** | 1.281 GB/s | 1.034 GB/s | **6.709 GB/s** | 4.957 GB/s | 3.155 GB/s | **93.7** (`8.27x` / `3.84x`) |
-| **`app-logs.logfmt`** | 16 MiB | **0.0353** | 0.2007 | 0.0695 | **1.885 GB/s** | 1.871 GB/s | 1.219 GB/s | **8.434 GB/s** | 7.626 GB/s | 3.201 GB/s | **113.0** (`6.00x` / `3.98x`) |
-| **`json-records.ndjson`** | 16 MiB | **0.0227** | 0.1497 | 0.0542 | 2.474 GB/s | **2.484 GB/s** | 1.650 GB/s | **10.906 GB/s** | 9.651 GB/s | 4.085 GB/s | **229.3** (`7.01x` / `4.79x`) |
-| **`field-order-optional-escaping.ndjson`** | 16 MiB | **0.0445** | 0.2132 | 0.1043 | **1.377 GB/s** | 1.286 GB/s | 0.856 GB/s | **5.483 GB/s** | 4.587 GB/s | 2.113 GB/s | **61.8** (`5.42x` / `4.79x`) |
-| **`event-mix-identifiers.ndjson`** | 16 MiB | **0.0248** | 0.1545 | 0.0779 | 1.824 GB/s | **1.836 GB/s** | 1.145 GB/s | **7.681 GB/s** | 5.197 GB/s | 2.461 GB/s | **150.8** (`7.54x` / `7.00x`) |
-| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | 1.032 GB/s | **1.300 GB/s** | 0.801 GB/s | 3.772 GB/s | **3.918 GB/s** | 1.792 GB/s | **41.1** (`3.76x` / `4.10x`) |
-| **`source-and-docs.txt`** | 16 MiB | **0.2712** | 0.3785 | 0.2722 | 0.513 GB/s | **0.661 GB/s** | 0.416 GB/s | 2.205 GB/s | **3.970 GB/s** | 1.772 GB/s | 3.9 (`0.92x` / `1.24x`) |
-| **`ui-render-32bpp.bmp`** *(procedural)* | 16 MiB | **0.0048** | 0.0140 | 0.0091 | 8.370 GB/s | **9.805 GB/s** | 5.723 GB/s | 14.818 GB/s | **21.433 GB/s** | 4.797 GB/s | **2327.3** (`2.25x` / `4.05x`) |
-| **`rgb-frame-24bpp.bmp`** *(procedural)* | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **7.311 GB/s** | 7.260 GB/s | 5.124 GB/s | **9.078 GB/s** | 2.881 GB/s | 2.622 GB/s | **6564.0** (`32.59x` / `21.37x`) |
-| **All-10 Geometric Mean** | — | **0.0249** | 0.1270 | 0.0607 | 1.984 GB/s | **2.038 GB/s** | 1.308 GB/s | **6.822 GB/s** | 5.994 GB/s | 2.699 GB/s | **147.5** (`5.36x` / `4.76x`) |
-
-### 3. Windows (`windows-latest` / `x86_64` AVX2+SSE2)
-
-| Dataset | Size | VXG v4 Ratio | LZ4 Ratio | Zstd-1 Ratio | VXG v4 Encode | LZ4 Encode | Zstd-1 Encode | VXG v4 Decode | LZ4 Decode | Zstd-1 Decode | VXG `VPI` (`vs LZ4` / `Zstd-1`) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`telemetry.csv`** | 16 MiB | **0.0407** | 0.1994 | 0.0841 | **2.010 GB/s** | 1.364 GB/s | 0.872 GB/s | **8.915 GB/s** | 8.835 GB/s | 2.481 GB/s | **103.9** (`5.97x` / `5.94x`) |
-| **`events.tsv`** | 16 MiB | **0.0334** | 0.2223 | 0.0741 | **1.893 GB/s** | 1.115 GB/s | 0.945 GB/s | **8.583 GB/s** | 6.385 GB/s | 2.917 GB/s | **120.7** (`10.06x` / `5.38x`) |
-| **`app-logs.logfmt`** | 16 MiB | **0.0353** | 0.2007 | 0.0695 | **1.758 GB/s** | 1.312 GB/s | 1.045 GB/s | **9.922 GB/s** | 8.689 GB/s | 2.667 GB/s | **118.3** (`7.03x` / `4.93x`) |
-| **`json-records.ndjson`** | 16 MiB | **0.0227** | 0.1497 | 0.0542 | **2.748 GB/s** | 1.776 GB/s | 1.261 GB/s | **14.409 GB/s** | 11.171 GB/s | 3.658 GB/s | **277.7** (`9.33x` / `7.01x`) |
-| **`field-order-optional-escaping.ndjson`** | 16 MiB | **0.0445** | 0.2132 | 0.1043 | **1.519 GB/s** | 1.132 GB/s | 0.760 GB/s | **6.405 GB/s** | 4.697 GB/s | 1.946 GB/s | **70.1** (`6.48x` / `6.01x`) |
-| **`event-mix-identifiers.ndjson`** | 16 MiB | **0.0248** | 0.1545 | 0.0779 | **2.018 GB/s** | 1.513 GB/s | 0.995 GB/s | **9.347 GB/s** | 4.840 GB/s | 2.339 GB/s | **174.9** (`9.98x` / `8.93x`) |
-| **`bursty-variable-records.ndjson`** | 16 MiB | **0.0480** | 0.2065 | 0.1196 | 1.176 GB/s | **1.178 GB/s** | 0.733 GB/s | **4.472 GB/s** | 3.965 GB/s | 1.670 GB/s | **47.8** (`4.56x` / `5.16x`) |
-| **`source-and-docs.txt`** | 16 MiB | 0.2678 | 0.3721 | **0.2672** | 0.576 GB/s | **0.735 GB/s** | 0.522 GB/s | 2.962 GB/s | **5.253 GB/s** | 1.805 GB/s | 4.9 (`0.92x` / `1.34x`) |
-| **`ui-render-32bpp.bmp`** *(procedural)* | 16 MiB | **0.0048** | 0.0140 | 0.0091 | **10.452 GB/s** | 3.523 GB/s | 3.133 GB/s | 17.003 GB/s | **47.484 GB/s** | 18.978 GB/s | **2785.9** (`3.02x` / `3.29x`) |
-| **`rgb-frame-24bpp.bmp`** *(procedural)* | 16 MiB | **0.0012** | 0.0227 | 0.0119 | **10.137 GB/s** | 3.554 GB/s | 2.892 GB/s | **11.329 GB/s** | 4.692 GB/s | 4.180 GB/s | **8634.5** (`48.02x` / `29.64x`) |
-| **All-10 Geometric Mean** | — | **0.0249** | 0.1268 | 0.0606 | **2.295 GB/s** | 1.520 GB/s | 1.110 GB/s | **8.362 GB/s** | 7.519 GB/s | 3.080 GB/s | **175.9** (`6.60x` / `5.76x`) |
+| Language / Runtime | Integration | Example |
+| :--- | :--- | :--- |
+| **Rust** | `vxg`, `vxg-kv`, `vimg`, `vxg-tensor` workspace crates | [`docs/guide/api-and-ffi.md`](docs/guide/api-and-ffi.md) |
+| **Python + DuckDB / Polars** | Zero-copy `ctypes` & filtered `read_vxg()` Arrow stream | [`examples/ffi/duckdb_read_vxg.py`](examples/ffi/duckdb_read_vxg.py) |
+| **C / C++** | Static or dynamic `libvxg` + `include/vxg.h` | [`examples/ffi/c_example.c`](examples/ffi/c_example.c) |
+| **Go / C# (.NET 8+) / Node & Bun** | `cgo`, `Span<byte>` P/Invoke, `Uint8Array` FFI | [`examples/ffi/`](examples/ffi/) |
+| **Browser / Cloudflare Workers** | `@vxg/wasm` & `@vimg/wasm` (`+simd128`, zero WASI) | [`packages/vxg-wasm`](packages/vxg-wasm) · [`packages/vimg-wasm`](packages/vimg-wasm) |
 
 ---
 
-## Compressed-Domain Mutations, Column Splicing & Pushdown (`vxg-query-real`)
-
-Measured on synthetic multi-template **`ndjson_varied.ndjson`** (`scripts/gen_varied_ndjson.py`, `56.50 MB` raw -> `5.17 MB` / `9.14%`, `300,000` rows, `863` independent `64 KiB` blocks) and synthetic **`data.csv`** (`scripts/gen_format_bench.py`, `30.53 MB` -> `5.48 MB` / `17.94%`, `250,001` rows, Apple Silicon NEON, persistent worker pool, median of 5 runs via `vxg-query-real`). Every output is asserted 100% byte-for-byte identical to `decompress + raw op (+ compress)`:
-
-| Workload (`300k` rows unless noted) | `1T` VXG (`ms` / `M rows/s`) | `1T` vs Naive Decode+Op | `8T` VXG (`ms` / `M rows/s`) | `8T` vs Naive Decode+Op |
-| :--- | :---: | :---: | :---: | :---: |
-| **`filter_column` (`level == "NOPE"`, 0-hit alphabet)** | `1.62 ms` (`185.6 M/s`) | `50.8×` | **`0.75 ms` (`401.7 M/s`)** | `98.4×` |
-| **`filter_column` (`bytes >= 50000`, zone-map skip)** | `1.81 ms` (`165.9 M/s`) | `52.3×` | **`0.80 ms` (`375.1 M/s`)** | `107.2×` |
-| **`top_k_by` (`ORDER BY latency_ms ASC LIMIT 10`)** | `1.47 ms` (`204.5 M/s`) | `67.5×` | **`0.63 ms` (`479.3 M/s`)** | `140.5×` |
-| **`agg SUM/MIN/MAX(bytes)` (all `300k` rows)** | `1.60 ms` (`187.5 M/s`) | `60.0×` | **`0.50 ms` (`595.2 M/s`)** | `171.8×` |
-| **`group_by(service) COUNT(*)` (`8` groups)** | `2.14 ms` (`140.4 M/s`) | `45.2×` | **`0.38 ms` (`797.0 M/s`)** | `235.2×` |
-| **`group_by(service) SUM/MIN/MAX(bytes)`** | `2.94 ms` (`101.9 M/s`) | `54.3×` | **`0.50 ms` (`596.3 M/s`)** | `298.4×` |
-| **`select [service,status,bytes]` (all `300k` -> `16.2 MB`)** | `5.64 ms` (`53.2 M/s`) | `24.9×` | **`2.21 ms` (`135.7 M/s`)** | `59.5×` |
-| **`project_frame` (`[service,status,bytes,lat]` splice -> `.vxg`)** | `6.34 ms` (`47.3 M/s`) | `26.2×` | **`2.00 ms` (`150.0 M/s`)** | `72.8×` |
-| **`update_column WHERE latency_ms>=250 SET CRITICAL`** | `3.42 ms` (`87.7 M/s`) | `43.2×` | **`1.14 ms` (`263.5 M/s`)** | `81.9×` |
-| **`map_column bytes -> bytes + 100` (1-col numeric splice)** | `4.33 ms` (`69.2 M/s`) | `35.7×` | **`1.49 ms` (`201.5 M/s`)** | `68.8×` |
-| **`data.csv` `filter_col` / `update` / `map` (`250k` rows)** | `0.49 / 1.74 / 2.16 ms` (`514 / 144 / 115 M/s`) | `113.7× / 58.9× / 55.3×` | **`0.34 / 0.89 / 1.09 ms` (`739 / 281 / 229 M/s`)** | `60.9×–129.4×` |
-
----
-
-## 5. Where Competitors Win (`v0.5.3`) & Future Roadmap ([`docs/ROADMAP.md`](docs/ROADMAP.md))
-
-1. **Cold NVMe Cache Scans, `1T` `40M` CSV `Top-10`, & Fixed-`64 KiB` Verbose NDJSON Scans vs. `DuckDB + Parquet`:** In **Warm OS Page Cache**, `VXG --record-aligned` wins `15 / 15` (`8T` & `1T`) in-cache queries, `5 / 5` (`8T` & `1T`) `10M` NDJSON queries (`1.58–5.91 ms` `8T`), and `5 / 5` `8T` / `4 / 5` `1T` `40M` CSV queries (`11.07–27.79 ms` `8T`). However, `DuckDB + Parquet` wins **Cold NVMe Cache (`F_NOCACHE` evicted) scans** (`12.21–52.59 ms` vs `103.21–146.93 ms` on `10M` NDJSON; `27.02–62.92 ms` vs `370.81–643.57 ms` on `40M` CSV) because Parquet stores `122,880` rows per contiguous column chunk whereas `VXG` is a self-contained `PAX` block codec; `DuckDB + Parquet-Snappy` also leads `1T` `40M` CSV `Top-10` (`30.05` vs `63.08 ms`) and fixed-`64 KiB` (non-`--record-aligned`) `10M` NDJSON scans (`8.02–15.43 ms` vs `13.98–38.73 ms` `8T`).
-2. **Per-File Unstructured/Nested Ratios (`Zstd + Trained Dict L9`) & Raw `GB/s` (`LZ4`):** `v0.5.3` leads the 6-dataset real public `64 KiB` geomean (`0.1171` vs `Zstd+Dict-9 [32..256K]` `0.1181`), but `Zstd + Trained Dict L9` (`FSE + optimal parsing`) leads individual `64 KiB` ratios on deeply nested JSON (`gharchive`: `0.1072` vs `0.1181`), HTTP/system logs (`0.0896` vs `0.0974`, `0.0452` vs `0.0548`), non-repeating source code (`0.1872` vs `0.1917`), prose (`0.3729` vs `0.3780`), and camera BMP (`0.7363` vs `0.7985`), while `LZ4 (a1)` leads raw `GB/s` on unstructured text (`4.95 / 20.52 GB/s` vs `1.52 / 15.35 GB/s` `8T` geomean).
-
----
-
-## Quick Start & CLI Usage (`vxg`)
-
-Requires **Rust 1.89+**.
-
-```sh
-# Build CLI, staticlib (libvxg.a), and cdylib (libvxg.dylib / .so / .dll):
-cargo build --release
-
-# Inspect detected CPU SIMD & GPU backends:
-./target/release/vxg hardware
-
-# Compress and decompress (--record-aligned snaps blocks to \n; --level 1..9 tunes DICT_LZ):
-./target/release/vxg compress input.ndjson input.vxg --record-aligned --level 3 --threads auto
-./target/release/vxg decompress input.vxg restored.ndjson --threads auto --force
-
-# Run SQL directly on compressed .vxg files (supports CSV header names & dotted nested JSON keys):
-./target/release/vxg sql input.vxg \
-  "SELECT service, COUNT(*), SUM(bytes), MAX(latency_ms) WHERE status = 500 GROUP BY service ORDER BY SUM(bytes) DESC LIMIT 10" \
-  --format json -t auto
-
-# Export projected compressed columns directly to zero-dependency Apache Arrow IPC Stream (.arrows):
-./target/release/vxg arrow input.vxg projected.arrows --cols service,status,bytes,latency_ms -t auto -f
-
-# Verify frame structure or salvage intact blocks from a corrupted/truncated .vxg archive:
-./target/release/vxg verify input.vxg --threads auto
-./target/release/vxg recover damaged.vxg salvaged.ndjson --report -f
-
-# Inspect frame header, overall ratio, and block-type breakdown (RAW / LZ / COLUMN / DICT_LZ):
-./target/release/vxg info input.vxg --summary
-
-# O(1) random-access single-block extraction (extracts block #0 without decoding other blocks):
-./target/release/vxg block input.vxg 0 block0.bin --force
-
-# Compressed-domain structured record random access, compound WHERE & SELECT projection:
-./target/release/vxg query input.vxg --count
-./target/release/vxg query input.vxg --row 42
-./target/release/vxg query input.vxg --range 100:150
-./target/release/vxg query input.vxg --select ts,service,status,latency_ms \
-  --where 'status==500 && (service==fraud-engine || service==auth-gateway) && latency_ms>=150' \
-  --limit 20 -t auto
-
-# Compressed-domain GROUP BY / SUM / AVG analytics & zero-reencode VXG -> VXG column splicing:
-./target/release/vxg agg input.vxg --group-by service --col bytes --where 'status==500' -t auto
-./target/release/vxg project input.vxg slim.vxg --cols service,status,bytes,latency_ms -t auto -f
-
-# Compressed-domain single-column mutations without full decode/re-encode:
-./target/release/vxg update input.vxg patched.vxg --where status==500 --col level --set CRITICAL -f
-./target/release/vxg map input.vxg upper.vxg --col service --upper -f
-
-# Unix bounded-memory streaming pipeline via stdin / stdout ('-') or --stream:
-cat input.ndjson | ./target/release/vxg c - - --stream -t auto -q \
-  | ./target/release/vxg sql - "SELECT service, COUNT(*) WHERE status = 500 GROUP BY service" --stream -t auto
-```
-
-### Running the Multi-Format Benchmark Suite Locally
-
-Requires `liblz4` and `libzstd` installed on your system (`brew install lz4 zstd` on macOS, `apt-get install liblz4-dev libzstd-dev` on Ubuntu/Debian, or `vcpkg install lz4 zstd` on Windows).
-
-```sh
-cargo run --release --features bench --bin vxg-bench -- \
-  --suite v4-nonrep --size-mib 16 --samples 3 --seconds 0.05 \
-  --csv reports/local-v4-nonrep.csv --markdown reports/local-v4-nonrep.md
-```
-
----
-
-## Using VXG from Other Languages (Static & Dynamic C ABI + Arrow / DuckDB)
-
-VXG compiles out of the box into both a **static archive** (`libvxg.a` / `vxg.lib`) and a **dynamic shared library** (`libvxg.dylib` / `libvxg.so` / `vxg.dll`), exposing a zero-allocation caller-buffer C ABI plus Apache Arrow C Data (`ArrowSchema` / `ArrowArray`) and C Stream (`ArrowArrayStream`) exports in [`include/vxg.h`](include/vxg.h). See **[`docs/FFI.md`](docs/FFI.md)** for full API documentation.
-
-### Rust Library Usage
-```rust
-let input = b"{\"ts\":\"2026-10-17T19:00:00Z\",\"seq\":1,\"status\":\"ok\"}\n";
-let opts = vxg::Options { record_aligned: true, ..vxg::Options::default() };
-let dec_opts = vxg::DecodeOptions::default();
-
-// Allocating convenience API:
-let frame = vxg::compress(input, &opts)?;
-let output = vxg::decompress(&frame, &dec_opts)?;
-assert_eq!(output, input);
-
-// Zero-allocation caller-buffer API (single-thread and multi-thread):
-let mut comp_buf = vec![0u8; vxg::compress_bound(input.len(), opts.block_size)?];
-let c_len = vxg::compress_into(input, &mut comp_buf, &opts)?;
-let mut out_buf = vec![0u8; vxg::frame_raw_size(&comp_buf[..c_len])?];
-let d_len = vxg::decompress_into(&comp_buf[..c_len], &mut out_buf, &dec_opts)?;
-assert_eq!(&out_buf[..d_len], input);
-
-// Compressed-domain SQL, Arrow export, structured record random access & projection:
-let sql_q = vxg::sql::SqlQuery::parse("SELECT status, COUNT(*), SUM(seq) WHERE status = 'ok' GROUP BY status")?;
-let tsv = vxg::sql::execute_sql(&frame, &sql_q, vxg::sql::SqlFormat::Tsv, true, &dec_opts)?;
-let cols = [vxg::ColTarget::JsonKey("ts"), vxg::ColTarget::JsonKey("seq")];
-let arrow_ipc = vxg::export_arrow_ipc(&frame, &cols, &dec_opts)?;
-let total_rows = vxg::frame_row_count(&frame)?;
-let row0 = vxg::extract_row(&frame, 0, &dec_opts)?;
-let slim_frame = vxg::project_frame(&frame, None, &cols, &opts, &dec_opts)?;
-```
-
-### C / C++ Static or Dynamic Linking ([`examples/ffi/c_example.c`](examples/ffi/c_example.c))
-```c
-#include "vxg.h"
-
-// 1. Compress into caller-provided buffer (threads=0 -> auto, block_size=0 -> 64 KiB, checksum=1):
-vxg_ssize_t bound = vxg_compress_bound(raw_len, 0);
-vxg_ssize_t c_len = vxg_compress_into(raw_ptr, raw_len, comp_buf, bound, 0, 0, 1);
-
-// 2. O(1) header query + zero-allocation decode directly into caller buffer:
-vxg_ssize_t raw_size = vxg_frame_raw_size(comp_buf, c_len);
-vxg_ssize_t d_len = vxg_decompress_into(comp_buf, c_len, out_buf, raw_size, 0, 1);
-```
-```sh
-cc -O3 -Iinclude examples/ffi/c_example.c target/release/libvxg.a -lpthread -ldl -lm -o c_example
-```
-
-### Python Zero-Copy `ctypes` & Zero-Dependency `DuckDB` `read_vxg()` Bridge ([`examples/ffi/python_example.py`](examples/ffi/python_example.py), [`examples/ffi/duckdb_read_vxg.py`](examples/ffi/duckdb_read_vxg.py))
-```sh
-python3 examples/ffi/python_example.py
-python3 examples/ffi/duckdb_read_vxg.py   # Zero-pyarrow Arrow C Stream PyCapsule scan in DuckDB 2.0+
-```
-
-### Go Zero-Copy `cgo` ([`examples/ffi/go_example.go`](examples/ffi/go_example.go))
-```sh
-CGO_CFLAGS="-I$(pwd)/include" CGO_LDFLAGS="$(pwd)/target/release/libvxg.a -lpthread -ldl -lm" \
-  go run examples/ffi/go_example.go
-```
-
-### Bun / Node.js Zero-Copy `Uint8Array` FFI ([`examples/ffi/node_bun_example.mjs`](examples/ffi/node_bun_example.mjs))
-```sh
-bun run examples/ffi/node_bun_example.mjs
-```
-
-### C# / .NET 8+ Zero-Copy `Span<byte>` P/Invoke ([`examples/ffi/csharp_example.cs`](examples/ffi/csharp_example.cs))
-Uses `[LibraryImport("vxg")]` and `fixed (byte* ...)` over `ReadOnlySpan<byte>` / `Span<byte>` for zero managed heap copies.
-
-### WebAssembly (`wasm32-unknown-unknown` — Browser, Node.js, Bun, Cloudflare Workers) ([`examples/ffi/wasm_example.mjs`](examples/ffi/wasm_example.mjs))
-Compiles to a standalone `vxg.wasm` module with **zero WASI imports** (`WebAssembly.instantiate(bytes, {})`) and zero `wasm-bindgen` dependencies:
-```sh
-rustup target add wasm32-unknown-unknown
-cargo build --release --lib --target wasm32-unknown-unknown
-node examples/ffi/wasm_example.mjs
-```
-
----
-
-## Mathematical & Verification Scope
-
-For an uncompressed input of $N$ bytes and block size $B$:
+## Repository Map
 
 ```text
-encoded_size <= N + 32 + 32 * ceil(N / B)
-CPU hash probes <= N
-8 * accepted_matches <= matched_bytes <= N
+vxg/
+├── src/                    # Core VXG v5 codec, SQL engine, Arrow IPC, HTTP/1.1 Range, C ABI
+├── crates/
+│   ├── vxg-kv/             # Stateless snapshot Redis (RESP2/RESP3, kqueue/epoll, JSON/Geo, XGROUP)
+│   ├── vxg-tensor/         # VXT-Turbo E8 lattice LLM/VLM/MoE codec + Metal/CUDA inference
+│   └── vimg/               # VIMG1/VIMA1 HTTP-Range wavelet image & animation codec
+├── packages/
+│   ├── vxg-wasm/           # @vxg/wasm (TypeScript + WASM SQL & codec)
+│   └── vimg-wasm/          # @vimg/wasm (TypeScript + +simd128 wavelet imaging)
+├── apps/vxt-studio/        # Companion desktop UI for VXT-Turbo local LLM inference
+├── assets/                 # Official SVG brand banner & module logos
+├── docs/                   # VitePress documentation site + live WASM playgrounds
+├── examples/ffi/           # C, Python/DuckDB, Go, C#, Bun/Node, WASM examples
+├── reports/ & scripts/     # Reproducible benchmark artifacts & CI drift checker
+└── tests/                  # Frozen v1–v5 wire vectors, fuzzing & E2E suites
 ```
-
-- **Cross-checked SIMT & Model Verification:** `native/shaders/core.gpu` is validated across 110 encode/decode cases under ASan + UBSan (WG=8 and WG=64), 46 independent Python model cross-checks, 65,536 control words, 2,047 exhaustive small binary inputs, and 4,700 truncated prefix rejections.
-- Detailed invariants and formal proof boundaries are documented in [`docs/PROOFS.md`](docs/PROOFS.md).
 
 ---
 
-## Repository Layout
+## Community, Security & License
 
-```text
-src/                     Rust codec core (lib.rs, encode.rs, arrow*.rs, stream.rs, simd.rs, crc32c.rs)
-src/columns/             Modular structured-column, PFOR-Delta, ScaledDecimal, query/splice, stride/BMP & Fast-LZ
-src/dict_lz/             Format v5 pure-Rust FastCover frame dictionary trainer & `--level 1..9` `BLOCK_DICT_LZ`
-src/sql/                 Zero-dependency SQL parser & compressed-domain execution engine (`vxg sql`)
-src/query/               Compressed-domain row seek, bigram/nibble search, and parallel pushdown
-src/ops/                 Compressed-domain compound WHERE, agg/group_by, filter/map/update & column projection
-src/frame/               Format v1–v5 frame encoder, parser, `var_raw` splitter, `recover.rs` & parallel decoder
-src/block/               Block LZ encoder and SIMD/SWAR decoder submodules
-src/packing/             Command-metadata & entropy research submodules (--features bench)
-src/groups/              Fixed-group command-layout evaluator submodules (--features bench)
-src/bin/                 Production CLI (`vxg`) and benchmark harnesses (`vxg-bench`, `vxg-query-real`)
-include/vxg.h            Official C99 / C++11 header (codec, SQL, and Arrow C Data / C Stream ABI)
-examples/ffi/            Zero-copy integration examples for C, Python, DuckDB/Arrow, Go, Bun/JS, C#, and WASM
-native/shaders/core.gpu  Shared GPU kernel source (Metal, Vulkan GLSL, CUDA)
-native/                  Metal, Vulkan, and CUDA host bridges
-verification/            Independent Python reference model and C++ SIMT emulator
-crates/vxg-tensor/       Compressed-domain AI weight codec (.vxt, VXT-Turbo E8/E8-HQ), Apple Metal & NVIDIA CUDA Resident (963 tok/s RTX 5090) LLM/VLM/MoE runners, streaming packer & OpenAI SSE + Prometheus server
-apps/vxt-studio/         Tauri v2 + React 19 + shadcn/ui + AI SDK desktop app (HF Hub downloader, streaming Q3/Q4/Q6/Q8 .vxt Forge, Vision Chat & OpenAI/Prometheus API Hub)
-tests/                   Property, stress, differential SQL/Arrow/recovery, CI ratio gate & frozen `tests/vectors/`
-reports/                 Current benchmark artifacts (`real-public-*`, `covid-19-and-src-*`, `duckdb-*`, `ci-v0.4.1/`)
-archive/                 Archived historical milestone plans and early microbenchmark logs
-docs/                    Wire format, tensor engine, FFI guide, proofs, benchmarks, GPU architecture, and safety
-```
-
-[Wire Format](docs/FORMAT.md) · [VXT Tensor & Metal LLM Engine](docs/TENSOR.md) · [FFI & Language Bindings](docs/FFI.md) · [Benchmarks](docs/BENCHMARKS.md) · [Proofs](docs/PROOFS.md) · [GPU Architecture](docs/GPU.md) · [Safety](docs/SAFETY.md) · [Validation](docs/VALIDATION.md)
-
----
-
-## License
-
-MIT License.
+- **Contribute:** Read [`CONTRIBUTING.md`](CONTRIBUTING.md) — PRs for new hardware benchmarks, FFI wrappers, custom `ObjectStore` adapters (S3/R2/GCS), and docs are very welcome!
+- **Issues & Benchmarks:** Use our structured [Bug Report](https://github.com/meftunca/vxg/issues/new?template=bug_report.yml), [Feature Request](https://github.com/meftunca/vxg/issues/new?template=feature_request.yml), or [Benchmark Report](https://github.com/meftunca/vxg/issues/new?template=benchmark_report.yml) templates.
+- **Security:** See [`SECURITY.md`](SECURITY.md) and [`docs/SAFETY.md`](docs/SAFETY.md).
+- **License:** Dual-licensed / [MIT License](LICENSE).

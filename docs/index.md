@@ -2,16 +2,22 @@
 layout: home
 
 hero:
-  name: "VXG Codec v0.6.0"
-  text: "Vectorized Execution Grammar"
-  tagline: "Store raw NDJSON/CSV verbatim (1.2x–15.4x faster ingest than Parquet ETL), 1.17x–1.97x smaller 64 KiB blocks than Zstd + Trained Dict [32..256 KiB] on flat tabular & time-series records, beat Zstd+Dict-9 on the 6-dataset real public geomean (0.1171 vs 0.1181), run SQL or filtered zero-dependency Arrow / DuckDB / Polars read_vxg() exports on 40M+ compressed rows, and recover the original file byte-for-byte."
+  name: "VXG v0.7.0"
+  text: "Unified Compressed-Domain Engine"
+  tagline: "Pure-Rust, zero-dependency compressed-domain computing across Data & SQL (vxg), Stateless Snapshot Redis (vxg-kv), E8 Lattice LLM/VLM Inference (vxt-turbo), and HTTP-Range Wavelet Imaging (vimg)."
+  image:
+    src: /logos/vxg.svg
+    alt: VXG Logo
   actions:
     - theme: brand
-      text: VXG WASM Playground →
+      text: VXG SQL Playground →
       link: /playground
     - theme: brand
       text: VIMG Image Playground →
       link: /vimg-playground
+    - theme: alt
+      text: Stateless Redis (VXG-KV)
+      link: /KV
     - theme: alt
       text: Image Codec (.vimg)
       link: /VIMG
@@ -21,21 +27,24 @@ hero:
     - theme: alt
       text: Get Started
       link: /guide/getting-started
-    - theme: alt
-      text: View on GitHub
-      link: https://github.com/meftunca/vxg
 
 features:
-  - title: "Zero-ETL Lossless Archive + SQL & Filtered Arrow (`vxg sql` / `vxg arrow`)"
-    details: "Keep raw JSON/CSV verbatim without lossy Parquet ETL, run SQL (`SELECT`, `WHERE`, `GROUP BY`, `ORDER BY Top-K`) or filtered zero-dependency Arrow C Stream (`read_vxg()` in DuckDB & Polars) directly on compressed blocks, and recover the original file byte-for-byte."
-  - title: "Honest Real-Corpus Trade-Offs (`Format v4/v5` + `PFOR-Delta` + `FSE`)"
-    details: "1.17x–1.97x smaller than Zstd+Dict-9 [32..256K] on flat tabular & Covid-19 cumulative time series (`0.0963` vs `0.1495`); beats Zstd+Dict-9 on the 6-dataset real geomean (`0.1171` vs `0.1181` at `15.35 GB/s` 8T decode), while Zstd+Dict-9 leads individual nested-JSON/log/prose files and LZ4 leads unstructured GB/s."
-  - title: "Calibrated 1T & 8T vs DuckDB 2.0 + Parquet (Up to 40M Rows)"
-    details: "With zero-alloc GroupAccumSoa, Top-K zone-map pruning & row-bounded `--record-aligned`, VXG wins 15/15 in-cache 1T & 8T (`0.03–0.23 ms` 8T), 5/5 1T & 8T on 10M NDJSON (`1.31–4.31 ms` 8T, `8.10–31.06 ms` 1T), and 5/5 8T (4/5 1T) on 40M CSV, while DuckDB + Parquet leads 1T 40M CSV Top-10 and fixed-64K 10M NDJSON scans."
-  - title: "vxg-tensor (.vxt) AI Model Codec, Metal & NVIDIA CUDA Resident LLM"
-    details: "VXT-Turbo E8/E8-HQ beats GGUF Q6_K (-0.43 GB, -32% TR KLD) and Q8_0 (-0.89 GB, -56% TR KLD) on Qwen3.5-9B; 962.86 tok/s Q3 / 796.28 tok/s Q6 on RTX 5090 CUDA Resident, 298 tok/s on Apple M2 Max Metal, MoE + Vision 3D M-RoPE, zero-OOM streaming packer, and OpenAI SSE + Prometheus server."
-  - title: "vimg (.vimg) HTTP-Range Wavelet Image Codec & 144 KiB WASM Studio"
-    details: "Zero-dependency pure-Rust YCoCg-R + CDF 5/3 & 9/7 wavelet pyramid + 128-context 2D Adaptive Binary Range Coder. -38.6% vs PNG lossless, -46.8% vs JPEG lossy (beats WebP on portraits/landscapes at 25x faster encode), and 1 ms remote HTTP 206 crops/resizes/effects."
+  - icon:
+      src: /logos/vxg.svg
+    title: "VXG Core v0.7.0 — Data, SQL & HTTP/1.1 Range"
+    details: "Keep raw JSON/CSV verbatim (0.1171 6-dataset geomean, ahead of Zstd+Dict-9), run SQL (`EXPLAIN`, `DISTINCT`, `GROUP BY`, `HAVING`) or Arrow/DuckDB/Polars `read_vxg()` directly on local or remote HTTP Range blocks (15/15 vs DuckDB 2.0), and recover files byte-for-byte."
+  - icon:
+      src: /logos/vxg-kv.svg
+    title: "VXG-KV v0.3.0 — Stateless Snapshot Redis (RESP2/RESP3)"
+    details: "Zero-dep kqueue/epoll reactor beating Redis 8.10.3 11/11 (1.67M–1.85M ops/s, 1.93x less CPU) with 20x smaller snapshots, 7x less cold-pod RAM, AUTH/HELLO 3, JSON/Geo, BLPOP/BRPOP, XGROUP, O(1) DBSIZE, --wal-shards N, Time-Travel, and 26.8x faster VXG.SQL."
+  - icon:
+      src: /logos/vxt-turbo.svg
+    title: "VXT-Turbo v0.6.0 — E8 Lattice AI Model Codec & GPU LLM"
+    details: "E8/E8-HQ beats GGUF Q6_K (-0.43 GB, -32% TR KLD) and Q8_0 (-0.89 GB, -56% TR KLD) on Qwen3.5-9B; 963 tok/s Q3 / 796 tok/s Q6 on RTX 5090 CUDA Resident, 298 tok/s on Apple Metal, MoE + Vision 3D M-RoPE, and OpenAI SSE server."
+  - icon:
+      src: /logos/vimg.svg
+    title: "VIMG v0.4.0 — HTTP-Range Wavelet Image & Animation Codec"
+    details: "Zero-dep pure-Rust 8/10/12/16-bit HDR YCoCg-R + CDF 5/3 & 9/7 wavelet pyramid + VIMA1 animations. 1.00 ms UI Palette+RLE, zero-decode crop/downscale, ProgressiveDecoder, WebP Edge Proxy, and 277 KiB +simd128 WASM Studio."
 ---
 
 ## Why VXG?

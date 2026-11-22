@@ -1,4 +1,18 @@
-# `vxg-kv` — Stateless Snapshot Redis (RESP2/RESP3) + JSON/Geo + Streams/Groups + Pub/Sub + Compressed-Domain SQL over VXG
+<p align="center">
+  <img src="../../assets/logos/vxg-kv.svg" width="88" height="88" alt="VXG-KV Logo" />
+</p>
+
+<h1 align="center">VXG-KV <code>v0.3.0</code></h1>
+<p align="center">
+  <strong>Stateless Snapshot Redis (RESP2/RESP3) · JSON &amp; Geo · Streams &amp; Consumer Groups · Cross-Pod Pub/Sub · Compressed-Domain SQL</strong><br/>
+  Zero external dependencies · Native <code>kqueue</code>/<code>epoll</code> reactor · <code>11/11</code> faster than Redis 8.10.3 · <code>20×</code> smaller snapshots
+</p>
+
+<p align="center">
+  <a href="https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.3.0"><img src="https://img.shields.io/badge/release-vxg--kv--v0.3.0-F97316?style=flat-square" alt="Release" /></a>
+  <a href="https://meftunca.github.io/vxg/KV"><img src="https://img.shields.io/badge/docs-VXG--KV-10B981?style=flat-square" alt="Docs" /></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License" /></a>
+</p>
 
 **Zero external dependencies. Zero dedicated Redis cluster. Object-storage source of truth for thousands of stateless pods.**
 

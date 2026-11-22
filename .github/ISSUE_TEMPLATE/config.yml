@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Live VXG SQL Playground (WASM)
+    url: https://meftunca.github.io/vxg/playground
+    about: Try VXG compression and compressed-domain SQL directly in your browser.
+  - name: Live VIMG Image Studio (WASM)
+    url: https://meftunca.github.io/vxg/vimg-playground
+    about: Test wavelet compression, crops, and HTTP-Range progressive decoding in-browser.
+  - name: Documentation & Benchmarks
+    url: https://meftunca.github.io/vxg/
+    about: Architecture guides, wire format specs, and reproducible benchmark reports.

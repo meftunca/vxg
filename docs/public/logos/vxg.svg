@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" fill="none">
+  <defs>
+    <linearGradient id="vxg-g1" x1="12" y1="10" x2="108" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="55%" stop-color="#06B6D4"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="vxg-bg" x1="0" y1="0" x2="120" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0B1220"/>
+      <stop offset="100%" stop-color="#111C30"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="112" height="112" rx="26" fill="url(#vxg-bg)" stroke="url(#vxg-g1)" stroke-width="2.5"/>
+  <!-- Compressed block grid (top-left subtle) -->
+  <rect x="22" y="22" width="14" height="14" rx="3.5" fill="#10B981" fill-opacity="0.22" stroke="#10B981" stroke-opacity="0.55" stroke-width="1.2"/>
+  <rect x="40" y="22" width="14" height="14" rx="3.5" fill="#06B6D4" fill-opacity="0.16" stroke="#06B6D4" stroke-opacity="0.45" stroke-width="1.2"/>
+  <rect x="84" y="84" width="14" height="14" rx="3.5" fill="#0EA5E9" fill-opacity="0.22" stroke="#0EA5E9" stroke-opacity="0.55" stroke-width="1.2"/>
+  <!-- Sharp Vector V + X Prism -->
+  <path d="M26 36 L52 88 L60 72 L42 36 Z" fill="url(#vxg-g1)"/>
+  <path d="M94 36 L68 88 L60 72 L78 36 Z" fill="url(#vxg-g1)" fill-opacity="0.82"/>
+  <!-- Compressed Core Diamond -->
+  <polygon points="60,42 71,56 60,70 49,56" fill="#ECFEFF"/>
+  <polygon points="60,47 66.5,56 60,65 53.5,56" fill="url(#vxg-g1)"/>
+</svg>

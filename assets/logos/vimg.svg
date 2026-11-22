@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" fill="none">
+  <defs>
+    <linearGradient id="vimg-g" x1="12" y1="12" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="55%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+    <linearGradient id="vimg-bg" x1="0" y1="0" x2="120" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0A1124"/>
+      <stop offset="100%" stop-color="#111C3D"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="112" height="112" rx="26" fill="url(#vimg-bg)" stroke="url(#vimg-g)" stroke-width="2.5"/>
+  <!-- Hierarchical Wavelet Pyramid Frame -->
+  <rect x="22" y="22" width="76" height="76" rx="12" stroke="url(#vimg-g)" stroke-width="2.4" fill="#38BDF8" fill-opacity="0.06"/>
+  <!-- Quadtree Subband Splits -->
+  <line x1="60" y1="22" x2="60" y2="98" stroke="#38BDF8" stroke-opacity="0.45" stroke-width="1.8"/>
+  <line x1="22" y1="60" x2="98" y2="60" stroke="#38BDF8" stroke-opacity="0.45" stroke-width="1.8"/>
+  <line x1="41" y1="22" x2="41" y2="60" stroke="#818CF8" stroke-opacity="0.55" stroke-width="1.5"/>
+  <line x1="22" y1="41" x2="60" y2="41" stroke="#818CF8" stroke-opacity="0.55" stroke-width="1.5"/>
+  <!-- LL Thumbnail Core -->
+  <rect x="25" y="25" width="13" height="13" rx="3" fill="#38BDF8"/>
+  <!-- Wavelet Curve + Lens Accent -->
+  <path d="M28 84 Q42 66 56 78 T92 68" stroke="url(#vimg-g)" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+  <circle cx="79" cy="41" r="10" fill="url(#vimg-g)" fill-opacity="0.9"/>
+  <circle cx="79" cy="41" r="4" fill="#EFF6FF"/>
+</svg>

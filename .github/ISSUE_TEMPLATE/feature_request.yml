@@ -1,0 +1,31 @@
+name: Feature Request
+description: Suggest a new command, codec optimization, adapter, or integration
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: module
+    attributes:
+      label: Target Module
+      options:
+        - VXG Core (codec / SQL / Arrow / HTTP Range)
+        - VXG-KV (stateless Redis server / origin)
+        - VXT-Turbo (AI tensor codec / Metal / CUDA)
+        - VIMG (wavelet image / animation codec)
+        - WASM / FFI / Ecosystem
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Use Case / Problem
+      description: What workflow or limitation does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: API, CLI flags, RESP command, or design idea (zero-dep friendly preferred).
+    validations:
+      required: true

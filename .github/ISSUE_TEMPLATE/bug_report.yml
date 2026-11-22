@@ -1,0 +1,41 @@
+name: Bug Report
+description: Report a crash, wrong output, wire incompatibility, or unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: module
+    attributes:
+      label: Affected Module
+      options:
+        - VXG Core (codec / SQL / Arrow / HTTP Range)
+        - VXG-KV (stateless Redis server / origin)
+        - VXT-Turbo (AI tensor codec / Metal / CUDA)
+        - VIMG (wavelet image / animation codec)
+        - WASM / FFI / Docs
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Command or code snippet
+        2. Input dataset / flags
+        3. Observed error or output
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "OS, CPU arch (arm64/x86_64), Rust version, VXG crate version"
+    validations:
+      required: true

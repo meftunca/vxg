@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../../assets/logos/vimg.svg" width="72" height="72" alt="VIMG WASM Logo" />
+</p>
+
 # `@vimg/wasm`
 
 Zero-WASI WebAssembly (`+simd128`, ~266 KiB) wrapper for **VIMG** (`VIMG1`) — the HTTP/HTTPS Range-native hierarchical wavelet image codec & compressed-domain transform engine.

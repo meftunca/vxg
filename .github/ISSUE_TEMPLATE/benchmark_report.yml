@@ -1,0 +1,37 @@
+name: Benchmark Report
+description: Share reproducible benchmark results on new hardware, OS, or datasets
+title: "[Bench]: "
+labels: ["benchmark"]
+body:
+  - type: dropdown
+    id: module
+    attributes:
+      label: Benchmarked Module
+      options:
+        - VXG Core (vs Zstd / LZ4 / DuckDB)
+        - VXG-KV (vs Redis / Valkey)
+        - VXT-Turbo (vs GGUF / llama.cpp)
+        - VIMG (vs PNG / JPEG / WebP / AVIF)
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware & OS
+      placeholder: "e.g., AMD EPYC 9654 / Apple M4 Max / RTX 5090, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact Command & Dataset
+      placeholder: "e.g., cargo run --release -p vxg-kv -- bench --keys 100000"
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Raw Output / Results Table
+      render: text
+    validations:
+      required: true

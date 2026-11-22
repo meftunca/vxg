@@ -1,9 +1,9 @@
 {
   "name": "vxg-docs",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
-  "description": "VXG — Vectorized Execution Grammar Codec Documentation",
+  "description": "VXG — Unified Compressed-Domain Engine Documentation (VXG Core, VXG-KV, VXT-Turbo, VIMG)",
   "scripts": {
     "build:wasm": "mkdir -p public && RUSTFLAGS='-C strip=symbols' cargo build --release --lib --target wasm32-unknown-unknown --manifest-path ../Cargo.toml && cp \"${CARGO_TARGET_DIR:-../target}/wasm32-unknown-unknown/release/vxg.wasm\" public/vxg.wasm",
     "docs:dev": "vitepress dev .",

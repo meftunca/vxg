@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../../assets/logos/vxg.svg" width="72" height="72" alt="VXG WASM Logo" />
+</p>
+
 # `@vxg/wasm`
 
 Zero-WASI WebAssembly wrapper for **VXG** — adaptive block-independent lossless codec & compressed-domain SQL engine (`SELECT`, `DISTINCT`, `COUNT(DISTINCT col)`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`).
