@@ -1,9 +1,9 @@
 [package]
 name = "vxg-kv"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
-description = "Zero-dependency Redis-compatible (RESP2) stateless snapshot KV, Pub/Sub & compressed-domain SQL engine over VXG + HTTP Range Object Storage"
+description = "Zero-dependency Redis-compatible (RESP2/RESP3) stateless snapshot KV, JSON/Geo, Streams/Groups, Pub/Sub & compressed-domain SQL engine over VXG + HTTP Range Object Storage"
 license = "MIT"
 authors = ["meftunca"]
 repository = "https://github.com/meftunca/vxg"

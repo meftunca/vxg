@@ -12,13 +12,14 @@ use vxg_kv::{
     LocalFsStore, ObjectStore, PodServer, PubSubBroker, RespBuffer, ServerConfig, Value,
 };
 
-const HELP: &str = r#"vxg-kv — Stateless Snapshot Redis (RESP2) + Pub/Sub + Compressed-Domain SQL over VXG
+const HELP: &str = r#"vxg-kv — Stateless Snapshot Redis (RESP2/RESP3) + Pub/Sub + JSON/Geo + Compressed-Domain SQL
 
 Usage:
   vxg-kv origin DIR     [--port 9000]
   vxg-kv server         [--port 6379] [--origin http://127.0.0.1:9000 | --dir ./vxg-kv-data]
                         [--pod-id NAME] [--cache-mb 64] [--block-size 16384]
                         [--flush-ms 100] [--sync-ms 250] [--auto-compact 16]
+                        [--wal-shards 1] [--requirepass SECRET]
   vxg-kv bench          [--keys 25000]
   vxg-kv --help|-h
 "#;
@@ -111,9 +112,25 @@ fn run_server(args: &[String]) -> Result<(), String> {
                     .parse()
                     .map_err(|_| "bad auto-compact")?;
             }
+            "--wal-shards" => {
+                let n: usize = next_val(args, &mut i)?
+                    .parse()
+                    .map_err(|_| "bad wal-shards")?;
+                ecfg.wal_shards = n.clamp(1, 64);
+            }
+            "--requirepass" => {
+                ecfg.password = Some(next_val(args, &mut i)?.to_owned());
+            }
             x => return Err(format!("unknown option: {x}")),
         }
         i += 1;
+    }
+    if ecfg.password.is_none() {
+        if let Ok(pw) = env::var("VXG_KV_PASSWORD") {
+            if !pw.is_empty() {
+                ecfg.password = Some(pw);
+            }
+        }
     }
 
     let store: Arc<dyn ObjectStore> = if let Some(ref url) = origin_url {

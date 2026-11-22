@@ -5,7 +5,7 @@
 
 use std::io::{self, Read, Write};
 
-/// A RESP2 value sent over the wire.
+/// A RESP2/RESP3 value sent over the wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RespVal {
     Simple(String),
@@ -13,6 +13,7 @@ pub enum RespVal {
     Integer(i64),
     Bulk(Option<Vec<u8>>),
     Array(Option<Vec<RespVal>>),
+    Map(Vec<(RespVal, RespVal)>),
 }
 
 impl RespVal {
@@ -39,6 +40,9 @@ impl RespVal {
     }
     pub fn array(items: Vec<RespVal>) -> Self {
         Self::Array(Some(items))
+    }
+    pub fn map(pairs: Vec<(RespVal, RespVal)>) -> Self {
+        Self::Map(pairs)
     }
 
     pub fn encode(&self, out: &mut Vec<u8>) {
@@ -73,6 +77,15 @@ impl RespVal {
                 out.extend_from_slice(b"\r\n");
                 for it in items {
                     it.encode(out);
+                }
+            }
+            Self::Map(pairs) => {
+                out.push(b'%');
+                out.extend_from_slice(pairs.len().to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+                for (k, v) in pairs {
+                    k.encode(out);
+                    v.encode(out);
                 }
             }
         }
@@ -411,6 +424,26 @@ pub fn parse_resp_frame(src: &[u8]) -> Result<Option<(RespVal, usize)>, String> 
                 cur += used;
             }
             Ok(Some((RespVal::Array(Some(items)), cur)))
+        }
+        b'%' => {
+            let cnt: usize = std::str::from_utf8(head)
+                .map_err(|_| "ERR bad map length")?
+                .parse()
+                .map_err(|_| "ERR bad map length")?;
+            let mut cur = after;
+            let mut pairs = Vec::with_capacity(cnt.min(512));
+            for _ in 0..cnt {
+                let Some((k, uk)) = parse_resp_frame(&src[cur..])? else {
+                    return Ok(None);
+                };
+                cur += uk;
+                let Some((v, uv)) = parse_resp_frame(&src[cur..])? else {
+                    return Ok(None);
+                };
+                cur += uv;
+                pairs.push((k, v));
+            }
+            Ok(Some((RespVal::Map(pairs), cur)))
         }
         other => Err(format!("ERR protocol error: unexpected byte 0x{other:02x}")),
     }

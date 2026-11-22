@@ -7,12 +7,13 @@ use vxg::{Options, SqlFormat};
 
 use crate::engine::KvEngine;
 use crate::index::SnapshotIndex;
+use crate::shard_sync::is_internal_key;
 use crate::snapshot::{
     decode_wal_segment, encode_wal_segment, execute_vxg_sql_on_frame, read_full_snapshot,
     write_snapshot, write_snapshot_fastmap, Manifest, SnapshotRef, WalRef, MANIFEST_KEY,
 };
 use crate::store::PutOutcome;
-use crate::types::{encode_record_line, glob_match, now_ms, FastMap, Record};
+use crate::types::{encode_record_line, now_ms, FastMap, Record};
 
 impl KvEngine {
     /// Clear all local and remote keys (commits an empty compacted snapshot).
@@ -43,6 +44,9 @@ impl KvEngine {
         self.manifest = next_m;
         self.manifest_etag = Some(etag);
         self.base = Some((snap_ref, idx));
+        if self.cfg.wal_shards > 1 {
+            self.clear_all_shards()?;
+        }
         Ok(next_epoch)
     }
 
@@ -50,67 +54,70 @@ impl KvEngine {
     /// Fast path: `HEAD manifest.json` -> unchanged ETag = **0 payload bytes transferred!**
     pub fn pull(&mut self) -> Result<usize, String> {
         self.stats.pulls += 1;
-        let Some(meta) = self.store.head(MANIFEST_KEY)? else {
-            return Ok(0);
-        };
-        if self.manifest_etag.as_deref() == Some(meta.etag.as_str()) {
-            return Ok(0);
-        }
-        let Some((bytes, etag)) = self.store.get(MANIFEST_KEY)? else {
-            return Ok(0);
-        };
-        let remote = Manifest::from_bytes(&bytes)?;
         let mut applied_count = 0usize;
-
-        let base_changed = match (&self.base, &remote.base_snapshot) {
-            (Some((cur, _)), Some(rem)) => cur.epoch != rem.epoch,
-            (None, Some(_)) | (Some(_), None) => true,
-            (None, None) => false,
-        };
-        if base_changed {
-            self.wal_overlay = FastMap::default();
-            self.applied_wals.clear();
-            self.remote_handle = None;
-            if let Some(ref b) = remote.base_snapshot {
-                let Some((idx_bytes, _)) = self.store.get(&b.idx_key)? else {
-                    return Err(format!("ERR missing base index {}", b.idx_key));
-                };
-                let idx = SnapshotIndex::decode(&idx_bytes)?;
-                self.base = Some((b.clone(), idx));
-            } else {
-                self.base = None;
-            }
-        }
-
-        for w in &remote.wals {
-            if self.applied_wals.contains(&w.epoch) {
-                continue;
-            }
-            let Some((wb, _)) = self.store.get(&w.key)? else {
-                continue;
-            };
-            let (recs, events) = decode_wal_segment(&wb)?;
-            for (k, r) in recs {
-                let ver = r.version.max(self.next_ver + 1);
-                self.next_ver = self.next_ver.max(ver);
-                if !self.key_versions.is_empty() {
-                    if let Some(slot) = self.key_versions.get_mut(&k) {
-                        *slot = ver;
+        if let Some(meta) = self.store.head(MANIFEST_KEY)? {
+            if self.manifest_etag.as_deref() != Some(meta.etag.as_str()) {
+                if let Some((bytes, etag)) = self.store.get(MANIFEST_KEY)? {
+                    let remote = Manifest::from_bytes(&bytes)?;
+                    let base_changed = match (&self.base, &remote.base_snapshot) {
+                        (Some((cur, _)), Some(rem)) => cur.epoch != rem.epoch,
+                        (None, Some(_)) | (Some(_), None) => true,
+                        (None, None) => false,
+                    };
+                    if base_changed {
+                        self.wal_overlay = FastMap::default();
+                        self.applied_wals.clear();
+                        self.remote_handle = None;
+                        for s in &mut self.applied_shard_wals {
+                            s.clear();
+                        }
+                        self.shard_etags.fill(None);
+                        if let Some(ref b) = remote.base_snapshot {
+                            let Some((idx_bytes, _)) = self.store.get(&b.idx_key)? else {
+                                return Err(format!("ERR missing base index {}", b.idx_key));
+                            };
+                            let idx = SnapshotIndex::decode(&idx_bytes)?;
+                            self.base = Some((b.clone(), idx));
+                        } else {
+                            self.base = None;
+                        }
                     }
+
+                    for w in &remote.wals {
+                        if self.applied_wals.contains(&w.epoch) {
+                            continue;
+                        }
+                        let Some((wb, _)) = self.store.get(&w.key)? else {
+                            continue;
+                        };
+                        let (recs, events) = decode_wal_segment(&wb)?;
+                        for (k, r) in recs {
+                            let ver = r.version.max(self.next_ver + 1);
+                            self.next_ver = self.next_ver.max(ver);
+                            if !self.key_versions.is_empty() {
+                                if let Some(slot) = self.key_versions.get_mut(&k) {
+                                    *slot = ver;
+                                }
+                            }
+                            self.wal_overlay.insert(k, r);
+                        }
+                        for ev in events {
+                            if ev.origin_pod != self.cfg.pod_id {
+                                self.broker.publish_local(&ev.channel, &ev.payload);
+                                self.stats.pubsub_remote_delivered += 1;
+                            }
+                        }
+                        self.applied_wals.insert(w.epoch);
+                        applied_count += 1;
+                    }
+                    self.manifest = remote;
+                    self.manifest_etag = Some(etag);
                 }
-                self.wal_overlay.insert(k, r);
             }
-            for ev in events {
-                if ev.origin_pod != self.cfg.pod_id {
-                    self.broker.publish_local(&ev.channel, &ev.payload);
-                    self.stats.pubsub_remote_delivered += 1;
-                }
-            }
-            self.applied_wals.insert(w.epoch);
-            applied_count += 1;
         }
-        self.manifest = remote;
-        self.manifest_etag = Some(etag);
+        if self.cfg.wal_shards > 1 {
+            applied_count += self.pull_all_shards()?;
+        }
         Ok(applied_count)
     }
 
@@ -159,6 +166,9 @@ impl KvEngine {
     pub fn commit(&mut self) -> Result<u64, String> {
         if !self.has_dirty() {
             return Ok(self.manifest.epoch);
+        }
+        if self.cfg.wal_shards > 1 {
+            return self.commit_sharded();
         }
         for _ in 0..16 {
             if let Some(ep) = self.try_commit_once()? {
@@ -237,6 +247,9 @@ impl KvEngine {
                     self.manifest = next_m;
                     self.manifest_etag = Some(new_etag);
                     self.stats.compactions += 1;
+                    if self.cfg.wal_shards > 1 {
+                        self.clear_all_shards()?;
+                    }
                     return Ok(snap_ref);
                 }
                 PutOutcome::PreconditionFailed => {
@@ -247,13 +260,9 @@ impl KvEngine {
         Err("ERR VXG.COMPACT exceeded CAS retry budget".to_owned())
     }
 
-    /// Return all live keys matching `pattern` (`*` matches everything).
+    /// Return all live keys matching `pattern` (`*` matches everything) using fence-pointer pruning.
     pub fn matching_keys(&mut self, pattern: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-        let merged = self.materialize_live()?;
-        Ok(merged
-            .into_keys()
-            .filter(|k| pattern == b"*" || glob_match(pattern, k))
-            .collect())
+        self.matching_keys_pruned(pattern)
     }
 
     /// Execute compressed-domain `VXG.SQL` over either a pinned historical snapshot or live state.
@@ -282,7 +291,9 @@ impl KvEngine {
         let merged = self.materialize_live()?;
         let mut raw = Vec::with_capacity(merged.len() * 64);
         for (k, r) in &merged {
-            encode_record_line(&mut raw, k, r);
+            if !is_internal_key(k) {
+                encode_record_line(&mut raw, k, r);
+            }
         }
         let frame = vxg::compress(
             &raw,

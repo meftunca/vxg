@@ -87,7 +87,8 @@ fn parse_i64_fast(b: &[u8]) -> Option<i64> {
 fn is_control_slice(b: &[u8]) -> bool {
     const CTRL: &[&[u8]] = &[
         b"SUBSCRIBE", b"UNSUBSCRIBE", b"PSUBSCRIBE", b"PUNSUBSCRIBE", b"PUBSUB", b"QUIT",
-        b"MULTI", b"EXEC", b"DISCARD", b"WATCH", b"UNWATCH",
+        b"MULTI", b"EXEC", b"DISCARD", b"WATCH", b"UNWATCH", b"AUTH", b"HELLO", b"ACL",
+        b"BLPOP", b"BRPOP",
     ];
     CTRL.iter().any(|k| b.eq_ignore_ascii_case(k))
 }
@@ -451,13 +452,16 @@ pub fn dispatch_span_batch_unlocked(
     cmd_ranges: &[(usize, usize)],
     out: &mut Vec<u8>,
 ) {
-    let fast_ok = !conn.in_multi && conn.pinned_epoch.is_none();
     for &(a, b) in cmd_ranges {
         if a >= b {
             continue;
         }
         let spans = &arg_spans[a..b];
-        if fast_ok && try_rw_fast_spans(eng, buf, spans, out) {
+        if conn.authed
+            && !conn.in_multi
+            && conn.pinned_epoch.is_none()
+            && try_rw_fast_spans(eng, buf, spans, out)
+        {
             continue;
         }
         let owned = materialize_args(buf, spans);
@@ -488,7 +492,8 @@ pub fn dispatch_span_batch(
         return;
     }
     // Fast Path 1: 100% read-only hot batch under 1 shared `RwLock::read()` (parallel across cores!)
-    if !conn.in_multi
+    if conn.authed
+        && !conn.in_multi
         && conn.pinned_epoch.is_none()
         && cmd_ranges
             .iter()
@@ -511,7 +516,8 @@ pub fn dispatch_span_batch(
     }
 
     // Fast Path 2: single `RwLock::write()` for entire data-only pipeline batch!
-    if !conn.in_multi
+    if conn.authed
+        && !conn.in_multi
         && conn.pinned_epoch.is_none()
         && cmd_ranges
             .iter()

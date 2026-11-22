@@ -14,6 +14,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::blocking::reactor_queue::WaiterQueue;
 use crate::dispatch::{dispatch_command_unlocked, ConnState};
 use crate::engine::KvEngine;
 use crate::fast_path::dispatch_span_batch_unlocked;
@@ -351,6 +352,7 @@ pub fn run_reactor(
     let mut arg_spans: Vec<(usize, usize)> = Vec::with_capacity(256);
     let mut cmd_ranges: Vec<(usize, usize)> = Vec::with_capacity(128);
     let mut to_close: Vec<RawFd> = Vec::with_capacity(16);
+    let mut waiters = WaiterQueue::default();
 
     let mut last_flush = Instant::now();
     let mut last_sync = Instant::now();
@@ -362,7 +364,8 @@ pub fn run_reactor(
     };
 
     while !shutdown.load(Ordering::Relaxed) {
-        if poller.wait(poll_ms, &mut events).is_err() {
+        let wait_ms = if waiters.is_empty() { poll_ms } else { poll_ms.min(10) };
+        if poller.wait(wait_ms, &mut events).is_err() {
             break;
         }
         let mut any_publish = false;
@@ -387,7 +390,10 @@ pub fn run_reactor(
                                     out: Vec::with_capacity(16_384),
                                     out_pos: 0,
                                     want_write: false,
-                                    conn: ConnState::new(sub_id),
+                                    conn: ConnState::new_with_auth(
+                                        sub_id,
+                                        engine.cfg.password.is_none(),
+                                    ),
                                     rx,
                                 },
                             );
@@ -424,23 +430,32 @@ pub fn run_reactor(
                         Ok(true) => {
                             if !cmd_ranges.is_empty() {
                                 let raw = cl.buf.raw_buf();
-                                if cmd_ranges.iter().any(|&(a, b)| {
-                                    a < b && {
+                                let mut has_blocking = false;
+                                for &(a, b) in &cmd_ranges {
+                                    if a < b {
                                         let (s, e) = arg_spans[a];
-                                        raw[s..e].eq_ignore_ascii_case(b"PUBLISH")
+                                        let c = &raw[s..e];
+                                        if c.len() == 7 && c.eq_ignore_ascii_case(b"PUBLISH") {
+                                            any_publish = true;
+                                        } else if c.len() == 5
+                                            && (c.eq_ignore_ascii_case(b"BLPOP")
+                                                || c.eq_ignore_ascii_case(b"BRPOP"))
+                                        {
+                                            has_blocking = true;
+                                        }
                                     }
-                                }) {
-                                    any_publish = true;
                                 }
-                                dispatch_span_batch_unlocked(
-                                    &mut engine,
-                                    &broker,
-                                    &mut cl.conn,
-                                    raw,
-                                    &arg_spans,
-                                    &cmd_ranges,
-                                    &mut cl.out,
-                                );
+                                if has_blocking {
+                                    waiters.dispatch_blocking_batch(
+                                        ev.fd, &mut engine, &broker, &mut cl.conn,
+                                        raw, &arg_spans, &cmd_ranges, &mut cl.out,
+                                    );
+                                } else {
+                                    dispatch_span_batch_unlocked(
+                                        &mut engine, &broker, &mut cl.conn,
+                                        raw, &arg_spans, &cmd_ranges, &mut cl.out,
+                                    );
+                                }
                             }
                         }
                         Ok(false) => {
@@ -461,10 +476,14 @@ pub fn run_reactor(
                                         if args.first().is_some_and(|c| c.eq_ignore_ascii_case(b"PUBLISH")) {
                                             any_publish = true;
                                         }
-                                        for reply in
-                                            dispatch_command_unlocked(&mut engine, &broker, &mut cl.conn, args)
-                                        {
-                                            reply.encode(&mut cl.out);
+                                        if !waiters.try_handle_blocking(
+                                            ev.fd, &mut engine, &cl.conn, &args, &mut cl.out,
+                                        ) {
+                                            for reply in
+                                                dispatch_command_unlocked(&mut engine, &broker, &mut cl.conn, args)
+                                            {
+                                                reply.encode(&mut cl.out);
+                                            }
                                         }
                                         if cl.conn.quit {
                                             break;
@@ -513,7 +532,7 @@ pub fn run_reactor(
         {
             let _ = engine.commit();
             if engine.cfg.auto_compact_wals > 0
-                && engine.manifest.wals.len() >= engine.cfg.auto_compact_wals
+                && engine.active_wal_count() >= engine.cfg.auto_compact_wals
             {
                 let _ = engine.compact();
             }
@@ -547,7 +566,25 @@ pub fn run_reactor(
             }
         }
 
+        // Wake any blocked BLPOP/BRPOP clients whose list now has data or whose timeout expired
+        if !waiters.is_empty() {
+            for (wfd, reply) in waiters.poll_ready(&mut engine) {
+                if let Some(cl) = clients.get_mut(&wfd) {
+                    reply.encode(&mut cl.out);
+                    match cl.flush() {
+                        Ok(false) if !cl.want_write => {
+                            poller.set_write(wfd, true);
+                            cl.want_write = true;
+                        }
+                        Err(_) => to_close.push(wfd),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         for fd in &to_close {
+            waiters.remove_fd(*fd);
             poller.remove(*fd);
             if let Some(cl) = clients.remove(fd) {
                 broker.unregister(cl.conn.sub_id);

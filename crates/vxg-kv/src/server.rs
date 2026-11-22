@@ -136,7 +136,7 @@ mod portable {
                     {
                         let _ = eng.commit();
                         if eng.cfg.auto_compact_wals > 0
-                            && eng.manifest.wals.len() >= eng.cfg.auto_compact_wals
+                            && eng.active_wal_count() >= eng.cfg.auto_compact_wals
                         {
                             let _ = eng.compact();
                         }
@@ -179,7 +179,8 @@ mod portable {
         let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
         let (tx, rx) = mpsc::channel::<PushMessage>();
         let sub_id = broker.register(tx);
-        let mut conn = ConnState::new(sub_id);
+        let init_authed = engine.read().unwrap().cfg.password.is_none();
+        let mut conn = ConnState::new_with_auth(sub_id, init_authed);
         let mut buf = RespBuffer::new();
         let mut out_wire = Vec::with_capacity(16_384);
         let mut arg_spans: Vec<(usize, usize)> = Vec::with_capacity(128);

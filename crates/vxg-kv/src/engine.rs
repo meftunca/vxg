@@ -19,6 +19,8 @@ pub struct EngineConfig {
     pub cache_bytes: usize,
     pub block_size: usize,
     pub auto_compact_wals: usize,
+    pub password: Option<String>,
+    pub wal_shards: usize,
 }
 
 impl Default for EngineConfig {
@@ -28,6 +30,8 @@ impl Default for EngineConfig {
             cache_bytes: 64 * 1024 * 1024,
             block_size: 16_384,
             auto_compact_wals: 16,
+            password: None,
+            wal_shards: 1,
         }
     }
 }
@@ -53,6 +57,9 @@ pub struct KvEngine {
     pub broker: Arc<PubSubBroker>,
     pub manifest: Manifest,
     pub manifest_etag: Option<String>,
+    pub shard_manifests: Vec<Manifest>,
+    pub shard_etags: Vec<Option<String>>,
+    pub applied_shard_wals: Vec<BTreeSet<u64>>,
     pub mem: FastMap<Vec<u8>, Record>,
     pub wal_overlay: FastMap<Vec<u8>, Record>,
     pub applied_wals: BTreeSet<u64>,
@@ -73,12 +80,16 @@ impl KvEngine {
         cfg: EngineConfig,
     ) -> Result<Self, String> {
         let cache = LruBlockCache::new(cfg.cache_bytes);
+        let n_shards = if cfg.wal_shards > 1 { cfg.wal_shards } else { 0 };
         let mut eng = Self {
             cfg,
             store,
             broker,
             manifest: Manifest::default(),
             manifest_etag: None,
+            shard_manifests: vec![Manifest::default(); n_shards],
+            shard_etags: vec![None; n_shards],
+            applied_shard_wals: vec![BTreeSet::new(); n_shards],
             mem: FastMap::default(),
             wal_overlay: FastMap::default(),
             applied_wals: BTreeSet::new(),
@@ -277,7 +288,7 @@ impl KvEngine {
         Ok(res)
     }
 
-    fn fetch_block_cached_handle(
+    pub(crate) fn fetch_block_cached_handle(
         &mut self,
         snap: &SnapshotRef,
         blk: usize,

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::dispatch_ds::{arg_str as s_arg, dispatch_ds_cmd, parse_f64, parse_i64, WRONGTYPE};
-use crate::dispatch_vxg::dispatch_vxg_cmd;
+use crate::dispatch_vxg::{dispatch_vxg_cmd, handle_auth, handle_hello};
 use crate::engine::KvEngine;
 use crate::pubsub::PubSubBroker;
 use crate::resp::RespVal;
@@ -14,6 +14,8 @@ use crate::types::{now_ms, Value};
 /// Per-TCP-connection session state.
 pub struct ConnState {
     pub sub_id: u64,
+    pub authed: bool,
+    pub resp3: bool,
     pub in_multi: bool,
     pub tx_queue: Vec<Vec<Vec<u8>>>,
     pub watched: HashMap<Vec<u8>, u64>,
@@ -23,8 +25,14 @@ pub struct ConnState {
 
 impl ConnState {
     pub fn new(sub_id: u64) -> Self {
+        Self::new_with_auth(sub_id, true)
+    }
+
+    pub fn new_with_auth(sub_id: u64, authed: bool) -> Self {
         Self {
             sub_id,
+            authed,
+            resp3: false,
             in_multi: false,
             tx_queue: Vec::new(),
             watched: HashMap::new(),
@@ -45,6 +53,17 @@ pub fn dispatch_command_unlocked(
         return Vec::new();
     }
     let cmd = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
+    if !conn.authed {
+        return match cmd.as_str() {
+            "AUTH" => vec![handle_auth(eng, conn, &args)],
+            "HELLO" => vec![handle_hello(eng, conn, &args)],
+            "QUIT" => {
+                conn.quit = true;
+                vec![RespVal::ok()]
+            }
+            _ => vec![RespVal::err("NOAUTH Authentication required.")],
+        };
+    }
     if let Some(res) = dispatch_pubsub_or_quit(broker, conn, &cmd, &args) {
         return res;
     }
@@ -119,8 +138,10 @@ pub fn dispatch_command(
         return Vec::new();
     }
     let cmd = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
-    if let Some(res) = dispatch_pubsub_or_quit(broker, conn, &cmd, &args) {
-        return res;
+    if conn.authed {
+        if let Some(res) = dispatch_pubsub_or_quit(broker, conn, &cmd, &args) {
+            return res;
+        }
     }
     let mut eng = engine.write().unwrap();
     dispatch_command_unlocked(&mut eng, broker, conn, args)
@@ -275,14 +296,6 @@ pub(crate) fn exec_single(
             Some(m) => RespVal::bulk(m.clone()),
             None => RespVal::err("ERR wrong number of arguments for 'echo'"),
         },
-        "HELLO" => RespVal::array(vec![
-            RespVal::bulk(b"server".to_vec()),
-            RespVal::bulk(b"vxg-kv".to_vec()),
-            RespVal::bulk(b"version".to_vec()),
-            RespVal::bulk(env!("CARGO_PKG_VERSION").as_bytes().to_vec()),
-            RespVal::bulk(b"proto".to_vec()),
-            RespVal::int(2),
-        ]),
         "CLIENT" => RespVal::ok(),
         "COMMAND" => RespVal::array(Vec::new()),
         "TIME" => {
@@ -292,8 +305,8 @@ pub(crate) fn exec_single(
                 RespVal::bulk(((ms % 1000) * 1000).to_string().into_bytes()),
             ])
         }
-        "DBSIZE" => match eng.materialize_live() {
-            Ok(m) => RespVal::int(m.len() as i64),
+        "DBSIZE" => match eng.dbsize_fast() {
+            Ok(n) => RespVal::int(n as i64),
             Err(e) => RespVal::err(e),
         },
         "FLUSHDB" | "FLUSHALL" => match eng.flush_all() {

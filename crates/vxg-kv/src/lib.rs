@@ -1,10 +1,14 @@
 //! `vxg-kv`: Zero-dependency Redis-compatible (RESP2) stateless snapshot KV, Pub/Sub &
 //! compressed-domain SQL engine backed by `VXG v5` + HTTP/1.1 Range & ETag CAS Object Storage.
 
+pub mod blocking;
 pub mod dispatch;
 pub mod dispatch_ds;
+pub mod dispatch_geo;
+pub mod dispatch_json;
 pub mod dispatch_stream;
 pub mod dispatch_vxg;
+pub mod dispatch_xgroup;
 pub mod dispatch_zset;
 pub mod engine;
 mod engine_sync;
@@ -16,6 +20,7 @@ pub mod pubsub;
 mod reactor;
 pub mod resp;
 pub mod server;
+mod shard_sync;
 pub mod snapshot;
 pub mod store;
 pub mod types;

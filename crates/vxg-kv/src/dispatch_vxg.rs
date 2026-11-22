@@ -16,6 +16,9 @@ pub(crate) fn dispatch_vxg_cmd(
 ) -> Option<RespVal> {
     Some(match cmd {
         "INFO" | "VXG.STATS" => build_stats_info(eng, conn),
+        "AUTH" => handle_auth(eng, conn, args),
+        "HELLO" => handle_hello(eng, conn, args),
+        "ACL" => handle_acl(eng, args),
         "SET" => handle_set(eng, args),
         "INCR" | "DECR" | "INCRBY" | "DECRBY" => handle_incr(eng, cmd, args),
         "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" => handle_expire(eng, cmd, args),
@@ -282,25 +285,103 @@ fn handle_scan(eng: &mut KvEngine, args: &[Vec<u8>]) -> RespVal {
             i += 1;
         }
     }
-    let all = match eng.matching_keys(pat) {
+    let (next_cursor, batch) = match eng.scan_pruned(cursor, pat, count) {
         Ok(v) => v,
         Err(e) => return RespVal::err(e),
     };
-    let end = (cursor + count).min(all.len());
-    let next_cursor = if end >= all.len() { 0 } else { end };
-    let batch = if cursor < all.len() {
-        all[cursor..end]
-            .iter()
-            .cloned()
-            .map(RespVal::bulk)
-            .collect()
-    } else {
-        Vec::new()
-    };
     RespVal::array(vec![
         RespVal::bulk(next_cursor.to_string().into_bytes()),
-        RespVal::array(batch),
+        RespVal::array(batch.into_iter().map(RespVal::bulk).collect()),
     ])
+}
+
+pub(crate) fn handle_auth(eng: &KvEngine, conn: &mut ConnState, args: &[Vec<u8>]) -> RespVal {
+    if args.len() < 2 || args.len() > 3 {
+        return RespVal::err("ERR wrong number of arguments for 'auth'");
+    }
+    let Some(ref expected) = eng.cfg.password else {
+        return RespVal::err(
+            "ERR AUTH <password> called without any password configured for the default user",
+        );
+    };
+    let (user_ok, pass) = if args.len() == 3 {
+        (args[1].eq_ignore_ascii_case(b"default"), args[2].as_slice())
+    } else {
+        (true, args[1].as_slice())
+    };
+    if user_ok && pass == expected.as_bytes() {
+        conn.authed = true;
+        RespVal::ok()
+    } else {
+        RespVal::err("WRONGPASS invalid username-password pair or user is disabled.")
+    }
+}
+
+pub(crate) fn handle_hello(eng: &KvEngine, conn: &mut ConnState, args: &[Vec<u8>]) -> RespVal {
+    let mut proto = if conn.resp3 { 3i64 } else { 2i64 };
+    if let Some(p_raw) = args.get(1) {
+        match std::str::from_utf8(p_raw).ok().and_then(|s| s.parse::<i64>().ok()) {
+            Some(2) => proto = 2,
+            Some(3) => proto = 3,
+            _ => return RespVal::err("NOPROTO unsupported protocol version"),
+        }
+    }
+    let mut i = 2usize;
+    while i < args.len() {
+        let tok = arg_str(args, i).unwrap_or("").to_ascii_uppercase();
+        if tok == "AUTH" && i + 2 < args.len() {
+            let auth_args = vec![b"AUTH".to_vec(), args[i + 1].clone(), args[i + 2].clone()];
+            let res = handle_auth(eng, conn, &auth_args);
+            if matches!(res, RespVal::Error(_)) {
+                return res;
+            }
+            i += 3;
+        } else if tok == "SETNAME" && i + 1 < args.len() {
+            i += 2;
+        } else {
+            return RespVal::err("ERR syntax error in HELLO");
+        }
+    }
+    if !conn.authed {
+        return RespVal::err("NOAUTH Authentication required.");
+    }
+    conn.resp3 = proto == 3;
+    let pairs = vec![
+        (RespVal::bulk(b"server".to_vec()), RespVal::bulk(b"vxg-kv".to_vec())),
+        (
+            RespVal::bulk(b"version".to_vec()),
+            RespVal::bulk(env!("CARGO_PKG_VERSION").as_bytes().to_vec()),
+        ),
+        (RespVal::bulk(b"proto".to_vec()), RespVal::int(proto)),
+        (RespVal::bulk(b"id".to_vec()), RespVal::int(conn.sub_id as i64)),
+        (RespVal::bulk(b"mode".to_vec()), RespVal::bulk(b"standalone".to_vec())),
+    ];
+    if proto == 3 {
+        RespVal::map(pairs)
+    } else {
+        let mut flat = Vec::with_capacity(pairs.len() * 2);
+        for (k, v) in pairs {
+            flat.push(k);
+            flat.push(v);
+        }
+        RespVal::array(flat)
+    }
+}
+
+fn handle_acl(eng: &KvEngine, args: &[Vec<u8>]) -> RespVal {
+    let sub = arg_str(args, 1).unwrap_or("").to_ascii_uppercase();
+    match sub.as_str() {
+        "WHOAMI" => RespVal::bulk(b"default".to_vec()),
+        "LIST" => {
+            let rule = if eng.cfg.password.is_some() {
+                b"user default on #configured ~* &* +@all".to_vec()
+            } else {
+                b"user default on nopass ~* &* +@all".to_vec()
+            };
+            RespVal::array(vec![RespVal::bulk(rule)])
+        }
+        _ => RespVal::err("ERR unknown ACL subcommand"),
+    }
 }
 
 fn handle_vxg_cas(eng: &mut KvEngine, args: &[Vec<u8>]) -> RespVal {
@@ -365,13 +446,14 @@ fn build_stats_info(eng: &KvEngine, conn: &ConnState) -> RespVal {
         None => "base_epoch:0\r\n".to_owned(),
     };
     let s = format!(
-        "# VXG-KV\r\npod_id:{}\r\nepoch:{}\r\npinned_epoch:{:?}\r\nmem_dirty_keys:{}\r\nwal_overlay_keys:{}\r\nactive_wals:{}\r\nhistory_snapshots:{}\r\n{base_info}cache_blocks:{}\r\ncache_bytes:{}\r\ncache_hits:{}\r\ncache_misses:{}\r\nrange_requests:{}\r\nrange_bytes:{}\r\nbloom_filtered:{}\r\nout_of_range_filtered:{}\r\ncas_commits:{}\r\ncas_retries:{}\r\ncompactions:{}\r\npulls:{}\r\npubsub_remote_delivered:{}\r\n",
+        "# VXG-KV\r\npod_id:{}\r\nepoch:{}\r\npinned_epoch:{:?}\r\nwal_shards:{}\r\nmem_dirty_keys:{}\r\nwal_overlay_keys:{}\r\nactive_wals:{}\r\nhistory_snapshots:{}\r\n{base_info}cache_blocks:{}\r\ncache_bytes:{}\r\ncache_hits:{}\r\ncache_misses:{}\r\nrange_requests:{}\r\nrange_bytes:{}\r\nbloom_filtered:{}\r\nout_of_range_filtered:{}\r\ncas_commits:{}\r\ncas_retries:{}\r\ncompactions:{}\r\npulls:{}\r\npubsub_remote_delivered:{}\r\n",
         eng.cfg.pod_id,
         eng.manifest.epoch,
         conn.pinned_epoch,
+        eng.cfg.wal_shards,
         eng.mem.len(),
         eng.wal_overlay.len(),
-        eng.manifest.wals.len(),
+        eng.active_wal_count(),
         eng.manifest.history.len(),
         eng.cache.cached_blocks(),
         eng.cache.bytes_used(),

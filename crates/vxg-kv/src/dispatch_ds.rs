@@ -2,7 +2,11 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::blocking::{parse_blocking_pop, try_pop_any};
+use crate::dispatch_geo::dispatch_geo_cmd;
+use crate::dispatch_json::dispatch_json_cmd;
 use crate::dispatch_stream::dispatch_stream_cmd;
+use crate::dispatch_xgroup::dispatch_xgroup_cmd;
 use crate::dispatch_zset::dispatch_set_zset_cmd;
 use crate::engine::KvEngine;
 use crate::resp::RespVal;
@@ -82,12 +86,21 @@ fn list_ref<'a>(eng: &'a mut KvEngine, key: &[u8]) -> Result<Option<&'a VecDeque
     }
 }
 
-/// Dispatch Hash, List, Set, ZSet, Stream, Bitmap, and HLL commands.
+/// Dispatch Hash, List, Set, ZSet, Stream, XGroup, JSON, Geo, Bitmap, and HLL commands.
 pub fn dispatch_ds_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) -> Option<RespVal> {
     if let Some(r) = dispatch_set_zset_cmd(eng, cmd, args) {
         return Some(r);
     }
     if let Some(r) = dispatch_stream_cmd(eng, cmd, args) {
+        return Some(r);
+    }
+    if let Some(r) = dispatch_xgroup_cmd(eng, cmd, args) {
+        return Some(r);
+    }
+    if let Some(r) = dispatch_json_cmd(eng, cmd, args) {
+        return Some(r);
+    }
+    if let Some(r) = dispatch_geo_cmd(eng, cmd, args) {
         return Some(r);
     }
     Some(match cmd {
@@ -559,6 +572,17 @@ pub fn dispatch_ds_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) -> Optio
                 dst.push_back(val.clone());
             }
             RespVal::bulk(val)
+        }
+        "BLPOP" | "BRPOP" => {
+            let (keys, _) = match parse_blocking_pop(args) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            match try_pop_any(eng, &keys, cmd == "BLPOP") {
+                Ok(Some((k, v))) => RespVal::array(vec![RespVal::bulk(k), RespVal::bulk(v)]),
+                Ok(None) => RespVal::nil_array(),
+                Err(e) => RespVal::err(e),
+            }
         }
         _ => return None,
     })
