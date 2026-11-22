@@ -4,10 +4,11 @@ use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::dispatch::{dispatch_command, ConnState};
+use crate::dispatch::ConnState;
+use crate::dispatch_vxg::dispatch_batch;
 use crate::engine::KvEngine;
 use crate::pubsub::{PubSubBroker, PushMessage};
 use crate::resp::{RespBuffer, RespVal};
@@ -30,7 +31,7 @@ impl Default for ServerConfig {
 /// Running `vxg-kv` pod server handle (exposes bound address and graceful shutdown).
 pub struct PodServer {
     pub addr: SocketAddr,
-    pub engine: Arc<Mutex<KvEngine>>,
+    pub engine: Arc<RwLock<KvEngine>>,
     pub broker: Arc<PubSubBroker>,
     shutdown: Arc<AtomicBool>,
 }
@@ -44,17 +45,15 @@ impl PodServer {
     ) -> io::Result<Self> {
         let addr = listener.local_addr()?;
         let broker = Arc::clone(&engine.broker);
-        let engine = Arc::new(Mutex::new(engine));
+        let engine = Arc::new(RwLock::new(engine));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        // Background sync/flush/auto-compact loop
         if cfg.flush_ms > 0 || cfg.sync_ms > 0 {
             let eng_bg = Arc::clone(&engine);
             let sd_bg = Arc::clone(&shutdown);
             std::thread::spawn(move || background_sync_loop(eng_bg, sd_bg, cfg));
         }
 
-        // TCP accept loop
         let eng_ac = Arc::clone(&engine);
         let br_ac = Arc::clone(&broker);
         let sd_ac = Arc::clone(&shutdown);
@@ -96,20 +95,16 @@ impl Drop for PodServer {
 }
 
 fn background_sync_loop(
-    engine: Arc<Mutex<KvEngine>>,
+    engine: Arc<RwLock<KvEngine>>,
     shutdown: Arc<AtomicBool>,
     cfg: ServerConfig,
 ) {
     let mut last_flush = Instant::now();
     let mut last_sync = Instant::now();
-    let tick = Duration::from_millis(
-        cfg.flush_ms
-            .min(cfg.sync_ms.max(1))
-            .clamp(10, 50),
-    );
+    let tick = Duration::from_millis(cfg.flush_ms.min(cfg.sync_ms.max(1)).clamp(10, 50));
     while !shutdown.load(Ordering::Relaxed) {
         std::thread::sleep(tick);
-        let mut eng = engine.lock().unwrap();
+        let mut eng = engine.write().unwrap();
         if cfg.flush_ms > 0
             && eng.has_dirty()
             && last_flush.elapsed() >= Duration::from_millis(cfg.flush_ms)
@@ -151,37 +146,32 @@ fn encode_push(msg: PushMessage) -> RespVal {
 
 fn handle_client(
     mut stream: TcpStream,
-    engine: Arc<Mutex<KvEngine>>,
+    engine: Arc<RwLock<KvEngine>>,
     broker: Arc<PubSubBroker>,
     shutdown: Arc<AtomicBool>,
 ) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let (tx, rx) = mpsc::channel::<PushMessage>();
     let sub_id = broker.register(tx);
     let mut conn = ConnState::new(sub_id);
     let mut buf = RespBuffer::new();
-    let mut out_wire = Vec::with_capacity(4096);
+    let mut out_wire = Vec::with_capacity(8192);
+    let mut batch: Vec<Vec<Vec<u8>>> = Vec::with_capacity(32);
+    let mut sub_mode = false;
 
     while !shutdown.load(Ordering::Relaxed) && !conn.quit {
-        let subscribed = broker.subscription_count(sub_id) > 0;
-        let timeout = if subscribed {
-            Duration::from_millis(15)
-        } else {
-            Duration::from_millis(250)
-        };
-        let _ = stream.set_read_timeout(Some(timeout));
-
-        // Drain any pending Pub/Sub messages first
-        out_wire.clear();
-        while let Ok(pm) = rx.try_recv() {
-            encode_push(pm).encode(&mut out_wire);
-        }
-        if !out_wire.is_empty() && stream.write_all(&out_wire).is_err() {
-            break;
+        if sub_mode {
+            out_wire.clear();
+            while let Ok(pm) = rx.try_recv() {
+                encode_push(pm).encode(&mut out_wire);
+            }
+            if !out_wire.is_empty() && stream.write_all(&out_wire).is_err() {
+                break;
+            }
         }
 
-        // Read incoming RESP frames
         match buf.read_more(&mut stream) {
             Ok(0) => break,
             Ok(_) => {}
@@ -196,26 +186,48 @@ fn handle_client(
             Err(_) => break,
         }
 
-        out_wire.clear();
+        batch.clear();
+        let mut parse_err = None;
         loop {
             match buf.next_command() {
-                Ok(Some(args)) => {
-                    for reply in dispatch_command(&engine, &broker, &mut conn, args) {
-                        reply.encode(&mut out_wire);
-                    }
-                    if conn.quit {
-                        break;
-                    }
-                }
+                Ok(Some(args)) => batch.push(args),
                 Ok(None) => break,
                 Err(err) => {
-                    RespVal::err(err).encode(&mut out_wire);
+                    parse_err = Some(err);
                     break;
                 }
             }
         }
+        out_wire.clear();
+        let had_sub_cmd = batch.iter().any(|a| {
+            a.first().is_some_and(|c| {
+                c.eq_ignore_ascii_case(b"SUBSCRIBE")
+                    || c.eq_ignore_ascii_case(b"UNSUBSCRIBE")
+                    || c.eq_ignore_ascii_case(b"PSUBSCRIBE")
+                    || c.eq_ignore_ascii_case(b"PUNSUBSCRIBE")
+            })
+        });
+        if !batch.is_empty() {
+            let cmds = std::mem::take(&mut batch);
+            dispatch_batch(&engine, &broker, &mut conn, cmds, &mut out_wire);
+        }
+        if let Some(err) = parse_err {
+            RespVal::err(err).encode(&mut out_wire);
+        }
         if !out_wire.is_empty() && stream.write_all(&out_wire).is_err() {
             break;
+        }
+        if had_sub_cmd {
+            let now_sub = broker.subscription_count(sub_id) > 0;
+            if now_sub != sub_mode {
+                sub_mode = now_sub;
+                let timeout = if sub_mode {
+                    Duration::from_millis(15)
+                } else {
+                    Duration::from_millis(250)
+                };
+                let _ = stream.set_read_timeout(Some(timeout));
+            }
         }
     }
     broker.unregister(sub_id);

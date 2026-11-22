@@ -65,30 +65,46 @@ pub struct Record {
 }
 
 impl Record {
+    #[inline]
     pub fn live(value: Value, expires_at_ms: Option<u64>, version: u64) -> Self {
         Self {
             value: Some(value),
             expires_at_ms,
             version,
-            updated_ms: now_ms(),
+            updated_ms: 0,
         }
     }
 
+    #[inline]
     pub fn tombstone(version: u64) -> Self {
         Self {
             value: None,
             expires_at_ms: None,
             version,
-            updated_ms: now_ms(),
+            updated_ms: 0,
         }
     }
 
+    #[inline]
     pub fn is_expired(&self, now: u64) -> bool {
         self.expires_at_ms.is_some_and(|exp| now >= exp)
     }
 
+    #[inline]
     pub fn is_live(&self, now: u64) -> bool {
         self.value.is_some() && !self.is_expired(now)
+    }
+
+    /// Zero-syscall liveness check: only reads wall clock if the record actually has a TTL.
+    #[inline]
+    pub fn is_live_lazy(&self) -> bool {
+        if self.value.is_none() {
+            return false;
+        }
+        match self.expires_at_ms {
+            None => true,
+            Some(exp) => now_ms() < exp,
+        }
     }
 }
 

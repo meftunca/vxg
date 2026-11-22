@@ -1,10 +1,13 @@
 //! `SET`, `INCR/DECR`, `EXPIRE`, `SCAN`, `VXG.*` superpowers, and `INFO`/`VXG.STATS` handlers.
 
+use std::sync::{Arc, RwLock};
+
 use vxg::SqlFormat;
 
-use crate::dispatch::ConnState;
-use crate::dispatch_ds::{arg_str, parse_i64, WRONGTYPE};
+use crate::dispatch::{dispatch_command, exec_single, ConnState};
+use crate::dispatch_ds::{arg_str, format_float, parse_i64, WRONGTYPE};
 use crate::engine::KvEngine;
+use crate::pubsub::PubSubBroker;
 use crate::resp::RespVal;
 use crate::types::{now_ms, Value};
 
@@ -159,6 +162,15 @@ fn handle_set(eng: &mut KvEngine, args: &[Vec<u8>]) -> RespVal {
         }
         i += 1;
     }
+    if !(nx || xx || get_old || keepttl) {
+        eng.set_record(key.clone(), Value::Str(val.clone()), exp_ms);
+        if sync {
+            if let Err(e) = eng.commit() {
+                return RespVal::err(e);
+            }
+        }
+        return RespVal::ok();
+    }
     let existing = match eng.get_record(key) {
         Ok(v) => v,
         Err(e) => return RespVal::err(e),
@@ -211,19 +223,21 @@ fn handle_incr(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) -> RespVal {
     if args.len() < 2 {
         return RespVal::err("ERR wrong number of arguments");
     }
-    let (cur, exp) = match eng.get_record(&args[1]) {
-        Ok(None) => (0i64, None),
-        Ok(Some(r)) => match r.value {
-            Some(Value::Str(b)) => match parse_i64(&b) {
-                Ok(n) => (n, r.expires_at_ms),
-                Err(e) => return e,
-            },
-            _ => return RespVal::err(WRONGTYPE),
-        },
+    let rec = match eng.ensure_entry_mut(&args[1], || Value::Str(b"0".to_vec())) {
+        Ok(r) => r,
         Err(e) => return RespVal::err(e),
     };
+    let Some(Value::Str(buf)) = rec.value.as_mut() else {
+        return RespVal::err(WRONGTYPE);
+    };
+    let cur = match parse_i64(buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     let next = cur.saturating_add(delta);
-    eng.set_record(args[1].clone(), Value::Str(next.to_string().into_bytes()), exp);
+    buf.clear();
+    use std::io::Write;
+    let _ = write!(buf, "{next}");
     RespVal::int(next)
 }
 
@@ -364,12 +378,12 @@ fn build_stats_info(eng: &KvEngine, conn: &ConnState) -> RespVal {
         eng.manifest.history.len(),
         eng.cache.cached_blocks(),
         eng.cache.bytes_used(),
-        eng.stats.cache_hits,
+        eng.stats.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
         eng.stats.cache_misses,
         eng.stats.range_requests,
         eng.stats.range_bytes,
-        eng.stats.bloom_filtered,
-        eng.stats.out_of_range_filtered,
+        eng.stats.bloom_filtered.load(std::sync::atomic::Ordering::Relaxed),
+        eng.stats.out_of_range_filtered.load(std::sync::atomic::Ordering::Relaxed),
         eng.stats.cas_commits,
         eng.stats.cas_retries,
         eng.stats.compactions,
@@ -377,4 +391,201 @@ fn build_stats_info(eng: &KvEngine, conn: &ConnState) -> RespVal {
         eng.stats.pubsub_remote_delivered
     );
     RespVal::bulk(s.into_bytes())
+}
+
+#[inline]
+fn is_control_cmd(b: &[u8]) -> bool {
+    const CTRL: &[&[u8]] = &[
+        b"SUBSCRIBE", b"UNSUBSCRIBE", b"PSUBSCRIBE", b"PUNSUBSCRIBE", b"PUBSUB", b"QUIT",
+        b"MULTI", b"EXEC", b"DISCARD", b"WATCH", b"UNWATCH",
+    ];
+    CTRL.iter().any(|k| b.eq_ignore_ascii_case(k))
+}
+
+#[inline]
+fn is_fast_readonly_cmd(b: &[u8]) -> bool {
+    const RO: &[&[u8]] = &[
+        b"PING", b"ECHO", b"GET", b"EXISTS", b"STRLEN", b"HGET", b"LLEN", b"SCARD", b"ZSCORE",
+    ];
+    RO.iter().any(|k| b.eq_ignore_ascii_case(k))
+}
+
+#[inline]
+fn write_bulk(out: &mut Vec<u8>, b: &[u8]) {
+    use std::io::Write;
+    let _ = write!(out, "${}\r\n", b.len());
+    out.extend_from_slice(b);
+    out.extend_from_slice(b"\r\n");
+}
+
+#[inline]
+fn write_int(out: &mut Vec<u8>, n: i64) {
+    use std::io::Write;
+    let _ = write!(out, ":{n}\r\n");
+}
+
+/// Try to execute a hot read-only command directly under `RwLock::read()` with zero cloning.
+/// Returns `false` if a cold snapshot block must be fetched under `RwLock::write()`.
+fn try_exec_readonly(eng: &KvEngine, args: &[Vec<u8>], out: &mut Vec<u8>) -> bool {
+    let c = &args[0];
+    if c.eq_ignore_ascii_case(b"PING") {
+        match args.get(1) {
+            Some(m) => write_bulk(out, m),
+            None => out.extend_from_slice(b"+PONG\r\n"),
+        }
+        return true;
+    }
+    if c.eq_ignore_ascii_case(b"ECHO") && args.len() == 2 {
+        write_bulk(out, &args[1]);
+        return true;
+    }
+    if c.eq_ignore_ascii_case(b"GET") && args.len() == 2 {
+        let Some(rec_opt) = eng.get_record_ref(&args[1]) else {
+            return false;
+        };
+        match rec_opt {
+            None => out.extend_from_slice(b"$-1\r\n"),
+            Some(r) => match r.value.as_ref() {
+                Some(Value::Str(b)) => write_bulk(out, b),
+                None => out.extend_from_slice(b"$-1\r\n"),
+                _ => out.extend_from_slice(format!("-{WRONGTYPE}\r\n").as_bytes()),
+            },
+        }
+        return true;
+    }
+    if c.eq_ignore_ascii_case(b"STRLEN") && args.len() == 2 {
+        let Some(rec_opt) = eng.get_record_ref(&args[1]) else {
+            return false;
+        };
+        match rec_opt {
+            None => write_int(out, 0),
+            Some(r) => match r.value.as_ref() {
+                Some(Value::Str(b)) => write_int(out, b.len() as i64),
+                _ => out.extend_from_slice(format!("-{WRONGTYPE}\r\n").as_bytes()),
+            },
+        }
+        return true;
+    }
+    if c.eq_ignore_ascii_case(b"EXISTS") && args.len() == 2 {
+        let Some(rec_opt) = eng.get_record_ref(&args[1]) else {
+            return false;
+        };
+        write_int(out, i64::from(rec_opt.is_some()));
+        return true;
+    }
+    if c.eq_ignore_ascii_case(b"HGET") && args.len() == 3 {
+        let Some(rec_opt) = eng.get_record_ref(&args[1]) else {
+            return false;
+        };
+        match rec_opt {
+            None => out.extend_from_slice(b"$-1\r\n"),
+            Some(r) => match r.value.as_ref() {
+                Some(Value::Hash(m)) => match m.get(&args[2]) {
+                    Some(v) => write_bulk(out, v),
+                    None => out.extend_from_slice(b"$-1\r\n"),
+                },
+                _ => out.extend_from_slice(format!("-{WRONGTYPE}\r\n").as_bytes()),
+            },
+        }
+        return true;
+    }
+    if c.eq_ignore_ascii_case(b"LLEN") && args.len() == 2 {
+        let Some(rec_opt) = eng.get_record_ref(&args[1]) else {
+            return false;
+        };
+        match rec_opt {
+            None => write_int(out, 0),
+            Some(r) => match r.value.as_ref() {
+                Some(Value::List(l)) => write_int(out, l.len() as i64),
+                _ => out.extend_from_slice(format!("-{WRONGTYPE}\r\n").as_bytes()),
+            },
+        }
+        return true;
+    }
+    if c.eq_ignore_ascii_case(b"SCARD") && args.len() == 2 {
+        let Some(rec_opt) = eng.get_record_ref(&args[1]) else {
+            return false;
+        };
+        match rec_opt {
+            None => write_int(out, 0),
+            Some(r) => match r.value.as_ref() {
+                Some(Value::Set(s)) => write_int(out, s.len() as i64),
+                _ => out.extend_from_slice(format!("-{WRONGTYPE}\r\n").as_bytes()),
+            },
+        }
+        return true;
+    }
+    if c.eq_ignore_ascii_case(b"ZSCORE") && args.len() == 3 {
+        let Some(rec_opt) = eng.get_record_ref(&args[1]) else {
+            return false;
+        };
+        match rec_opt {
+            None => out.extend_from_slice(b"$-1\r\n"),
+            Some(r) => match r.value.as_ref() {
+                Some(Value::ZSet(z)) => match z.get(&args[2]) {
+                    Some(&sc) => write_bulk(out, format_float(sc).as_bytes()),
+                    None => out.extend_from_slice(b"$-1\r\n"),
+                },
+                _ => out.extend_from_slice(format!("-{WRONGTYPE}\r\n").as_bytes()),
+            },
+        }
+        return true;
+    }
+    false
+}
+
+/// Dispatch an entire pipelined command batch with optimal locking:
+/// 1) 100% read-only hot batch -> 1 shared `RwLock::read()` (parallel across all CPU cores!)
+/// 2) Data-only write/mixed batch -> 1 single `RwLock::write()` for the entire pipeline!
+/// 3) Control/tx batch -> per-command dispatch.
+pub fn dispatch_batch(
+    engine: &Arc<RwLock<KvEngine>>,
+    broker: &Arc<PubSubBroker>,
+    conn: &mut ConnState,
+    batch: Vec<Vec<Vec<u8>>>,
+    out: &mut Vec<u8>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    // Fast path 1: parallel shared-lock read-only batch
+    if !conn.in_multi
+        && conn.pinned_epoch.is_none()
+        && batch.iter().all(|a| !a.is_empty() && is_fast_readonly_cmd(&a[0]))
+    {
+        let start_len = out.len();
+        let eng = engine.read().unwrap();
+        let mut all_ok = true;
+        for args in &batch {
+            if !try_exec_readonly(&eng, args, out) {
+                all_ok = false;
+                break;
+            }
+        }
+        drop(eng);
+        if all_ok {
+            return;
+        }
+        out.truncate(start_len);
+    }
+
+    // Fast path 2: single write-lock for entire data-only pipeline batch (no control/tx cmds)
+    if !conn.in_multi && batch.iter().all(|a| !a.is_empty() && !is_control_cmd(&a[0])) {
+        let mut eng = engine.write().unwrap();
+        for args in &batch {
+            let cmd = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
+            exec_single(&mut eng, conn, &cmd, args).encode(out);
+        }
+        return;
+    }
+
+    // Fallback: control / transaction / PubSub commands
+    for args in batch {
+        for reply in dispatch_command(engine, broker, conn, args) {
+            reply.encode(out);
+        }
+        if conn.quit {
+            break;
+        }
+    }
 }

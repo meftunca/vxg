@@ -2,7 +2,7 @@
 //! Pub/Sub (`SUBSCRIBE`/`PSUBSCRIBE`/`PUBLISH`/`PUBSUB`), and `VXG.*` superpowers.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crate::dispatch_ds::{arg_str as s_arg, dispatch_ds_cmd, parse_f64, parse_i64, WRONGTYPE};
 use crate::dispatch_vxg::dispatch_vxg_cmd;
@@ -36,7 +36,7 @@ impl ConnState {
 
 /// Dispatch one parsed command; may return multiple RESP frames (e.g. `SUBSCRIBE a b`).
 pub fn dispatch_command(
-    engine: &Arc<Mutex<KvEngine>>,
+    engine: &Arc<RwLock<KvEngine>>,
     broker: &Arc<PubSubBroker>,
     conn: &mut ConnState,
     args: Vec<Vec<u8>>,
@@ -165,9 +165,10 @@ pub fn dispatch_command(
             if conn.in_multi {
                 return vec![RespVal::err("ERR WATCH inside MULTI is not allowed")];
             }
-            let eng = engine.lock().unwrap();
+            let mut eng = engine.write().unwrap();
             for k in &args[1..] {
-                conn.watched.insert(k.clone(), eng.key_version(k));
+                let v = eng.watch_key(k);
+                conn.watched.insert(k.clone(), v);
             }
             return vec![RespVal::ok()];
         }
@@ -182,7 +183,7 @@ pub fn dispatch_command(
             conn.in_multi = false;
             let queued = std::mem::take(&mut conn.tx_queue);
             let watched = std::mem::take(&mut conn.watched);
-            let mut eng = engine.lock().unwrap();
+            let mut eng = engine.write().unwrap();
             for (k, ver) in watched {
                 if eng.key_version(&k) != ver {
                     return vec![RespVal::nil_array()];
@@ -203,7 +204,7 @@ pub fn dispatch_command(
         return vec![RespVal::Simple("QUEUED".to_owned())];
     }
 
-    let mut eng = engine.lock().unwrap();
+    let mut eng = engine.write().unwrap();
     vec![exec_single(&mut eng, conn, &cmd, &args)]
 }
 
@@ -232,7 +233,12 @@ fn handle_pubsub_introspect(broker: &PubSubBroker, args: &[Vec<u8>]) -> RespVal 
     }
 }
 
-fn exec_single(eng: &mut KvEngine, conn: &mut ConnState, cmd: &str, args: &[Vec<u8>]) -> RespVal {
+pub(crate) fn exec_single(
+    eng: &mut KvEngine,
+    conn: &mut ConnState,
+    cmd: &str,
+    args: &[Vec<u8>],
+) -> RespVal {
     if let Some(resp) = dispatch_ds_cmd(eng, cmd, args) {
         return resp;
     }

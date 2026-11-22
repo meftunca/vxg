@@ -2,18 +2,16 @@
 //! + Atomic ETag CAS Multi-Pod Commit/Pull/Compaction + Time-Travel + `VXG.SQL`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use vxg::{DecodeOptions, Options, RemoteFrame, SqlFormat};
+use vxg::{DecodeOptions, RemoteFrame};
 
 use crate::index::{DecodedBlock, LookupPlan, LruBlockCache, SnapshotIndex};
 use crate::pubsub::{PubSubBroker, PubSubEvent};
-use crate::snapshot::{
-    decode_wal_segment, encode_wal_segment, execute_vxg_sql_on_frame, read_full_snapshot,
-    write_snapshot, Manifest, SnapshotRef, WalRef, MANIFEST_KEY,
-};
-use crate::store::{ObjectStore, PutOutcome, StoreRangeReader};
-use crate::types::{decode_record_line, encode_record_line, glob_match, now_ms, Record, Value};
+use crate::snapshot::{Manifest, SnapshotRef};
+use crate::store::{ObjectStore, StoreRangeReader};
+use crate::types::{decode_record_line, now_ms, Record, Value};
 
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -34,13 +32,13 @@ impl Default for EngineConfig {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct EngineStats {
     pub range_requests: u64,
     pub range_bytes: u64,
-    pub bloom_filtered: u64,
-    pub out_of_range_filtered: u64,
-    pub cache_hits: u64,
+    pub bloom_filtered: AtomicU64,
+    pub out_of_range_filtered: AtomicU64,
+    pub cache_hits: AtomicU64,
     pub cache_misses: u64,
     pub cas_commits: u64,
     pub cas_retries: u64,
@@ -61,7 +59,7 @@ pub struct KvEngine {
     pub pending_events: Vec<PubSubEvent>,
     pub base: Option<(SnapshotRef, SnapshotIndex)>,
     pub hist_indices: HashMap<u64, SnapshotIndex>,
-    remote_handle: Option<(u64, RemoteFrame<StoreRangeReader>)>,
+    pub(crate) remote_handle: Option<(u64, RemoteFrame<StoreRangeReader>)>,
     pub cache: LruBlockCache,
     pub next_ver: u64,
     pub key_versions: HashMap<Vec<u8>, u64>,
@@ -101,25 +99,66 @@ impl KvEngine {
         !self.mem.is_empty() || !self.pending_events.is_empty()
     }
 
+    /// Register a `WATCH` on `key` and return its current version.
+    pub fn watch_key(&mut self, key: &[u8]) -> u64 {
+        let cur = self.next_ver;
+        *self.key_versions.entry(key.to_vec()).or_insert(cur)
+    }
+
+    #[inline]
     pub fn key_version(&self, key: &[u8]) -> u64 {
         self.key_versions.get(key).copied().unwrap_or(0)
     }
 
+    #[inline]
     fn bump_ver(&mut self, key: &[u8]) -> u64 {
         self.next_ver += 1;
         let v = self.next_ver;
-        self.key_versions.insert(key.to_vec(), v);
+        if !self.key_versions.is_empty() {
+            if let Some(slot) = self.key_versions.get_mut(key) {
+                *slot = v;
+            }
+        }
         v
     }
 
-    /// Look up the current live record for `key` (MemTable -> WAL overlay -> Base Snapshot Range).
-    pub fn get_record(&mut self, key: &[u8]) -> Result<Option<Record>, String> {
-        let now = now_ms();
+    /// Zero-clone, lock-free (`&self`) read-only lookup for hot `RwLock::read` parallel queries.
+    /// Returns `Some(res)` if resolved from MemTable, WAL, Bloom/Range filter, or LRU cache;
+    /// returns `None` ONLY when a cold snapshot block must be fetched via HTTP Range (`&mut self`).
+    #[inline]
+    pub fn get_record_ref(&self, key: &[u8]) -> Option<Option<&Record>> {
         if let Some(rec) = self.mem.get(key) {
-            return Ok(rec.is_live(now).then(|| rec.clone()));
+            return Some(rec.is_live_lazy().then_some(rec));
         }
         if let Some(rec) = self.wal_overlay.get(key) {
-            return Ok(rec.is_live(now).then(|| rec.clone()));
+            return Some(rec.is_live_lazy().then_some(rec));
+        }
+        let Some((snap, idx)) = self.base.as_ref() else {
+            return Some(None);
+        };
+        let blk = match idx.plan_lookup(key) {
+            LookupPlan::OutOfRange => {
+                self.stats.out_of_range_filtered.fetch_add(1, Ordering::Relaxed);
+                return Some(None);
+            }
+            LookupPlan::BloomFiltered => {
+                self.stats.bloom_filtered.fetch_add(1, Ordering::Relaxed);
+                return Some(None);
+            }
+            LookupPlan::CandidateBlock(b) => b,
+        };
+        let decoded = self.cache.peek(snap.epoch, blk)?;
+        self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+        Some(decoded.get(key).filter(|r| r.is_live_lazy()))
+    }
+
+    /// Zero-clone lookup returning `&Record` (loads cold snapshot block on cache miss).
+    pub fn get_record_or_load(&mut self, key: &[u8]) -> Result<Option<&Record>, String> {
+        if self.mem.contains_key(key) {
+            return Ok(self.mem.get(key).filter(|r| r.is_live_lazy()));
+        }
+        if self.wal_overlay.contains_key(key) {
+            return Ok(self.wal_overlay.get(key).filter(|r| r.is_live_lazy()));
         }
         let (epoch, plan) = match self.base.as_ref() {
             Some((snap, idx)) => (snap.epoch, idx.plan_lookup(key)),
@@ -127,25 +166,80 @@ impl KvEngine {
         };
         let blk = match plan {
             LookupPlan::OutOfRange => {
-                self.stats.out_of_range_filtered += 1;
+                self.stats.out_of_range_filtered.fetch_add(1, Ordering::Relaxed);
                 return Ok(None);
             }
             LookupPlan::BloomFiltered => {
-                self.stats.bloom_filtered += 1;
+                self.stats.bloom_filtered.fetch_add(1, Ordering::Relaxed);
                 return Ok(None);
             }
             LookupPlan::CandidateBlock(b) => b,
         };
-        if let Some(decoded) = self.cache.get(epoch, blk) {
-            self.stats.cache_hits += 1;
-            return Ok(decoded.get(key).filter(|r| r.is_live(now)).cloned());
+        if self.cache.peek(epoch, blk).is_none() {
+            self.stats.cache_misses += 1;
+            let snap = self.base.as_ref().unwrap().0.clone();
+            let (decoded, approx) = self.fetch_block_cached_handle(&snap, blk)?;
+            self.cache.insert(epoch, blk, decoded, approx);
+        } else {
+            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
         }
-        self.stats.cache_misses += 1;
-        let snap = self.base.as_ref().unwrap().0.clone();
-        let (decoded, approx) = self.fetch_block_cached_handle(&snap, blk)?;
-        let res = decoded.get(key).filter(|r| r.is_live(now)).cloned();
-        self.cache.insert(epoch, blk, decoded, approx);
-        Ok(res)
+        Ok(self
+            .cache
+            .get(epoch, blk)
+            .and_then(|d| d.get(key))
+            .filter(|r| r.is_live_lazy()))
+    }
+
+    /// Look up the current live record for `key` (MemTable -> WAL overlay -> Base Snapshot Range).
+    pub fn get_record(&mut self, key: &[u8]) -> Result<Option<Record>, String> {
+        Ok(self.get_record_or_load(key)?.cloned())
+    }
+
+    /// Zero-clone in-place `&mut Record` if live in MemTable, or promotes from WAL/Snapshot once.
+    pub fn get_or_promote_mut(&mut self, key: &[u8]) -> Result<Option<&mut Record>, String> {
+        if self.mem.contains_key(key) {
+            let live = self.mem.get(key).is_some_and(Record::is_live_lazy);
+            if !live {
+                return Ok(None);
+            }
+            let v = self.bump_ver(key);
+            let rec = self.mem.get_mut(key).unwrap();
+            rec.version = v;
+            return Ok(Some(rec));
+        }
+        let Some(mut rec) = self.get_record(key)? else {
+            return Ok(None);
+        };
+        rec.version = self.bump_ver(key);
+        self.mem.insert(key.to_vec(), rec);
+        Ok(self.mem.get_mut(key))
+    }
+
+    /// Zero-clone in-place `&mut Record`, creating with `init()` if missing/expired/tombstone.
+    pub fn ensure_entry_mut<F>(&mut self, key: &[u8], init: F) -> Result<&mut Record, String>
+    where
+        F: FnOnce() -> Value,
+    {
+        if self.mem.contains_key(key) {
+            let v = self.bump_ver(key);
+            let rec = self.mem.get_mut(key).unwrap();
+            if !rec.is_live_lazy() {
+                *rec = Record::live(init(), None, v);
+            } else {
+                rec.version = v;
+            }
+            return Ok(rec);
+        }
+        let v = self.bump_ver(key);
+        let rec = match self.get_record(key)? {
+            Some(mut existing) => {
+                existing.version = v;
+                existing
+            }
+            None => Record::live(init(), None, v),
+        };
+        self.mem.insert(key.to_vec(), rec);
+        Ok(self.mem.get_mut(key).unwrap())
     }
 
     /// Time-Travel lookup: read `key` strictly as it existed in historical snapshot `epoch`.
@@ -163,17 +257,17 @@ impl KvEngine {
         let plan = self.hist_indices.get(&epoch).unwrap().plan_lookup(key);
         let blk = match plan {
             LookupPlan::OutOfRange => {
-                self.stats.out_of_range_filtered += 1;
+                self.stats.out_of_range_filtered.fetch_add(1, Ordering::Relaxed);
                 return Ok(None);
             }
             LookupPlan::BloomFiltered => {
-                self.stats.bloom_filtered += 1;
+                self.stats.bloom_filtered.fetch_add(1, Ordering::Relaxed);
                 return Ok(None);
             }
             LookupPlan::CandidateBlock(b) => b,
         };
         if let Some(decoded) = self.cache.get(epoch, blk) {
-            self.stats.cache_hits += 1;
+            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(decoded.get(key).cloned());
         }
         self.stats.cache_misses += 1;
@@ -301,278 +395,5 @@ impl KvEngine {
             }
         }
         Err("ERR VXG.CAS contention retry limit exceeded".to_owned())
-    }
-
-    /// Clear all local and remote keys (commits an empty compacted snapshot).
-    pub fn flush_all(&mut self) -> Result<u64, String> {
-        self.mem.clear();
-        self.wal_overlay.clear();
-        self.pending_events.clear();
-        self.applied_wals.clear();
-        self.base = None;
-        self.remote_handle = None;
-        let next_epoch = self.manifest.epoch + 1;
-        let (snap_ref, idx) = write_snapshot(
-            &self.store,
-            next_epoch,
-            &BTreeMap::new(),
-            self.cfg.block_size,
-        )?;
-        let mut next_m = self.manifest.clone();
-        if let Some(old) = next_m.base_snapshot.take() {
-            next_m.history.push(old);
-        }
-        next_m.epoch = next_epoch;
-        next_m.base_snapshot = Some(snap_ref.clone());
-        next_m.wals.clear();
-        let etag = self.store.put(MANIFEST_KEY, &next_m.to_bytes())?;
-        self.manifest = next_m;
-        self.manifest_etag = Some(etag);
-        self.base = Some((snap_ref, idx));
-        Ok(next_epoch)
-    }
-
-    /// Pull latest manifest + any unseen WAL segments from the shared `ObjectStore`.
-    /// Fast path: `HEAD manifest.json` -> unchanged ETag = **0 payload bytes transferred!**
-    pub fn pull(&mut self) -> Result<usize, String> {
-        self.stats.pulls += 1;
-        let Some(meta) = self.store.head(MANIFEST_KEY)? else {
-            return Ok(0);
-        };
-        if self.manifest_etag.as_deref() == Some(meta.etag.as_str()) {
-            return Ok(0);
-        }
-        let Some((bytes, etag)) = self.store.get(MANIFEST_KEY)? else {
-            return Ok(0);
-        };
-        let remote = Manifest::from_bytes(&bytes)?;
-        let mut applied_count = 0usize;
-
-        // Reload base snapshot index if compaction advanced the base snapshot
-        let base_changed = match (&self.base, &remote.base_snapshot) {
-            (Some((cur, _)), Some(rem)) => cur.epoch != rem.epoch,
-            (None, Some(_)) | (Some(_), None) => true,
-            (None, None) => false,
-        };
-        if base_changed {
-            self.wal_overlay.clear();
-            self.applied_wals.clear();
-            self.remote_handle = None;
-            if let Some(ref b) = remote.base_snapshot {
-                let Some((idx_bytes, _)) = self.store.get(&b.idx_key)? else {
-                    return Err(format!("ERR missing base index {}", b.idx_key));
-                };
-                let idx = SnapshotIndex::decode(&idx_bytes)?;
-                self.hist_indices.insert(b.epoch, idx.clone());
-                self.base = Some((b.clone(), idx));
-            } else {
-                self.base = None;
-            }
-        }
-
-        // Apply any unseen WAL segments in epoch order
-        for w in &remote.wals {
-            if self.applied_wals.contains(&w.epoch) {
-                continue;
-            }
-            let Some((wb, _)) = self.store.get(&w.key)? else {
-                continue;
-            };
-            let (recs, events) = decode_wal_segment(&wb)?;
-            for (k, r) in recs {
-                let ver = r.version.max(self.next_ver + 1);
-                self.next_ver = self.next_ver.max(ver);
-                self.key_versions.insert(k.clone(), ver);
-                self.wal_overlay.insert(k, r);
-            }
-            for ev in events {
-                if ev.origin_pod != self.cfg.pod_id {
-                    self.broker.publish_local(&ev.channel, &ev.payload);
-                    self.stats.pubsub_remote_delivered += 1;
-                }
-            }
-            self.applied_wals.insert(w.epoch);
-            applied_count += 1;
-        }
-        self.manifest = remote;
-        self.manifest_etag = Some(etag);
-        Ok(applied_count)
-    }
-
-    fn try_commit_once(&mut self) -> Result<Option<u64>, String> {
-        if !self.has_dirty() {
-            return Ok(Some(self.manifest.epoch));
-        }
-        let next_epoch = self.manifest.epoch + 1;
-        let wal_bytes = encode_wal_segment(&self.mem, &self.pending_events)?;
-        let wal_key = format!("wal/wal_{next_epoch:08}_{}.vxg", self.cfg.pod_id);
-        match self.store.put_if_none_match(&wal_key, &wal_bytes)? {
-            PutOutcome::PreconditionFailed => return Ok(None),
-            PutOutcome::Written(_) => {}
-        }
-        let mut next_m = self.manifest.clone();
-        next_m.epoch = next_epoch;
-        next_m.wals.push(WalRef {
-            epoch: next_epoch,
-            key: wal_key,
-            pod_id: self.cfg.pod_id.clone(),
-            compressed_bytes: wal_bytes.len() as u64,
-            created_ms: now_ms(),
-        });
-        let raw_m = next_m.to_bytes();
-        let outcome = match &self.manifest_etag {
-            None => self.store.put_if_none_match(MANIFEST_KEY, &raw_m)?,
-            Some(et) => self.store.put_if_match(MANIFEST_KEY, et, &raw_m)?,
-        };
-        match outcome {
-            PutOutcome::Written(new_etag) => {
-                // Move committed mem into wal_overlay
-                for (k, r) in std::mem::take(&mut self.mem) {
-                    self.wal_overlay.insert(k, r);
-                }
-                self.pending_events.clear();
-                self.applied_wals.insert(next_epoch);
-                self.manifest = next_m;
-                self.manifest_etag = Some(new_etag);
-                self.stats.cas_commits += 1;
-                Ok(Some(next_epoch))
-            }
-            PutOutcome::PreconditionFailed => Ok(None),
-        }
-    }
-
-    /// Atomic multi-pod CAS commit with automatic `412` pull + rebase + retry!
-    pub fn commit(&mut self) -> Result<u64, String> {
-        if !self.has_dirty() {
-            return Ok(self.manifest.epoch);
-        }
-        for _ in 0..16 {
-            if let Some(ep) = self.try_commit_once()? {
-                return Ok(ep);
-            }
-            self.stats.cas_retries += 1;
-            self.pull()?;
-        }
-        Err("ERR VXG.COMMIT exceeded CAS retry budget".to_owned())
-    }
-
-    /// Materialize the complete current live keyspace (base + WAL overlay + MemTable).
-    pub fn materialize_live(&mut self) -> Result<BTreeMap<Vec<u8>, Record>, String> {
-        let now = now_ms();
-        let mut merged = if let Some((ref snap, _)) = self.base {
-            read_full_snapshot(&self.store, snap)?
-        } else {
-            BTreeMap::new()
-        };
-        for (k, r) in &self.wal_overlay {
-            if r.is_live(now) {
-                merged.insert(k.clone(), r.clone());
-            } else {
-                merged.remove(k);
-            }
-        }
-        for (k, r) in &self.mem {
-            if r.is_live(now) {
-                merged.insert(k.clone(), r.clone());
-            } else {
-                merged.remove(k);
-            }
-        }
-        merged.retain(|_, r| r.is_live(now));
-        Ok(merged)
-    }
-
-    /// Merge base snapshot + all active WALs + local MemTable into a clean sorted VXG v5
-    /// snapshot (`snap_<epoch>.vxg` + `VXI1` Bloom/Fence index), archiving old snapshot in history!
-    pub fn compact(&mut self) -> Result<SnapshotRef, String> {
-        for _ in 0..8 {
-            self.pull()?;
-            let merged = self.materialize_live()?;
-            let next_epoch = self.manifest.epoch + 1;
-            let (snap_ref, idx) =
-                write_snapshot(&self.store, next_epoch, &merged, self.cfg.block_size)?;
-            let mut next_m = self.manifest.clone();
-            if let Some(old_base) = next_m.base_snapshot.take() {
-                next_m.history.push(old_base);
-            }
-            next_m.epoch = next_epoch;
-            next_m.base_snapshot = Some(snap_ref.clone());
-            next_m.wals.clear();
-            let raw_m = next_m.to_bytes();
-            let outcome = match &self.manifest_etag {
-                None => self.store.put_if_none_match(MANIFEST_KEY, &raw_m)?,
-                Some(et) => self.store.put_if_match(MANIFEST_KEY, et, &raw_m)?,
-            };
-            match outcome {
-                PutOutcome::Written(new_etag) => {
-                    self.mem.clear();
-                    self.wal_overlay.clear();
-                    self.applied_wals.clear();
-                    self.pending_events.clear();
-                    self.remote_handle = None;
-                    self.hist_indices.insert(snap_ref.epoch, idx.clone());
-                    self.base = Some((snap_ref.clone(), idx));
-                    self.manifest = next_m;
-                    self.manifest_etag = Some(new_etag);
-                    self.stats.compactions += 1;
-                    return Ok(snap_ref);
-                }
-                PutOutcome::PreconditionFailed => {
-                    self.stats.cas_retries += 1;
-                }
-            }
-        }
-        Err("ERR VXG.COMPACT exceeded CAS retry budget".to_owned())
-    }
-
-    /// Return all live keys matching `pattern` (`*` matches everything).
-    pub fn matching_keys(&mut self, pattern: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-        let merged = self.materialize_live()?;
-        Ok(merged
-            .into_keys()
-            .filter(|k| pattern == b"*" || glob_match(pattern, k))
-            .collect())
-    }
-
-    /// Execute compressed-domain `VXG.SQL` over either a pinned historical snapshot or live state.
-    pub fn execute_sql(
-        &mut self,
-        sql: &str,
-        format: SqlFormat,
-        pinned_epoch: Option<u64>,
-    ) -> Result<Vec<u8>, String> {
-        if let Some(ep) = pinned_epoch {
-            let Some(snap) = self.manifest.find_snapshot(ep).cloned() else {
-                return Err(format!("ERR snapshot epoch {ep} not found"));
-            };
-            let Some((frame, _)) = self.store.get(&snap.vxg_key)? else {
-                return Err(format!("ERR snapshot missing: {}", snap.vxg_key));
-            };
-            return execute_vxg_sql_on_frame(&frame, sql, format);
-        }
-        if self.mem.is_empty() && self.wal_overlay.is_empty() {
-            if let Some((ref snap, _)) = self.base {
-                if let Some((frame, _)) = self.store.get(&snap.vxg_key)? {
-                    return execute_vxg_sql_on_frame(&frame, sql, format);
-                }
-            }
-        }
-        let merged = self.materialize_live()?;
-        let mut raw = Vec::with_capacity(merged.len() * 64);
-        for (k, r) in &merged {
-            encode_record_line(&mut raw, k, r);
-        }
-        let frame = vxg::compress(
-            &raw,
-            &Options {
-                block_size: self.cfg.block_size.clamp(4096, 262_144),
-                record_aligned: true,
-                row_index: true,
-                checksum: true,
-                ..Options::default()
-            },
-        )
-        .map_err(|e| format!("ERR sql frame: {e}"))?;
-        execute_vxg_sql_on_frame(&frame, sql, format)
     }
 }

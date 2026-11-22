@@ -260,7 +260,7 @@ fn run_bench(args: &[String]) -> Result<(), String> {
     println!(
         "1,000 Miss GETs:     {bloom_us:.0} us total ({:.2} us/op) | Bloom filtered={}, extra HTTP reqs={bloom_extra_reqs}",
         bloom_us / 1000.0,
-        pod_b.stats.bloom_filtered
+        pod_b.stats.bloom_filtered.load(std::sync::atomic::Ordering::Relaxed)
     );
     println!(
         "10,000 Hot GETs:     {hot_ms:.2} ms ({:.0} ops/s)",

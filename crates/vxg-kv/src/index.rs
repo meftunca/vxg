@@ -219,6 +219,12 @@ impl LruBlockCache {
         }
     }
 
+    /// Lock-free read-only cache lookup (no LRU tick update; ideal under `RwLock::read`).
+    #[inline]
+    pub fn peek(&self, epoch: u64, block_idx: usize) -> Option<&DecodedBlock> {
+        self.map.get(&(epoch, block_idx)).map(|e| &e.records)
+    }
+
     pub fn get(&mut self, epoch: u64, block_idx: usize) -> Option<&DecodedBlock> {
         self.tick += 1;
         let t = self.tick;

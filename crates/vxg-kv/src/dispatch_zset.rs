@@ -1,4 +1,4 @@
-//! Redis Set (`S*`) and Sorted Set (`Z*`) command dispatchers.
+//! Redis Set (`S*`) and Sorted Set (`Z*`) command dispatchers (zero-clone in-place).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,23 +25,24 @@ fn parse_score_bound(b: &[u8]) -> Result<(f64, bool), RespVal> {
     Ok((val, exclusive))
 }
 
-fn get_set_mut(eng: &mut KvEngine, key: &[u8]) -> Result<(BTreeSet<Vec<u8>>, Option<u64>), RespVal> {
-    match eng.get_record(key).map_err(RespVal::err)? {
-        None => Ok((BTreeSet::new(), None)),
-        Some(r) => match r.value {
-            Some(Value::Set(s)) => Ok((s, r.expires_at_ms)),
+fn set_ref<'a>(eng: &'a mut KvEngine, key: &[u8]) -> Result<Option<&'a BTreeSet<Vec<u8>>>, RespVal> {
+    match eng.get_record_or_load(key).map_err(RespVal::err)? {
+        None => Ok(None),
+        Some(r) => match r.value.as_ref() {
+            Some(Value::Set(s)) => Ok(Some(s)),
             _ => Err(RespVal::err(WRONGTYPE)),
         },
     }
 }
 
-type ZSetEntry = (BTreeMap<Vec<u8>, f64>, Option<u64>);
-
-fn get_zset_mut(eng: &mut KvEngine, key: &[u8]) -> Result<ZSetEntry, RespVal> {
-    match eng.get_record(key).map_err(RespVal::err)? {
-        None => Ok((BTreeMap::new(), None)),
-        Some(r) => match r.value {
-            Some(Value::ZSet(z)) => Ok((z, r.expires_at_ms)),
+fn zset_ref<'a>(
+    eng: &'a mut KvEngine,
+    key: &[u8],
+) -> Result<Option<&'a BTreeMap<Vec<u8>, f64>>, RespVal> {
+    match eng.get_record_or_load(key).map_err(RespVal::err)? {
+        None => Ok(None),
+        Some(r) => match r.value.as_ref() {
+            Some(Value::ZSet(z)) => Ok(Some(z)),
             _ => Err(RespVal::err(WRONGTYPE)),
         },
     }
@@ -59,14 +60,17 @@ fn zset_sorted(z: &BTreeMap<Vec<u8>, f64>) -> Vec<(&[u8], f64)> {
 
 pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) -> Option<RespVal> {
     Some(match cmd {
-        // ---- SET ----
+        // ---- SET (Zero-Clone In-Place) ----
         "SADD" => {
             if args.len() < 3 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'sadd'"));
             }
-            let (mut s, exp) = match get_set_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
+            let rec = match eng.ensure_entry_mut(&args[1], || Value::Set(BTreeSet::new())) {
+                Ok(r) => r,
+                Err(e) => return Some(RespVal::err(e)),
+            };
+            let Some(Value::Set(s)) = rec.value.as_mut() else {
+                return Some(RespVal::err(WRONGTYPE));
             };
             let mut added = 0i64;
             for m in &args[2..] {
@@ -74,29 +78,32 @@ pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) ->
                     added += 1;
                 }
             }
-            eng.set_record(args[1].clone(), Value::Set(s), exp);
             RespVal::int(added)
         }
         "SREM" => {
             if args.len() < 3 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'srem'"));
             }
-            let (mut s, exp) = match get_set_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
+            let (removed, empty) = {
+                let Some(rec) = (match eng.get_or_promote_mut(&args[1]) {
+                    Ok(v) => v,
+                    Err(e) => return Some(RespVal::err(e)),
+                }) else {
+                    return Some(RespVal::int(0));
+                };
+                let Some(Value::Set(s)) = rec.value.as_mut() else {
+                    return Some(RespVal::err(WRONGTYPE));
+                };
+                let mut r = 0i64;
+                for m in &args[2..] {
+                    if s.remove(m) {
+                        r += 1;
+                    }
+                }
+                (r, s.is_empty())
             };
-            let mut removed = 0i64;
-            for m in &args[2..] {
-                if s.remove(m) {
-                    removed += 1;
-                }
-            }
-            if removed > 0 {
-                if s.is_empty() {
-                    let _ = eng.del_key(&args[1]);
-                } else {
-                    eng.set_record(args[1].clone(), Value::Set(s), exp);
-                }
+            if removed > 0 && empty {
+                let _ = eng.del_key(&args[1]);
             }
             RespVal::int(removed)
         }
@@ -104,73 +111,78 @@ pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) ->
             if args.len() != 2 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'smembers'"));
             }
-            let (s, _) = match get_set_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            RespVal::array(s.into_iter().map(RespVal::bulk).collect())
+            match set_ref(eng, &args[1]) {
+                Ok(Some(s)) => RespVal::array(s.iter().cloned().map(RespVal::bulk).collect()),
+                Ok(None) => RespVal::array(Vec::new()),
+                Err(e) => e,
+            }
         }
         "SISMEMBER" => {
             if args.len() != 3 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'sismember'"));
             }
-            let (s, _) = match get_set_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            RespVal::int(i64::from(s.contains(&args[2])))
+            match set_ref(eng, &args[1]) {
+                Ok(Some(s)) => RespVal::int(i64::from(s.contains(&args[2]))),
+                Ok(None) => RespVal::int(0),
+                Err(e) => e,
+            }
         }
         "SMISMEMBER" => {
             if args.len() < 3 {
                 return Some(RespVal::err("ERR wrong number of arguments"));
             }
-            let (s, _) = match get_set_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            RespVal::array(
-                args[2..]
-                    .iter()
-                    .map(|m| RespVal::int(i64::from(s.contains(m))))
-                    .collect(),
-            )
+            match set_ref(eng, &args[1]) {
+                Ok(s_opt) => RespVal::array(
+                    args[2..]
+                        .iter()
+                        .map(|m| RespVal::int(i64::from(s_opt.is_some_and(|s| s.contains(m)))))
+                        .collect(),
+                ),
+                Err(e) => e,
+            }
         }
         "SCARD" => {
             if args.len() != 2 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'scard'"));
             }
-            let (s, _) = match get_set_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            RespVal::int(s.len() as i64)
+            match set_ref(eng, &args[1]) {
+                Ok(Some(s)) => RespVal::int(s.len() as i64),
+                Ok(None) => RespVal::int(0),
+                Err(e) => e,
+            }
         }
         "SPOP" => {
             if args.len() < 2 || args.len() > 3 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'spop'"));
             }
-            let (mut s, exp) = match get_set_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            if s.is_empty() {
-                return Some(RespVal::nil());
-            }
-            let resp = if args.len() == 3 {
-                let cnt = parse_i64(&args[2]).unwrap_or(1).max(0) as usize;
-                let mut out = Vec::new();
-                for _ in 0..cnt {
-                    let Some(first) = s.pop_first() else { break };
-                    out.push(RespVal::bulk(first));
+            let cnt_opt = (args.len() == 3).then(|| parse_i64(&args[2]).unwrap_or(1).max(0) as usize);
+            let (resp, empty) = {
+                let Some(rec) = (match eng.get_or_promote_mut(&args[1]) {
+                    Ok(v) => v,
+                    Err(e) => return Some(RespVal::err(e)),
+                }) else {
+                    return Some(RespVal::nil());
+                };
+                let Some(Value::Set(s)) = rec.value.as_mut() else {
+                    return Some(RespVal::err(WRONGTYPE));
+                };
+                if s.is_empty() {
+                    return Some(RespVal::nil());
                 }
-                RespVal::array(out)
-            } else {
-                RespVal::bulk(s.pop_first().unwrap())
+                let r = if let Some(cnt) = cnt_opt {
+                    let mut out = Vec::new();
+                    for _ in 0..cnt {
+                        let Some(first) = s.pop_first() else { break };
+                        out.push(RespVal::bulk(first));
+                    }
+                    RespVal::array(out)
+                } else {
+                    RespVal::bulk(s.pop_first().unwrap())
+                };
+                (r, s.is_empty())
             };
-            if s.is_empty() {
+            if empty {
                 let _ = eng.del_key(&args[1]);
-            } else {
-                eng.set_record(args[1].clone(), Value::Set(s), exp);
             }
             resp
         }
@@ -178,13 +190,15 @@ pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) ->
             if args.len() < 2 {
                 return Some(RespVal::err("ERR wrong number of arguments"));
             }
-            let (mut acc, _) = match get_set_mut(eng, &args[1]) {
-                Ok(v) => v,
+            let mut acc = match set_ref(eng, &args[1]) {
+                Ok(Some(s)) => s.clone(),
+                Ok(None) => BTreeSet::new(),
                 Err(e) => return Some(e),
             };
             for k in &args[2..] {
-                let (other, _) = match get_set_mut(eng, k) {
-                    Ok(v) => v,
+                let other = match set_ref(eng, k) {
+                    Ok(Some(s)) => s.clone(),
+                    Ok(None) => BTreeSet::new(),
                     Err(e) => return Some(e),
                 };
                 match cmd {
@@ -197,28 +211,32 @@ pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) ->
             RespVal::array(acc.into_iter().map(RespVal::bulk).collect())
         }
 
-        // ---- SORTED SET (ZSET) ----
+        // ---- SORTED SET (ZSET, Zero-Clone In-Place) ----
         "ZADD" => dispatch_zadd(eng, args),
         "ZREM" => {
             if args.len() < 3 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'zrem'"));
             }
-            let (mut z, exp) = match get_zset_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
+            let (rem, empty) = {
+                let Some(rec) = (match eng.get_or_promote_mut(&args[1]) {
+                    Ok(v) => v,
+                    Err(e) => return Some(RespVal::err(e)),
+                }) else {
+                    return Some(RespVal::int(0));
+                };
+                let Some(Value::ZSet(z)) = rec.value.as_mut() else {
+                    return Some(RespVal::err(WRONGTYPE));
+                };
+                let mut r = 0i64;
+                for m in &args[2..] {
+                    if z.remove(m).is_some() {
+                        r += 1;
+                    }
+                }
+                (r, z.is_empty())
             };
-            let mut rem = 0i64;
-            for m in &args[2..] {
-                if z.remove(m).is_some() {
-                    rem += 1;
-                }
-            }
-            if rem > 0 {
-                if z.is_empty() {
-                    let _ = eng.del_key(&args[1]);
-                } else {
-                    eng.set_record(args[1].clone(), Value::ZSet(z), exp);
-                }
+            if rem > 0 && empty {
+                let _ = eng.del_key(&args[1]);
             }
             RespVal::int(rem)
         }
@@ -226,40 +244,42 @@ pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) ->
             if args.len() != 3 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'zscore'"));
             }
-            let (z, _) = match get_zset_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            match z.get(&args[2]) {
-                Some(&sc) => RespVal::bulk(format_float(sc).into_bytes()),
-                None => RespVal::nil(),
+            match zset_ref(eng, &args[1]) {
+                Ok(Some(z)) => match z.get(&args[2]) {
+                    Some(&sc) => RespVal::bulk(format_float(sc).into_bytes()),
+                    None => RespVal::nil(),
+                },
+                Ok(None) => RespVal::nil(),
+                Err(e) => e,
             }
         }
         "ZCARD" => {
             if args.len() != 2 {
                 return Some(RespVal::err("ERR wrong number of arguments for 'zcard'"));
             }
-            let (z, _) = match get_zset_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            RespVal::int(z.len() as i64)
+            match zset_ref(eng, &args[1]) {
+                Ok(Some(z)) => RespVal::int(z.len() as i64),
+                Ok(None) => RespVal::int(0),
+                Err(e) => e,
+            }
         }
         "ZRANK" | "ZREVRANK" => {
             if args.len() != 3 {
                 return Some(RespVal::err("ERR wrong number of arguments"));
             }
-            let (z, _) = match get_zset_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let mut sorted = zset_sorted(&z);
-            if cmd == "ZREVRANK" {
-                sorted.reverse();
-            }
-            match sorted.iter().position(|(m, _)| *m == args[2].as_slice()) {
-                Some(p) => RespVal::int(p as i64),
-                None => RespVal::nil(),
+            match zset_ref(eng, &args[1]) {
+                Ok(None) => RespVal::nil(),
+                Ok(Some(z)) => {
+                    let mut sorted = zset_sorted(z);
+                    if cmd == "ZREVRANK" {
+                        sorted.reverse();
+                    }
+                    match sorted.iter().position(|(m, _)| *m == args[2].as_slice()) {
+                        Some(p) => RespVal::int(p as i64),
+                        None => RespVal::nil(),
+                    }
+                }
+                Err(e) => e,
             }
         }
         "ZINCRBY" => {
@@ -270,13 +290,15 @@ pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) ->
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let (mut z, exp) = match get_zset_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
+            let rec = match eng.ensure_entry_mut(&args[1], || Value::ZSet(BTreeMap::new())) {
+                Ok(r) => r,
+                Err(e) => return Some(RespVal::err(e)),
+            };
+            let Some(Value::ZSet(z)) = rec.value.as_mut() else {
+                return Some(RespVal::err(WRONGTYPE));
             };
             let next = z.get(&args[3]).copied().unwrap_or(0.0) + delta;
             z.insert(args[3].clone(), next);
-            eng.set_record(args[1].clone(), Value::ZSet(z), exp);
             RespVal::bulk(format_float(next).into_bytes())
         }
         "ZCOUNT" => {
@@ -288,18 +310,20 @@ pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) ->
             else {
                 return Some(RespVal::err("ERR min or max is not a float"));
             };
-            let (z, _) = match get_zset_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
-            };
-            let cnt = z
-                .values()
-                .filter(|&&s| {
-                    (if lo_ex { s > lo } else { s >= lo })
-                        && (if hi_ex { s < hi } else { s <= hi })
-                })
-                .count();
-            RespVal::int(cnt as i64)
+            match zset_ref(eng, &args[1]) {
+                Ok(None) => RespVal::int(0),
+                Ok(Some(z)) => {
+                    let cnt = z
+                        .values()
+                        .filter(|&&s| {
+                            (if lo_ex { s > lo } else { s >= lo })
+                                && (if hi_ex { s < hi } else { s <= hi })
+                        })
+                        .count();
+                    RespVal::int(cnt as i64)
+                }
+                Err(e) => e,
+            }
         }
         "ZRANGE" | "ZRANGEBYSCORE" => dispatch_zrange(eng, cmd, args),
         "ZPOPMIN" | "ZPOPMAX" => {
@@ -311,27 +335,33 @@ pub fn dispatch_set_zset_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) ->
             } else {
                 1
             };
-            let (mut z, exp) = match get_zset_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
+            let (out, empty) = {
+                let Some(rec) = (match eng.get_or_promote_mut(&args[1]) {
+                    Ok(v) => v,
+                    Err(e) => return Some(RespVal::err(e)),
+                }) else {
+                    return Some(RespVal::array(Vec::new()));
+                };
+                let Some(Value::ZSet(z)) = rec.value.as_mut() else {
+                    return Some(RespVal::err(WRONGTYPE));
+                };
+                let mut sorted: Vec<(Vec<u8>, f64)> = zset_sorted(z)
+                    .into_iter()
+                    .map(|(m, s)| (m.to_vec(), s))
+                    .collect();
+                if cmd == "ZPOPMAX" {
+                    sorted.reverse();
+                }
+                let mut res = Vec::new();
+                for (m, s) in sorted.into_iter().take(cnt) {
+                    z.remove(&m);
+                    res.push(RespVal::bulk(m));
+                    res.push(RespVal::bulk(format_float(s).into_bytes()));
+                }
+                (res, z.is_empty())
             };
-            let mut sorted: Vec<(Vec<u8>, f64)> = zset_sorted(&z)
-                .into_iter()
-                .map(|(m, s)| (m.to_vec(), s))
-                .collect();
-            if cmd == "ZPOPMAX" {
-                sorted.reverse();
-            }
-            let mut out = Vec::new();
-            for (m, s) in sorted.into_iter().take(cnt) {
-                z.remove(&m);
-                out.push(RespVal::bulk(m));
-                out.push(RespVal::bulk(format_float(s).into_bytes()));
-            }
-            if z.is_empty() {
+            if empty {
                 let _ = eng.del_key(&args[1]);
-            } else {
-                eng.set_record(args[1].clone(), Value::ZSet(z), exp);
             }
             RespVal::array(out)
         }
@@ -365,9 +395,12 @@ fn dispatch_zadd(eng: &mut KvEngine, args: &[Vec<u8>]) -> RespVal {
     if i >= args.len() || !(args.len() - i).is_multiple_of(2) {
         return RespVal::err("ERR syntax error");
     }
-    let (mut z, exp) = match get_zset_mut(eng, &args[1]) {
-        Ok(v) => v,
-        Err(e) => return e,
+    let rec = match eng.ensure_entry_mut(&args[1], || Value::ZSet(BTreeMap::new())) {
+        Ok(r) => r,
+        Err(e) => return RespVal::err(e),
+    };
+    let Some(Value::ZSet(z)) = rec.value.as_mut() else {
+        return RespVal::err(WRONGTYPE);
     };
     let mut added = 0i64;
     let mut changed = 0i64;
@@ -393,7 +426,6 @@ fn dispatch_zadd(eng: &mut KvEngine, args: &[Vec<u8>]) -> RespVal {
             }
         }
     }
-    eng.set_record(args[1].clone(), Value::ZSet(z), exp);
     RespVal::int(if ch { changed } else { added })
 }
 
@@ -422,11 +454,13 @@ fn dispatch_zrange(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) -> RespVal {
         }
         i += 1;
     }
-    let (z, _) = match get_zset_mut(eng, &args[1]) {
+    let Some(z) = (match zset_ref(eng, &args[1]) {
         Ok(v) => v,
         Err(e) => return e,
+    }) else {
+        return RespVal::array(Vec::new());
     };
-    let mut sorted = zset_sorted(&z);
+    let mut sorted = zset_sorted(z);
     if rev {
         sorted.reverse();
     }

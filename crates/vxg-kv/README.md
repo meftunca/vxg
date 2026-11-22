@@ -29,9 +29,22 @@ redis-cli -p 6379 SET user:1 '{"plan":"pro","spend":120}' SYNC
 redis-cli -p 6380 GET user:1
 redis-cli -p 6380 VXG.SQL "SELECT data.plan, COUNT(*), SUM(data.spend) WHERE _t = 'json' GROUP BY data.plan"
 
-# 4. Run the built-in 25k-key live HTTP Range + Bloom + SQL benchmark
-cargo run --release -p vxg-kv -- bench --keys 25000
+# 4. Run the built-in 100k-key live HTTP Range + Bloom + SQL + TCP benchmark
+cargo run --release -p vxg-kv -- bench --keys 100000
 ```
+
+## Head-to-Head vs `Redis 8.10.3` (`redis-benchmark`, Same Host)
+
+| Benchmark (`redis-benchmark`) | `Redis 8.10.3` | `vxg-kv` | Speedup |
+| :--- | ---: | ---: | :---: |
+| **`c=1, P=1` (11 commands: `PING`/`SET`/`GET`/`INCR`/`LPUSH`/`HSET`/`ZADD`/`MSET`…)** | 42.6k – 48.9k ops/s (`1.74s` CPU, `7.8 MiB`) | **46.7k – 51.4k ops/s (`1.44s` CPU, `5.0 MiB`)** | **`1.03× – 1.13×`** (11/11) |
+| **`c=1, P=16` (`PING`/`SET`/`GET`/`INCR`/`LPUSH`/`LPOP`/`HSET`/`ZADD`/`MSET`)** | 235k – 595k ops/s (`1.23s` CPU) | **353k – 637k ops/s (`0.89s` CPU)** | **`1.00× – 1.51×`** |
+| **`c=16, P=16` (`SET`/`INCR`/`LPUSH`/`RPUSH`/`LPOP`/`SADD`/`HSET`/`ZADD`/`MSET`)** | 325k – 1.41M ops/s | **962k – 1.56M ops/s** | **`1.09× – 2.96×`** |
+| **100k JSON Load (`12 MB` raw, `P=500`)** | `201.3 ms` | **`181.2 ms`** *(+ `86.6 ms` compact)* | **`1.11×`** |
+| **100k JSON Disk / Snapshot** | `5,458 KiB` (`dump.rdb`) | **`271.3 KiB`** (`snap.vxg`) | **`20.1×` smaller** |
+| **100k JSON Cold Reader Pod RAM (RSS)** | `20.39 MiB` | **`2.91 MiB`** | **`7.0×` less RAM** |
+| **100k JSON `GROUP BY` Analytics** | `212.83 ms` (`MGET` + JSON) | **`8.73 ms`** (`VXG.SQL`) | **`24.4×` faster** |
+| **Live TCP Streams `XADD` (`P=32`)** | — | **`692,471 ops/s`** | Zero-clone in-place |
 
 ## Supported Commands
 

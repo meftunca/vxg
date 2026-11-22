@@ -131,9 +131,12 @@ pub fn dispatch_stream_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) -> O
                 Ok(1) => 1u8,
                 _ => return Some(RespVal::err("ERR bit is not an integer or out of range")),
             };
-            let (mut buf, exp) = match get_str_mut(eng, &args[1]) {
-                Ok(v) => v,
-                Err(e) => return Some(e),
+            let rec = match eng.ensure_entry_mut(&args[1], || Value::Str(Vec::new())) {
+                Ok(r) => r,
+                Err(e) => return Some(RespVal::err(e)),
+            };
+            let Some(Value::Str(buf)) = rec.value.as_mut() else {
+                return Some(RespVal::err(WRONGTYPE));
             };
             let byte_idx = offset >> 3;
             let mask = 0x80u8 >> (offset & 7);
@@ -146,7 +149,6 @@ pub fn dispatch_stream_cmd(eng: &mut KvEngine, cmd: &str, args: &[Vec<u8>]) -> O
             } else {
                 buf[byte_idx] &= !mask;
             }
-            eng.set_record(args[1].clone(), Value::Str(buf), exp);
             RespVal::int(prev)
         }
         "GETBIT" => {
@@ -207,9 +209,12 @@ fn dispatch_xadd(eng: &mut KvEngine, args: &[Vec<u8>]) -> RespVal {
     if i >= args.len() || !(args.len() - i).is_multiple_of(2) {
         return RespVal::err("ERR wrong number of arguments for 'xadd'");
     }
-    let (mut entries, exp) = match get_stream_mut(eng, &args[1]) {
-        Ok(v) => v,
-        Err(e) => return e,
+    let rec = match eng.ensure_entry_mut(&args[1], || Value::Stream(Vec::new())) {
+        Ok(r) => r,
+        Err(e) => return RespVal::err(e),
+    };
+    let Some(Value::Stream(entries)) = rec.value.as_mut() else {
+        return RespVal::err(WRONGTYPE);
     };
     let last_id = entries.last().map_or(StreamId { ms: 0, seq: 0 }, |e| e.id);
     let new_id = if id_tok == "*" {
@@ -238,7 +243,6 @@ fn dispatch_xadd(eng: &mut KvEngine, args: &[Vec<u8>]) -> RespVal {
             entries.drain(..entries.len() - max);
         }
     }
-    eng.set_record(args[1].clone(), Value::Stream(entries), exp);
     RespVal::bulk(new_id.format().into_bytes())
 }
 
