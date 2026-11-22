@@ -83,13 +83,12 @@ impl Value {
     }
 }
 
-/// Versioned KV record with optional expiry (`expires_at_ms`) and tombstone (`value = None`).
+/// Versioned KV record with optional expiry (`expires_at_ms == 0` means no TTL) and tombstone (`value = None`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
     pub value: Option<Value>,
-    pub expires_at_ms: Option<u64>,
+    pub expires_at_ms: u64,
     pub version: u64,
-    pub updated_ms: u64,
 }
 
 impl Record {
@@ -97,9 +96,8 @@ impl Record {
     pub fn live(value: Value, expires_at_ms: Option<u64>, version: u64) -> Self {
         Self {
             value: Some(value),
-            expires_at_ms,
+            expires_at_ms: expires_at_ms.unwrap_or(0),
             version,
-            updated_ms: 0,
         }
     }
 
@@ -107,15 +105,19 @@ impl Record {
     pub fn tombstone(version: u64) -> Self {
         Self {
             value: None,
-            expires_at_ms: None,
+            expires_at_ms: 0,
             version,
-            updated_ms: 0,
         }
     }
 
     #[inline]
+    pub fn expires_opt(&self) -> Option<u64> {
+        (self.expires_at_ms > 0).then_some(self.expires_at_ms)
+    }
+
+    #[inline]
     pub fn is_expired(&self, now: u64) -> bool {
-        self.expires_at_ms.is_some_and(|exp| now >= exp)
+        self.expires_at_ms > 0 && now >= self.expires_at_ms
     }
 
     #[inline]
@@ -129,10 +131,7 @@ impl Record {
         if self.value.is_none() {
             return false;
         }
-        match self.expires_at_ms {
-            None => true,
-            Some(exp) => now_ms() < exp,
-        }
+        self.expires_at_ms == 0 || now_ms() < self.expires_at_ms
     }
 }
 
@@ -482,10 +481,8 @@ pub fn encode_record_line(out: &mut Vec<u8>, key: &[u8], rec: &Record) {
         out.extend_from_slice(hex_encode(key).as_bytes());
         out.push(b'"');
     }
-    let exp = rec.expires_at_ms.unwrap_or(0);
-    out.extend_from_slice(
-        format!(",\"_e\":{exp},\"_v\":{},\"_u\":{}", rec.version, rec.updated_ms).as_bytes(),
-    );
+    let exp = rec.expires_at_ms;
+    out.extend_from_slice(format!(",\"_e\":{exp},\"_v\":{},\"_u\":0", rec.version).as_bytes());
     match &rec.value {
         None => {
             out.extend_from_slice(b",\"_t\":\"del\"}\n");
@@ -538,7 +535,6 @@ pub fn decode_record_line(line: &[u8]) -> Option<(Vec<u8>, Record)> {
     let rest = &trimmed[k_end + 1..trimmed.len() - 1];
     let exp = parse_u64_field(rest, b"\"_e\":")?;
     let ver = parse_u64_field(rest, b"\"_v\":")?;
-    let upd = parse_u64_field(rest, b"\"_u\":")?;
     let tag = parse_str_field(rest, b"\"_t\":\"")?;
     let value = match tag.as_slice() {
         b"del" => None,
@@ -558,9 +554,8 @@ pub fn decode_record_line(line: &[u8]) -> Option<(Vec<u8>, Record)> {
         key,
         Record {
             value,
-            expires_at_ms: (exp > 0).then_some(exp),
+            expires_at_ms: exp,
             version: ver,
-            updated_ms: upd,
         },
     ))
 }

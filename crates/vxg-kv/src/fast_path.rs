@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
-use crate::dispatch::{dispatch_command, exec_single, ConnState};
+use crate::dispatch::{dispatch_command, dispatch_command_unlocked, exec_single, ConnState};
 use crate::dispatch_ds::{format_float, WRONGTYPE};
 use crate::engine::KvEngine;
 use crate::pubsub::PubSubBroker;
@@ -217,8 +217,9 @@ fn try_ro_spans(eng: &KvEngine, buf: &[u8], spans: &[(usize, usize)], out: &mut 
     false
 }
 
-/// Try zero-allocation hot write/read execution directly from byte spans under `RwLock::write()`.
+/// Try zero-allocation hot write/read execution directly from byte spans with 1-cycle jump table.
 /// Returns `false` if command needs the full general dispatcher (options, rare commands, etc.).
+#[inline]
 fn try_rw_fast_spans(
     eng: &mut KvEngine,
     buf: &[u8],
@@ -227,178 +228,246 @@ fn try_rw_fast_spans(
 ) -> bool {
     let argc = spans.len();
     let c = arg(buf, spans, 0);
-
-    // Plain `SET key val` (3 args): ZERO heap alloc on overwrites!
-    if c.eq_ignore_ascii_case(b"SET") && argc == 3 {
-        eng.set_str_in_place(arg(buf, spans, 1), arg(buf, spans, 2));
-        out.extend_from_slice(b"+OK\r\n");
-        return true;
+    if c.is_empty() {
+        return false;
     }
-    if c.eq_ignore_ascii_case(b"GET") && argc == 2 {
-        match eng.get_record_or_load(arg(buf, spans, 1)) {
-            Ok(None) => out.extend_from_slice(b"$-1\r\n"),
-            Ok(Some(r)) => match r.value.as_ref() {
-                Some(Value::Str(b)) => write_bulk(out, b),
-                None => out.extend_from_slice(b"$-1\r\n"),
-                _ => write_wrongtype(out),
-            },
-            Err(e) => {
-                out.push(b'-');
-                out.extend_from_slice(e.as_bytes());
-                out.extend_from_slice(b"\r\n");
+    match (c.len(), c[0] & 0xdf) {
+        (3, b'S') if argc == 3 && c.eq_ignore_ascii_case(b"SET") => {
+            eng.set_str_in_place(arg(buf, spans, 1), arg(buf, spans, 2));
+            out.extend_from_slice(b"+OK\r\n");
+            true
+        }
+        (3, b'G') if argc == 2 && c.eq_ignore_ascii_case(b"GET") => {
+            match eng.get_record_or_load(arg(buf, spans, 1)) {
+                Ok(None) => out.extend_from_slice(b"$-1\r\n"),
+                Ok(Some(r)) => match r.value.as_ref() {
+                    Some(Value::Str(b)) => write_bulk(out, b),
+                    None => out.extend_from_slice(b"$-1\r\n"),
+                    _ => write_wrongtype(out),
+                },
+                Err(e) => {
+                    out.push(b'-');
+                    out.extend_from_slice(e.as_bytes());
+                    out.extend_from_slice(b"\r\n");
+                }
             }
+            true
         }
-        return true;
-    }
-    if c.eq_ignore_ascii_case(b"PING") && argc == 1 {
-        out.extend_from_slice(b"+PONG\r\n");
-        return true;
-    }
-    if c.eq_ignore_ascii_case(b"MSET") && argc >= 3 && (argc - 1).is_multiple_of(2) {
-        let mut i = 1;
-        while i < argc {
-            eng.set_str_in_place(arg(buf, spans, i), arg(buf, spans, i + 1));
-            i += 2;
+        (4, b'P') if argc == 1 && c.eq_ignore_ascii_case(b"PING") => {
+            out.extend_from_slice(b"+PONG\r\n");
+            true
         }
-        out.extend_from_slice(b"+OK\r\n");
-        return true;
-    }
-    if (c.eq_ignore_ascii_case(b"INCR") || c.eq_ignore_ascii_case(b"DECR")) && argc == 2 {
-        let delta = if c[0] == b'I' || c[0] == b'i' { 1 } else { -1 };
-        let Ok(rec) = eng.ensure_entry_mut(arg(buf, spans, 1), || Value::Str(b"0".to_vec())) else {
-            return false;
-        };
-        let Some(Value::Str(vbuf)) = rec.value.as_mut() else {
-            write_wrongtype(out);
-            return true;
-        };
-        let Some(cur) = parse_i64_fast(vbuf) else {
-            return false;
-        };
-        let next = cur.saturating_add(delta);
-        vbuf.clear();
-        push_i64_dec(vbuf, next);
-        write_int(out, next);
-        return true;
-    }
-    if (c.eq_ignore_ascii_case(b"LPUSH") || c.eq_ignore_ascii_case(b"RPUSH")) && argc >= 3 {
-        let left = c[0] == b'L' || c[0] == b'l';
-        let Ok(rec) = eng.ensure_entry_mut(arg(buf, spans, 1), || Value::List(VecDeque::new())) else {
-            return false;
-        };
-        let Some(Value::List(l)) = rec.value.as_mut() else {
-            write_wrongtype(out);
-            return true;
-        };
-        for i in 2..argc {
-            let item = arg(buf, spans, i).to_vec();
-            if left {
-                l.push_front(item);
-            } else {
-                l.push_back(item);
+        (4, b'M') if argc >= 3 && (argc - 1).is_multiple_of(2) && c.eq_ignore_ascii_case(b"MSET") => {
+            let mut i = 1;
+            while i < argc {
+                eng.set_str_in_place(arg(buf, spans, i), arg(buf, spans, i + 1));
+                i += 2;
             }
+            out.extend_from_slice(b"+OK\r\n");
+            true
         }
-        write_int(out, l.len() as i64);
-        return true;
-    }
-    if (c.eq_ignore_ascii_case(b"LPOP") || c.eq_ignore_ascii_case(b"RPOP")) && argc == 2 {
-        let left = c[0] == b'L' || c[0] == b'l';
-        let key = arg(buf, spans, 1);
-        let (popped, empty) = {
-            let Ok(rec_opt) = eng.get_or_promote_mut(key) else {
+        (4, b'I' | b'D')
+            if argc == 2
+                && (c.eq_ignore_ascii_case(b"INCR") || c.eq_ignore_ascii_case(b"DECR")) =>
+        {
+            let delta = if (c[0] & 0xdf) == b'I' { 1 } else { -1 };
+            let Ok(rec) = eng.ensure_entry_mut(arg(buf, spans, 1), || Value::Str(b"0".to_vec()))
+            else {
                 return false;
             };
-            let Some(rec) = rec_opt else {
-                out.extend_from_slice(b"$-1\r\n");
+            let Some(Value::Str(vbuf)) = rec.value.as_mut() else {
+                write_wrongtype(out);
                 return true;
+            };
+            let Some(cur) = parse_i64_fast(vbuf) else {
+                return false;
+            };
+            let next = cur.saturating_add(delta);
+            vbuf.clear();
+            push_i64_dec(vbuf, next);
+            write_int(out, next);
+            true
+        }
+        (5, b'L' | b'R')
+            if argc >= 3
+                && (c.eq_ignore_ascii_case(b"LPUSH") || c.eq_ignore_ascii_case(b"RPUSH")) =>
+        {
+            let left = (c[0] & 0xdf) == b'L';
+            let Ok(rec) =
+                eng.ensure_entry_mut(arg(buf, spans, 1), || Value::List(VecDeque::new()))
+            else {
+                return false;
             };
             let Some(Value::List(l)) = rec.value.as_mut() else {
                 write_wrongtype(out);
                 return true;
             };
-            let val = if left { l.pop_front() } else { l.pop_back() };
-            (val, l.is_empty())
-        };
-        if empty {
-            let _ = eng.del_key(key);
-        }
-        match popped {
-            Some(v) => write_bulk(out, &v),
-            None => out.extend_from_slice(b"$-1\r\n"),
-        }
-        return true;
-    }
-    if c.eq_ignore_ascii_case(b"SADD") && argc >= 3 {
-        let Ok(rec) = eng.ensure_entry_mut(arg(buf, spans, 1), || Value::Set(BTreeSet::new())) else {
-            return false;
-        };
-        let Some(Value::Set(s)) = rec.value.as_mut() else {
-            write_wrongtype(out);
-            return true;
-        };
-        let mut added = 0i64;
-        for i in 2..argc {
-            let m = arg(buf, spans, i);
-            if !s.contains(m) {
-                s.insert(m.to_vec());
-                added += 1;
+            for i in 2..argc {
+                let item = arg(buf, spans, i).to_vec();
+                if left {
+                    l.push_front(item);
+                } else {
+                    l.push_back(item);
+                }
             }
+            write_int(out, l.len() as i64);
+            true
         }
-        write_int(out, added);
-        return true;
-    }
-    if c.eq_ignore_ascii_case(b"HSET") && argc >= 4 && argc.is_multiple_of(2) {
-        let Ok(rec) = eng.ensure_entry_mut(arg(buf, spans, 1), || Value::Hash(BTreeMap::new())) else {
-            return false;
-        };
-        let Some(Value::Hash(m)) = rec.value.as_mut() else {
-            write_wrongtype(out);
-            return true;
-        };
-        let mut added = 0i64;
-        let mut i = 2;
-        while i < argc {
-            let f = arg(buf, spans, i);
-            let v = arg(buf, spans, i + 1);
-            if let Some(slot) = m.get_mut(f) {
-                slot.clear();
-                slot.extend_from_slice(v);
+        (4, b'L' | b'R')
+            if argc == 2
+                && (c.eq_ignore_ascii_case(b"LPOP") || c.eq_ignore_ascii_case(b"RPOP")) =>
+        {
+            let left = (c[0] & 0xdf) == b'L';
+            let key = arg(buf, spans, 1);
+            let (popped, empty) = {
+                let Ok(rec_opt) = eng.get_or_promote_mut(key) else {
+                    return false;
+                };
+                let Some(rec) = rec_opt else {
+                    out.extend_from_slice(b"$-1\r\n");
+                    return true;
+                };
+                let Some(Value::List(l)) = rec.value.as_mut() else {
+                    write_wrongtype(out);
+                    return true;
+                };
+                let val = if left { l.pop_front() } else { l.pop_back() };
+                (val, l.is_empty())
+            };
+            if empty {
+                let _ = eng.del_key(key);
+            }
+            match popped {
+                Some(v) => write_bulk(out, &v),
+                None => out.extend_from_slice(b"$-1\r\n"),
+            }
+            true
+        }
+        (4, b'S') if argc >= 3 && c.eq_ignore_ascii_case(b"SADD") => {
+            let Ok(rec) = eng.ensure_entry_mut(arg(buf, spans, 1), || Value::Set(BTreeSet::new()))
+            else {
+                return false;
+            };
+            let Some(Value::Set(s)) = rec.value.as_mut() else {
+                write_wrongtype(out);
+                return true;
+            };
+            let mut added = 0i64;
+            for i in 2..argc {
+                let m = arg(buf, spans, i);
+                if !s.contains(m) {
+                    s.insert(m.to_vec());
+                    added += 1;
+                }
+            }
+            write_int(out, added);
+            true
+        }
+        (4, b'H') if argc >= 4 && argc.is_multiple_of(2) && c.eq_ignore_ascii_case(b"HSET") => {
+            let Ok(rec) =
+                eng.ensure_entry_mut(arg(buf, spans, 1), || Value::Hash(BTreeMap::new()))
+            else {
+                return false;
+            };
+            let Some(Value::Hash(m)) = rec.value.as_mut() else {
+                write_wrongtype(out);
+                return true;
+            };
+            let mut added = 0i64;
+            let mut i = 2;
+            while i < argc {
+                let f = arg(buf, spans, i);
+                let v = arg(buf, spans, i + 1);
+                if let Some(slot) = m.get_mut(f) {
+                    slot.clear();
+                    slot.extend_from_slice(v);
+                } else {
+                    m.insert(f.to_vec(), v.to_vec());
+                    added += 1;
+                }
+                i += 2;
+            }
+            write_int(out, added);
+            true
+        }
+        (4, b'H') if argc == 3 && c.eq_ignore_ascii_case(b"HGET") => {
+            match eng.get_record_or_load(arg(buf, spans, 1)) {
+                Ok(None) => out.extend_from_slice(b"$-1\r\n"),
+                Ok(Some(r)) => match r.value.as_ref() {
+                    Some(Value::Hash(m)) => match m.get(arg(buf, spans, 2)) {
+                        Some(v) => write_bulk(out, v),
+                        None => out.extend_from_slice(b"$-1\r\n"),
+                    },
+                    _ => write_wrongtype(out),
+                },
+                Err(_) => return false,
+            }
+            true
+        }
+        (4, b'Z') if argc == 4 && c.eq_ignore_ascii_case(b"ZADD") => {
+            let sc_b = arg(buf, spans, 2);
+            let Ok(sc) = std::str::from_utf8(sc_b)
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .ok_or(())
+            else {
+                return false;
+            };
+            if sc.is_nan() {
+                return false;
+            }
+            let Ok(rec) =
+                eng.ensure_entry_mut(arg(buf, spans, 1), || Value::ZSet(BTreeMap::new()))
+            else {
+                return false;
+            };
+            let Some(Value::ZSet(z)) = rec.value.as_mut() else {
+                write_wrongtype(out);
+                return true;
+            };
+            let m = arg(buf, spans, 3);
+            let added = if let Some(slot) = z.get_mut(m) {
+                *slot = sc;
+                0
             } else {
-                m.insert(f.to_vec(), v.to_vec());
-                added += 1;
-            }
-            i += 2;
+                z.insert(m.to_vec(), sc);
+                1
+            };
+            write_int(out, added);
+            true
         }
-        write_int(out, added);
-        return true;
+        _ => false,
     }
-    if c.eq_ignore_ascii_case(b"ZADD") && argc == 4 {
-        let sc_b = arg(buf, spans, 2);
-        let Ok(sc) = std::str::from_utf8(sc_b).ok().and_then(|s| s.parse::<f64>().ok()).ok_or(()) else {
-            return false;
-        };
-        if sc.is_nan() {
-            return false;
+}
+
+/// Zero-lock, zero-allocation batch execution for the single-threaded `kqueue`/`epoll` reactor!
+#[inline]
+pub fn dispatch_span_batch_unlocked(
+    eng: &mut KvEngine,
+    broker: &Arc<PubSubBroker>,
+    conn: &mut ConnState,
+    buf: &[u8],
+    arg_spans: &[(usize, usize)],
+    cmd_ranges: &[(usize, usize)],
+    out: &mut Vec<u8>,
+) {
+    let fast_ok = !conn.in_multi && conn.pinned_epoch.is_none();
+    for &(a, b) in cmd_ranges {
+        if a >= b {
+            continue;
         }
-        let Ok(rec) = eng.ensure_entry_mut(arg(buf, spans, 1), || Value::ZSet(BTreeMap::new())) else {
-            return false;
-        };
-        let Some(Value::ZSet(z)) = rec.value.as_mut() else {
-            write_wrongtype(out);
-            return true;
-        };
-        let m = arg(buf, spans, 3);
-        let added = if let Some(slot) = z.get_mut(m) {
-            *slot = sc;
-            0
-        } else {
-            z.insert(m.to_vec(), sc);
-            1
-        };
-        write_int(out, added);
-        return true;
+        let spans = &arg_spans[a..b];
+        if fast_ok && try_rw_fast_spans(eng, buf, spans, out) {
+            continue;
+        }
+        let owned = materialize_args(buf, spans);
+        for reply in dispatch_command_unlocked(eng, broker, conn, owned) {
+            reply.encode(out);
+        }
+        if conn.quit {
+            break;
+        }
     }
-    false
 }
 
 fn materialize_args(buf: &[u8], spans: &[(usize, usize)]) -> Vec<Vec<u8>> {

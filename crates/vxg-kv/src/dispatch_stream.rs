@@ -16,20 +16,26 @@ type StrData = (Vec<u8>, Option<u64>);
 fn get_stream_mut(eng: &mut KvEngine, key: &[u8]) -> Result<StreamData, RespVal> {
     match eng.get_record(key).map_err(RespVal::err)? {
         None => Ok((Vec::new(), None)),
-        Some(r) => match r.value {
-            Some(Value::Stream(v)) => Ok((v, r.expires_at_ms)),
-            _ => Err(RespVal::err(WRONGTYPE)),
-        },
+        Some(r) => {
+            let exp = r.expires_opt();
+            match r.value {
+                Some(Value::Stream(v)) => Ok((v, exp)),
+                _ => Err(RespVal::err(WRONGTYPE)),
+            }
+        }
     }
 }
 
 fn get_str_mut(eng: &mut KvEngine, key: &[u8]) -> Result<StrData, RespVal> {
     match eng.get_record(key).map_err(RespVal::err)? {
         None => Ok((Vec::new(), None)),
-        Some(r) => match r.value {
-            Some(Value::Str(b)) => Ok((b, r.expires_at_ms)),
-            _ => Err(RespVal::err(WRONGTYPE)),
-        },
+        Some(r) => {
+            let exp = r.expires_opt();
+            match r.value {
+                Some(Value::Str(b)) => Ok((b, exp)),
+                _ => Err(RespVal::err(WRONGTYPE)),
+            }
+        }
     }
 }
 

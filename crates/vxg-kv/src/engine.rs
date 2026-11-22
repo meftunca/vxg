@@ -11,7 +11,7 @@ use crate::index::{DecodedBlock, LookupPlan, LruBlockCache, SnapshotIndex};
 use crate::pubsub::{PubSubBroker, PubSubEvent};
 use crate::snapshot::{Manifest, SnapshotRef};
 use crate::store::{ObjectStore, StoreRangeReader};
-use crate::types::{decode_record_line, now_ms, FastMap, Record, Value};
+use crate::types::{decode_record_line, FastMap, Record, Value};
 
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -331,7 +331,7 @@ impl KvEngine {
     pub fn set_str_in_place(&mut self, key: &[u8], val: &[u8]) {
         let v = self.bump_ver(key);
         if let Some(rec) = self.mem.get_mut(key) {
-            rec.expires_at_ms = None;
+            rec.expires_at_ms = 0;
             rec.version = v;
             if let Some(Value::Str(buf)) = rec.value.as_mut() {
                 buf.clear();
@@ -359,13 +359,10 @@ impl KvEngine {
 
     /// Update expiry of an existing live key. Returns true if key exists and was updated.
     pub fn set_expiry(&mut self, key: &[u8], expires_at_ms: Option<u64>) -> Result<bool, String> {
-        let Some(mut rec) = self.get_record(key)? else {
+        let Some(rec) = self.get_or_promote_mut(key)? else {
             return Ok(false);
         };
-        rec.expires_at_ms = expires_at_ms;
-        rec.version = self.bump_ver(key);
-        rec.updated_ms = now_ms();
-        self.mem.insert(key.to_vec(), rec);
+        rec.expires_at_ms = expires_at_ms.unwrap_or(0);
         Ok(true)
     }
 

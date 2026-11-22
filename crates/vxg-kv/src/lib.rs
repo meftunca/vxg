@@ -12,6 +12,8 @@ pub mod fast_path;
 pub mod index;
 pub mod origin;
 pub mod pubsub;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod reactor;
 pub mod resp;
 pub mod server;
 pub mod snapshot;

@@ -184,7 +184,7 @@ fn handle_set(eng: &mut KvEngine, args: &[Vec<u8>]) -> RespVal {
         };
     }
     let final_exp = if keepttl {
-        existing.and_then(|r| r.expires_at_ms)
+        existing.and_then(|r| r.expires_opt())
     } else {
         exp_ms
     };

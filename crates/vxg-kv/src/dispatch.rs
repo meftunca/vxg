@@ -34,9 +34,9 @@ impl ConnState {
     }
 }
 
-/// Dispatch one parsed command; may return multiple RESP frames (e.g. `SUBSCRIBE a b`).
-pub fn dispatch_command(
-    engine: &Arc<RwLock<KvEngine>>,
+/// Dispatch one parsed command with an already-owned `&mut KvEngine` (used by zero-lock reactor).
+pub fn dispatch_command_unlocked(
+    eng: &mut KvEngine,
     broker: &Arc<PubSubBroker>,
     conn: &mut ConnState,
     args: Vec<Vec<u8>>,
@@ -45,104 +45,9 @@ pub fn dispatch_command(
         return Vec::new();
     }
     let cmd = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
-
-    // Pub/Sub subscription management bypasses engine lock for sub-50us latency
-    match cmd.as_str() {
-        "SUBSCRIBE" => {
-            if args.len() < 2 {
-                return vec![RespVal::err("ERR wrong number of arguments for 'subscribe'")];
-            }
-            return args[1..]
-                .iter()
-                .map(|ch| {
-                    let n = broker.subscribe(conn.sub_id, ch.clone()) as i64;
-                    RespVal::array(vec![
-                        RespVal::bulk(b"subscribe".to_vec()),
-                        RespVal::bulk(ch.clone()),
-                        RespVal::int(n),
-                    ])
-                })
-                .collect();
-        }
-        "UNSUBSCRIBE" => {
-            let items = if args.len() == 1 {
-                broker.unsubscribe(conn.sub_id, None)
-            } else {
-                args[1..]
-                    .iter()
-                    .flat_map(|ch| broker.unsubscribe(conn.sub_id, Some(ch)))
-                    .collect()
-            };
-            if items.is_empty() {
-                return vec![RespVal::array(vec![
-                    RespVal::bulk(b"unsubscribe".to_vec()),
-                    RespVal::nil(),
-                    RespVal::int(broker.subscription_count(conn.sub_id) as i64),
-                ])];
-            }
-            return items
-                .into_iter()
-                .map(|(ch, rem)| {
-                    RespVal::array(vec![
-                        RespVal::bulk(b"unsubscribe".to_vec()),
-                        RespVal::bulk(ch),
-                        RespVal::int(rem as i64),
-                    ])
-                })
-                .collect();
-        }
-        "PSUBSCRIBE" => {
-            if args.len() < 2 {
-                return vec![RespVal::err("ERR wrong number of arguments for 'psubscribe'")];
-            }
-            return args[1..]
-                .iter()
-                .map(|pat| {
-                    let n = broker.psubscribe(conn.sub_id, pat.clone()) as i64;
-                    RespVal::array(vec![
-                        RespVal::bulk(b"psubscribe".to_vec()),
-                        RespVal::bulk(pat.clone()),
-                        RespVal::int(n),
-                    ])
-                })
-                .collect();
-        }
-        "PUNSUBSCRIBE" => {
-            let items = if args.len() == 1 {
-                broker.punsubscribe(conn.sub_id, None)
-            } else {
-                args[1..]
-                    .iter()
-                    .flat_map(|pat| broker.punsubscribe(conn.sub_id, Some(pat)))
-                    .collect()
-            };
-            if items.is_empty() {
-                return vec![RespVal::array(vec![
-                    RespVal::bulk(b"punsubscribe".to_vec()),
-                    RespVal::nil(),
-                    RespVal::int(broker.subscription_count(conn.sub_id) as i64),
-                ])];
-            }
-            return items
-                .into_iter()
-                .map(|(pat, rem)| {
-                    RespVal::array(vec![
-                        RespVal::bulk(b"punsubscribe".to_vec()),
-                        RespVal::bulk(pat),
-                        RespVal::int(rem as i64),
-                    ])
-                })
-                .collect();
-        }
-        "PUBSUB" => return vec![handle_pubsub_introspect(broker, &args)],
-        "QUIT" => {
-            conn.quit = true;
-            return vec![RespVal::ok()];
-        }
-        _ => {}
+    if let Some(res) = dispatch_pubsub_or_quit(broker, conn, &cmd, &args) {
+        return res;
     }
-
-    // Transaction control (`MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`)
     match cmd.as_str() {
         "MULTI" => {
             if conn.in_multi {
@@ -165,7 +70,6 @@ pub fn dispatch_command(
             if conn.in_multi {
                 return vec![RespVal::err("ERR WATCH inside MULTI is not allowed")];
             }
-            let mut eng = engine.write().unwrap();
             for k in &args[1..] {
                 let v = eng.watch_key(k);
                 conn.watched.insert(k.clone(), v);
@@ -183,7 +87,6 @@ pub fn dispatch_command(
             conn.in_multi = false;
             let queued = std::mem::take(&mut conn.tx_queue);
             let watched = std::mem::take(&mut conn.watched);
-            let mut eng = engine.write().unwrap();
             for (k, ver) in watched {
                 if eng.key_version(&k) != ver {
                     return vec![RespVal::nil_array()];
@@ -192,20 +95,137 @@ pub fn dispatch_command(
             let mut results = Vec::with_capacity(queued.len());
             for qargs in queued {
                 let qcmd = String::from_utf8_lossy(&qargs[0]).to_ascii_uppercase();
-                results.push(exec_single(&mut eng, conn, &qcmd, &qargs));
+                results.push(exec_single(eng, conn, &qcmd, &qargs));
             }
             return vec![RespVal::array(results)];
         }
         _ => {}
     }
-
     if conn.in_multi {
         conn.tx_queue.push(args);
         return vec![RespVal::Simple("QUEUED".to_owned())];
     }
+    vec![exec_single(eng, conn, &cmd, &args)]
+}
 
+/// Dispatch one parsed command under `RwLock` (used by portable thread-per-client fallback).
+pub fn dispatch_command(
+    engine: &Arc<RwLock<KvEngine>>,
+    broker: &Arc<PubSubBroker>,
+    conn: &mut ConnState,
+    args: Vec<Vec<u8>>,
+) -> Vec<RespVal> {
+    if args.is_empty() {
+        return Vec::new();
+    }
+    let cmd = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
+    if let Some(res) = dispatch_pubsub_or_quit(broker, conn, &cmd, &args) {
+        return res;
+    }
     let mut eng = engine.write().unwrap();
-    vec![exec_single(&mut eng, conn, &cmd, &args)]
+    dispatch_command_unlocked(&mut eng, broker, conn, args)
+}
+
+fn dispatch_pubsub_or_quit(
+    broker: &Arc<PubSubBroker>,
+    conn: &mut ConnState,
+    cmd: &str,
+    args: &[Vec<u8>],
+) -> Option<Vec<RespVal>> {
+    Some(match cmd {
+        "SUBSCRIBE" => {
+            if args.len() < 2 {
+                return Some(vec![RespVal::err("ERR wrong number of arguments for 'subscribe'")]);
+            }
+            args[1..]
+                .iter()
+                .map(|ch| {
+                    let n = broker.subscribe(conn.sub_id, ch.clone()) as i64;
+                    RespVal::array(vec![
+                        RespVal::bulk(b"subscribe".to_vec()),
+                        RespVal::bulk(ch.clone()),
+                        RespVal::int(n),
+                    ])
+                })
+                .collect()
+        }
+        "UNSUBSCRIBE" => {
+            let items = if args.len() == 1 {
+                broker.unsubscribe(conn.sub_id, None)
+            } else {
+                args[1..]
+                    .iter()
+                    .flat_map(|ch| broker.unsubscribe(conn.sub_id, Some(ch)))
+                    .collect()
+            };
+            if items.is_empty() {
+                return Some(vec![RespVal::array(vec![
+                    RespVal::bulk(b"unsubscribe".to_vec()),
+                    RespVal::nil(),
+                    RespVal::int(broker.subscription_count(conn.sub_id) as i64),
+                ])]);
+            }
+            items
+                .into_iter()
+                .map(|(ch, rem)| {
+                    RespVal::array(vec![
+                        RespVal::bulk(b"unsubscribe".to_vec()),
+                        RespVal::bulk(ch),
+                        RespVal::int(rem as i64),
+                    ])
+                })
+                .collect()
+        }
+        "PSUBSCRIBE" => {
+            if args.len() < 2 {
+                return Some(vec![RespVal::err("ERR wrong number of arguments for 'psubscribe'")]);
+            }
+            args[1..]
+                .iter()
+                .map(|pat| {
+                    let n = broker.psubscribe(conn.sub_id, pat.clone()) as i64;
+                    RespVal::array(vec![
+                        RespVal::bulk(b"psubscribe".to_vec()),
+                        RespVal::bulk(pat.clone()),
+                        RespVal::int(n),
+                    ])
+                })
+                .collect()
+        }
+        "PUNSUBSCRIBE" => {
+            let items = if args.len() == 1 {
+                broker.punsubscribe(conn.sub_id, None)
+            } else {
+                args[1..]
+                    .iter()
+                    .flat_map(|pat| broker.punsubscribe(conn.sub_id, Some(pat)))
+                    .collect()
+            };
+            if items.is_empty() {
+                return Some(vec![RespVal::array(vec![
+                    RespVal::bulk(b"punsubscribe".to_vec()),
+                    RespVal::nil(),
+                    RespVal::int(broker.subscription_count(conn.sub_id) as i64),
+                ])]);
+            }
+            items
+                .into_iter()
+                .map(|(pat, rem)| {
+                    RespVal::array(vec![
+                        RespVal::bulk(b"punsubscribe".to_vec()),
+                        RespVal::bulk(pat),
+                        RespVal::int(rem as i64),
+                    ])
+                })
+                .collect()
+        }
+        "PUBSUB" => vec![handle_pubsub_introspect(broker, args)],
+        "QUIT" => {
+            conn.quit = true;
+            vec![RespVal::ok()]
+        }
+        _ => return None,
+    })
 }
 
 fn handle_pubsub_introspect(broker: &PubSubBroker, args: &[Vec<u8>]) -> RespVal {
@@ -389,10 +409,13 @@ pub(crate) fn exec_single(
             }
             let (mut cur, exp) = match eng.get_record(&args[1]) {
                 Ok(None) => (Vec::new(), None),
-                Ok(Some(r)) => match r.value {
-                    Some(Value::Str(b)) => (b, r.expires_at_ms),
-                    _ => return RespVal::err(WRONGTYPE),
-                },
+                Ok(Some(r)) => {
+                    let exp = r.expires_opt();
+                    match r.value {
+                        Some(Value::Str(b)) => (b, exp),
+                        _ => return RespVal::err(WRONGTYPE),
+                    }
+                }
                 Err(e) => return RespVal::err(e),
             };
             cur.extend_from_slice(&args[2]);
@@ -450,13 +473,16 @@ pub(crate) fn exec_single(
             };
             let (cur, exp) = match eng.get_record(&args[1]) {
                 Ok(None) => (0.0, None),
-                Ok(Some(r)) => match r.value {
-                    Some(Value::Str(b)) => match parse_f64(&b) {
-                        Ok(v) => (v, r.expires_at_ms),
-                        Err(e) => return e,
-                    },
-                    _ => return RespVal::err(WRONGTYPE),
-                },
+                Ok(Some(r)) => {
+                    let exp = r.expires_opt();
+                    match r.value {
+                        Some(Value::Str(b)) => match parse_f64(&b) {
+                            Ok(v) => (v, exp),
+                            Err(e) => return e,
+                        },
+                        _ => return RespVal::err(WRONGTYPE),
+                    }
+                }
                 Err(e) => return RespVal::err(e),
             };
             let next = format!("{}", cur + delta);
@@ -471,7 +497,7 @@ pub(crate) fn exec_single(
             }
             match eng.get_record(&args[1]) {
                 Ok(None) => RespVal::int(-2),
-                Ok(Some(r)) => match r.expires_at_ms {
+                Ok(Some(r)) => match r.expires_opt() {
                     None => RespVal::int(-1),
                     Some(exp) => {
                         let rem = exp.saturating_sub(now_ms()) as i64;
@@ -486,7 +512,7 @@ pub(crate) fn exec_single(
                 return RespVal::err("ERR wrong number of arguments for 'persist'");
             }
             match eng.get_record(&args[1]) {
-                Ok(Some(r)) if r.expires_at_ms.is_some() => {
+                Ok(Some(r)) if r.expires_at_ms > 0 => {
                     let _ = eng.set_expiry(&args[1], None);
                     RespVal::int(1)
                 }
@@ -518,9 +544,10 @@ pub(crate) fn exec_single(
             if cmd == "RENAMENX" && matches!(eng.get_record(&args[2]), Ok(Some(_))) {
                 return RespVal::int(0);
             }
+            let exp = rec.expires_opt();
             if let Some(val) = rec.value {
                 let _ = eng.del_key(&args[1]);
-                eng.set_record(args[2].clone(), val, rec.expires_at_ms);
+                eng.set_record(args[2].clone(), val, exp);
             }
             if cmd == "RENAMENX" {
                 RespVal::int(1)
