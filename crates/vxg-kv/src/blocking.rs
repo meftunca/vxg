@@ -3,13 +3,43 @@
 //! Clients blocked on empty lists consume **zero threads** and incur **zero overhead** when the
 //! waiter queue is empty (1 predicted-false check in the reactor loop).
 
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::engine::KvEngine;
 use crate::resp::RespVal;
 use crate::types::Value;
 
 pub type PopResult = Result<Option<(Vec<u8>, Vec<u8>)>, String>;
+
+/// Blocking `BLPOP`/`BRPOP` implementation for `RwLock`-backed portable mode (Windows).
+pub fn blocking_pop_rwlock(
+    engine: &Arc<RwLock<KvEngine>>,
+    args: &[Vec<u8>],
+    left: bool,
+) -> RespVal {
+    let (keys, timeout) = match parse_blocking_pop(args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let deadline = timeout.map(|d| Instant::now() + d);
+    loop {
+        let res = {
+            let mut eng = engine.write().unwrap();
+            try_pop_any(&mut eng, &keys, left)
+        };
+        match res {
+            Ok(Some((k, v))) => return RespVal::array(vec![RespVal::bulk(k), RespVal::bulk(v)]),
+            Err(e) => return RespVal::err(e),
+            Ok(None) => {
+                if deadline.is_some_and(|dl| Instant::now() >= dl) {
+                    return RespVal::nil_array();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
 
 /// Pop one element from the first non-empty list in `keys` (`left = true` => `LPOP`, else `RPOP`).
 pub fn try_pop_any(eng: &mut KvEngine, keys: &[Vec<u8>], left: bool) -> PopResult {

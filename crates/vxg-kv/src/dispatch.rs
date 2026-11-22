@@ -142,6 +142,13 @@ pub fn dispatch_command(
         if let Some(res) = dispatch_pubsub_or_quit(broker, conn, &cmd, &args) {
             return res;
         }
+        if !conn.in_multi && (cmd == "BLPOP" || cmd == "BRPOP") {
+            return vec![crate::blocking::blocking_pop_rwlock(
+                engine,
+                &args,
+                cmd == "BLPOP",
+            )];
+        }
     }
     let mut eng = engine.write().unwrap();
     dispatch_command_unlocked(&mut eng, broker, conn, args)
