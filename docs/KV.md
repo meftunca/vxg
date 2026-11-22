@@ -11,6 +11,8 @@ description: Zero-dependency Redis-compatible (RESP2/RESP3) stateless snapshot K
 
 **Zero external dependencies. Zero dedicated Redis cluster. Object-storage source of truth for thousands of stateless pods.**
 
+> **Try it right now in your browser (no install!):** Open the **[Live VXG-KV WASM Playground](/kv-playground)** — two pods backed by real **IndexedDB / localStorage** compressed VXG snapshots!
+
 `vxg-kv` speaks standard **Redis RESP2 & RESP3 (`HELLO 3`)** (`redis-cli`, `ioredis`, `redis-py`, `go-redis`) while persisting state as immutable, key-sorted **`VXG v5`** snapshots + atomic ETag CAS delta WAL segments over any `ObjectStore` (`HttpObjectStore`, `LocalFsStore`, or your own 6-method S3/R2/GCS adapter).
 
 ## Key Advantages

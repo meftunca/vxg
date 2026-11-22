@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{BuildHasher, Hasher};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default, Clone, Copy)]
@@ -32,12 +33,14 @@ impl Hasher for FxHasher {
 }
 pub type FastMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
-/// Current UTC Unix timestamp in milliseconds.
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
+#[cfg(target_arch = "wasm32")]
+static WASM_NOW_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_700_000_000_000);
+#[cfg(target_arch = "wasm32")]
+pub fn set_wasm_now_ms(ms: u64) { WASM_NOW_MS.store(ms, std::sync::atomic::Ordering::Relaxed); }
+#[cfg(not(target_arch = "wasm32"))]
+pub fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64) }
+#[cfg(target_arch = "wasm32")]
+pub fn now_ms() -> u64 { WASM_NOW_MS.load(std::sync::atomic::Ordering::Relaxed) }
 
 /// Monotonic Redis Stream entry ID (`ms-seq`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

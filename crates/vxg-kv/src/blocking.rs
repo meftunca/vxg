@@ -3,8 +3,11 @@
 //! Clients blocked on empty lists consume **zero threads** and incur **zero overhead** when the
 //! waiter queue is empty (1 predicted-false check in the reactor loop).
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use crate::engine::KvEngine;
 use crate::resp::RespVal;
@@ -13,6 +16,7 @@ use crate::types::Value;
 pub type PopResult = Result<Option<(Vec<u8>, Vec<u8>)>, String>;
 
 /// Blocking `BLPOP`/`BRPOP` implementation for `RwLock`-backed portable mode (Windows).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn blocking_pop_rwlock(
     engine: &Arc<RwLock<KvEngine>>,
     args: &[Vec<u8>],

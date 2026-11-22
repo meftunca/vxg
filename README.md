@@ -7,6 +7,7 @@
   <a href="https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml"><img src="https://github.com/meftunca/vxg/actions/workflows/benchmarks.yml/badge.svg" alt="Benchmarks" /></a>
   <a href="https://github.com/meftunca/vxg/releases"><img src="https://img.shields.io/github/v/release/meftunca/vxg?color=10B981" alt="Release" /></a>
   <a href="https://meftunca.github.io/vxg/playground"><img src="https://img.shields.io/badge/WASM-SQL%20Playground-06B6D4" alt="VXG Playground" /></a>
+  <a href="https://meftunca.github.io/vxg/kv-playground"><img src="https://img.shields.io/badge/WASM-Redis%20KV%20Playground-F97316" alt="VXG-KV Playground" /></a>
   <a href="https://meftunca.github.io/vxg/vimg-playground"><img src="https://img.shields.io/badge/WASM-Image%20Studio-3B82F6" alt="VIMG Playground" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
 </p>
@@ -42,7 +43,7 @@
       <sub>&nbsp; Stateless Snapshot Redis (RESP2/RESP3)</sub>
       <br clear="left"/><br/>
       Zero-dep <code>kqueue</code>/<code>epoll</code> Redis server backed by HTTP Range + sharded ETag CAS object storage. Beats <code>Redis 8.10.3</code> <strong>11/11</strong> (<code>1.67M–1.85M ops/s</code>, <code>1.93×</code> less CPU) with <code>20×</code> smaller snapshots, <code>7×</code> less cold RAM, <code>AUTH/HELLO 3</code>, <code>JSON.*</code>, <code>GEO*</code>, <code>BLPOP</code>, <code>XGROUP</code>, Time-Travel &amp; <code>VXG.SQL</code>.<br/><br/>
-      <a href="crates/vxg-kv/README.md">Docs</a> · <a href="docs/KV.md">Architecture</a> · <a href="https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.3.0">Release</a>
+      <a href="https://meftunca.github.io/vxg/kv-playground">Live Playground</a> · <a href="crates/vxg-kv/README.md">Docs</a> · <a href="https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.3.0">Release</a>
     </td>
   </tr>
   <tr>

@@ -10,10 +10,13 @@ hero:
     alt: VXG Logo
   actions:
     - theme: brand
-      text: Try SQL Playground →
+      text: SQL Playground →
       link: /playground
     - theme: brand
-      text: Try Image Studio →
+      text: Redis KV Playground →
+      link: /kv-playground
+    - theme: brand
+      text: Image Studio →
       link: /vimg-playground
     - theme: alt
       text: Quick Start
@@ -53,7 +56,7 @@ Every module ships as an **independent crate and binary** — you never have to 
 | If you want to… | Use | Install / Try |
 | :--- | :--- | :--- |
 | Compress JSON/CSV/logs losslessly and run SQL or DuckDB queries on local or `http://` files | **[VXG Core](/guide/getting-started)** | [Live SQL Playground](/playground) · [v0.7.0 Release](https://github.com/meftunca/vxg/releases/tag/v0.7.0) |
-| Run a Redis-compatible server with zero Redis cluster, 20× smaller snapshots & SQL analytics | **[VXG-KV](/KV)** | [VXG-KV Docs](/KV) · [v0.3.0 Release](https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.3.0) |
+| Run a Redis-compatible server with zero Redis cluster, 20× smaller snapshots & SQL analytics | **[VXG-KV](/KV)** | [Live KV Playground](/kv-playground) · [v0.3.0 Release](https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.3.0) |
 | Pack GGUF/SafeTensors into smaller E8 models and run fast local Metal/CUDA inference | **[VXT-Turbo](/TENSOR)** | [VXT-Turbo Spec](/TENSOR) |
 | Serve HDR images or animations with ~1 ms remote HTTP Range crops, resizes & WASM decoding | **[VIMG](/VIMG)** | [Live Image Studio](/vimg-playground) · [v0.4.0 Release](https://github.com/meftunca/vxg/releases/tag/vimg-v0.4.0) |
 

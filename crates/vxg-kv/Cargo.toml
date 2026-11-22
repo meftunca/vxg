@@ -8,5 +8,8 @@ license = "MIT"
 authors = ["meftunca"]
 repository = "https://github.com/meftunca/vxg"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 vxg = { path = "../.." }

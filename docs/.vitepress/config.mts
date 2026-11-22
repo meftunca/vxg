@@ -44,6 +44,7 @@ export default defineConfig({
         text: 'Playgrounds',
         items: [
           { text: 'VXG SQL Studio (WASM)', link: '/playground' },
+          { text: 'VXG-KV Redis Studio (IndexedDB / LS)', link: '/kv-playground' },
           { text: 'VIMG Image Studio (WASM)', link: '/vimg-playground' }
         ]
       },
@@ -67,6 +68,7 @@ export default defineConfig({
           { text: 'Overview', link: '/' },
           { text: 'Quick Start & CLI', link: '/guide/getting-started' },
           { text: 'SQL Playground (WASM)', link: '/playground' },
+          { text: 'KV / Redis Playground (WASM)', link: '/kv-playground' },
           { text: 'Image Studio (WASM)', link: '/vimg-playground' }
         ]
       },

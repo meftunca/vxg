@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/meftunca/vxg/releases/tag/vxg-kv-v0.3.0"><img src="https://img.shields.io/badge/release-vxg--kv--v0.3.0-F97316?style=flat-square" alt="Release" /></a>
+  <a href="https://meftunca.github.io/vxg/kv-playground"><img src="https://img.shields.io/badge/playground-Browser%20WASM%20(IndexedDB)-F97316?style=flat-square" alt="Playground" /></a>
   <a href="https://meftunca.github.io/vxg/KV"><img src="https://img.shields.io/badge/docs-VXG--KV-10B981?style=flat-square" alt="Docs" /></a>
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License" /></a>
 </p>

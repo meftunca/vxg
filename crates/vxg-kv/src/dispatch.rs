@@ -142,6 +142,7 @@ pub fn dispatch_command(
         if let Some(res) = dispatch_pubsub_or_quit(broker, conn, &cmd, &args) {
             return res;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if !conn.in_multi && (cmd == "BLPOP" || cmd == "BRPOP") {
             return vec![crate::blocking::blocking_pop_rwlock(
                 engine,

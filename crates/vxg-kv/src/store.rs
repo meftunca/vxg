@@ -1,18 +1,28 @@
 //! Pluggable `ObjectStore` abstraction with zero-dependency `LocalFsStore` and
 //! `HttpObjectStore` (HTTP/1.1 `Range` + `ETag` Conditional PUT CAS).
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use vxg::{Error as VxgError, RangeReader};
 
 pub type StoreResult<T> = Result<T, String>;
+#[cfg(not(target_arch = "wasm32"))]
 type HttpHdrs = Vec<(String, String)>;
+#[cfg(not(target_arch = "wasm32"))]
 type HttpResp = (u16, HttpHdrs, Vec<u8>);
+#[cfg(not(target_arch = "wasm32"))]
 type HttpReadResp = (u16, HttpHdrs, Vec<u8>, bool);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,11 +87,13 @@ impl RangeReader for StoreRangeReader {
 }
 
 /// Local filesystem `ObjectStore` with atomic rename + CAS lock (ideal for local dev/shared NFS/tests).
+#[cfg(not(target_arch = "wasm32"))]
 pub struct LocalFsStore {
     root: PathBuf,
     cas_lock: Mutex<()>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl LocalFsStore {
     pub fn new(root: impl AsRef<Path>) -> StoreResult<Self> {
         let root = root.as_ref().to_path_buf();
@@ -118,6 +130,7 @@ impl LocalFsStore {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ObjectStore for LocalFsStore {
     fn head(&self, key: &str) -> StoreResult<Option<ObjectMeta>> {
         let p = self.resolve(key)?;
@@ -187,6 +200,7 @@ impl ObjectStore for LocalFsStore {
 
 /// Zero-dependency HTTP/1.1 `ObjectStore` speaking `HEAD`, `GET Range`, and `PUT` with
 /// `If-Match` / `If-None-Match` CAS (compatible with `vxg-kv origin`, MinIO, R2/S3 proxies).
+#[cfg(not(target_arch = "wasm32"))]
 pub struct HttpObjectStore {
     host: String,
     port: u16,
@@ -194,6 +208,7 @@ pub struct HttpObjectStore {
     pool: Mutex<Option<TcpStream>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl HttpObjectStore {
     pub fn connect(base_url: &str) -> StoreResult<Self> {
         let rest = base_url
@@ -303,12 +318,14 @@ impl HttpObjectStore {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn find_hdr<'a>(hdrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
     hdrs.iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_str())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_http_resp(stream: &mut TcpStream, head_only: bool) -> StoreResult<HttpReadResp> {
     let mut raw = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
@@ -370,6 +387,7 @@ fn read_http_resp(stream: &mut TcpStream, head_only: bool) -> StoreResult<HttpRe
     Ok((status, hdrs, body, !close))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ObjectStore for HttpObjectStore {
     fn head(&self, key: &str) -> StoreResult<Option<ObjectMeta>> {
         let (st, hdrs, _) = self.request("HEAD", key, &[], &[])?;

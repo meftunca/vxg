@@ -25,8 +25,12 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let pod_id = format!("pod-{}", std::process::id());
+        #[cfg(target_arch = "wasm32")]
+        let pod_id = "pod-wasm".to_owned();
         Self {
-            pod_id: format!("pod-{}", std::process::id()),
+            pod_id,
             cache_bytes: 64 * 1024 * 1024,
             block_size: 16_384,
             auto_compact_wals: 16,
